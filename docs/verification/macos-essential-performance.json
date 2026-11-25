@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "scope": "isolated-node-public-data-not-installed-app",
+  "node": "24.12.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "importMs": 111.19770899999999,
+  "pathCount": 512,
+  "legacy": {
+    "medianMs": 1.5111916699999983,
+    "p95Ms": 1.6698287499999993
+  },
+  "current": {
+    "medianMs": 0.011765829999994822,
+    "p95Ms": 0.013029999999998836
+  },
+  "largeProjectParse": {
+    "medianMs": 1.5638958999999886,
+    "p95Ms": 1.7366250000000036
+  },
+  "churnControllers": 10000,
+  "postGcMemory": [
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8547960,
+      "external": 8448974,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8544464,
+      "external": 8439276,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8544304,
+      "external": 8439255,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8537416,
+      "external": 8439255,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8537560,
+      "external": 8439255,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8537368,
+      "external": 8439276,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8537400,
+      "external": 8437092,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8547768,
+      "external": 8437092,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8545888,
+      "external": 8437092,
+      "arrayBuffers": 10479
+    },
+    {
+      "rss": 73433088,
+      "heapTotal": 13811712,
+      "heapUsed": 8546264,
+      "external": 8437092,
+      "arrayBuffers": 10479
+    }
+  ],
+  "workspace": {
+    "scope": "source-SSR-no-effects",
+    "importMs": 828.75,
+    "renderMs": 29.30141600000013,
+    "htmlBytes": 44718,
+    "memory": {
+      "rss": 385171456,
+      "heapTotal": 230932480,
+      "heapUsed": 60291960,
+      "external": 10792643,
+      "arrayBuffers": 29036
+    },
+    "idleMs": 2002.2169999999999,
+    "idleCpuMs": 4.472
+  },
+  "completed": 25550
+}

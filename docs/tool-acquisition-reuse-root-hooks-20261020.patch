@@ -1,0 +1,297 @@
+--- a/desktop/src-tauri/src/saved_command_android_catalog.rs
++++ b/desktop/src-tauri/src/saved_command_android_catalog.rs
+@@ -244,6 +244,13 @@
+     }
+ }
+ impl Selection {
++    /// Labels from the SAME positive full-Recover publication, not metadata
++    /// rows or a path/Status rebuilt into selection authority.
++    pub(super) fn tool_preparation_versions(&self,inner:&Inner)->Option<&wire::Versions>{
++        if !self.matches_owner(inner){return None;}
++        self.produced.entries.iter().find(|entry|entry.status==wire::RowStatus::VerifiedThisSession
++            && entry.selection.as_ref()==Some(&self.data) && entry.valid(self.data.catalog_generation))?.versions.as_ref()
++    }
+     pub(super) fn data(&self)->&android_wire::MacToolchainSelection{&self.data}
+     pub(super) fn matches_owner(&self,inner:&Inner)->bool{
+         let original=&self.produced.original;
+@@ -255,6 +262,17 @@
+     }
+ }
+ impl Catalog {
++    pub(super) fn tool_acquisition_selection(&self,inner:&Inner)->Option<Arc<Selection>>{
++        let selected=self.selected.as_ref()?;
++        self.same_tool_acquisition_selection(selected,inner).then(||selected.clone())
++    }
++    pub(super) fn same_tool_acquisition_selection(&self,selected:&Arc<Selection>,inner:&Inner)->bool{
++        self.generation>0 && self.generation<u32::MAX && self.active.is_none() && self.retired.is_none()
++            && self.generation==selected.data.catalog_generation
++            && self.selected.as_ref().is_some_and(|current|Arc::ptr_eq(current,selected))
++            && self.published.as_ref().is_some_and(|current|Arc::ptr_eq(current,&selected.produced))
++            && selected.tool_preparation_versions(inner).is_some()
++    }
+     pub(super) fn empty_acquisition_loan(&self)->Option<EmptyLoan>{
+         if self.generation==0||self.active.is_some()||self.selected.is_some()||self.retired.is_some(){return None;}
+         let published=self.published.as_ref().filter(|p|p.entries.is_empty())?.clone();
+--- a/desktop/src-tauri/src/saved_command_android_registration.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration.rs
+@@ -943,6 +943,21 @@
+     pub(super) fn pristine_tool_acquisition_generation(&self)->Option<u32>{
+         (self.installation_empty()&&!self.busy()&&!self.unknown()).then_some(self.generation)
+     }
++    /// Prior joined service/maintenance work is counted, not mistaken for
++    /// unfinished work. This lends no service, source or installation permit.
++    pub(super) fn tool_acquisition_generation(&self)->Option<u32>{
++        if self.active.is_some() || self.review.is_some() || self.busy() || self.unknown()
++            || self.last.as_ref().is_some_and(|last|
++                !matches!(last.phase,wire::Phase::Complete|wire::Phase::Refused|wire::Phase::Cancelled)
++                || last.reason==wire::Reason::CleanupUnknown
++                || last.report.as_ref().is_some_and(|report|report.protected_copy==wire::ProtectedCopy::RetainedPartial)){
++            return None;
++        }
++        // Includes the SAME actual service Retirement::owner_finalized gate
++        // and retained TLS manager; busy=false alone cannot stand in for it.
++        self.maintenance_retained_bytes()?;
++        Some(self.generation)
++    }
+     pub(super) fn sources_match(&self,sources:&android_sources::Sources)->bool{
+         self.maintenance.sources_match(sources) && self.service.sources_match(sources) && self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
+             && self.review.as_ref().is_none_or(|review|sources.same_snapshot(&review.original.source))
+@@ -1856,6 +1871,37 @@
+     use super::*;
+
+     #[test]
++    fn tool_acquisition_allows_counted_history_but_not_partial_or_unsettled_state() {
++        // Closed state/heap DATA, no native copy, selection or permit.
++        let mut registration=Registration::default();
++        let baseline=registration.maintenance_retained_bytes().unwrap();
++        assert_eq!(registration.tool_acquisition_generation(),Some(0));
++        registration.generation=7;
++        let data=wire::Operation { operation_id:"inert-reuse-history".into(),registration_generation:7,
++            source_generation:3,kind:wire::Kind::Inspection,context:android_wire::Prepare {
++                project_id:"inert-reuse-project".into(),draft_revision:1,baseline_generation:1,
++                saved_config:android_wire::Content{bytes:32,sha256:"a".repeat(64)},
++                saved_version:android_wire::SavedVersion{source:"version.properties".into(),bytes:20,
++                    sha256:"b".repeat(64),name:"1.0.0".into(),build:1},
++                artifact_validation:android_wire::ArtifactValidation{mode:android_wire::ValidationMode::StructureAndVersion,
++                    upload_certificate_sha256:None},signing:None,operation:None,action:None }};
++        registration.last=Some(Last {data,phase:wire::Phase::Refused,reason:wire::Reason::SourceRefused,
++            report:Some(wire::Report {sources:Vec::new(),protected_copy:wire::ProtectedCopy::NotCreated,accounting:None,
++                problems:wire::Problems{recorded:0,shown:0,omitted:0,first:None,items:Vec::new()}})});
++        assert_eq!(registration.pristine_tool_acquisition_generation(),None);
++        assert_eq!(registration.tool_acquisition_generation(),Some(7));
++        assert!(registration.maintenance_retained_bytes().unwrap()>baseline);
++        registration.last.as_mut().unwrap().report.as_mut().unwrap().protected_copy=wire::ProtectedCopy::RetainedPartial;
++        assert_eq!(registration.tool_acquisition_generation(),None);
++        registration.last.as_mut().unwrap().report.as_mut().unwrap().protected_copy=wire::ProtectedCopy::NotCreated;
++        registration.last.as_mut().unwrap().phase=wire::Phase::Unknown;
++        assert_eq!(registration.tool_acquisition_generation(),None);
++        registration.last.as_mut().unwrap().phase=wire::Phase::Refused;
++        registration.last.as_mut().unwrap().reason=wire::Reason::CleanupUnknown;
++        assert_eq!(registration.tool_acquisition_generation(),None);
++    }
++
++    #[test]
+     fn whole_operation_budget_keeps_previous_charge_and_rejects_cap_or_overflow() {
+         // Arithmetic only: neither these scalar inputs nor a Linux sizeof
+         // prove the complete real-catalogue macOS admission high-water.
+@@ -2211,13 +2257,13 @@
+     Some((bytes,originals))
+ }
+
+-/// The same original allocation census, narrowed to pristine registration and
+-/// an actually empty selected-source set. No Execute/tool permission is lent.
++/// The same original allocation census, including genuinely joined prior
++/// service/maintenance holdings and an empty picked-source set. No tool permit.
+ #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+ pub(super) fn tool_acquisition_owner_bytes(inner:&Inner,document:&Arc<()>)->Option<usize>{
+     if !inner.android_original_document_matches(Some(document)){return None;}
+     let registry=inner.registry.try_lock().ok()?;
+-    registry.android_registration.pristine_tool_acquisition_generation()?;
++    registry.android_registration.tool_acquisition_generation()?;
+     if registry.android_sources.census_originals()?.iter().any(Option::is_some){return None;}
+     let registration=registry.android_registration.maintenance_retained_bytes()?;
+     original_owner_retained_bytes(inner,&registry,document,0,registration,0)
+--- a/desktop/src-tauri/src/saved_command_android_service_setup.rs
++++ b/desktop/src-tauri/src/saved_command_android_service_setup.rs
+@@ -1761,6 +1761,29 @@
+     }
+
+     #[test]
++    fn tool_acquisition_counts_service_history_only_after_original_retirement() {
++        // SAME inert callback-lifecycle fixture as the adjacent tests, not a
++        // native service, worker/manager join or production qualification.
++        let (_,_,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Service);
++        let (retirement,held)=callback(gate,false);
++        let mut registration=Registration::default();
++        let baseline=registration.maintenance_retained_bytes().unwrap();
++        registration.service.retirement=Some(retirement.clone());
++        assert!(!registration.busy());
++        assert_eq!(registration.tool_acquisition_generation(),None);
++        *held.returned.lock().unwrap()=Some(returned(Instant::now()));
++        let ExtractedCallback::Returned(serial,returned)=CallbackOriginal::extract(held,&retirement)
++            else{panic!("the original callback capture must retire")};
++        assert!(management_settled(returned.native.unwrap().1));
++        assert!(retirement.callback_retired(serial,false));
++        assert_eq!(registration.tool_acquisition_generation(),None);
++        assert!(retirement.finalize());
++        assert_eq!(registration.pristine_tool_acquisition_generation(),None);
++        assert_eq!(registration.tool_acquisition_generation(),Some(0));
++        assert!(registration.maintenance_retained_bytes().unwrap()>baseline);
++    }
++
++    #[test]
+     fn callback_stamp_needs_exclusive_capture_return_then_original_owner_finality(){
+         let (_,control,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Service);
+         let (retirement,held)=callback(gate,false);
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -2771,7 +2771,7 @@
+                         };
+                     }
+                 }
+-                tool_acquisition::after_final(&mut r,&active,&owner);
++                tool_acquisition::after_final(&mut r,&mut active,&owner);
+                 upload_key::after_final(&active,&owner);
+                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
+             }
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+@@ -23,6 +23,8 @@
+ ))]
+ #[path = "saved_command_tool_acquisition_macos.rs"]
+ mod native;
++#[path = "saved_command_tool_acquisition_reuse.rs"]
++mod reuse;
+ #[path = "saved_command_tool_acquisition_sources.rs"]
+ mod sources;
+ pub(crate) use sources::SourceNomination;
+@@ -59,7 +61,7 @@
+ struct Known {
+     android: Arc<Inner>,
+     document: Weak<()>,
+-    catalog: android_catalog::EmptyLoan,
++    catalog: reuse::CatalogLoan,
+     revision: u32,
+     source_generation: u32,
+     registration_generation: u32,
+@@ -90,13 +92,10 @@
+         if originals.iter().any(Option::is_some) {
+             return None;
+         }
+-        let catalog = r.android_catalog.empty_acquisition_loan()?;
+-        if !catalog.joined_for(&binding.android) {
+-            return None;
+-        }
++        let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android)?;
+         let registration_generation = r
+             .android_registration
+-            .pristine_tool_acquisition_generation()?;
++            .tool_acquisition_generation()?;
+         Some(Self {
+             android: binding.android.clone(),
+             document: binding.document.clone(),
+@@ -130,11 +129,11 @@
+             && !self.android.poisoned.load(Ordering::SeqCst)
+             && !self.android.android_registration_control.owns_work()
+             && !self.android.android_registration_control.is_unknown()
+-            && r.android_catalog.same_empty_acquisition_loan(&self.catalog)
++            && self.catalog.current(&r.android_catalog, &self.android)
+             && r.android_sources.census_generation() == self.source_generation
+             && r.android_sources.same_census_originals(&[None, None, None])
+             && r.android_registration
+-                .pristine_tool_acquisition_generation()
++                .tool_acquisition_generation()
+                 == Some(self.registration_generation)
+     }
+     fn same(&self, other: &Self) -> bool {
+@@ -171,6 +170,7 @@
+             && self.terminal.context == *before
+             && self.terminal.outcome == wire::Outcome::Complete
+             && self.terminal.lifetime.settled()
++            && self.terminal.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
+             && self
+                 .terminal
+                 .result
+@@ -353,7 +353,9 @@
+         if r.active.is_some() || r.disabled || r.exhausted || r.stopping || r.document_lost {
+             return Err(wire::invalid());
+         }
+-        let retained = retained_bytes(&self.inner, &r, document).ok_or_else(wire::invalid)?;
++        let retained = retained_bytes(&self.inner, &r, document)
++            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Known>() + 2 * std::mem::size_of::<usize>()))
++            .ok_or_else(wire::invalid)?;
+         Ok(Census {
+             owner: Arc::downgrade(&self.inner),
+             document: Arc::downgrade(document),
+@@ -389,6 +391,7 @@
+                 .map_err(|_| BridgeError::cleanup_unknown())?;
+             if !census.matches(&self.inner, &r)
+                 || r.tool_acquisition.producers.len() >= MAX_PRODUCERS
++                || !census.known.catalog.permits_action(input.action)
+             {
+                 return Err(wire::invalid());
+             }
+@@ -710,7 +713,7 @@
+         Err(BridgeError::cleanup_unknown())
+     }
+ }
+-pub(super) fn after_final(r: &mut super::Registry, active: &Active, owner: &Arc<Session>) {
++pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &Arc<Session>) {
+     if owner.domain != SavedCommandDomain::ToolAcquisition {
+         return;
+     }
+@@ -766,6 +769,7 @@
+         && active.first_stop.is_none()
+         && active.projection.outcome == Some(Outcome::Complete)
+     {
++        observe_protected_tools(owner, active);
+         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
+             if t.context.action == wire::Action::Acquire {
+                 r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
+@@ -773,14 +777,23 @@
+             if t.context.action == wire::Action::Inspect
+                 && t.outcome == wire::Outcome::Complete
+                 && t.lifetime.settled()
++                && t.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
+             {
+                 r.tool_acquisition.review = Some(Arc::new(Inspection {
+-                    original: owner.clone(),
+-                    terminal: t.clone(),
++                    original: owner.clone(), terminal: t.clone(),
+                 }));
+             }
+         }
+     }
++}
++fn observe_protected_tools(owner: &Session, active: &mut Active) {
++    let (Some(intent), Profile::ToolAcquisition(profile)) = (&owner.tools.intent, owner.profile) else { return; };
++    let Some(Terminal::ToolAcquisition(terminal)) = &mut active.projection.result else { return; };
++    if terminal.context.action != wire::Action::Inspect || !intent.current() { return; }
++    let finding = intent.known.catalog.finding(&intent.known.android, profile, terminal);
++    // Only post-join public DATA is added. A selected loan creates no download
++    // Review and thus retains no orphaned catalogue/Session after retirement.
++    terminal.observe_protected_tools(finding);
+ }
+ fn hash(bytes: &[u8]) -> String {
+     Sha256::digest(bytes)
+@@ -907,6 +920,10 @@
+             .checked_add(prepared.projection.operation_id.capacity())?
+             .checked_add(prepared.projection.owner_generation.capacity())?;
+         if let Some(intent) = &prepared.tools {
++            // A selected loan is read-only and cannot become a producer. Its
++            // actual catalogue backing is counted by the SAME Android census;
++            // a retired prepared selection must be cancelled, not omitted.
++            if intent.known.catalog.empty().is_none() && !intent.known.current() { return None; }
+             bytes = bytes
+                 .checked_add(std::mem::size_of::<Intent>())?
+                 .checked_add(std::mem::size_of::<Known>())?
+@@ -975,6 +992,9 @@
+                 .checked_add(expected.projection_sha256.capacity())?;
+         }
+         if let Some(intent) = &owner.tools.intent {
++            // Only missing-tool Inspect/Acquire Sessions are retained as cache
++            // producers or download Reviews. No uncounted old selected loan.
++            if intent.known.catalog.empty().is_none() { return None; }
+             bytes = bytes
+                 .checked_add(std::mem::size_of::<Intent>())?
+                 .checked_add(std::mem::size_of::<Known>())?

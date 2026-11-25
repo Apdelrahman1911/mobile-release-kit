@@ -1,0 +1,642 @@
+diff --git a/desktop/src-tauri/src/credential_upload_key_cancellation.rs b/desktop/src-tauri/src/credential_upload_key_cancellation.rs
+--- a/desktop/src-tauri/src/credential_upload_key_cancellation.rs
++++ b/desktop/src-tauri/src/credential_upload_key_cancellation.rs
+@@ -597,6 +597,8 @@
+             retirement.failed = true;
+             return false;
+         }
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        observation::cancelled_disposed(held, retirement.stopped_write.as_ref().and_then(controls::recovery::StoppedWrite::installed_revision));
+         let clock = held.clock.clone();
+         self.inner = None; // Actual private Fields/retained native run dropped, not scheduled.
+         self.cancelled = None;
+diff --git a/desktop/src-tauri/src/credential_upload_key_controls.rs b/desktop/src-tauri/src/credential_upload_key_controls.rs
+--- a/desktop/src-tauri/src/credential_upload_key_controls.rs
++++ b/desktop/src-tauri/src/credential_upload_key_controls.rs
+@@ -24,12 +24,18 @@
+ }
+ #[cfg(feature = "desktop-shell")]
+ #[derive(Clone,Copy)]
+-pub(in crate::asset_session) enum SelectedAction { Prepare, Create }
++pub(in crate::asset_session) enum SelectedAction { Prepare, Create, Recover }
+ impl Admission {
+     fn qualified(&self, document: &DocumentBinding) -> bool {
+         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         if let Some(control)=&self.installed {return control.permits(&document.inner.session_identity);}
+         available(document)
++    }
++    fn recovery_action(&self, action: recovery::Action) -> bool {
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        if self.installed.is_some() { return action == recovery::Action::AcknowledgeUnstarted; }
++        let _ = action;
++        true
+     }
+     fn same(&self, other: &Self) -> bool {
+         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -47,7 +53,9 @@
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::Installed(selection) => {
+                 use crate::shell::installed_observation::vault::upload_key::Action;
+-                if !matches!((action,selection.action()),(SelectedAction::Prepare,Action::Prepare))
++                if !matches!((action,selection.action()),
++                    (SelectedAction::Prepare,Action::Prepare | Action::RecoveryPrepare)
++                    | (SelectedAction::Recover,Action::AcknowledgeUnstarted))
+                     && !(matches!(action,SelectedAction::Create) && selection.action().creates()) {return Err(AssetError::invalid());}
+                 let control=document.installed_upload_consume(selection,path)?;
+                 Ok(Admission{installed:Some(control)})
+diff --git a/desktop/src-tauri/src/credential_upload_key_observation.rs b/desktop/src-tauri/src/credential_upload_key_observation.rs
+--- a/desktop/src-tauri/src/credential_upload_key_observation.rs
++++ b/desktop/src-tauri/src/credential_upload_key_observation.rs
+@@ -2,6 +2,9 @@
+ //! No private value, user path, tool pathname or result-shaped grant is accepted.
+ //! All observation storage is fixed, nonsecret DATA; it cannot settle anything.
+ use super::*;
++#[path = "credential_upload_key_cancel_observation.rs"]
++mod cancelled;
++pub(super) use cancelled::cancelled_disposed;
+ use crate::shell::installed_observation::vault::{
+     upload_key::{Action, Case, Selection},
+     Control,
+@@ -64,6 +67,9 @@
+     disposed: bool,
+     native_use_retired: bool,
+     checkpoint: Option<Cut>,
++    cancelled_disposal: bool,
++    stopped_preference_revision: Option<u64>,
++    recovery_request: Option<controls::RecoveryRequest>,
+ }
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -94,6 +100,8 @@
+     document_unknown: bool,
+     unassigned: bool,
+     checkpoint: &'static str,
++    cancelled_disposal: bool,
++    stopped_preference_revision: Option<u64>,
+     // `producer` is the captured actual authenticated-NEW boundary when one
+     // exists; otherwise it is the current pre-GO observation. A later STOP
+     // cannot rewrite that earlier receipt, nor hide the current retained axes.
+@@ -121,6 +129,8 @@
+             && !self.document_unknown
+             && self.unassigned
+             && self.checkpoint == "none"
++            && !self.cancelled_disposal
++            && self.stopped_preference_revision.is_none()
+             && self.producer.is_some_and(ProducerSample::generated)
+             && self.retained_producer.is_none()
+     }
+@@ -433,7 +443,11 @@
+             .ok_or_else(AssetError::invalid)
+     }
+     pub(crate) async fn installed_upload_saved(&self) -> Result<(), AssetError> {
+-        let selection = self.installed_upload_select(Action::Saved)?;
++        self.installed_upload_saved_action(Action::Saved).await
++    }
++    async fn installed_upload_saved_action(&self, action: Action) -> Result<(), AssetError> {
++        if !matches!(action, Action::Saved | Action::RecoverySaved) { return Err(AssetError::invalid()); }
++        let selection = self.installed_upload_select(action)?;
+         self.installed_upload_consume(selection, None)?;
+         let project = self
+             .lock()
+@@ -509,7 +523,7 @@
+         let path = (action == Action::Reopen).then(|| control.root());
+         self.installed_upload_consume(selection, path)?;
+         match action {
+-            Action::Lock | Action::Relock | Action::Missing => {
++            Action::Lock | Action::Relock | Action::RecoveredRelock | Action::Missing => {
+                 self.lock_session()?;
+             }
+             Action::Reopen => {
+@@ -635,6 +649,8 @@
+                 Some(Cut::BeforeGo) => "before-go",
+                 Some(Cut::AfterNew) => "after-new-before-journal",
+             },
++            cancelled_disposal: trace.cancelled_disposal,
++            stopped_preference_revision: trace.stopped_preference_revision,
+             producer,
+             retained_producer,
+         })
+@@ -666,6 +682,8 @@
+             document_unknown: false,
+             unassigned: true,
+             checkpoint: "none",
++            cancelled_disposal: false,
++            stopped_preference_revision: None,
+             producer: Some(ProducerSample {
+                 ready: true,
+                 go_claimed: true,
+@@ -821,6 +839,8 @@
+             document_unknown: true,
+             unassigned: true,
+             checkpoint: "before-go",
++            cancelled_disposal: false,
++            stopped_preference_revision: None,
+             producer: Some(ProducerSample {
+                 ready: true,
+                 ..ProducerSample::default()
+diff --git a/desktop/src-tauri/src/credential_upload_key_recovery.rs b/desktop/src-tauri/src/credential_upload_key_recovery.rs
+--- a/desktop/src-tauri/src/credential_upload_key_recovery.rs
++++ b/desktop/src-tauri/src/credential_upload_key_recovery.rs
+@@ -787,10 +787,19 @@
+         &self,
+         request: RecoveryRequest,
+     ) -> Result<UploadKeyStatus, AssetError> {
++        self.recover_upload_key_selected(request, Qualification::Ordinary)
++    }
++    pub(in crate::asset_session) fn recover_upload_key_selected(
++        &self, request: RecoveryRequest, selection: Qualification,
++    ) -> Result<UploadKeyStatus, AssetError> {
++        let admission = selection.admit(self, SelectedAction::Recover, None)?;
++        if !admission.recovery_action(request.action) {
++            return Err(AssetError::new(Reason::Unqualified));
++        }
+         self.reconcile();
+         let mut state = self.lock();
+         self.expire(&mut state, Instant::now());
+-        if !available(self) {
++        if !admission.qualified(self) {
+             return Err(AssetError::new(Reason::Unqualified));
+         }
+         self.durable_gate(&state, true)?;
+@@ -812,6 +821,9 @@
+             .as_ref()
+             .and_then(|session| session.upload_key_setup.ready.clone())
+             .ok_or_else(|| AssetError::new(Reason::VaultInterrupted))?;
++        if !admission.same(&prepared.admission) {
++            return Err(AssetError::new(Reason::Unqualified));
++        }
+         current_prepared(self, &state, &prepared)?;
+         let observed = self.credential_observation_for_binding(
+             &state,
+@@ -898,6 +910,49 @@
+     change: Option<saved::Change>,
+     revision: Option<u64>,
+ }
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++impl StoppedWrite {
++    pub(in crate::asset_session) fn installed_revision(&self) -> Option<u64> {
++        self.revision
++    }
++}
++
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(in crate::asset_session) fn installed_unstarted_request(
++    status: &UploadKeyStatus, expected: u64,
++) -> Result<RecoveryRequest, AssetError> {
++    let recovery = &status.recovery;
++    if recovery.state != "acknowledge-unstarted"
++        || recovery.preference_revision.as_deref() != Some(expected.to_string().as_str())
++        || recovery.record.is_some() || recovery.operation.is_some()
++    { return Err(AssetError::new(Reason::ContextStale)); }
++    let context = status.assets.context.as_ref().ok_or_else(AssetError::invalid)?;
++    Ok(RecoveryRequest { context_revision: context.revision,
++        status_revision: status.assets.status_revision, preference_revision: expected,
++        action: Action::AcknowledgeUnstarted })
++}
++
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(in crate::asset_session) fn installed_acknowledged(
++    document: &DocumentBinding, state: &DocumentState, stopped_revision: u64,
++) -> Option<bool> {
++    let slot = state.slot.as_ref()?;
++    if slot.operation != Operation::RecoverUploadKey || slot.owner.id != 8
++        || state.unknown || slot.owner.stopped() || slot.reason != Reason::None
++        || slot.error.is_some() || slot.settlement == Settlement::Unknown
++    { return Some(false); }
++    let status = projection(document, state, None);
++    let operation = status.operation?;
++    if operation.phase == "pending" { return None; }
++    Some(operation.operation_id == 8 && operation.action == Action::AcknowledgeUnstarted
++        && operation.phase == "completed"
++        && stopped_revision.checked_add(1).is_some_and(|revision|
++            operation.preference_revision.as_deref() == Some(revision.to_string().as_str()))
++        && status.record.is_none() && state.assignments.is_empty()
++        && state.vault.as_ref().is_some_and(|vault| vault.rows.is_empty()
++            && vault.bound.iter().all(Option::is_none)))
++}
++
+ pub(in crate::asset_session) fn persist_stopped(
+     held: &super::super::Holding,
+     write: &mut StoppedWrite,
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs b/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
+@@ -44,6 +44,10 @@
+     Recontext,
+     Read,
+     Relock,
++    RecoverySaved,
++    RecoveryPrepare,
++    AcknowledgeUnstarted,
++    RecoveredRelock,
+     Missing,
+ }
+ impl Action {
+@@ -63,6 +67,10 @@
+             Self::Recontext => 11,
+             Self::Read => 12,
+             Self::Relock => 13,
++            Self::RecoverySaved => 12,
++            Self::RecoveryPrepare => 13,
++            Self::AcknowledgeUnstarted => 14,
++            Self::RecoveredRelock => 15,
+             Self::Missing => 254,
+         }
+     }
+@@ -70,9 +78,16 @@
+         match self {
+             Self::RefuseRepeat | Self::Lock | Self::Reopen => 5,
+             Self::Unlock => 6,
+-            Self::Recontext | Self::Read => 7,
+-            Self::Relock => 8,
++            Self::Recontext | Self::Read | Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted => 7,
++            Self::Relock | Self::RecoveredRelock => 8,
+             _ => 4,
++        }
++    }
++    fn allowed(self, case: Case) -> bool {
++        match self {
++            Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted | Self::RecoveredRelock => case == Case::StopBeforeGo,
++            Self::Read | Self::Relock => case != Case::StopBeforeGo,
++            _ => true,
+         }
+     }
+     pub(crate) fn creates(self) -> bool {
+@@ -101,7 +116,7 @@
+         original: u32,
+     ) -> Option<Selection> {
+         if !std::ptr::eq(self, &control.upload)
+-            || self.case(control.case).is_none()
++            || !self.case(control.case).is_some_and(|case| action.allowed(case))
+             || !control.permits(document)
+             || original != action.original()
+         {
+@@ -133,7 +148,7 @@
+         })
+     }
+     pub(super) fn finished(&self, originals: usize) -> bool {
+-        (originals == 8 && self.next.load(Ordering::SeqCst) == 14)
++        (originals == 8 && matches!(self.next.load(Ordering::SeqCst), 14 | 16))
+             || (originals == 4 && self.next.load(Ordering::SeqCst) == 255)
+     }
+ }
+@@ -163,7 +178,8 @@
+         Some(self.control)
+     }
+     fn claim(&self, document: &Arc<()>, original: u32, path: Option<&Path>) -> bool {
+-        self.serial
++        self.control.upload.case(self.control.case).is_some_and(|case| self.action.allowed(case))
++            && self.serial
+             == if self.action == Action::Missing {
+                 255
+             } else {
+@@ -175,7 +191,7 @@
+                 .is_some_and(|same| Arc::ptr_eq(&same, document))
+             && original == self.action.original()
+             && self.control.upload.next.load(Ordering::SeqCst) == self.serial
+-            && if matches!(self.action, Action::Prepare | Action::Reopen) {
++            && if matches!(self.action, Action::Prepare | Action::RecoveryPrepare | Action::Reopen) {
+                 path == Some(self.control.root())
+             } else {
+                 path.is_none()
+@@ -204,6 +220,10 @@
+     Recontext,
+     Read,
+     Readback,
++    RecoverySaved,
++    RecoveryPrepare,
++    AcknowledgeUnstarted,
++    RecoveryReadback,
+     Relock,
+     Relocked,
+     Missing,
+@@ -214,6 +234,7 @@
+     pub(super) sample: Option<InstalledUploadSample>,
+     repeated_refused: bool,
+     readback: bool,
++    acknowledged: bool,
+     not_executed: bool,
+ }
+ #[derive(Clone, Copy)]
+@@ -384,30 +405,14 @@
+                             .upload
+                             .sample = Some(sample);
+                         Some(Step::Repeat)
+-                    } else if sample.stopped_observed(case) {
+-                        // Record the actual retained negative. Do NOT dispose,
+-                        // claim all-originals-final, force exit or start another
+-                        // fixture. The outer owner may time out/retain UNKNOWN.
+-                        if !document.installed_upload_create(true).map_err(asset)? {
+-                            return Err(BridgeError::invalid());
+-                        }
+-                        let mut r = self.record().ok_or_else(BridgeError::invalid)?;
+-                        r.vault_record
+-                            .as_mut()
+-                            .ok_or_else(BridgeError::invalid)?
+-                            .upload
+-                            .repeated_refused = true;
+-                        if super::super::latch_failure(
+-                            &self.failure_reason,
+-                            &self.failed,
+-                            "upload-key-expected-retention",
+-                        ) {
+-                            r.upload_failure = Some(FailureSample {
+-                                sample,
+-                                repeated_create_refused: true,
+-                            });
+-                        }
+-                        None
++                    } else if sample.cancelled(case) {
++                        // Observe only the original positive cleanup/CAS/use
++                        // retirement. UserCancelled stays UserCancelled; no
++                        // transient retained STOP becomes a pass or an exit.
++                        self.record().ok_or_else(BridgeError::invalid)?
++                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
++                            .upload.sample = Some(sample);
++                        Some(Step::Repeat)
+                     } else {
+                         None
+                     }
+@@ -495,7 +500,7 @@
+                     document
+                         .installed_upload_context(&self.base, &project, true)
+                         .map_err(asset)?;
+-                    Some(Step::Read)
++                    Some(if case == Case::StopBeforeGo { Step::RecoverySaved } else { Step::Read })
+                 }
+                 Step::Read => {
+                     document
+@@ -517,9 +522,31 @@
+                     Some(false) => return Err(BridgeError::invalid()),
+                     None => None,
+                 },
++                Step::RecoverySaved => {
++                    document.installed_upload_recovery_saved().await.map_err(asset)?;
++                    Some(Step::RecoveryPrepare)
++                }
++                Step::RecoveryPrepare => {
++                    document.installed_upload_recovery_prepare().await.map_err(asset)?;
++                    Some(Step::AcknowledgeUnstarted)
++                }
++                Step::AcknowledgeUnstarted => {
++                    document.installed_upload_acknowledge_unstarted().map_err(asset)?;
++                    Some(Step::RecoveryReadback)
++                }
++                Step::RecoveryReadback => match document.installed_upload_acknowledged() {
++                    Some(true) => {
++                        self.record().ok_or_else(BridgeError::invalid)?
++                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
++                            .upload.acknowledged = true;
++                        Some(Step::Relock)
++                    }
++                    Some(false) => return Err(BridgeError::invalid()),
++                    None => None,
++                },
+                 Step::Relock => {
+                     document
+-                        .installed_upload_vault(Action::Relock)
++                        .installed_upload_vault(if case == Case::StopBeforeGo { Action::RecoveredRelock } else { Action::Relock })
+                         .map_err(asset)?;
+                     Some(Step::Relocked)
+                 }
+@@ -590,10 +617,10 @@
+         || !record.preview_consumed
+         || !record.locked
+         || (!not_executed
+-            && (case != Case::RoundTrip
+-                || !data.sample.is_some_and(InstalledUploadSample::positive)
++            && (!data.sample.is_some_and(|sample| if case == Case::RoundTrip { sample.positive() } else { sample.cancelled(case) })
+                 || !data.repeated_refused
+-                || !data.readback
++                || data.readback != (case != Case::StopBeforeGo)
++                || data.acknowledged != (case == Case::StopBeforeGo)
+                 || record.original_count != 8))
+     {
+         return None;
+@@ -601,9 +628,9 @@
+     Some(
+         json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
+         "execution":if not_executed{"not-executed-prerequisite"}else{"executed"},
+-        "testResult":if not_executed{"not-executed"}else{"positive"},
++        "testResult":if not_executed{"not-executed"}else if case == Case::RoundTrip{"positive"}else{"cancelled-cleanup"},
+         "initializeHelper":record.initialization,"storage":record.storage,
+-        "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,
++        "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,"stoppedIntentAcknowledged":data.acknowledged,
+         "originalCount":record.original_count+1,"allOriginalsSettled":true,"finalDocumentEmpty":true,
+         "automaticallyAssigned":false,"backupCreated":false,"releaseSigningQualified":false,
+         "physicalMacEvidence":false,"privateContentsExported":false,"rowRetirement":"disposable-hosted-account-only"}),
+@@ -686,6 +713,16 @@
+     if !control.upload.finished(4) || control.upload.finished(5) {
+         return false;
+     }
++    if Action::AcknowledgeUnstarted.allowed(Case::RoundTrip)
++        || Action::RecoveryPrepare.allowed(Case::StopAfterNew)
++        || Action::Read.allowed(Case::StopBeforeGo)
++        || Action::Relock.allowed(Case::StopBeforeGo)
++        || !Action::AcknowledgeUnstarted.allowed(Case::StopBeforeGo)
++        || Action::AcknowledgeUnstarted.original() != 7
++        || Action::RecoveredRelock.original() != 8
++    { return false; }
++    control.upload.next.store(16, Ordering::SeqCst);
++    if !control.upload.finished(8) || control.upload.finished(9) { return false; }
+     Action::Create.original() == 4
+         && Action::RefuseRepeat.original() == 5
+         && Action::Read.original() == 7
+diff --git a/desktop/tools/macos_upload_key_observation.py b/desktop/tools/macos_upload_key_observation.py
+--- a/desktop/tools/macos_upload_key_observation.py
++++ b/desktop/tools/macos_upload_key_observation.py
+@@ -17,9 +17,9 @@
+                            "tailClosed", "originalFinal", "cleanupUnknown", "privateDisposed"))
+ SAMPLE_FLAGS = frozenset(("reserved", "authenticatedNew", "recorded", "published", "privateDisposed", "nativeUseRetired",
+                         "nativeUseRetained", "privateRetained", "stopped", "clockFailed", "clockRetired", "coordinatorJoined",
+-                        "childJoined", "sourcesClosed", "parentEnded", "documentUnknown", "unassigned"))
++                        "childJoined", "sourcesClosed", "parentEnded", "documentUnknown", "unassigned", "cancelledDisposal"))
+ REPORT_FIELDS = frozenset(("mechanism", "normalGenerationEnabled", "execution", "testResult", "initializeHelper", "storage",
+-                         "generated", "repeatedCreateRefused", "authenticatedReopenReadback", "originalCount",
++                         "generated", "repeatedCreateRefused", "authenticatedReopenReadback", "stoppedIntentAcknowledged", "originalCount",
+                          "allOriginalsSettled", "finalDocumentEmpty", "automaticallyAssigned", "backupCreated",
+                          "releaseSigningQualified", "physicalMacEvidence", "privateContentsExported", "rowRetirement"))
+
+@@ -40,10 +40,12 @@
+
+
+ def sample(value):
+-    need(type(value) is dict and value.keys() == SAMPLE_FLAGS | {"operationId", "checkpoint", "producer", "retainedProducer"})
++    need(type(value) is dict and value.keys() == SAMPLE_FLAGS | {"operationId", "checkpoint", "producer", "retainedProducer", "stoppedPreferenceRevision"})
+     _flags(value, SAMPLE_FLAGS)
+     need(type(value["operationId"]) is int and value["operationId"] == 5)
+     need(value["checkpoint"] in ("none", "before-go", "after-new-before-journal"))
++    need(value["stoppedPreferenceRevision"] is None or (type(value["stoppedPreferenceRevision"]) is int
++         and 0 < value["stoppedPreferenceRevision"] <= 2**64 - 1))
+     if value["producer"] is not None:
+         producer(value["producer"])
+     if value["retainedProducer"] is not None:
+@@ -59,10 +61,30 @@
+
+ def positive(value):
+     value = sample(value)
+-    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown"}
++    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown", "cancelledDisposal"}
+     need(all(value[key] is (key not in false) for key in SAMPLE_FLAGS))
++    need(value["stoppedPreferenceRevision"] is None)
+     need(value["checkpoint"] == "none" and value["producer"] is not None and _generated(value["producer"])
+          and value["retainedProducer"] is None)
++    return value
++
++
++def cancelled(value, case):
++    """Completed test observation, not generation success or disposal authority."""
++    need(case in CASES[1:])
++    value = sample(value)
++    false = {"recorded", "published", "nativeUseRetained", "privateRetained", "documentUnknown"}
++    if case == CASES[1]:
++        false.add("authenticatedNew")
++    need(all(value[key] is (key not in false) for key in SAMPLE_FLAGS))
++    need(value["retainedProducer"] is None)
++    if case == CASES[1]:
++        need(value["checkpoint"] == "before-go" and value["producer"] is None
++             and value["stoppedPreferenceRevision"] is not None)
++    else:
++        need(value["checkpoint"] == "after-new-before-journal"
++             and value["stoppedPreferenceRevision"] is None
++             and value["producer"] is not None and _generated(value["producer"]))
+     return value
+
+
+@@ -73,6 +95,7 @@
+     need(value["source"] == "original-upload-key-sample" and value["observationOnly"] is True
+          and value["exitOrDisposalPermission"] is False and value["repeatedCreateRefused"] is True)
+     data = sample(value["sample"])
++    need(not data["cancelledDisposal"] and data["stoppedPreferenceRevision"] is None)
+     for key in ("reserved", "nativeUseRetained", "privateRetained", "stopped", "clockFailed", "unassigned"):
+         need(data[key] is True)
+     for key in ("recorded", "published", "privateDisposed", "nativeUseRetired", "clockRetired"):
+@@ -98,14 +121,22 @@
+         need(value[key] is False)
+     need(value["rowRetirement"] == "disposable-hosted-account-only")
+     need(type(value["originalCount"]) is int)
+-    _flags(value, ("repeatedCreateRefused", "authenticatedReopenReadback"))
++    _flags(value, ("repeatedCreateRefused", "authenticatedReopenReadback", "stoppedIntentAcknowledged"))
+     if value["testResult"] == "not-executed":
+         need(value["execution"] == "not-executed-prerequisite" and value["generated"] is None
+-             and not value["repeatedCreateRefused"] and not value["authenticatedReopenReadback"] and value["originalCount"] == 5)
++             and not value["repeatedCreateRefused"] and not value["authenticatedReopenReadback"]
++             and not value["stoppedIntentAcknowledged"] and value["originalCount"] == 5)
+     else:
+-        need(case == CASES[0] and value["testResult"] == "positive" and value["execution"] == "executed"
+-             and value["repeatedCreateRefused"] and value["authenticatedReopenReadback"] and value["originalCount"] == 9)
+-        positive(value["generated"])
++        need(value["execution"] == "executed" and value["repeatedCreateRefused"] and value["originalCount"] == 9)
++        if case == CASES[0]:
++            need(value["testResult"] == "positive" and value["authenticatedReopenReadback"]
++                 and not value["stoppedIntentAcknowledged"])
++            positive(value["generated"])
++        else:
++            need(value["testResult"] == "cancelled-cleanup"
++                 and value["authenticatedReopenReadback"] is (case == CASES[2])
++                 and value["stoppedIntentAcknowledged"] is (case == CASES[1]))
++            cancelled(value["generated"], case)
+     # The existing runner separately validates original helper/storage syntax.
+     # No fixture fills these fields from an expected report or report filename.
+     need(type(value["initializeHelper"]) is dict and type(value["storage"]) is dict)
+@@ -173,11 +204,13 @@
+     report(value, case)
+     need(fixtures.cases == (case,) and case not in fixtures.vault_completed
+          and not fixtures.inflight and fixtures.last_returned, "upload-key-readback-order")
+-    generated = value["testResult"] == "positive"
++    host_started = value["execution"] == "executed"
++    generated = host_started and case != CASES[1]
+     initialized = value["storage"]["header"] == [True, True]
+-    # Known no-tools exit has initialized the vault but never begins Host setup.
+-    # Host is present only when the actual NEW generation sequence succeeded.
+-    app_names = ("credential-vault-v1", "service-v1", "service-v1.reservation") if generated else ("credential-vault-v1",)
++    # Both known cancellations really reserved shared state. Before-GO has
++    # NO key; after-NEW preserves its one authenticated key despite cancellation.
++    # Only the explicit missing-tools path has never started the Host.
++    app_names = ("credential-vault-v1", "service-v1", "service-v1.reservation") if host_started else ("credential-vault-v1",)
+     source = fixtures.readback(case)
+     parent = fixtures.vault_parents[case]
+     fixtures._named(fixtures.vault_namespace, case, parent, 0o700)
+@@ -189,9 +222,9 @@
+         with fixtures._temporary(fixtures._open("credential-vault-v1", app, directory=True)) as vault:
+             fixtures._named(app, "credential-vault-v1", vault, 0o700)
+             names = fixtures._upload_names(vault)
+-            total += _files(fixtures, vault, private_roster(names, initialized=initialized, generated=generated, host_started=generated))
++            total += _files(fixtures, vault, private_roster(names, initialized=initialized, generated=generated, host_started=host_started))
+             fixtures._named(app, "credential-vault-v1", vault, 0o700)
+-        if generated:
++        if host_started:
+             reservation = len(b"MRK application references v1\nprojects\ncredential-references\nversion-allocations\n")
+             root_reservation = len(b"MRK service root v1\n") + 16
+             # _files checks complete directory rosters; parent reservation has
+@@ -217,5 +250,5 @@
+     fixtures.vault_completed.add(case)
+     fixtures._vault_namespace_current()
+     return {**source, "uploadKeyOutput": {"nativeFixtureRootObserved": True, "newEncryptedRecordPresent": generated,
+-        "referenceNamespacePresent": generated, "privateContentsExported": False, "keychainInspectedByOwner": False,
++        "referenceNamespacePresent": host_started, "privateContentsExported": False, "keychainInspectedByOwner": False,
+         "retainedPrivateFileBytes": total, "retainedForDisposableAccountRetirement": True}}
+diff --git a/tests/desktop/test_macos_upload_key_observation.py b/tests/desktop/test_macos_upload_key_observation.py
+--- a/tests/desktop/test_macos_upload_key_observation.py
++++ b/tests/desktop/test_macos_upload_key_observation.py
+@@ -31,9 +31,9 @@
+
+
+ def positive():
+-    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown"}
++    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown", "cancelledDisposal"}
+     return {**{key: key not in false for key in U.SAMPLE_FLAGS}, "operationId": 5,
+-            "checkpoint": "none", "producer": producer(), "retainedProducer": None}
++            "checkpoint": "none", "producer": producer(), "retainedProducer": None, "stoppedPreferenceRevision": None}
+
+
+ def stopped(case=BEFORE):
+@@ -59,7 +59,7 @@
+             "execution": "not-executed-prerequisite" if missing else "executed",
+             "testResult": "not-executed" if missing else "positive", "initializeHelper": old["initializeHelper"],
+             "storage": old["storage"], "generated": None if missing else positive(),
+-            "repeatedCreateRefused": not missing, "authenticatedReopenReadback": not missing,
++            "repeatedCreateRefused": not missing, "authenticatedReopenReadback": not missing, "stoppedIntentAcknowledged": False,
+             "originalCount": 5 if missing else 9, "allOriginalsSettled": True, "finalDocumentEmpty": True,
+             "automaticallyAssigned": False, "backupCreated": False, "releaseSigningQualified": False,
+             "physicalMacEvidence": False, "privateContentsExported": False,
+@@ -104,8 +104,9 @@
+     """Finite synthetic metadata slots, no FDs, filesystem or private bytes."""
+     uid, gid = 501, 20
+
+-    def __init__(self, *, generated=True, initialized=True):
+-        self.cases, self.inflight, self.last_returned = (CASE,), False, True
++    def __init__(self, *, generated=True, initialized=True, case=CASE, host_started=None):
++        self.cases, self.inflight, self.last_returned = (case,), False, True
++        host_started = generated if host_started is None else host_started
+         self.vault_completed, self.reads, self.opened, self.closed, self.active = set(), [], [], [], set()
+         self.before = []
+         self.fail_close = set()
+@@ -115,8 +116,8 @@
+         self.next_id = 1
+         self.vault_namespace = self.directory()
+         parent = self.directory()
+-        self.vault_parents = {CASE: parent}
+-        self.entries[self.vault_namespace][CASE] = parent
++        self.vault_parents = {case: parent}
++        self.entries[self.vault_namespace][case] = parent
+         self.app = self.directory()
+         self.entries[parent]["dev.mobile-release-kit.desktop"] = self.app
+         self.vault = self.directory()
+@@ -127,6 +128,7 @@
+             self.file(self.vault, "vault-header", 104)
+         if generated:
+             self.file(self.vault, "record-" + "b" * 32, 4096)
++        if host_started:
+             self.fence = self.file(self.app, "service-v1.reservation", len(b"MRK service root v1\n") + 16)
+             self.service = self.directory()
+             self.entries[self.app]["service-v1"] = self.service
+@@ -187,7 +189,7 @@
+     _temporary = M.Fixtures._temporary
+
+     def _vault_namespace_current(self):
+-        U.need(self.vault_completed == {CASE})
++        U.need(self.vault_completed == set(self.cases))
+
+     def readback(self, case):
+         self.reads.append(case)

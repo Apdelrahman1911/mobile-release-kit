@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import stat
-import struct
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlsplit
@@ -75,6 +76,54 @@ ANDROID_NOTE_SECRET_RE = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class MetadataTextCheck:
+    """Pure generic Store-text policy; never the Android changelog policy."""
+
+    character_count: int
+    limit: int | None
+    issues: tuple[tuple[str, Status], ...]
+
+
+def check_metadata_text(name: str, text: str) -> MetadataTextCheck:
+    """Check the CLI's universal-newline view without altering saved bytes.
+
+    The generic metadata reader historically uses read_text(newline=None).
+    Supplied desktop text must use that same policy view, while the uploader's
+    distinct Android release-note helper above continues to count raw text.
+    File admission, UTF-8 byte bounds and JSON parsing belong to their callers.
+    """
+    view = text.replace("\r\n", "\n").replace("\r", "\n")
+    issues: list[tuple[str, Status]] = []
+    if not view.strip():
+        issues.append(("metadata.empty-text", Status.INVALID))
+    if "\x00" in view:
+        issues.append(("metadata.nul", Status.INVALID))
+    if PLACEHOLDER_RE.search(view):
+        issues.append(("metadata.placeholder", Status.FAIL))
+    if SECRET_RE.search(view):
+        issues.append(("metadata.secret-pattern", Status.FAIL))
+    candidate = view.rstrip("\n")
+    url = name.endswith("_url.txt")
+    if url:
+        try:
+            parsed = urlsplit(candidate)
+            _ = parsed.port
+        except ValueError:
+            parsed = None
+        if not (parsed and candidate == candidate.strip()
+                and len(candidate) <= MAX_STORE_URL_LENGTH
+                and not any(ord(character) < 32 for character in candidate)
+                and parsed.scheme == "https" and parsed.hostname
+                and parsed.username is None and parsed.password is None
+                and not parsed.query and not parsed.fragment):
+            issues.append(("metadata.url", Status.INVALID))
+    limit = TEXT_LIMITS.get(name)
+    if limit is not None and len(candidate) > limit:
+        issues.append(("metadata.length", Status.FAIL))
+    return MetadataTextCheck(len(candidate), MAX_STORE_URL_LENGTH if url else limit, tuple(issues))
+
+
 def validate_android_release_note(text: object) -> str:
     """Validate public Play copy without trimming or normalizing uploaded bytes."""
     if not isinstance(text, str):
@@ -101,12 +150,17 @@ def _read_android_release_note(config: ReleaseConfig, path: Path) -> str:
     path = config.project_path(str(path))  # Reject every in-repository symlink component.
     relative = path.relative_to(config.root)
     try:
-        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
-        with os.fdopen(os.open(path, flags), "rb") as handle:
-            attributes = os.fstat(handle.fileno())
-            if not stat.S_ISREG(attributes.st_mode) or attributes.st_size > ANDROID_NOTE_MAX_BYTES:
-                raise ValidationError(f"Android release notes must be a bounded regular file: {relative}")
-            raw = handle.read(ANDROID_NOTE_MAX_BYTES + 1)
+        if config._preflight_budget is not None:
+            raw = config._preflight_budget.read(path, limit=ANDROID_NOTE_MAX_BYTES, binary=True)
+            if raw is None:
+                raise FileNotFoundError
+        else:
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+            with os.fdopen(os.open(path, flags), "rb") as handle:
+                attributes = os.fstat(handle.fileno())
+                if not stat.S_ISREG(attributes.st_mode) or attributes.st_size > ANDROID_NOTE_MAX_BYTES:
+                    raise ValidationError(f"Android release notes must be a bounded regular file: {relative}")
+                raw = handle.read(ANDROID_NOTE_MAX_BYTES + 1)
         if len(raw) > ANDROID_NOTE_MAX_BYTES:
             raise ValidationError(f"Android release notes exceed the bounded UTF-8 file size: {relative}")
         # read_text() would translate CRLF, changing both the length and intent.
@@ -168,11 +222,16 @@ def _is_android_changelog(relative: Path) -> bool:
     )
 
 
-def _safe_files(root: Path) -> Iterable[Path]:
+def _safe_files(root: Path, *, budget=None) -> Iterable[Path]:
     if root.is_symlink() or not root.is_dir():
         raise ValidationError("metadata root must be a regular directory, not a symlink")
     count = 0
-    for path in sorted(root.rglob("*")):
+    paths = sorted(root.rglob("*")) if budget is None else budget.walk(root)
+    if budget is not None:
+        paths.sort()
+    for path in paths:
+        if budget is not None:
+            budget.check()
         if path.is_symlink():
             raise ValidationError(f"metadata must not contain symlinks: {path.relative_to(root)}")
         if path.is_file():
@@ -198,12 +257,12 @@ def _safe_files(root: Path) -> Iterable[Path]:
             yield path
 
 
-def _safe_platform_files(root: Path, platforms: Iterable[str]) -> list[Path]:
+def _safe_platform_files(root: Path, platforms: Iterable[str], *, budget=None) -> list[Path]:
     selected = tuple(dict.fromkeys(platforms))
     unknown = sorted(set(selected) - set(PLATFORM_METADATA_ROOTS))
     if unknown:
         raise ValidationError(f"unsupported metadata platform(s): {', '.join(unknown)}")
-    files: list[Path] = []
+    files: list[Path] = [] if budget is None else budget.list("path")
     for relative in dict.fromkeys(
         item for platform in selected for item in PLATFORM_METADATA_ROOTS[platform]
     ):
@@ -212,59 +271,26 @@ def _safe_platform_files(root: Path, platforms: Iterable[str]) -> list[Path]:
             raise ValidationError(f"metadata must not contain symlinks: {relative}")
         if not subtree.exists():
             continue
-        files.extend(_safe_files(subtree))
+        files.extend(_safe_files(subtree, budget=budget))
         if len(files) > MAX_FILE_COUNT:
             raise ValidationError("metadata tree contains too many files")
+    if budget is not None:
+        files.sort()
+        return files
     return sorted(files)
 
 
-def _image_dimensions(path: Path) -> tuple[int, int] | None:
-    with path.open("rb") as handle:
-        header = handle.read(32)
-        if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
-            return struct.unpack(">II", header[16:24])
-        if header.startswith(b"\xff\xd8"):
-            handle.seek(2)
-            while True:
-                marker_start = handle.read(1)
-                if not marker_start:
-                    return None
-                if marker_start != b"\xff":
-                    continue
-                marker = handle.read(1)
-                while marker == b"\xff":
-                    marker = handle.read(1)
-                if not marker:
-                    return None
-                if marker in {b"\xd8", b"\xd9", b"\x01"} or 0xD0 <= marker[0] <= 0xD7:
-                    continue
-                raw_length = handle.read(2)
-                if len(raw_length) != 2:
-                    return None
-                length = struct.unpack(">H", raw_length)[0]
-                if length < 2:
-                    return None
-                if marker[0] in {
-                    0xC0,
-                    0xC1,
-                    0xC2,
-                    0xC3,
-                    0xC5,
-                    0xC6,
-                    0xC7,
-                    0xC9,
-                    0xCA,
-                    0xCB,
-                    0xCD,
-                    0xCE,
-                    0xCF,
-                }:
-                    payload = handle.read(length - 2)
-                    if len(payload) < 5:
-                        return None
-                    return struct.unpack(">HH", payload[1:5])[::-1]
-                handle.seek(length - 2, os.SEEK_CUR)
-    return None
+def _image_dimensions(path: Path, *, budget=None) -> tuple[int, int] | None:
+    if budget is not None:
+        raw = budget.read(path, limit=MAX_FILE_SIZE, binary=True)
+        if raw is None:
+            return None
+        stream = io.BytesIO(raw)
+    else:
+        stream = path.open("rb")
+    from .metadata_image_header import image_dimensions
+    with stream as handle:
+        return image_dimensions(handle, checkpoint=budget.check if budget is not None else None)
 
 
 def metadata_findings(
@@ -272,17 +298,24 @@ def metadata_findings(
     *,
     check_urls: bool = False,
     platforms: Iterable[str] | None = None,
+    cancellation=None,
 ) -> list[Finding]:
     del check_urls  # Network URL validation belongs to the explicit online Store preflight.
     metadata = config.section("metadata")
     relative_root = metadata.get("root", "release/store")
-    findings: list[Finding] = []
+    budget = config._preflight_budget
+    if budget is not None:
+        if budget.guard is not cancellation:
+            raise ValueError("Metadata lost its original preflight cancellation binding")
+        budget.checkpoint()
+    findings: list[Finding] = [] if budget is None else budget.list("finding")
     try:
         root = config.project_path(relative_root)
     except ConfigurationError as error:
-        return [Finding("metadata.paths", Status.INVALID, str(error), category="metadata")]
+        findings.append(Finding("metadata.paths", Status.INVALID, str(error), category="metadata"))
+        return findings
     if not root.is_dir():
-        return [
+        findings.append(
             Finding(
                 code="metadata.root",
                 status=Status.MISSING,
@@ -290,7 +323,8 @@ def metadata_findings(
                 message=f"Store metadata directory is missing: {relative_root}",
                 remediation="Create the configured metadata tree and add the required locales/assets.",
             )
-        ]
+        )
+        return findings
 
     selected = set(platforms if platforms is not None else config.enabled_platforms)
     android_build = None
@@ -304,6 +338,8 @@ def metadata_findings(
                 category="metadata", remediation="Fix the configured version source before selecting changelogs.",
             ))
     for platform, key in (("android", "androidLocales"), ("ios", "iosLocales")):
+        if cancellation is not None:
+            cancellation.check()
         if platform not in selected:
             continue
         if not config.platform_enabled(platform):
@@ -321,6 +357,8 @@ def metadata_findings(
             )
             continue
         for locale in locales:
+            if budget is not None:
+                budget.checkpoint()
             if not LOCALE_RE.fullmatch(locale):
                 findings.append(
                     Finding(
@@ -342,11 +380,15 @@ def metadata_findings(
                     )
                 )
             else:
-                public_files = [
-                    path
-                    for path in locale_root.rglob("*")
-                    if path.is_file() and not path.is_symlink() and path.name != ".gitkeep"
-                ]
+                if budget is None:
+                    public_files = [path for path in locale_root.rglob("*")
+                                    if path.is_file() and not path.is_symlink() and path.name != ".gitkeep"]
+                else:
+                    public_files = budget.list("path")
+                    for path in budget.walk(locale_root):
+                        budget.check()
+                        if path.is_file() and not path.is_symlink() and path.name != ".gitkeep":
+                            public_files.append(path)
                 if not public_files:
                     findings.append(
                         Finding(
@@ -407,7 +449,7 @@ def metadata_findings(
                 )
 
     try:
-        files = _safe_platform_files(root, selected)
+        files = _safe_platform_files(root, selected, budget=budget)
     except ValidationError as error:
         findings.append(
             Finding("metadata.paths", Status.INVALID, str(error), category="metadata")
@@ -420,6 +462,8 @@ def metadata_findings(
         return findings
 
     for path in files:
+        if budget is not None:
+            budget.checkpoint()
         relative = path.relative_to(root)
         if _is_android_changelog(relative):
             try:
@@ -433,7 +477,9 @@ def metadata_findings(
         suffix = path.suffix.lower()
         if suffix in {".txt", ".md", ".json"}:
             try:
-                text = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8") if budget is None else budget.read(path, limit=MAX_FILE_SIZE)
+                if text is None:
+                    raise FileNotFoundError
             except UnicodeDecodeError:
                 findings.append(
                     Finding(
@@ -444,7 +490,9 @@ def metadata_findings(
                     )
                 )
                 continue
-            if not text.strip():
+            checked = check_metadata_text(path.name, text)
+            codes = {code for code, _ in checked.issues}
+            if "metadata.empty-text" in codes:
                 findings.append(
                     Finding(
                         "metadata.empty-text",
@@ -453,7 +501,7 @@ def metadata_findings(
                         category="metadata",
                     )
                 )
-            if "\x00" in text:
+            if "metadata.nul" in codes:
                 findings.append(
                     Finding(
                         "metadata.nul",
@@ -462,7 +510,7 @@ def metadata_findings(
                         category="metadata",
                     )
                 )
-            if PLACEHOLDER_RE.search(text):
+            if "metadata.placeholder" in codes:
                 findings.append(
                     Finding(
                         "metadata.placeholder",
@@ -471,7 +519,7 @@ def metadata_findings(
                         category="metadata",
                     )
                 )
-            if SECRET_RE.search(text):
+            if "metadata.secret-pattern" in codes:
                 findings.append(
                     Finding(
                         "metadata.secret-pattern",
@@ -493,46 +541,26 @@ def metadata_findings(
                             category="metadata",
                         )
                     )
-            if path.name.endswith("_url.txt"):
-                candidate = text.rstrip("\n")
-                try:
-                    parsed = urlsplit(candidate)
-                    _ = parsed.port
-                except ValueError:
-                    parsed = None
-                valid_url = bool(
-                    parsed
-                    and candidate == candidate.strip()
-                    and len(candidate) <= MAX_STORE_URL_LENGTH
-                    and not any(ord(character) < 32 for character in candidate)
-                    and parsed.scheme == "https"
-                    and parsed.hostname
-                    and parsed.username is None
-                    and parsed.password is None
-                    and not parsed.query
-                    and not parsed.fragment
-                )
-                if not valid_url:
-                    findings.append(
-                        Finding(
-                            "metadata.url",
-                            Status.INVALID,
-                            f"Store URL must be an absolute credential-free HTTPS URL: {relative}",
-                            category="metadata",
-                        )
+            if "metadata.url" in codes:
+                findings.append(
+                    Finding(
+                        "metadata.url",
+                        Status.INVALID,
+                        f"Store URL must be an absolute credential-free HTTPS URL: {relative}",
+                        category="metadata",
                     )
-            limit = TEXT_LIMITS.get(path.name)
-            if limit is not None and len(text.rstrip("\n")) > limit:
+                )
+            if "metadata.length" in codes:
                 findings.append(
                     Finding(
                         "metadata.length",
                         Status.FAIL,
-                        f"{relative} exceeds its {limit}-character Store limit.",
+                        f"{relative} exceeds its {checked.limit}-character Store limit.",
                         category="metadata",
                     )
                 )
         elif suffix in {".png", ".jpg", ".jpeg"}:
-            dimensions = _image_dimensions(path)
+            dimensions = _image_dimensions(path, budget=budget)
             if not dimensions or dimensions[0] < 1 or dimensions[1] < 1:
                 findings.append(
                     Finding(

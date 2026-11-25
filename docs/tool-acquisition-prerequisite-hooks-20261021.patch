@@ -1,0 +1,727 @@
+diff --git a/desktop/src-tauri/src/tool_acquisition_protocol.rs b/desktop/src-tauri/src/tool_acquisition_protocol.rs
+--- a/desktop/src-tauri/src/tool_acquisition_protocol.rs
++++ b/desktop/src-tauri/src/tool_acquisition_protocol.rs
+@@ -31,6 +31,8 @@
+ pub(crate) mod sdk;
+ #[path = "tool_source_discovery.rs"]
+ pub(crate) mod discovery;
++#[path = "tool_acquisition_prerequisite.rs"]
++pub(crate) mod prerequisite;
+ use components::Partition;
+ pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
+ pub(crate) const FIXED: [&str; 7] = [
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition.rs b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+@@ -77,16 +77,17 @@
+     source_generation: u32,
+     registration_generation: u32,
+ }
++enum KnownFailure { Invalid, CatalogueRequired }
+ impl Known {
+-    fn capture(binding: &Binding) -> Option<Self> {
+-        let document = binding.document.upgrade()?;
++    fn capture(binding: &Binding) -> Result<Self, KnownFailure> {
++        let document = binding.document.upgrade().ok_or(KnownFailure::Invalid)?;
+         if !binding
+             .android
+             .android_original_document_matches(Some(&document))
+         {
+-            return None;
+-        }
+-        let r = binding.android.registry.try_lock().ok()?;
++            return Err(KnownFailure::Invalid);
++        }
++        let r = binding.android.registry.try_lock().map_err(|_| KnownFailure::Invalid)?;
+         if r.active.is_some()
+             || r.prepared.is_some()
+             || r.disabled
+@@ -97,14 +98,17 @@
+             || binding.android.android_registration_control.owns_work()
+             || binding.android.android_registration_control.is_unknown()
+         {
+-            return None;
+-        }
+-        let sources = r.android_sources.acquisition_snapshot()?;
+-        let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android)?;
++            return Err(KnownFailure::Invalid);
++        }
++        let sources = r.android_sources.acquisition_snapshot().ok_or(KnownFailure::Invalid)?;
+         let registration_generation = r
+             .android_registration
+-            .tool_acquisition_generation()?;
+-        Some(Self {
++            .tool_acquisition_generation().ok_or(KnownFailure::Invalid)?;
++        let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android).ok_or_else(|| {
++            if r.android_catalog.tool_acquisition_check_required(&binding.android) { KnownFailure::CatalogueRequired }
++            else { KnownFailure::Invalid }
++        })?;
++        Ok(Self {
+             android: binding.android.clone(),
+             document: binding.document.clone(),
+             catalog,
+@@ -354,7 +358,32 @@
+         &self,
+         document: &Arc<()>,
+     ) -> Result<Census, BridgeError> {
++        self.tool_acquisition_census_inner(document, false)
++    }
++    /// Only Document Prepare may expose a known missing prerequisite. Start
++    /// keeps the old generic failure and its original retained intent.
++    pub(crate) fn tool_acquisition_prepare_census(
++        &self,
++        document: &Arc<()>,
++    ) -> Result<Census, BridgeError> {
++        self.tool_acquisition_census_inner(document, true)
++    }
++    fn tool_acquisition_census_inner(
++        &self,
++        document: &Arc<()>,
++        before_prepare: bool,
++    ) -> Result<Census, BridgeError> {
+         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
++        if before_prepare {
++            // Drop THIS registry before checking the Android original; no
++            // new lock order or exemption for live/unknown work is introduced.
++            let r = self.inner.registry.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
++            if self.inner.availability(&r, Availability::Available) != Availability::Available
++                || r.tool_acquisition.producers.len() >= MAX_PRODUCERS
++                || r.tool_acquisition.generation == u32::MAX {
++                return Err(wire::invalid());
++            }
++        }
+         let binding = self
+             .inner
+             .tool_acquisition
+@@ -363,7 +392,22 @@
+         if binding.document.as_ptr() != Arc::as_ptr(document) {
+             return Err(wire::invalid());
+         }
+-        let known = Arc::new(Known::capture(binding).ok_or_else(wire::invalid)?);
++        let known = Arc::new(match Known::capture(binding) {
++            Ok(known) => known,
++            Err(KnownFailure::CatalogueRequired) if before_prepare => {
++                let r = self.inner.registry.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
++                if self.inner.availability(&r, Availability::Available) != Availability::Available
++                    || r.tool_acquisition.producers.len() >= MAX_PRODUCERS
++                    || r.tool_acquisition.generation == u32::MAX { return Err(wire::invalid()); }
++                // An unrelated retained source/producer uncertainty must not
++                // be hidden by this diagnostic. Traverse the SAME originals;
++                // no census or authority is returned on the refused path.
++                retained_bytes(&self.inner, &r, document, &mut picked::PickerOriginals::new())
++                    .ok_or_else(wire::invalid)?;
++                return Err(wire::prerequisite::Required::Catalogue.error());
++            }
++            Err(_) => return Err(wire::invalid()),
++        });
+         let future = picked::future_bytes(&known).ok_or_else(wire::invalid)?;
+         let r = self
+             .inner
+@@ -1563,6 +1607,20 @@
+         assert!(!resources.selected && !resources.runtime_joined() && !resources.tail_joined());
+     }
+     #[test]
++    fn unqualified_prepare_census_is_not_a_resumable_missing_prerequisite() {
++        let owner = SavedCommandOwner::tool_acquisition(RuntimeConfig::packaged(
++            "/never-opened-prerequisite-runtime".into(),
++        ));
++        let document = Arc::new(());
++        let error = owner.tool_acquisition_prepare_census(&document).err().unwrap();
++        assert_eq!(error.code, wire::invalid().code);
++        assert_ne!(error.code, wire::prerequisite::Required::Catalogue.error().code);
++        assert_ne!(error.code, wire::prerequisite::Required::SavedInputs.error().code);
++        let r = owner.inner.registry.try_lock().unwrap();
++        assert!(r.active.is_none() && r.prepared.is_none() && r.last.is_none());
++        assert_eq!(r.revision, 0);
++    }
++    #[test]
+     fn fixed_acquisition_deadline_and_buffers_are_not_renewed_by_later_phases() {
+         let t = Instant::now();
+         let clock = Clocks::new(SavedCommandDomain::ToolAcquisition, t);
+diff --git a/desktop/src-tauri/src/saved_command_android_catalog.rs b/desktop/src-tauri/src/saved_command_android_catalog.rs
+--- a/desktop/src-tauri/src/saved_command_android_catalog.rs
++++ b/desktop/src-tauri/src/saved_command_android_catalog.rs
+@@ -272,6 +272,22 @@
+             && self.selected.as_ref().is_some_and(|current|Arc::ptr_eq(current,selected))
+             && self.published.as_ref().is_some_and(|current|Arc::ptr_eq(current,&selected.produced))
+             && selected.tool_preparation_versions(inner).is_some()
++    }
++    /// Missing prerequisite DATA only. Never turn failed, pending, lost or
++    /// fabricated catalogue history into permission to run another operation.
++    pub(super) fn tool_acquisition_check_required(&self, inner:&Inner)->bool {
++        if self.active.is_some() || self.selected.is_some() || self.generation==u32::MAX { return false; }
++        if self.generation==0 {
++            return self.published.is_none() && self.last.is_none() && self.retired.is_none();
++        }
++        let positive = |original:&Arc<Operation>| original.generation==self.generation
++            && original.final_seen.load(Ordering::SeqCst) && original.accepted_final.load(Ordering::SeqCst)
++            && original.original_matches(inner) && original.known_originals() && original.failure().is_none();
++        match (&self.published,&self.last,self.retired) {
++            (Some(p),Some(last),None) => !p.entries.is_empty() && Arc::ptr_eq(&p.original,last) && positive(last),
++            (None,Some(last),Some(wire::Reason::CatalogChanged)) => positive(last),
++            _ => false,
++        }
+     }
+     pub(super) fn empty_acquisition_loan(&self)->Option<EmptyLoan>{
+         if self.generation==0||self.active.is_some()||self.selected.is_some()||self.retired.is_some(){return None;}
+@@ -782,12 +798,28 @@
+         assert!(Arc::ptr_eq(registry.android_catalog.active.as_ref().unwrap(),&original));
+         assert!(registry.android_catalog.selected.is_none());
+         assert!(registry.android_catalog.published.is_none());
++        assert!(!registry.android_catalog.tool_acquisition_check_required(&app.inner));
+     }
+ }
+
+ #[cfg(test)]
+ mod frozen_row_data_tests {
+     use super::*;
++    #[test]
++    fn missing_catalogue_hint_needs_pristine_state_or_actual_positive_originals() {
++        let owner=SavedCommandOwner::new(RuntimeConfig::packaged("/never-opened-catalogue-prerequisite".into()),SavedCommandDomain::AndroidBuild);
++        let mut catalogue=Catalog::default();
++        assert!(catalogue.tool_acquisition_check_required(&owner.inner));
++        assert!(catalogue.empty_acquisition_loan().is_none()); // A hint is not a loan.
++        catalogue.retired=Some(wire::Reason::CatalogChanged);
++        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
++        catalogue.generation=1;
++        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
++        catalogue.retired=None;
++        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
++        catalogue.generation=u32::MAX;
++        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
++    }
+     fn entry()->wire::Entry{
+         wire::Entry{selection:android_wire::MacToolchainSelection{instance:"a".repeat(32),owner_uid:501,catalog_generation:2,
+             record_sha256:"b".repeat(64),inventory_sha256:"c".repeat(64),os_provider_sha256:"d".repeat(64)},
+diff --git a/desktop/src-tauri/src/asset_session_tool_acquisition.rs b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+--- a/desktop/src-tauri/src/asset_session_tool_acquisition.rs
++++ b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+@@ -362,13 +362,24 @@
+             .inner
+             .bridge
+             .tool_acquisition
+-            .tool_acquisition_census(&self.inner.session_identity)?;
++            .tool_acquisition_prepare_census(&self.inner.session_identity)?;
+         let edit = self
+             .inner
+             .bridge
+             .edits
+             .saved_registration_guard(&self.inner.session_identity)?;
+-        let saved = self.tool_acquisition_saved_lane(&state, &input, &edit, registration, &root)?;
++        let saved = match self.tool_acquisition_saved_lane(&state, &input, &edit, registration, &root) {
++            Ok(saved) => saved,
++            Err(error) => {
++                // This exact check precedes owner.prepare. It is NOT a map
++                // for generic invalid, busy, unknown or a Start rejection.
++                drop(edit);
++                if error.code != "release_version_changed" { return Err(error); }
++                let gate = self.tool_acquisition_gate(&state);
++                if gate != wire::Availability::Available { return Err(admission_error(gate)); }
++                return Err(wire::prerequisite::Required::SavedInputs.error());
++            }
++        };
+         let original = Arc::new(ToolAcquisitionDocumentInput {
+             document: Arc::downgrade(&self.inner),
+             context: input.clone(),
+diff --git a/desktop/src/toolAcquisitionController.ts b/desktop/src/toolAcquisitionController.ts
+--- a/desktop/src/toolAcquisitionController.ts
++++ b/desktop/src/toolAcquisitionController.ts
+@@ -13,6 +13,8 @@
+ import { PreparedToolSourceHandoff } from './toolAcquisitionSourcePicker.ts';
+ import type { PreparedToolFolders, PreparedToolSourcePick, ToolSourceFolderContext } from './toolAcquisitionSourcePicker.ts';
+ import type { AndroidToolSourceRole } from './androidToolSources.ts';
++import { toolAcquisitionPrerequisite, TOOL_ACQUISITION_PREREQUISITE_TEXT } from './toolAcquisitionPrerequisite.ts';
++import type { ToolAcquisitionPrerequisite } from './toolAcquisitionPrerequisite.ts';
+
+ interface Source {
+   selectedProject(): ProjectSession | null;
+@@ -27,6 +29,7 @@
+ }
+ interface Attempt {
+   witness: Witness; epoch: number; context: ToolAcquisitionContext; after: number; previous: ToolAcquisitionIdentity | null;
++  beforeStatus: ToolAcquisitionStatus; refusedBeforeAdmission: ToolAcquisitionPrerequisite | null; notAdmitted: boolean;
+   identity: ToolAcquisitionIdentity | null; prepareSent: boolean; prepareJoined: boolean; prepareAccepted: boolean;
+   startClaimed: boolean; startSent: boolean; startJoined: boolean; retired: boolean; unconfirmed: boolean;
+   terminalRead: boolean; cancelRequested: boolean; cancelSent: boolean;
+@@ -39,6 +42,7 @@
+   pending: 'inspect' | 'review' | 'download' | null; requestPending: boolean; cancelPending: boolean;
+   projectId: string | null; status: ToolAcquisitionStatus | null; issue: Issue | null; historical: boolean;
+   inspection: ToolRequirementsObservation | null;
++  prerequisite: ToolAcquisitionPrerequisite | null;
+   consent: (ToolAcquisitionIdentity & { acknowledged: boolean }) | null;
+   presentation: StagedToolPresentation; preparedFolders: PreparedToolFolders | null; cancelRequested: boolean; cancelSent: boolean;
+   checkReason: string | null; reviewReason: string | null; downloadReason: string | null;
+@@ -132,6 +136,7 @@
+       requestPending: this.preparing || this.starting, cancelPending: this.cancelling, projectId: this.projectId(), status: this.status,
+       issue: this.issue, historical: !!op && !current, inspection: this.inspection && this.current(this.inspection) ? this.inspection.result :
+         current ? a.requirements : null,
++      prerequisite: this.currentPrerequisite(),
+       consent, presentation, preparedFolders: this.sourceFolders.preview(this.folderContext(),op,presentation), cancelRequested: a?.cancelRequested ?? this.cancelIdentity !== null,
+       cancelSent: a?.cancelSent ?? this.cancelIdentity !== null, checkReason: this.checkReason(), reviewReason: this.reviewReason(),
+       downloadReason: this.downloadReason(), canRead: !!this.api && !this.reading && !this.subscribing,
+@@ -147,7 +152,7 @@
+     this.inspection = null; this.consentOpen = false; this.acknowledged = false;
+     if (this.attempt) {
+       this.attempt.retired = true;
+-      if (!this.attempt.startSent) this.attempt.cancelRequested = true;
++      if (!this.attempt.startSent && !this.attempt.notAdmitted) this.attempt.cancelRequested = true;
+     }
+     this.publish(); this.cancelRetired();
+   }
+@@ -197,7 +202,7 @@
+     if (this.issue) return attention;
+     if (this.action || this.preparing || this.starting || this.cancelling || this.reading || this.subscribing)
+       return 'A tool request is still finishing. Its original status and cancel control remain available.';
+-    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead)
++    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead && !this.attempt.notAdmitted)
+       return 'Finish or cancel the original tool preparation before starting another task.';
+     return null;
+   }
+@@ -214,9 +219,17 @@
+     return this.other();
+   }
+   checkReason(): string | null {
+-    return this.newWorkReason() ?? (this.action || this.preparing || this.starting || this.cancelling || this.reading ?
+-      'Wait for the current tool request to finish.' : active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead ?
+-        'Finish or cancel the original tool request first.' : null);
++    const reason = this.newWorkReason(); if (reason) return reason;
++    if (this.action || this.preparing || this.starting || this.cancelling || this.reading)
++      return 'Wait for the current tool request to finish.';
++    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead && !this.attempt.notAdmitted)
++      return 'Finish or cancel the original tool request first.';
++    const prerequisite = this.currentPrerequisite();
++    return prerequisite ? TOOL_ACQUISITION_PREREQUISITE_TEXT[prerequisite] : null;
++  }
++  private currentPrerequisite(): ToolAcquisitionPrerequisite | null {
++    const a = this.attempt;
++    return !this.issue && a?.notAdmitted && !a.retired && this.current(a) ? a.refusedBeforeAdmission : null;
+   }
+   reviewReason(): string | null {
+     const reason = this.checkReason(); if (reason) return reason;
+@@ -289,9 +302,12 @@
+     }
+     if (before && s.statusRevision === before.statusRevision && !sameToolAcquisitionData(before, s) ||
+         p && op && sameToolAcquisitionIdentity(p, op) && !toolAcquisitionProgress(p, op)) { this.fail('protocol'); return null; }
+-    const candidate = a?.prepareSent && op && s.statusRevision > a.after && !sameToolAcquisitionIdentity(a.previous, op) &&
++    if (a?.refusedBeforeAdmission && !a.notAdmitted && !sameToolAcquisitionData(a.beforeStatus, s)) {
++      this.fail('protocol'); return null; // Never promote a refusal into an entered or different original.
++    }
++    const candidate = a?.prepareSent && !a.notAdmitted && op && s.statusRevision > a.after && !sameToolAcquisitionIdentity(a.previous, op) &&
+       sameToolAcquisitionData(a.context, op.context);
+-    if (a?.prepareSent) {
++    if (a?.prepareSent && !a.notAdmitted) {
+       if (a.identity ? !sameToolAcquisitionIdentity(a.identity, op) : op && !sameToolAcquisitionIdentity(a.previous, op) && !candidate) {
+         this.fail('protocol'); return null;
+       }
+@@ -327,7 +343,14 @@
+         const s = this.receive(await api.status(), 'read');
+         if (!s || api !== this.api) return null;
+         const op = s.operation;
+-        if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
++        if (a?.refusedBeforeAdmission && !a.notAdmitted && afterInvoke) {
++          if (a === this.attempt && barrier === this.mutation && !this.issue && !a.unconfirmed && !a.retired && this.current(a) &&
++              this.other() === null && a.prepareJoined && !a.identity && !a.prepareAccepted && !a.startSent && !active(op) &&
++              sameToolAcquisitionData(a.beforeStatus, s) && s.statusRevision === a.after &&
++              (a.previous === null ? op === null : sameToolAcquisitionIdentity(a.previous, op))) {
++            a.notAdmitted = true; // A joined refused call, NOT a terminal operation or a native finality receipt.
++          } else { a.unconfirmed = true; this.fail('unconfirmed'); }
++        } else if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
+           a.terminalRead = true; a.unconfirmed = false;
+           if (this.issue === 'unconfirmed') this.issue = null;
+           if (!this.issue && a.startSent && !a.retired && this.current(a) && a.context.action === 'inspect' &&
+@@ -353,6 +376,7 @@
+     const context: ToolAcquisitionContext = freeze({ ...witness.context, action, review: action === 'acquire' ?
+       { ...inspected!.identity, requirementsSha256: inspected!.result.requirements.sourcesSha256 } : null });
+     const a: Attempt = { witness, epoch: this.epoch, context, after: this.status.statusRevision,
++      beforeStatus: this.status, refusedBeforeAdmission: null, notAdmitted: false,
+       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
+       startClaimed: false, startSent: false, startJoined: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
+       requirements: action === 'acquire' ? inspected!.result : null };
+@@ -369,9 +393,20 @@
+         const s = this.receive(await api.prepare(context), 'reply');
+         a.prepareAccepted = !!s && sameToolAcquisitionIdentity(a.identity, s.operation) && s.operation?.phase === 'awaiting-consent' && s.operation.intentUsable;
+         if (!s) { a.unconfirmed = true; this.fail('unconfirmed'); }
+-      } catch { a.unconfirmed = true; this.fail('unconfirmed'); }
++      } catch (error) {
++        const prerequisite = toolAcquisitionPrerequisite(error);
++        if (prerequisite && (a.identity || a.prepareAccepted || a.startSent)) {
++          a.unconfirmed = true; this.fail('protocol'); // Contradicts an already observed admission.
++        } else if (prerequisite && a.prepareSent && !this.issue && !a.unconfirmed && !a.retired && this.current(a))
++          a.refusedBeforeAdmission = prerequisite;
++        else { a.unconfirmed = true; this.fail('unconfirmed'); }
++      }
+       finally { a.prepareJoined = true; this.preparing = false; this.publish(); }
+       const read = await this.checkStatus(true);
++      if (a.refusedBeforeAdmission) {
++        if (!a.notAdmitted) { a.unconfirmed = true; this.fail('unconfirmed'); }
++        return; // Explicit catalogue/saved read then a NEW user check; never Start or retry this call.
++      }
+       if (!read || !this.usable(a)) { a.retired = true; a.cancelRequested = true; return; }
+       if (action === 'inspect') {
+         // Only this explicit Check click may chain its own INSPECT intent.
+diff --git a/desktop/src/components/PrepareBuildEnvironment.tsx b/desktop/src/components/PrepareBuildEnvironment.tsx
+--- a/desktop/src/components/PrepareBuildEnvironment.tsx
++++ b/desktop/src/components/PrepareBuildEnvironment.tsx
+@@ -6,6 +6,7 @@
+ import { foundToolRoles, TOOL_DISCOVERY_HELP } from '../toolSourceDiscovery.ts';
+ import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
+ import { hasIncompleteSdk, MANUAL_ANDROID_SDK_STEPS, toolComponentLabel } from '../toolAcquisitionComponents.ts';
++import { TOOL_ACQUISITION_PREREQUISITE_TEXT } from '../toolAcquisitionPrerequisite.ts';
+
+ export interface PrepareBuildEnvironmentProps {
+   state: ToolAcquisitionState;
+@@ -17,6 +18,8 @@
+   chooseSource(role: AndroidToolSourceRole): void | Promise<void>;
+   choosePreparedSource(role: AndroidToolSourceRole): void | Promise<void>;
+   refreshCatalog(): void | Promise<void>;
++  readSavedInputs(): void | Promise<void>;
++  readSavedInputsReason: string | null;
+   openRegistration(): void;
+ }
+ const hint = (value: ToolRequirementHint) => value.state === 'literal' ? value.value :
+@@ -24,7 +27,7 @@
+
+ /** Controlled view: mounting, navigation and checkbox rendering do no work. */
+ export function PrepareBuildEnvironment({ state, controller, compact = false, toolsBusy, chooseSource, choosePreparedSource,
+-  refreshCatalog, openRegistration }: PrepareBuildEnvironmentProps) {
++  refreshCatalog, readSavedInputs, readSavedInputsReason, openRegistration }: PrepareBuildEnvironmentProps) {
+   const op = state.status?.operation;
+   const active = op && op.phase !== 'terminal';
+   const attention = !!state.issue || op?.phase === 'unknown';
+@@ -67,6 +70,15 @@
+   return <section className="card" aria-label="Prepare Android build environment" aria-busy={state.pending !== null || state.requestPending}>
+     <div className="section-heading"><div><h2>{title}</h2><p>Reuse compatible tools first. Downloads are optional and always need your approval.</p></div></div>
+     {problem && <p className="notice notice-warning" role="status">{problem}</p>}
++    {state.prerequisite && <div className="notice notice-info"><div>
++      <p role="status">{TOOL_ACQUISITION_PREREQUISITE_TEXT[state.prerequisite]}</p>
++      <div className="button-row">{state.prerequisite === 'catalogue' ? <>
++        <button type="button" className="button primary" disabled={busy} onClick={() => void refreshCatalog()}>Check existing protected tools</button>
++        <button type="button" className="button secondary" onClick={openRegistration}>Open tool recovery &amp; choice</button>
++      </> : <button type="button" className="button primary" disabled={busy || readSavedInputsReason !== null}
++        onClick={() => void readSavedInputs()}>Read saved inputs</button>}</div>
++      {state.prerequisite === 'saved-inputs' && readSavedInputsReason && <p className="save-note">{readSavedInputsReason}</p>}
++    </div></div>}
+     {!state.preparedFolders && !consent && !active && (!report || state.historical || state.presentation === 'stale') && <>
+       <div className="button-row">
+         <button type="button" className="button primary" disabled={checkReason !== null} onClick={() => void controller.inspect()}>
+@@ -115,8 +127,9 @@
+       staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
+     {originalControls}
+     <details><summary>Existing tools &amp; manual setup</summary>
+-      <p>Keep your working JDK, Android SDK and Gradle installation. Choose the folders you already have, then use Check existing protected tools and Check required tools again. Refresh the saved project if requested. Inspect and approve the protected copy in Set up build tools below.</p>
++      <p>Keep your working JDK, Android SDK and Gradle installation. Finish choosing the folders you need, then check existing protected tools and read saved inputs before checking required tools again. These checks keep your folder choices and do not approve a download or protected copy. Inspect and approve the protected copy in Set up build tools below.</p>
+       <div className="button-row"><button type="button" className="button secondary" disabled={busy} onClick={() => void refreshCatalog()}>Check existing protected tools</button>
++        <button type="button" className="button secondary" disabled={busy || readSavedInputsReason !== null} onClick={() => void readSavedInputs()}>Read saved inputs</button>
+         {(['jdk', 'sdk', 'gradle'] as const).map((role) => <button type="button" className="button secondary" key={role} disabled={busy}
+           onClick={() => void chooseSource(role)}>Choose {role === 'jdk' ? 'JDK' : role === 'sdk' ? 'Android SDK' : 'Gradle'}</button>)}
+         <button type="button" className="button secondary" onClick={openRegistration}>Open tool inspection &amp; approval</button></div>
+diff --git a/desktop/src/components/DiscoveredToolSources.tsx b/desktop/src/components/DiscoveredToolSources.tsx
+--- a/desktop/src/components/DiscoveredToolSources.tsx
++++ b/desktop/src/components/DiscoveredToolSources.tsx
+@@ -14,7 +14,7 @@
+ }) {
+   return <div className="notice notice-info"><div>
+     <strong>Found existing tools</strong>
+-    <p>These folders contain checked matching components. Keep them unchanged. Use the normal folder picker to select them, then check any remaining tools. Nothing has been downloaded or registered.</p>
++    <p>These folders contain checked matching components. Keep them unchanged. Finish selecting the folders you want with the normal picker before checking remaining tools. If requested, check the protected catalogue and read saved inputs using the controls here; your choices stay selected. Nothing has been downloaded or registered.</p>
+     <div className="button-row">{folders.roles.map((role) => <button type="button" className="button primary" key={role}
+       disabled={busy || folders.waiting} onClick={() => void chooseFound(role)}>Use found {label(role)}…</button>)}</div>
+     {folders.waiting && <p role="status">Finish the current folder selection using its original controls below.</p>}
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1986,6 +1986,8 @@
+     chooseSource: (role) => { toolAcquisition.toolInputsIntent(); return androidBuild.chooseToolSource(role); },
+     choosePreparedSource: (role) => toolAcquisition.choosePreparedSource(role,(selected,original) => androidBuild.chooseToolSource(selected,original)),
+     refreshCatalog: () => { toolAcquisition.toolInputsIntent(); return androidBuild.refreshCatalog(); },
++    readSavedInputs: () => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); return releaseVersion.read(); },
++    readSavedInputsReason: releaseVersion.startReason(),
+     openRegistration: () => { const section = androidToolSetupSection.current; section?.focus({ preventScroll: true }); section?.scrollIntoView({ block: 'start' }); },
+   };
+
+diff --git a/desktop/tests/tool-acquisition-controller.test.mjs b/desktop/tests/tool-acquisition-controller.test.mjs
+--- a/desktop/tests/tool-acquisition-controller.test.mjs
++++ b/desktop/tests/tool-acquisition-controller.test.mjs
+@@ -5,6 +5,7 @@
+ import { ToolAcquisitionController } from '../src/toolAcquisitionController.ts';
+ import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
+ import { TOOL_ACQUISITION_CONSENT } from '../src/toolAcquisitionProtocol.ts';
++import { toolAcquisitionPrerequisite } from '../src/toolAcquisitionPrerequisite.ts';
+
+ const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), ACQUIRE = 'c'.repeat(32), ACQUIRE_OWNER = 'd'.repeat(32);
+ const SHA = 'e'.repeat(64), CONTENT = { bytes: 120, sha256: SHA };
+@@ -445,3 +446,149 @@
+   h.known(); await h.controller.reviewDownload();
+   assert.equal(h.state.inspection,null); assert.equal(h.calls.length,2);
+ });
++
++const prerequisiteError = (kind) => ({ code: kind === 'catalogue' ? 'tool_acquisition_catalog_required' : 'tool_acquisition_saved_inputs_required',
++  message: 'Inert fixed pre-admission refusal', retryable: false });
++
++test('prerequisite: only the two own data error codes describe prerequisites; generic errors and getters do not', () => {
++  for (const kind of ['catalogue', 'saved-inputs']) assert.equal(toolAcquisitionPrerequisite(prerequisiteError(kind)), kind);
++  for (const code of ['tool_acquisition_invalid', 'release_version_changed', 'tool_acquisition_busy', 'cleanup_unknown', 'protocol_error',
++    'runtime_unavailable', 'shutting_down']) assert.equal(toolAcquisitionPrerequisite({ code }), null);
++  let called = 0;
++  const getter = Object.defineProperty({}, 'code', { get() { called++; return prerequisiteError('catalogue').code; } });
++  for (const value of [null, undefined, 'tool_acquisition_catalog_required', [], getter,
++    Object.create(prerequisiteError('catalogue'))]) assert.equal(toolAcquisitionPrerequisite(value), null);
++  assert.equal(called, 0);
++});
++
++for (const kind of ['catalogue', 'saved-inputs']) {
++  test(`prerequisite: ${kind} refusal waits for its original rejected call and a fresh unchanged status, not a terminal receipt`, async (t) => {
++    const h = harness(t); await h.ready;
++    const flow = h.controller.inspect(), prepare = h.calls.at(-1), read = deferred();
++    h.emit(status()); await h.controller.checkStatus(); // Both occur before the actual Prepare return.
++    assert.equal(h.state.prerequisite, null); assert.equal(h.state.requestPending, true);
++    h.readQueue.push(read); prepare.reject(prerequisiteError(kind)); await flush();
++    assert.equal(h.state.requestPending, false); assert.equal(h.state.reading, true);
++    assert.equal(h.state.prerequisite, null); assert.notEqual(h.controller.ownerReason(), null);
++    await h.controller.inspect(); assert.equal(h.calls.length, 1);
++    read.resolve(status()); await flow;
++    assert.equal(h.state.issue, null); assert.equal(h.state.prerequisite, kind);
++    assert.equal(h.state.status.operation, null); assert.equal(h.state.status.statusRevision, 1);
++    assert.equal(h.state.inspection, null); assert.equal(h.state.consent, null);
++    assert.notEqual(h.state.presentation, 'current-staged'); assert.equal(h.controller.ownerReason(), null);
++    assert.match(h.state.checkReason, kind === 'catalogue' ? /protected tool catalogue/ : /saved project inputs/);
++    await h.controller.inspect(); assert.equal(h.calls.length, 1); // No repeated preparation/download.
++    h.controller.toolInputsIntent(); // Explicit existing Check catalogue / Read saved inputs action.
++    assert.equal(h.state.prerequisite, null); assert.equal(h.state.checkReason, null);
++    assert.equal(h.calls.length, 1); // The hint and its dismissal execute nothing.
++    // Once nonentry was proved, later peer/status revisions are new facts,
++    // not an unreturned tool invocation to revive or poison.
++    h.emit(status(2, null, 'busy')); assert.equal(h.state.issue, null);
++    assert.notEqual(h.state.checkReason, null);
++    h.emit(status(3)); assert.equal(h.state.issue, null); assert.equal(h.state.prerequisite, null);
++    const next = h.controller.inspect(); assert.equal(h.calls.length, 2);
++    h.calls.at(-1).reject(prerequisiteError(kind)); await next;
++    assert.deepEqual(h.calls.map((call) => call.kind), ['prepare', 'prepare']);
++  });
++}
++
++test('prerequisite: known pre-admission refusal preserves an older terminal identity and result as history, not the new check', async (t) => {
++  const h = harness(t); await inspected(h);
++  const original = h.state.status, flow = h.controller.inspect(); // Keep the original immutable parsed prototype too.
++  h.calls.at(-1).reject(prerequisiteError('saved-inputs')); await flow;
++  assert.deepEqual(h.state.status, original); assert.equal(h.state.historical, true);
++  assert.equal(h.state.prerequisite, 'saved-inputs'); assert.equal(h.state.inspection, null);
++  assert.equal(h.state.consent, null); assert.equal(h.controller.ownerReason(), null);
++  assert.notEqual(h.state.presentation, 'current-staged');
++  assert.deepEqual(h.calls.map((call) => call.kind), ['prepare', 'start', 'prepare']);
++});
++
++test('prerequisite: generic invalid, busy, poison, lost and unsupported Prepare failures remain unconfirmed despite unchanged status', async (t) => {
++  for (const code of ['tool_acquisition_invalid', 'release_version_changed', 'tool_acquisition_busy', 'cleanup_unknown', 'runtime_unavailable', 'shutting_down', 'lost-reply']) {
++    const h = harness(t); await h.ready;
++    const flow = h.controller.inspect(); h.calls.at(-1).reject({ code }); await flow;
++    await h.controller.checkStatus(true); h.controller.toolInputsIntent(); await h.controller.inspect();
++    assert.equal(h.state.issue, 'unconfirmed', code); assert.equal(h.state.prerequisite, null);
++    assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.state.canRead, true);
++    assert.equal(h.calls.length, 1); assert.equal(h.state.consent, null);
++  }
++});
++
++test('prerequisite: new revision, foreign identity or cleanup-unknown after a typed refusal never becomes resumable', async (t) => {
++  for (const cut of ['revision', 'identity', 'unknown']) {
++    const h = harness(t); await h.ready;
++    const flow = h.controller.inspect(), prepare = h.calls.at(-1);
++    const next = cut === 'identity' ? status(2, operation(prepare.request)) : status(2, null, cut === 'unknown' ? 'cleanup-unknown' : 'available');
++    h.native(next); prepare.reject(prerequisiteError('catalogue')); await flow;
++    assert.equal(h.state.prerequisite, null); assert.notEqual(h.state.issue, null);
++    assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.state.inspection, null);
++    await h.controller.inspect(); assert.equal(h.calls.length, 1);
++    h.native(status()); await h.controller.checkStatus(true); // A later equal-looking status cannot repair the contradiction.
++    assert.equal(h.state.prerequisite, null); assert.notEqual(h.state.issue, null);
++  }
++});
++
++test('prerequisite: typed refusal contradicting an observed admission retains that original and its cancel route', async (t) => {
++  const h = harness(t); await h.ready;
++  const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
++  h.emit(status(2, op)); prepare.reject(prerequisiteError('saved-inputs')); await flush();
++  assert.equal(h.state.issue, 'protocol'); assert.equal(h.state.prerequisite, null);
++  const cancel = h.calls.at(-1); assert.equal(cancel.kind, 'cancel');
++  h.reply(cancel, status(3, terminal(op, 'cancelled'))); await flow; await flush();
++  assert.equal(h.state.issue, 'protocol'); assert.equal(h.state.prerequisite, null);
++  assert.deepEqual(h.calls.map((call) => call.kind), ['prepare', 'cancel']);
++});
++
++test('prerequisite: context ABA, saved snapshot replacement and peer work during the rejected call prevent resume hints', async (t) => {
++  for (const cut of ['aba', 'snapshot', 'peer']) {
++    const h = harness(t); await h.ready;
++    const flow = h.controller.inspect(), prepare = h.calls.at(-1);
++    if (cut === 'aba') { h.controller.selectionIntent(); h.controller.selectionIntent(); h.controller.syncProject(); }
++    else if (cut === 'snapshot') h.replace({ snapshot: clone(h.project.snapshot) });
++    else h.other('The original peer is still running.');
++    prepare.reject(prerequisiteError('catalogue')); await flow;
++    h.other(null); h.controller.syncProject(); await h.controller.checkStatus(true);
++    assert.equal(h.state.prerequisite, null); assert.notEqual(h.controller.ownerReason(), null);
++    await h.controller.inspect(); assert.equal(h.calls.length, 1);
++  }
++});
++
++test('prerequisite: reentrant currentness loss while publishing the fresh refusal status cannot release the attempt', async (t) => {
++  const h = harness(t); await h.ready;
++  const flow = h.controller.inspect(), prepare = h.calls.at(-1), read = deferred();
++  h.readQueue.push(read); prepare.reject(prerequisiteError('saved-inputs')); await flush();
++  let once = true;
++  const off = h.controller.subscribe(() => {
++    if (once && h.state.reading) { once = false; h.controller.toolInputsIntent(); }
++  });
++  read.resolve(status()); await flow; off();
++  assert.equal(once, false); assert.equal(h.state.prerequisite, null);
++  assert.notEqual(h.state.issue, null); assert.notEqual(h.controller.ownerReason(), null);
++});
++
++test('prerequisite: lost fresh status or connection retirement after typed rejection stays unknown on later equal status', async (t) => {
++  for (const cut of ['read-loss', 'connection']) {
++    const h = harness(t); await h.ready;
++    const flow = h.controller.inspect(), prepare = h.calls.at(-1), read = deferred();
++    h.readQueue.push(read); prepare.reject(prerequisiteError('saved-inputs')); await flush();
++    if (cut === 'connection') { assert.equal(h.controller.beginConnection(), false); read.resolve(status()); }
++    else read.reject(new Error('Inert lost status'));
++    await flow; await h.controller.checkStatus(true);
++    assert.equal(h.state.prerequisite, null); assert.notEqual(h.state.issue, null);
++    assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.calls.length, 1);
++  }
++});
++
++test('prerequisite: the same prerequisite-shaped error from an entered Start is never a not-admitted Prepare', async (t) => {
++  const h = harness(t); await h.ready;
++  const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
++  h.reply(prepare, status(2, op)); await flush();
++  const start = h.calls.at(-1); assert.equal(start.kind, 'start');
++  h.native(status(3, running(op))); start.reject(prerequisiteError('catalogue')); await flow;
++  assert.equal(h.state.issue, 'unconfirmed'); assert.equal(h.state.prerequisite, null);
++  assert.equal(h.state.canCancel, true); assert.equal(h.state.status.operation.phase, 'running');
++  assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.state.consent, null);
++  const stop = h.controller.cancel(), cancel = h.calls.at(-1);
++  h.reply(cancel, status(4, terminal(op, 'cancelled'))); await stop;
++  assert.equal(h.state.prerequisite, null); // Only the original real terminal status can settle this entered work.
++});
+diff --git a/desktop/tests/tool-acquisition-source-picker.test.mjs b/desktop/tests/tool-acquisition-source-picker.test.mjs
+--- a/desktop/tests/tool-acquisition-source-picker.test.mjs
++++ b/desktop/tests/tool-acquisition-source-picker.test.mjs
+@@ -7,6 +7,7 @@
+ import { AndroidBuildController, androidBuildOwnerReason } from '../src/androidBuild.ts';
+ import { encodeAndroidToolSourcesRequest } from '../src/androidToolSources.ts';
+ import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
++import { ReleaseVersionController } from '../src/releaseVersion.ts';
+
+ const OP = 'a'.repeat(32), GEN = 'b'.repeat(32), INSPECT = 'c'.repeat(32), INSPECT_GEN = 'd'.repeat(32), SHA = 'e'.repeat(64);
+ const clone = (v) => structuredClone(v);
+@@ -121,8 +122,8 @@
+     root: '/never-opened-tools', config: { path: 'release/mobile-release.json', state: 'format-valid', data: { android: { enabled: true, module: ':app' } },
+       content: { bytes: 120, sha256: SHA }, issues: [] }, discovery: { hints: {} }, issues: [] } });
+   let tools, native = { schemaVersion: 1, statusRevision: 0, availability: 'available', operation: null }, sources = clone(initialSources);
+-  let catalogStatus = catalog(), registrationStatus = registration();
+-  const calls = [], observers = [];
++  let catalogStatus = catalog(), registrationStatus = registration(), prerequisites = false, needsSavedInputs = false;
++  const calls = [], observers = [], prerequisiteCalls = [], catalogCalls = [];
+   const listen = (kind, callback) => { const entry = { kind, callback, closed: false }; observers.push(entry); return () => { entry.closed = true; }; };
+   const project = () => ws.projects[ws.selectedId];
+   const android = new AndroidBuildController({ selectedProject: project, releaseVersion: () => null, otherOperationReason: () => tools?.ownerReason() ?? null });
+@@ -139,16 +140,27 @@
+     subscribeAndroidToolSources: async (receive) => listen('sources', receive), androidToolSourcesStatus: async () => clone(sources),
+     chooseAndroidToolSource: (input) => { const call = { kind: 'choose', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
+     cancelAndroidToolSource: (input) => { const call = { kind: 'cancel', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
+-    refreshAndroidToolchainCatalog: async () => { throw new Error('not this action'); }, prepareAndroidBuild: async () => { throw new Error('not this action'); } };
++    refreshAndroidToolchainCatalog: () => {
++      const call = deferred(); catalogCalls.push(call);
++      return call.promise.then((value) => { catalogStatus = clone(value); return clone(value); });
++    }, prepareAndroidBuild: async () => { throw new Error('not this action'); } };
+   android.syncProject(); await android.connect(androidApi);
+   tools = new ToolAcquisitionController({ selectedProject: project, otherOperationReason: () => androidBuildOwnerReason(android.getSnapshot()),
+     knownTools: () => { const s = android.getSnapshot(); return [s.catalogStatus, s.toolSources, s.toolRegistration]; } });
+   const toolApi = { mode: 'native', subscribe: async (receive) => listen('tools', receive), status: async () => clone(native),
+     prepare: async (input) => {
++      if (prerequisites) {
++        prerequisiteCalls.push({ kind: 'prepare', input: clone(input) });
++        // Deliberately inert native ports. These codes test UI control flow,
++        // never fabricate a native catalogue loan or saved-input authority.
++        if (catalogStatus.phase !== 'ready') throw { code: 'tool_acquisition_catalog_required' };
++        if (needsSavedInputs) throw { code: 'tool_acquisition_saved_inputs_required' };
++      }
+       native = { schemaVersion: 1, statusRevision: native.statusRevision + 1, availability: 'busy', operation: {
+         operationId: input.action === 'inspect' ? INSPECT : OP, ownerGeneration: input.action === 'inspect' ? INSPECT_GEN : GEN,
+         context: clone(input), phase: 'awaiting-consent', intentUsable: true, reason: 'none', outcome: null, result: null } }; return clone(native);
+     }, start: async () => {
++      if (prerequisites) prerequisiteCalls.push({ kind: 'start', action: native.operation.context.action });
+       const op = native.operation;
+       const requirements = { ...(discovered ? {discoveredSources:discovered} : {}), kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
+         compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'].filter((part) => !missing.includes(part)) }, requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
+@@ -169,7 +181,9 @@
+     if (kind === 'catalog') catalogStatus = clone(value); else registrationStatus = clone(value);
+     observers.find((entry) => entry.kind === kind && !entry.closed)?.callback(clone(value));
+   };
+-  return { tools, android, calls,
++  return { tools, android, calls, project, prerequisiteCalls, catalogCalls,
++    requirePrerequisites() { prerequisites = true; needsSavedInputs = true; },
++    savedReadReturned() { needsSavedInputs = false; },
+     peer,
+     choose(role) { return tools.choosePreparedSource(role, (selected, pick) => android.chooseToolSource(selected, pick)); },
+     emit(value) { sources = clone(value); observers.find((entry) => entry.kind === 'sources' && !entry.closed)?.callback(clone(value)); },
+@@ -378,3 +392,62 @@
+   assert.equal(h.tools.getSnapshot().presentation,'stale');
+   assert.equal(h.calls.length,1); // No download, Inspect, Register or build is automatic.
+ });
++
++test('explicit existing catalogue and saved-input reads resume a refused check without losing selected folders or approving a download', async (t) => {
++  const h = await controllers(t);
++  const picking = h.choose('gradle'), chosen = source(1, 'gradle');
++  h.reply(h.calls[0], chosen); await picking;
++  const selected = clone(h.android.getSnapshot().toolSources.selections);
++  h.requirePrerequisites();
++  await h.tools.inspect();
++  assert.equal(h.tools.getSnapshot().prerequisite, 'catalogue');
++  assert.equal(h.tools.ownerReason(), null);
++  assert.deepEqual(h.prerequisiteCalls.map((call) => call.kind), ['prepare']);
++
++  // Same explicit App handoff to the already-existing Android controller.
++  h.tools.toolInputsIntent();
++  const refreshing = h.android.refreshCatalog();
++  assert.equal(h.catalogCalls.length, 1);
++  await h.tools.inspect(); assert.equal(h.prerequisiteCalls.length, 1);
++  const before = h.android.getSnapshot().catalogStatus;
++  h.catalogCalls[0].resolve({ ...catalog(before.statusRevision + 1), catalogGeneration: before.catalogGeneration + 1,
++    operationId: '1'.repeat(32) });
++  await refreshing;
++  assert.equal(h.android.getSnapshot().catalogUnconfirmed, false);
++  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selected);
++  assert.equal(h.prerequisiteCalls.length, 1); // Refresh never chains Inspect/Acquire/Register.
++
++  await h.tools.inspect();
++  assert.equal(h.tools.getSnapshot().prerequisite, 'saved-inputs');
++  assert.equal(h.tools.ownerReason(), null);
++  const reads = [], saved = new ReleaseVersionController(h.project, () => false, () => h.tools.ownerReason() ?? androidBuildOwnerReason(h.android.getSnapshot()));
++  saved.setConnection({ mode: 'native', observeReleaseVersion: (projectId) => {
++    const call = deferred(); reads.push({ projectId, ...call });
++    return call.promise.then((value) => { h.savedReadReturned(); return value; });
++  } }, { runtime: { state: 'available', mode: 'development', reason: null }, capabilities: {
++    methods: [{ method: 'release.version.observe', available: true, reason: '' }] } });
++  saved.syncProject(); t.after(() => saved.dispose());
++  assert.equal(saved.startReason(), null); // The refused Prepare no longer permanently blocks this existing reader.
++  h.tools.versionIntent(); h.android.versionIntent();
++  const reading = saved.read();
++  assert.deepEqual(reads.map((read) => read.projectId), ['p1']);
++  assert.equal(h.prerequisiteCalls.length, 2);
++  reads[0].resolve({ schemaVersion: 2, source: 'release/version.properties', version: { name: '1.0.0', build: 1 },
++    savedConfig: { bytes: 120, sha256: SHA }, savedVersion: { bytes: 32, sha256: '2'.repeat(64) },
++    observationScope: 'single-request-non-atomic', assurance: { basis: 'static-text', projectCodeExecuted: false, toolsProbed: false,
++      credentialsRead: false, gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' } });
++  await reading;
++  assert.equal(saved.getSnapshot().error, null); assert.notEqual(saved.getSnapshot().result, null);
++  assert.equal(saved.passiveBusyReason(), null);
++  assert.equal(h.prerequisiteCalls.length, 2); // Read also requires a separate next user Check.
++  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selected);
++
++  await h.tools.inspect();
++  assert.deepEqual(h.prerequisiteCalls.map((call) => call.kind), ['prepare', 'prepare', 'prepare', 'start']);
++  assert.equal(h.prerequisiteCalls.at(-1).action, 'inspect');
++  assert.equal(h.tools.getSnapshot().prerequisite, null); assert.equal(h.tools.getSnapshot().issue, null);
++  assert.equal(h.tools.getSnapshot().inspection?.kind, 'tool-requirements-observation');
++  assert.equal(h.tools.getSnapshot().consent, null); assert.equal(h.calls.length, 1);
++  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selected);
++  assert.equal(h.android.getSnapshot().toolRegistration.phase, 'idle');
++});

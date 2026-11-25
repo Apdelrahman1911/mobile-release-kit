@@ -1,0 +1,3721 @@
+//! Fixed packaged runtime selection. No production PATH, environment, source, or
+//! failed-launch fallback. Verification runs in an owned blocking task, not UI IO.
+use std::{collections::BTreeSet, fs::{self, File, Metadata}, io::Read, path::{Component, Path, PathBuf}, time::Instant};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}};
+include!("runtime_publication_inputs.rs");
+
+const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
+const PROTOCOL_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_PROTOCOL_SHA256");
+const MANIFEST_LIMIT: u64 = if cfg!(target_os = "macos") { crate::macos_install_record::MANIFEST_LIMIT as u64 } else { 1024 * 1024 };
+// Separate from the session gate and the passive development feature. A CA
+// inventory hash is not native socket/TLS, runtime-custody or host qualification.
+pub(crate) const GITHUB_TLS_PROFILE_QUALIFIED: bool = false;
+// A prior read-only/TLS profile does not qualify a durable intent + dispatch
+// handshake. Normal installed selection has its own exact binding below; this
+// false flag never supplies native or service evidence for that candidate.
+pub(crate) const GITHUB_PREFLIGHT_NATIVE_QUALIFIED: bool = false;
+// Release dispatch needs its own original-journal/native qualification.
+pub(crate) const GITHUB_RELEASE_NATIVE_QUALIFIED: bool = false;
+const FILE_LIMIT: u64 = 512 * 1024 * 1024;
+const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024;
+// Larger bounded Mac dependency inventory; other targets keep their profile.
+const FILE_COUNT: usize = if cfg!(target_os = "macos") { crate::macos_install_record::FILE_LIMIT } else { 2048 };
+const ENTRY_COUNT: usize = if cfg!(target_os = "macos") { crate::macos_install_record::ENTRY_LIMIT } else { 8192 };
+fn manifest_json(bytes: &[u8]) -> Result<serde_json::Value, BridgeError> {
+    if cfg!(target_os = "macos") { crate::protocol::strict_macos_runtime_manifest_json(bytes) }
+    else { strict_json(bytes) }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, pub mode: &'static str }
+
+#[derive(Clone)]
+pub struct RuntimeConfig { bundle_root: PathBuf,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_push_observation: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_push::Control>>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_fetch_observation: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_fetch::Control>>>,
+    // Clones share one Android owner claim. Neither a second constructor nor
+    // an observer can reset it after an unavailable or dead first original.
+    android_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // Diagnostics owns a separate family; it cannot spend or renew Android's
+    // claim. Every clone keeps the same spent first-owner tombstone.
+    diagnostics_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    passive_installed: PassiveInstalledSelection,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    installed_session: InstalledSessionSelection,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_observation: Option<GitHubReadOnlyObservationProfile>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_preflight_observation: Option<GitHubPreflightObservationProfile>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_release_observation: Option<GitHubReleaseObservationProfile>,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    windows_passive: windows_version::Selection,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    environment_fixture_core: Option<PathBuf>,
+}
+
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="runtime_git_fetch_observation.rs"]
+pub(crate) mod fetch_observation;
+
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="runtime_git_push_observation.rs"]
+pub(crate) mod push_observation;
+
+// App-M2 census of this retained RuntimeConfig only, not process/framework RSS.
+// No installed/native probes and no capability, one-use claim or weak binding
+// mutation. The original Arc cells remain charged after their claims are spent.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+impl RuntimeConfig {
+    pub(crate) fn android_registration_retained_heap_bytes(&self,
+        document: &std::sync::Arc<()>) -> Option<usize> {
+        fn arc<T>() -> Option<usize> {
+            let (layout, _) = std::alloc::Layout::new::<[usize; 2]>()
+                .extend(std::alloc::Layout::new::<T>()).ok()?;
+            Some(layout.pad_to_align().size())
+        }
+        let binding = self.installed_session.original.document.try_lock().ok()?;
+        let mut bytes = self.bundle_root.capacity().checked_add(arc::<std::sync::atomic::AtomicBool>()?)?;
+        if !std::sync::Arc::ptr_eq(&self.android_owner_claimed, &self.diagnostics_owner_claimed) {
+            bytes = bytes.checked_add(arc::<std::sync::atomic::AtomicBool>()?)?;
+        }
+        bytes = bytes.checked_add(arc::<InstalledSessionOriginal>()?)?;
+        // The SAME current Document allocation is already charged by the
+        // borrowed Document census. A distinct Weak tombstone retains its own
+        // allocation even after its strong original has gone away.
+        if let Some(weak) = binding.as_ref() {
+            if weak.as_ptr() != std::sync::Arc::as_ptr(document)
+                && weak.as_ptr() != std::sync::Weak::<()>::new().as_ptr() {
+                bytes = bytes.checked_add(arc::<()>()?)?;
+            }
+        }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell")))]
+        if let Some(path) = &self.environment_fixture_core { bytes = bytes.checked_add(path.capacity())?; }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        {
+            bytes=bytes.checked_add(arc::<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_fetch::Control>>>()?)?;
+            if let Some(c)=self.git_fetch_observation.get(){bytes=bytes.checked_add(c.upgrade()?.retained_bytes()?)?;}
+        }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        {
+            bytes=bytes.checked_add(arc::<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_push::Control>>>()?)?;
+            if let Some(c)=self.git_push_observation.get(){bytes=bytes.checked_add(c.upgrade()?.retained_bytes()?)?;}
+        }
+        Some(bytes)
+    }
+}
+
+#[derive(Debug)]
+pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
+
+// Separate normal and headless selections; neither confers native custody.
+// Native ProgramFiles/SystemRoot selection belongs to the retained book. This
+// profile accepts no caller path or environment flag and cannot create handles.
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) struct PassiveInstalledProfile { selection: windows_version::Selection }
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+impl PassiveInstalledProfile {
+    pub(crate) fn compiled(&self) -> Result<windows_version::VersionSpec, BridgeError> {
+        let selected = match self.selection {
+            windows_version::Selection::Closed => false,
+            windows_version::Selection::HeadlessCandidate => cfg!(all(test, not(feature = "desktop-shell"),
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))),
+            windows_version::Selection::Normal => cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))),
+        };
+        if !selected { return Err(unavailable()); }
+        windows_version::VersionSpec::compiled()
+    }
+    fn permits(&self, method: &str) -> bool { self.selection.permits(method) }
+}
+
+// Explicit compile inputs bind the successor staged payload. Neither a nearby
+// manifest nor environment data at app launch can select or qualify a release.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn macos_bindings() -> bool {
+    crate::macos_build_profile::MacBuildTarget::matches_compiled(COMPILED_TARGET) && MANIFEST_ANCHOR.is_some_and(sha)
+        && PROTOCOL_ANCHOR == Some(crate::installed_runtime::PROTOCOL_SHA)
+        && cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct PassiveInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ConfigurationInstalledProfile { _private: () }
+// Separate typed Mac writer selections. Shared anchor DATA never converts a
+// Passive/Configuration permit into metadata or saved-version authority.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct MetadataTextInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct MetadataImagesInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubWorkflowInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ProjectInitializationInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ProjectIdentityInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ArtifactInspectionInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct IOSArchiveInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct AndroidBuildInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl AndroidBuildInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("android_build_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ArtifactInspectionInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("artifact_inspection_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl IOSArchiveInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("ios_archive_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalReleaseHistoryInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalReleaseHistoryInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_release_history_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(crate) struct UploadKeyInstalledProfile { _private: () }
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+impl UploadKeyInstalledProfile {
+    pub(crate) fn selection(&self)->Result<VerifiedRuntime,BridgeError>{
+        if !macos_bindings(){return Err(unavailable());}
+        let cwd=crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime{python:cwd.join("python/bin/python3"),bootstrap:cwd.join("android_upload_key_bootstrap.py"),core:cwd.join("core.zip"),cwd})
+    }
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(crate) struct ToolAcquisitionInstalledProfile { _private: () }
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+impl ToolAcquisitionInstalledProfile {
+    pub(crate) fn selection(&self)->Result<VerifiedRuntime,BridgeError> {
+        if !macos_bindings(){return Err(unavailable());}
+        let cwd=crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime {python:cwd.join("python/bin/python3"),bootstrap:cwd.join("tool_acquisition_bootstrap.py"),core:cwd.join("core.zip"),cwd})
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct AppleProvisioningInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl AppleProvisioningInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("apple_provisioning_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalStorePreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalStorePreflightInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_store_preflight_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalStorePrepareInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalStorePrepareInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_store_prepare_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalStoreReconcileInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalStoreReconcileInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_store_reconcile_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalStoreExecuteInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalStoreExecuteInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_store_execute_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct OfflinePreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl OfflinePreflightInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("offline_preflight_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+// Separate fixed selections for Check build tools and generic ProjectRecovery.
+// Neither profile borrows Android catalog, offline-preflight or iOS authority.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct EnvironmentDiagnosticsInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl EnvironmentDiagnosticsInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("environment_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ProjectRecoveryInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ProjectRecoveryInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("project_recovery_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl PassiveInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ConfigurationInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+// Separate session-only read domain. The same fixed Mac payload binding and
+// original installed Book are required; passive/edit authority is not a grant.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubReadOnlyInstalledProfile { _private: (),
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    push_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_push::Control>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubReadOnlyInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=&self.push_observation{if self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,true)}
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=&self.observation{return fetch_observation::selection(c,true)}
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_connection_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Separate nonsecret setup selection: installed source only, never consent
+// or publisher authority. Original supervised GO and Document checks are separate.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubSetupInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubSetupInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_setup_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Fixed installed History SOURCE nomination. A profile is not an original
+// descriptor loan or a provider result; the actual sealed slots establish both.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubHistoryInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubHistoryInstalledProfile {
+    pub(crate) fn provider_nomination(&self)->Result<crate::installed_runtime::HistoryProviderNomination,BridgeError>{
+        if !macos_bindings(){return Err(unavailable());}
+        crate::installed_runtime::HistoryProviderNomination::compiled()?.ok_or_else(||
+            BridgeError::new("history_provider_unavailable","The fixed authenticated History provider is not configured."))
+    }
+    pub(crate) fn selection(&self)->Result<VerifiedRuntime,BridgeError>{
+        self.provider_nomination()?;
+        let cwd=crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime{python:cwd.join("python/bin/python3"),bootstrap:cwd.join("github_history_bootstrap.py"),core:cwd.join("core.zip"),cwd})
+    }
+}
+
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[path="git_fetch_runtime_macos.rs"]
+pub(crate) mod git_fetch;
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[path="git_push_runtime_macos.rs"]
+pub(crate) mod git_push;
+
+// Fixed read-only Git sourceworker. Selection is not source/IO finality and
+// does not grant writes, network, hook execution or another runtime fallback.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitReadInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitReadInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_read_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Fixed local-write bootstrap. Selection alone is not mutation authority;
+// the original Doc/Publisher, source, NativeUse and joins remain mandatory.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitLocalInstalledProfile { _private: (), kind:crate::git_local_protocol::Kind,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    push_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_push::Control>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitLocalInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if self.kind==crate::git_local_protocol::Kind::Fetch {
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            if let Some(c)=&self.observation{return fetch_observation::selection(c,false)}
+            return git_fetch::selection();
+        }
+        if self.kind.is_push() {
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            if let Some(c)=&self.push_observation{if self.kind!=c.kind()||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
+            return git_push::selection_for(self.kind);
+        }
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_local_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// SOURCE uses the existing required bootstrap's closed source-only protocol
+// arm. This profile does not borrow Setup consent, credentials or HTTP roles.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct VersionAllocationSourceInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl VersionAllocationSourceInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_setup_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Selected-account authentication has its OWN fixed stock-provider nomination.
+// The patched History provider and a supplied version/path cannot select it.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubAuthInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubAuthInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() || crate::github_auth_nomination::StockGhNomination::compiled().is_none() {
+            return Err(unavailable());
+        }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_auth_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Device OAuth uses only the publisher-bound client ID, never a gh identity.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubDeviceInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubDeviceInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() || crate::github_device_protocol::configured().is_none() {
+            return Err(unavailable());
+        }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_device_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Two separate action families. Fixed installed selection is DATA, not
+// read-only authority, native/service qualification, or permission to dispatch.
+// No launch-time environment or renderer value selects a publisher binding.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubPreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubPreflightInstalledProfile {
+    fn bindings_match() -> bool { macos_bindings() && crate::github_preflight_protocol::publisher_bound() }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_preflight_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubReleaseInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubReleaseInstalledProfile {
+    fn bindings_match() -> bool { macos_bindings() && crate::github_release_protocol::publisher_bound() }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_release_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Explicit inert entry for the Mac harness=false observer as well as libtest.
+// Selection and fresh empty slots only: no inventory/native/network execution.
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn macos_github_readonly_profile_contract() {
+    use std::any::TypeId;
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-github-readonly-data-only"));
+    let expected = macos_bindings();
+    let profile = runtime.github_readonly_installed_profile();
+    assert_eq!(runtime.github_readonly_installed_profile_available(), expected);
+    assert_eq!(profile.is_ok(), expected);
+    assert_eq!(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:None, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:None }.selection().is_ok(), expected);
+    assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
+    // Other families require their own compiled publisher binding; the
+    // read-only selection above supplies neither action grant.
+    assert_eq!(runtime.github_preflight_profile_available(), expected && crate::github_preflight_protocol::publisher_bound());
+    assert_eq!(runtime.github_release_profile_available(), expected && crate::github_release_protocol::publisher_bound());
+    assert_ne!(TypeId::of::<GitHubReadOnlyInstalledProfile>(), TypeId::of::<PassiveInstalledProfile>());
+    assert_ne!(TypeId::of::<crate::installed_runtime::GitHubReadOnlyRuntimeSlots>(),
+        TypeId::of::<crate::installed_runtime::PassiveRuntimeSlots>());
+    let mut originals = crate::installed_runtime::GitHubReadOnlyRuntimeSlots::new();
+    assert!(originals.never_started() && originals.no_child_effect() && originals.capability().is_err());
+    if let Ok(profile) = profile {
+        let selected = profile.selection().unwrap();
+        let root = crate::installed_runtime::runtime_root();
+        assert_eq!(selected.python, root.join("python/bin/python3"));
+        assert_eq!(selected.bootstrap, root.join("github_connection_bootstrap.py"));
+        assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+        let passive = PassiveInstalledProfile { _private: () }.selection().unwrap();
+        assert_eq!(selected.cwd, passive.cwd); assert_ne!(selected.bootstrap, passive.bootstrap);
+    } else {
+        let (_sender, stop) = tokio::sync::watch::channel(false);
+        assert!(runtime.resolve_github_readonly_installed(&mut originals, Instant::now(), &stop).is_err());
+        assert!(originals.never_started() && originals.no_child_effect() && originals.capability().is_err());
+    }
+}
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[test]
+fn macos_github_readonly_profile_data_contract() { macos_github_readonly_profile_contract(); }
+
+// Explicitly invoked by the existing harness=false DATA entry. Even a
+// positive publisher binding never arms an ACL book or performs inspection.
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn macos_github_actions_profile_contract() {
+    use std::any::TypeId;
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-github-actions-data-only"));
+    let preflight = macos_bindings() && crate::github_preflight_protocol::publisher_bound();
+    let release = macos_bindings() && crate::github_release_protocol::publisher_bound();
+    assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
+    let types = [TypeId::of::<PassiveInstalledProfile>(), TypeId::of::<GitHubReadOnlyInstalledProfile>(),
+        TypeId::of::<GitHubPreflightInstalledProfile>(), TypeId::of::<GitHubReleaseInstalledProfile>(),
+        TypeId::of::<GitHubSetupInstalledProfile>()];
+    for (index, original) in types.iter().enumerate() { assert!(!types[index + 1..].contains(original)); }
+    assert_eq!(runtime.github_preflight_profile_available(), preflight);
+    assert_eq!(runtime.github_release_profile_available(), release);
+    assert_eq!(runtime.github_setup_profile_available(), macos_bindings());
+    assert_eq!(runtime.github_preflight_installed_profile().is_ok(), preflight);
+    assert_eq!(runtime.github_release_installed_profile().is_ok(), release);
+    let selected = [
+        (GitHubPreflightInstalledProfile { _private: () }.selection(), preflight, "github_preflight_bootstrap.py"),
+        (GitHubReleaseInstalledProfile { _private: () }.selection(), release, "github_release_bootstrap.py"),
+        (GitHubSetupInstalledProfile { _private: () }.selection(), macos_bindings(), "github_setup_bootstrap.py"),
+    ];
+    let root = crate::installed_runtime::runtime_root();
+    for (selection, expected, bootstrap) in selected {
+        assert_eq!(selection.is_ok(), expected);
+        if let Ok(selection) = selection {
+            assert_eq!(selection.cwd, root);
+            assert_eq!(selection.python, root.join("python/bin/python3"));
+            assert_eq!(selection.bootstrap, root.join(bootstrap));
+            assert_eq!(selection.core, root.join("core.zip"));
+        }
+    }
+    // Regardless of compiled binding, these unarmed originals cannot inspect,
+    // transfer or acquire. No stopped fixture may create a native ACL frame.
+    let now = Instant::now();
+    let (_sender, stop) = tokio::sync::watch::channel(true);
+    let mut preflight_slots = crate::installed_runtime::GitHubPreflightRuntimeSlots::new();
+    let mut release_slots = crate::installed_runtime::GitHubReleaseRuntimeSlots::new();
+    let mut setup_slots = crate::installed_runtime::GitHubSetupRuntimeSlots::new();
+    assert!(runtime.resolve_github_preflight_installed(&mut preflight_slots, now, &stop).is_err());
+    assert!(runtime.resolve_github_release_installed(&mut release_slots, now, &stop).is_err());
+    assert!(runtime.resolve_github_setup_installed(&mut setup_slots, now, &stop).is_err());
+    assert!(preflight_slots.never_started() && preflight_slots.no_child_effect() && preflight_slots.capability().is_err());
+    assert!(release_slots.never_started() && release_slots.no_child_effect() && release_slots.capability().is_err());
+    assert!(setup_slots.never_started() && setup_slots.no_child_effect() && setup_slots.capability().is_err());
+    crate::installed_runtime::history_installed_slot_data_checks();
+    crate::asset_source::HistorySources::data_checks();
+    let history=runtime.github_history_profile_reason();
+    assert_eq!(history==crate::github_history_protocol::Reason::None,
+        macos_bindings()&&crate::installed_runtime::HistoryProviderNomination::compiled().is_ok_and(|v|v.is_some()));
+}
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[test]
+fn macos_github_actions_profile_data_contract() { macos_github_actions_profile_contract(); }
+
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubWorkflowInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ProjectInitializationInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ProjectIdentityInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl MetadataTextInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl MetadataImagesInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ReleaseVersionInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn macos_installed_environment(command: &mut tokio::process::Command) -> std::io::Result<()> {
+    let uid = mrk_macos_installed_native::real_user()?;
+    command.env("__CF_USER_TEXT_ENCODING", format!("0x{uid:X}:0:0"));
+    Ok(())
+}
+
+// Selection DATA only, never executable custody. Only the fixed Linux shell
+// and its feature-off native tests can select the independently admitted A.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy)]
+enum PassiveInstalledSelection {
+    Closed,
+    #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
+    CandidateA,
+}
+
+// Linux session inputs use the ordinary original constructor. The fixed native
+// profile, one Supervisor claim and original document binding remain mandatory;
+// the selection bit alone cannot authorize collection or an assessment borrower.
+pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = true;
+// Ordinary fixed Mac session selection. This does not replace installed-runtime,
+// original-document, exact context/kind or native source-custody qualification.
+pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = true;
+// Reviewed private ordinary-persistence candidate. This production selection
+// still requires the original installed Supervisor/document and helper pins.
+// These exact enabled bytes/configuration need native acceptance before delivery;
+// compiler/DATA or selected-helper evidence alone is not that acceptance.
+pub(crate) const INSTALLED_MAC_PERSISTENCE_QUALIFIED: bool = true;
+fn persistence_helper_pins(hash: Option<&str>, size: Option<&str>) -> bool {
+    hash.is_some_and(sha) && size.and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|bytes| bytes > 0 && bytes <= 32 * 1024 * 1024)
+}
+// Undelivered ordinary project-field candidate; availability is not acceptance.
+// Exact enabled-source AppKit/APFS and ordinary UI evidence is required before
+// delivery. Original document/runtime/profile and source-custody gates remain.
+pub(crate) const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = true;
+// Undelivered ordinary Android source-folder candidate, separate from project
+// fields or catalogue selection. Exact enabled-source ordinary native Browse,
+// Cancel, reselect and backend-refusal evidence is required before delivery;
+// selection never qualifies supplier inspection, protected copying or builds.
+pub(crate) const INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED: bool = true;
+// Windows original session/source/dialog qualification is separate from Linux
+// and Mac acceptance. Keep closed until its actual native evidence is accepted.
+pub(crate) const INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED: bool = false;
+fn session_inputs_qualified() -> bool {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { INSTALLED_SESSION_INPUTS_QUALIFIED }
+    else if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) { INSTALLED_IOS_SESSION_INPUTS_QUALIFIED }
+    else if cfg!(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")) { INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED }
+    else { false }
+}
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+struct InstalledSessionOriginal {
+    supervisor_claimed: std::sync::atomic::AtomicBool,
+    document: std::sync::Mutex<Option<std::sync::Weak<()>>>,
+    enabled: std::sync::atomic::AtomicBool,
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[derive(Clone)]
+struct InstalledSessionSelection {
+    original: std::sync::Arc<InstalledSessionOriginal>,
+    supervisor: bool,
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+impl InstalledSessionSelection {
+    fn new() -> Self {
+        use std::sync::{Arc, Mutex, atomic::AtomicBool};
+        Self { original: Arc::new(InstalledSessionOriginal {
+            supervisor_claimed: AtomicBool::new(false), document: Mutex::new(None),
+            enabled: AtomicBool::new(session_inputs_qualified()),
+        }), supervisor: false }
+    }
+    fn claim_supervisor(&mut self) {
+        // RuntimeConfig clones share this ONE claim. Inspection copies of the
+        // already-bound original remain usable, but a second Supervisor::new
+        // never inherits its session admission.
+        self.supervisor = !self.original.supervisor_claimed.swap(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn bind_document(&self, identity: &std::sync::Arc<()>) {
+        if !self.supervisor { return; }
+        let Ok(mut document) = self.original.document.lock() else { return; };
+        // Even a dead original leaves its Weak tombstone: no later document
+        // can rebind this Supervisor or reuse its one-use qualification.
+        if document.is_none() { *document = Some(std::sync::Arc::downgrade(identity)); }
+    }
+    fn matches(&self, identity: Option<&std::sync::Arc<()>>) -> bool {
+        if !self.supervisor || !self.original.enabled.load(std::sync::atomic::Ordering::SeqCst) { return false; }
+        let Ok(document) = self.original.document.lock() else { return false; };
+        document.as_ref().and_then(std::sync::Weak::upgrade)
+            .is_some_and(|original| identity.is_none_or(|identity| std::sync::Arc::ptr_eq(&original, identity)))
+    }
+}
+
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+pub(crate) fn assert_installed_session_selection_contract() {
+    use std::sync::{Arc, atomic::Ordering};
+    // Pure shared-selection bookkeeping only. No installed runtime is opened.
+    let mut first = InstalledSessionSelection::new();
+    let mut other = first.clone();
+    let normal = session_inputs_qualified();
+    let original = Arc::new(()); let replacement = Arc::new(());
+    if cfg!(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")) {
+        assert_eq!(normal, INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED);
+    } else { assert!(normal); } // Existing Linux/Mac acceptance; never an observer grant.
+    assert_eq!(first.original.enabled.load(Ordering::SeqCst), normal);
+    assert!(!first.matches(None) && !other.matches(None));
+    first.bind_document(&original); // An unclaimed copy cannot bind a document.
+    assert!(first.original.document.lock().unwrap().is_none());
+    first.claim_supervisor();
+    assert!(!first.matches(None)); // Normal enabled state still needs its document.
+    other.claim_supervisor();
+    other.bind_document(&replacement); first.bind_document(&original);
+    first.bind_document(&replacement);
+    assert_eq!(first.matches(Some(&original)), normal);
+    assert_eq!(first.clone().matches(Some(&original)), normal);
+    assert!(!first.matches(Some(&replacement)) && !other.matches(None));
+    first.original.enabled.store(false, Ordering::SeqCst);
+    assert!(!first.matches(Some(&original)) && !other.matches(Some(&replacement)));
+    first.original.enabled.store(true, Ordering::SeqCst);
+    assert!(first.matches(Some(&original)) && first.clone().matches(Some(&original)));
+    assert!(!first.matches(Some(&replacement)) && !other.matches(None));
+    let mut second_supervisor = first.clone(); second_supervisor.claim_supervisor();
+    assert!(!second_supervisor.matches(Some(&original)));
+    drop(original); first.bind_document(&replacement);
+    assert!(!first.matches(None)); // Dead original remains a non-rebindable tombstone.
+}
+
+// The fixed selector supplies A DATA, not custody or loader qualification.
+// Every request still owes original inspection, transfer and the final claim.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct PassiveInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl PassiveInstalledProfile {
+    // Current payload V 36282923412/1. Any later profile requires separate source review.
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    pub(crate) const MANIFEST: &'static str = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
+    const PROTOCOL: &'static str = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5";
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
+    }
+    // Read-only passive family ONLY: the current runtime this 0.2.0 DEB bundles
+    // (assembly of run 43631372422: manifest 5b5eac42…, protocol unchanged).
+    // MANIFEST/bindings_match above stay historical, so every other family that
+    // reuses them (configuration and workflow edits, GitHub, metadata/version
+    // writes, recovery, diagnostics, sessions) remains closed on this runtime.
+    pub(crate) const CURRENT_MANIFEST: &'static str = "5b5eac42aa2bffce668bd0cc828cdcd25de1de8fbf6fa1e3848eeb8e3440ef3f";
+    fn current_bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        target == Self::TARGET && manifest == Some(Self::CURRENT_MANIFEST) && protocol == Some(Self::PROTOCOL)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::current_bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Err(unavailable().with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionCompileBinding)));
+        }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(Self::CURRENT_MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
+    }
+}
+
+// The same authenticated A contains the existing workflow bootstrap/core, but
+// Configuration or passive selection is NOT authority for this edit domain.
+// Only the normal installed workflow selector below can mint this profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubWorkflowInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubWorkflowInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol) // Fixed DATA only.
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Separate session-only GitHub selection DATA. The normal installed selector
+// binds the unchanged core/bootstrap/real CA; workflow, passive, development TLS
+// or credential-asset qualification never grants this network-read domain.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubReadOnlyInstalledProfile {
+    _private: (),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<GitHubReadOnlyObservationProfile>,
+}
+
+// Private installed-observer DATA only, never a renderer/argv/environment
+// endpoint, trust or enable switch. Each D manifest is independently inventoried;
+// ordinary configurations always select N even in an observation binary.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubReadOnlyObservationProfile { Normal, DialRealCa, DialSyntheticCa }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReadOnlyObservationProfile {
+    pub(crate) fn manifest_sha256(self) -> &'static str {
+        match self {
+            Self::Normal => PassiveInstalledProfile::MANIFEST,
+            Self::DialRealCa => "87237111b05fe6e5849d68ad74e02871223ae7d3aaaf05e8f0d6f6c48bffbe35",
+            Self::DialSyntheticCa => "90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb",
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReadOnlyInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol) // Exact normal payload DATA only.
+    }
+    pub(crate) fn manifest_anchor(&self) -> Result<&'static str, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.observation { return Ok(profile.manifest_sha256()); }
+        Ok(PassiveInstalledProfile::MANIFEST)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        let manifest = self.manifest_anchor()?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_connection_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Separate sealed action domain. It borrows the original Supervisor's common
+// installed-custody implementation, never a read-only book or edit capability.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubPreflightInstalledProfile {
+    _private: (),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<GitHubPreflightObservationProfile>,
+}
+// Closed native-observation DATA, not an ordinary activation or a published
+// toolkit claim. The selected helper/core/CA remain under the action domain's
+// own original installed ledger. Read-only fixture selection is not this grant.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubPreflightObservationProfile { Synthetic }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubPreflightObservationProfile {
+    pub(crate) const TOOLING_SHA: &'static str = "304abf6b802cde7dac236a2217488f67b33a3ce4";
+    pub(crate) const CALLER_SHA256: &'static str = "71bd9034967f4a2212a7f4475074ded0f1211d1f52d532a26a9e2f890df98b0d";
+    pub(crate) const MANIFEST: &'static str = "90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    pub(crate) const VERSION: &'static str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>,
+        tooling: Option<&str>, caller: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+            && tooling == Some(Self::TOOLING_SHA) && caller == Some(Self::CALLER_SHA256)
+    }
+    fn bindings_match(self) -> bool {
+        Self::binding_values_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR,
+            crate::github_preflight_protocol::TOOLING_SHA, crate::github_preflight_protocol::CALLER_SHA256)
+    }
+    pub(crate) fn assert_contracts() {
+        // Pure selector DATA only: no file import, executable, native ledger or
+        // live API is opened by these assertions. Ordinary selects only V.
+        assert!(!GITHUB_PREFLIGHT_NATIVE_QUALIFIED);
+        assert!(Self::Synthetic.bindings_match());
+        for (target, manifest, protocol, tooling, caller) in [
+            ("aarch64-apple-darwin", MANIFEST_ANCHOR, PROTOCOL_ANCHOR, Some(Self::TOOLING_SHA), Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, Some(Self::MANIFEST), PROTOCOL_ANCHOR, Some(Self::TOOLING_SHA), Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, None, Some(Self::TOOLING_SHA), Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, None, Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, Some(Self::TOOLING_SHA), None),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, Some(Self::CALLER_SHA256), Some(Self::TOOLING_SHA)),
+        ] { assert!(!Self::binding_values_match(target, manifest, protocol, tooling, caller)); }
+        let mut runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-github-preflight-contract"));
+        assert!(runtime.github_preflight_profile_available());
+        assert_eq!(runtime.github_preflight_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        let release_expected = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_release_protocol::publisher_bound();
+        let assert_normal_release = |runtime: &RuntimeConfig| {
+            assert_eq!(runtime.github_release_profile_available(), release_expected);
+            if let Ok(profile) = runtime.github_release_installed_profile() {
+                let selected = profile.selection().unwrap();
+                let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
+                    .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+                assert_eq!(selected.bootstrap, root.join("github_release_bootstrap.py"));
+                assert_eq!(selected.python, root.join("python/bin/python3"));
+                assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            }
+        };
+        assert_normal_release(&runtime);
+        runtime.select_github_readonly_observation(GitHubReadOnlyObservationProfile::DialSyntheticCa).unwrap();
+        assert_normal_release(&runtime);
+        // A read-only fixture cannot replace the ordinary action profile.
+        assert_eq!(runtime.github_preflight_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        runtime.select_github_preflight_observation(Self::Synthetic).unwrap();
+        assert!(runtime.select_github_preflight_observation(Self::Synthetic).is_err());
+        let action = runtime.github_preflight_installed_profile().unwrap();
+        assert_eq!(action.manifest_anchor().unwrap(), Self::MANIFEST);
+        let selected = action.selection().unwrap();
+        assert_eq!(selected.cwd, PathBuf::from(Self::VERSION));
+        assert_eq!(selected.bootstrap, selected.cwd.join("github_preflight_bootstrap.py"));
+        assert_eq!(selected.python, selected.cwd.join("python/bin/python3"));
+        assert_eq!(selected.core, selected.cwd.join("core.zip"));
+        assert_eq!(runtime.github_readonly_installed_profile().unwrap().manifest_anchor().unwrap(), Self::MANIFEST);
+        let ordinary = RuntimeConfig::packaged(PathBuf::from("/unopened-github-preflight-contract"));
+        assert!(ordinary.github_preflight_profile_available());
+        assert_eq!(ordinary.github_preflight_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        assert_eq!(ordinary.github_readonly_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        // Neither read-only nor G Synthetic selection can lend R its publisher
+        // binding or replace R's normal V payload with the observation payload.
+        assert_normal_release(&runtime);
+        assert_normal_release(&ordinary);
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubPreflightInstalledProfile {
+    // Pure selection DATA. Only the factory can mint this action profile, and
+    // production obtains its publisher binding from this family, never passive
+    // availability, a renderer value or the independent observation override.
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>, publisher_bound: bool) -> bool {
+        publisher_bound && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::binding_values_match(target, manifest, protocol, crate::github_preflight_protocol::publisher_bound())
+    }
+    pub(crate) fn manifest_anchor(&self) -> Result<&'static str, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.observation {
+            if !profile.bindings_match() { return Err(unavailable()); }
+            return Ok(GitHubPreflightObservationProfile::MANIFEST);
+        }
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        Ok(PassiveInstalledProfile::MANIFEST)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        let manifest = self.manifest_anchor()?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_preflight_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubReleaseInstalledProfile {
+    _private: (),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<GitHubReleaseObservationProfile>,
+}
+// Private R observation source-candidate binding, NOT delivered production
+// tooling. Connect's/G's profile cannot select this release domain.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubReleaseObservationProfile { Synthetic }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReleaseObservationProfile {
+    pub(crate) const TOOLING_SHA: &'static str = "4c89f77c7a1e3f0b538a99ab12069b245484205d";
+    pub(crate) const CANDIDATE_SHA256: &'static str = "693119d27471d9894c250cc4326547258afba446fc40620a1923b334563a8837";
+    pub(crate) const EXTERNAL_SHA256: &'static str = "82dc6d39910a4363b9432fbbda96f51f1a6c4ac543670a40bee8fb6a0c813397";
+    pub(crate) const PRODUCTION_SHA256: &'static str = "b16776c8de7862eaba316d330a05cacb2c36f338f22880897dcdca8f53157188";
+    pub(crate) const MANIFEST: &'static str = "90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    pub(crate) const VERSION: &'static str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>,
+        tooling: Option<&str>, callers: [Option<&str>;3]) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+            && tooling == Some(Self::TOOLING_SHA)
+            && callers == [Some(Self::CANDIDATE_SHA256), Some(Self::EXTERNAL_SHA256), Some(Self::PRODUCTION_SHA256)]
+    }
+    fn bindings_match(self) -> bool {
+        Self::binding_values_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR,
+            crate::github_release_protocol::TOOLING_SHA, [
+                crate::github_release_protocol::CANDIDATE_SHA256,
+                crate::github_release_protocol::EXTERNAL_SHA256,
+                crate::github_release_protocol::PRODUCTION_SHA256])
+    }
+    pub(crate) fn assert_contracts() {
+        assert!(!GITHUB_RELEASE_NATIVE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED);
+        assert!(Self::Synthetic.bindings_match());
+        let callers=[Some(Self::CANDIDATE_SHA256),Some(Self::EXTERNAL_SHA256),Some(Self::PRODUCTION_SHA256)];
+        for (target,manifest,protocol,tooling) in [
+            ("aarch64-apple-darwin",MANIFEST_ANCHOR,PROTOCOL_ANCHOR,Some(Self::TOOLING_SHA)),
+            (COMPILED_TARGET,Some(Self::MANIFEST),PROTOCOL_ANCHOR,Some(Self::TOOLING_SHA)),
+            (COMPILED_TARGET,MANIFEST_ANCHOR,None,Some(Self::TOOLING_SHA)),
+            (COMPILED_TARGET,MANIFEST_ANCHOR,PROTOCOL_ANCHOR,None),
+            (COMPILED_TARGET,MANIFEST_ANCHOR,PROTOCOL_ANCHOR,Some(GitHubPreflightObservationProfile::TOOLING_SHA)),
+        ] { assert!(!Self::binding_values_match(target,manifest,protocol,tooling,callers)); }
+        for index in 0..3 {
+            for wrong in [None,Some(GitHubPreflightObservationProfile::CALLER_SHA256),callers[(index+1)%3]] {
+                let mut changed=callers;changed[index]=wrong;
+                assert!(!Self::binding_values_match(COMPILED_TARGET,MANIFEST_ANCHOR,PROTOCOL_ANCHOR,Some(Self::TOOLING_SHA),changed));
+            }
+        }
+        let mut runtime=RuntimeConfig::packaged(PathBuf::from("/unopened-release-selector-DATA"));
+        let normal=|runtime:&RuntimeConfig| {
+            let profile=runtime.github_release_installed_profile().unwrap();
+            assert_eq!(profile.manifest_anchor().unwrap(),PassiveInstalledProfile::MANIFEST);
+            assert_eq!(profile.selection().unwrap().bootstrap,PathBuf::from("/var/lib/mobile-release-kit/versions")
+                .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST).join("github_release_bootstrap.py"));
+        };
+        normal(&runtime);
+        runtime.select_github_readonly_observation(GitHubReadOnlyObservationProfile::DialSyntheticCa).unwrap();
+        normal(&runtime); // Read-only selection is never R authority.
+        if GitHubPreflightObservationProfile::Synthetic.bindings_match() {
+            runtime.select_github_preflight_observation(GitHubPreflightObservationProfile::Synthetic).unwrap();
+            normal(&runtime);
+        }
+        runtime.select_github_release_observation(Self::Synthetic).unwrap();
+        assert!(runtime.select_github_release_observation(Self::Synthetic).is_err());
+        let profile=runtime.github_release_installed_profile().unwrap();
+        assert_eq!(profile.manifest_anchor().unwrap(),Self::MANIFEST);
+        let selected=profile.selection().unwrap();
+        assert_eq!(selected.cwd,PathBuf::from(Self::VERSION));
+        assert_eq!(selected.bootstrap,selected.cwd.join("github_release_bootstrap.py"));
+        assert_eq!(selected.python,selected.cwd.join("python/bin/python3"));
+        assert_eq!(selected.core,selected.cwd.join("core.zip"));
+        normal(&RuntimeConfig::packaged(PathBuf::from("/unopened-release-ordinary-DATA")));
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReleaseInstalledProfile {
+    // Selection DATA, not native/service qualification. Only this family's
+    // immutable publisher binding can authorize its exact normal payload.
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>, publisher_bound: bool) -> bool {
+        publisher_bound && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::binding_values_match(target, manifest, protocol, crate::github_release_protocol::publisher_bound())
+    }
+    pub(crate) fn manifest_anchor(&self) -> Result<&'static str, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.observation {
+            if !profile.bindings_match() { return Err(unavailable()); }
+            return Ok(GitHubReleaseObservationProfile::MANIFEST);
+        }
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        Ok(PassiveInstalledProfile::MANIFEST)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        let manifest = self.manifest_anchor()?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_release_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// The same authenticated A contains the existing metadata bootstrap/core, but
+// Configuration, workflow or passive selection is NOT authority for this edit domain.
+// Only the normal installed metadata selector below can mint this profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct MetadataTextInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl MetadataTextInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol) // Fixed DATA only.
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// This writer binds exactly the admitted current core/bootstrap payload. Old A
+// and another domain's positive evidence MUST NOT select it. Only the normal
+// installed version selector below mints this fixed DATA profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl ReleaseVersionInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
+        "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
+        "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+    ));
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// The image selector is deliberately closed until the image transaction,
+// restart recovery, native multi-picker and this exact installed source are
+// independently accepted. Other domains' supplier/core pins cannot admit it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct MetadataImagesInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl MetadataImagesInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Project recovery binds exactly the admitted current core/bootstrap payload. Old A
+// and another domain's positive evidence MUST NOT select it. Only the normal
+// installed version selector below mints this fixed DATA profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct ProjectRecoveryInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl ProjectRecoveryInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    // Q source binding only. Ordinary native/runtime qualification stays closed
+    // until this exact profile's two-original recovery evidence is accepted.
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
+        "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
+        "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+    ));
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("project_recovery_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Fixed A selection DATA, not another owner's execution permission. The two
+// command owners retain their independent, domain-local qualification gates.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct EnvironmentDiagnosticsInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl EnvironmentDiagnosticsInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("environment_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct OfflinePreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl OfflinePreflightInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("offline_preflight_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Separate configuration-only selection DATA. A passive candidate/profile is
+// not edit authority, and the feature-off native passive fixture cannot mint
+// this value. The original EditOwner still owes custody and a one-use claim.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct ConfigurationInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl ConfigurationInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        // Same independently admitted A, not a new supplier/loader profile.
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+/// Packaging inspection is NOT admission to execution or a native-custody proof.
+pub struct BundleInspection { pub files: usize, pub target: String }
+
+include!("runtime_manifest_data.rs");
+// Scope DATA, not an edit or release/custody permit. Saved text/version
+// and evidence observation remain separate from project/private/write authority.
+fn macos_installed_passive_method(name: &str) -> bool {
+    matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"
+        | "environment.requirements" | "github.setup.propose" | "release.version.observe"
+        | "metadata.text.observe" | "metadata.text.validate"
+        | "artifacts.candidate.observe" | "release.evidence.observe")
+}
+fn linux_installed_passive_method(name: &str) -> bool {
+    macos_installed_passive_method(name) || matches!(name,
+        "release.version.observe" | "metadata.text.observe" | "metadata.text.validate" | "artifacts.candidate.observe" | "release.evidence.observe")
+}
+fn installed_passive_method(name: &str) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { linux_installed_passive_method(name) }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    { macos_installed_passive_method(name) }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    { windows_version::passive_method(name) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+    { let _ = name; false }
+}
+fn deadline(end: Instant) -> Result<(), BridgeError> { if Instant::now() >= end { Err(BridgeError::timeout()) } else { Ok(()) } }
+include!("runtime_hash_data.rs");
+
+include!("runtime_paths.rs");
+
+fn compiled_payload_path(path: &str) -> bool {
+    if cfg!(target_os = "macos") { safe_macos_runtime_path(path) } else { safe_payload_path(path) }
+}
+
+
+fn ordinary(metadata: &Metadata) -> bool {
+    if metadata.file_type().is_symlink() { return false; }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 { return false; } // FILE_ATTRIBUTE_REPARSE_POINT
+    }
+    true
+}
+
+fn anchored_path(path: &Path) -> Result<(), BridgeError> {
+    if !path.is_absolute() { return Err(unavailable()); }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir | Component::CurDir => return Err(unavailable()),
+            // A Windows drive prefix alone (C:) is drive-relative. Do not
+            // inspect it until the following root component makes C:\\.
+            Component::Prefix(_) => { current.push(component.as_os_str()); continue; }
+            _ => current.push(component.as_os_str()),
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(|_| unavailable())?;
+        if !ordinary(&metadata) { return Err(unavailable()); }
+    }
+    Ok(())
+}
+
+fn same_metadata(first: &Metadata, second: &Metadata) -> bool {
+    if !ordinary(second) || first.len() != second.len() || first.modified().ok() != second.modified().ok() { return false; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if first.dev() != second.dev() || first.ino() != second.ino() || first.mode() != second.mode() { return false; }
+    }
+    true
+}
+
+fn read_checked(path: &Path, limit: u64, end: Instant) -> Result<Vec<u8>, BridgeError> {
+    deadline(end)?;
+    anchored_path(path)?;
+    let before = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+    if !before.is_file() || before.len() > limit { return Err(unavailable()); }
+    let mut file = File::open(path).map_err(|_| unavailable())?;
+    let opened = file.metadata().map_err(|_| unavailable())?;
+    if !opened.is_file() || !same_metadata(&before, &opened) { return Err(unavailable()); }
+    let mut result = Vec::new();
+    let mut block = [0u8; 32 * 1024];
+    loop {
+        deadline(end)?;
+        let length = file.read(&mut block).map_err(|_| unavailable())?;
+        if length == 0 { break; }
+        if (result.len() as u64).saturating_add(length as u64) > limit { return Err(unavailable()); }
+        result.extend_from_slice(&block[..length]);
+    }
+    let after = file.metadata().map_err(|_| unavailable())?;
+    let named_after = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+    if !same_metadata(&opened, &after) || !same_metadata(&opened, &named_after) || after.len() != result.len() as u64 { return Err(unavailable()); }
+    Ok(result)
+}
+
+fn hash_checked(path: &Path, expected_size: u64, end: Instant) -> Result<String, BridgeError> {
+    deadline(end)?;
+    anchored_path(path)?;
+    let before = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+    if !before.is_file() || before.len() != expected_size { return Err(unavailable()); }
+    let mut file = File::open(path).map_err(|_| unavailable())?;
+    let opened = file.metadata().map_err(|_| unavailable())?;
+    if !same_metadata(&before, &opened) { return Err(unavailable()); }
+    let mut hash = Sha256::new();
+    let mut count = 0u64;
+    let mut block = [0u8; 64 * 1024];
+    loop {
+        deadline(end)?;
+        let length = file.read(&mut block).map_err(|_| unavailable())?;
+        if length == 0 { break; }
+        count = count.checked_add(length as u64).ok_or_else(unavailable)?;
+        if count > expected_size { return Err(unavailable()); }
+        hash.update(&block[..length]);
+    }
+    let after = file.metadata().map_err(|_| unavailable())?;
+    let named_after = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+    if count != expected_size || !same_metadata(&opened, &after) || !same_metadata(&opened, &named_after) { return Err(unavailable()); }
+    Ok(hex(&hash.finalize()))
+}
+
+fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Result<(), BridgeError> {
+    let mut directories = BTreeSet::new();
+    for item in expected {
+        let mut parent = Path::new(item).parent();
+        while let Some(path) = parent {
+            if path.as_os_str().is_empty() { break; }
+            directories.insert(path.to_str().ok_or_else(unavailable)?.replace('\\', "/"));
+            parent = path.parent();
+        }
+    }
+    let mut pending = vec![(PathBuf::new(), 0usize)];
+    let mut observed = BTreeSet::new();
+    let mut entries = 0usize;
+    while let Some((relative, depth)) = pending.pop() {
+        deadline(end)?;
+        if depth > TREE_DEPTH + usize::from(cfg!(target_os = "macos")) { return Err(unavailable()); }
+        let directory = root.join(&relative);
+        anchored_path(&directory)?;
+        for entry in fs::read_dir(&directory).map_err(|_| unavailable())? {
+            deadline(end)?;
+            entries += 1;
+            if entries > ENTRY_COUNT { return Err(unavailable()); }
+            let entry = entry.map_err(|_| unavailable())?;
+            let filename = entry.file_name();
+            if !filename.to_str().is_some_and(|name| !name.contains('\\')) { return Err(unavailable()); }
+            let next = relative.join(filename);
+            let name = next.to_str().ok_or_else(unavailable)?.replace('\\', "/");
+            if !compiled_payload_path(&name) { return Err(unavailable()); }
+            let metadata = fs::symlink_metadata(root.join(&next)).map_err(|_| unavailable())?;
+            if !ordinary(&metadata) { return Err(unavailable()); }
+            if metadata.is_dir() {
+                if !directories.contains(&name) { return Err(unavailable()); }
+                pending.push((next, depth + 1));
+            } else if metadata.is_file() {
+                if name == "manifest.json" { continue; }
+                if !expected.contains(&name) || !observed.insert(name) { return Err(unavailable()); }
+            } else { return Err(unavailable()); }
+        }
+    }
+    if &observed != expected { return Err(unavailable()); }
+    Ok(())
+}
+
+impl RuntimeConfig {
+    pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_push_observation: std::sync::Arc::new(std::sync::OnceLock::new()),
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_fetch_observation: std::sync::Arc::new(std::sync::OnceLock::new()),
+        android_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        diagnostics_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        windows_passive: if cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))) {
+            windows_version::Selection::Normal
+        } else { windows_version::Selection::Closed },
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        passive_installed: {
+            #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            { PassiveInstalledSelection::CandidateA }
+            #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+            { PassiveInstalledSelection::Closed }
+        },
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+        installed_session: InstalledSessionSelection::new(),
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        github_observation: None,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        github_preflight_observation: None,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        github_release_observation: None,
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        environment_fixture_core: None,
+    } }
+    pub(crate) fn claim_original_android_owner(&self) -> bool {
+        !self.android_owner_claimed.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn claim_original_diagnostics_owner(&self) -> bool {
+        !self.diagnostics_owner_claimed.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+    // Fixed compile DATA only, not passive/session qualification or runtime
+    // custody. AndroidNativeBooks still owns the actual original inspection.
+    pub(crate) fn android_build_installed_runtime_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer")))]
+        { PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() && !cfg!(feature = "windows-runtime-publisher")
+            && crate::android_build_protocol::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports) }
+        #[cfg(not(any(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer")))))]
+        { false }
+    }
+    pub(crate) fn claim_original_supervisor(&mut self) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+        self.installed_session.claim_supervisor();
+    }
+    pub(crate) fn bind_original_session_document(&self, identity: &std::sync::Arc<()>) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+        self.installed_session.bind_document(identity);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+        let _ = identity;
+    }
+    fn installed_session_profile(&self, identity: Option<&std::sync::Arc<()>>) -> bool {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+        {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            if self.windows_passive != windows_version::Selection::Normal || cfg!(feature = "windows-runtime-publisher") { return false; }
+            // Linux credential sessions stay on the historical binding: the current
+            // passive read binding never opens credentials.assess or session work.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return false; }
+            self.passive_installed_profile().is_ok() && self.installed_session.matches(identity)
+        }
+        #[cfg(not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
+        { let _ = identity; false }
+    }
+    pub(crate) fn installed_session_available(&self, identity: &std::sync::Arc<()>) -> bool {
+        self.installed_session_profile(Some(identity))
+    }
+    // Eligibility DATA only: no filesystem, helper launch or Keychain probe.
+    // This shares the ONE original Supervisor/document binding, not a second
+    // claim. Actual helper/code/store/provider custody is rechecked per operation.
+    pub(crate) fn installed_persistence_available(&self, identity: &std::sync::Arc<()>) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { INSTALLED_MAC_PERSISTENCE_QUALIFIED && !cfg!(feature = "windows-runtime-publisher")
+            && self.installed_session_profile(Some(identity))
+            && persistence_helper_pins(option_env!("MRK_MACOS_VAULT_HELPER_SHA256"), option_env!("MRK_MACOS_VAULT_HELPER_BYTES")) }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { let _ = identity; false }
+    }
+    fn installed_method_available(&self, name: &str) -> bool {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        { self.windows_passive.permits_with_original_session(name,
+            name == "credentials.assess" && self.installed_session_profile(None)) }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+        { installed_passive_method(name) || name == "credentials.assess" && self.installed_session_profile(None) }
+    }
+    /// Fixed no-argument candidate DATA. No environment/path/permit can select
+    /// it. Feature-off packaged configurations remain Closed.
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(crate) fn installed_passive_candidate_a() -> Self {
+        let mut config = Self::packaged(PathBuf::new());
+        config.passive_installed = PassiveInstalledSelection::CandidateA;
+        config
+    }
+    /// One fixed nonshipping Windows candidate. No arbitrary root/profile,
+    /// environment opt-in, development runtime or publisher can select it.
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+        not(feature = "desktop-shell"), not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    pub(crate) fn installed_windows_passive_candidate() -> Self {
+        let mut config = Self::packaged(PathBuf::new());
+        config.windows_passive = windows_version::Selection::HeadlessCandidate; config
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    pub(crate) fn select_environment_fixture_zip(&mut self, selection: &crate::environment_diagnostics_owner::EnvironmentRuntimeSelection) {
+        self.environment_fixture_core = Some(selection.core().to_path_buf());
+    }
+    pub fn mode(&self) -> &'static str {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        { "development" }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        { "bundled" }
+    }
+    /// Availability DATA for the UI, using the same installed method allowlist
+    /// as admission. This is not permission to skip per-request inspection.
+    pub(crate) fn passive_method_available(&self, name: &str) -> bool {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        { let _ = name; true }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
+        { let _ = name; false }
+    }
+    /// Fixed selection DATA for the project-only picker, not an asset session
+    /// qualification or a substitute for its original document/lifecycle gate.
+    /// Even the feature-off passive candidate cannot select this shell route.
+    pub(crate) fn project_selection_profile_available(&self) -> bool {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.passive_installed_profile().is_ok() }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.passive_installed_profile().is_ok() }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        { self.windows_passive == windows_version::Selection::Normal
+            && self.passive_installed_profile().is_ok_and(|profile| profile.permits("project.snapshot")) }
+        #[cfg(not(any(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
+            all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+        { false }
+    }
+    /// Separate P2 selection DATA. A project-only Mac profile is never a
+    /// descendant-path picker permit; keep the existing Linux selection exact.
+    pub(crate) fn project_path_selection_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.project_selection_profile_available() }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && self.project_selection_profile_available() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    /// Android JDK/SDK/Gradle source folders are not project-relative fields.
+    /// Only their own qualification may select this fixed installed profile.
+    pub(crate) fn android_source_selection_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && self.project_selection_profile_available()
+            && crate::android_build_protocol::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports) }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    /// Separate documents-only picker DATA. DocumentBinding also checks the
+    /// exact method; this selector cannot publish a project or grant asset custody.
+    pub(crate) fn evidence_selection_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.project_selection_profile_available() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    pub fn resolve(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        { self.development(end) }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Packaged execution is disabled until an immutable, nonblocking runtime-custody backend is qualified. A manifest digest alone cannot enable it."))
+        }
+    }
+    /// The sole passive installed inspection seam. The caller already owns the
+    /// registered original slots and blocking worker; this never returns custody.
+    /// All other packaged profiles refuse before descriptor inspection.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method, originals: &mut crate::installed_runtime::PassiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.passive_installed_profile()?;
+        if !self.installed_method_available(method.name()) {
+            return Err(BridgeError::unavailable("This installed desktop method is outside the selected passive/session profile.")
+                .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionMethodOutsideProfile)));
+        }
+        originals.inspect_once(profile, end, stop)
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
+        match self.passive_installed {
+            PassiveInstalledSelection::Closed => Err(BridgeError::unavailable("The passive installed-runtime release and custody profile are not qualified.")
+                .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionProfileClosed))),
+            #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
+            PassiveInstalledSelection::CandidateA => {
+                if !PassiveInstalledProfile::current_bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+                    return Err(unavailable().with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionCompileBinding)));
+                }
+                Ok(PassiveInstalledProfile { _private: () })
+            }
+        }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(PassiveInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method, originals: &mut crate::installed_runtime::PassiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.passive_installed_profile()?;
+        if !self.installed_method_available(method.name()) { return Err(BridgeError::unavailable("This Mac method is outside its passive profile or original document-bound signing-input assessment profile.")); }
+        originals.inspect_once(profile, end, stop)
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
+        let profile = PassiveInstalledProfile { selection: self.windows_passive };
+        profile.compiled()?; Ok(profile)
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method,
+        originals: &mut crate::installed_runtime_windows::PassiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.passive_installed_profile()?;
+        if !self.installed_method_available(method.name()) {
+            return Err(BridgeError::unavailable("This Windows method is outside its compiled passive profile or normal original-document signing-input assessment profile; external and mutating operations remain unavailable."));
+        }
+        originals.inspect_once(profile, end, stop)
+    }
+    /// Availability and original-owner admission use this SAME sealed selector.
+    /// No caller path, environment flag, domain argument or passive test permit.
+    pub(crate) fn configuration_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.configuration_installed_profile().is_ok() }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.configuration_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn configuration_installed_profile(&self) -> Result<ConfigurationInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(ConfigurationInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_configuration_installed(&self, originals: &mut crate::installed_runtime::ConfigurationRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.configuration_installed_profile()?, end, stop)
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn configuration_installed_profile(&self) -> Result<ConfigurationInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if ConfigurationInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(ConfigurationInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The configuration installed-runtime release and custody profile are not qualified."))
+    }
+    /// Only the original configuration owner's registered worker may borrow
+    /// these slots. The result is path DATA; it cannot spawn or carry custody.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_configuration_installed(&self, originals: &mut crate::installed_runtime::ConfigurationRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.configuration_installed_profile()?; // Refuse other builds before inspection.
+        originals.inspect_once(profile, end, stop)
+    }
+    pub(crate) fn project_identity_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.project_identity_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn project_identity_installed_profile(&self) -> Result<ProjectIdentityInstalledProfile, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        Ok(ProjectIdentityInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_project_identity_installed(&self, originals: &mut crate::installed_runtime::ProjectIdentityRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.project_identity_installed_profile()?, end, stop)
+    }
+    pub(crate) fn project_initialization_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.project_initialization_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn project_initialization_installed_profile(&self) -> Result<ProjectInitializationInstalledProfile, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        Ok(ProjectInitializationInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_project_initialization_installed(&self, originals: &mut crate::installed_runtime::ProjectInitializationRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.project_initialization_installed_profile()?, end, stop)
+    }
+    /// SAME sealed workflow selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn github_workflow_edit_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.github_workflow_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_workflow_installed_profile(&self) -> Result<GitHubWorkflowInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubWorkflowInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubWorkflowInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The GitHub workflow installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn github_workflow_installed_profile(&self) -> Result<GitHubWorkflowInstalledProfile, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        Ok(GitHubWorkflowInstalledProfile { _private: () })
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_github_workflow_installed(&self, originals: &mut crate::installed_runtime::GitHubWorkflowRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.github_workflow_installed_profile()?, end, stop)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn select_github_readonly_observation(&mut self, profile: GitHubReadOnlyObservationProfile) -> Result<(), BridgeError> {
+        // Setup DATA before this config is moved into the original Supervisor.
+        // Keep normal N discovery/catalogue/project registration unchanged.
+        self.github_readonly_installed_profile()?;
+        if self.github_observation.is_some() { return Err(unavailable()); }
+        self.github_observation = Some(profile);
+        Ok(())
+    }
+    /// Session-only GitHub uses the SAME sealed selector for UI capability and
+    /// original Supervisor admission. No asset-vault or publisher registration.
+    pub(crate) fn github_readonly_installed_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.github_readonly_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()?, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:self.push_observation()? }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubReadOnlyInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubReadOnlyInstalledProfile { _private: (),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: self.github_observation,
+            });
+        }
+        Err(BridgeError::unavailable("The installed GitHub read-only runtime and TLS profile are not qualified."))
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_github_readonly_installed(&self, originals: &mut crate::installed_runtime::GitHubReadOnlyRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // Original inspection worker only. Paths are DATA, never native custody.
+        originals.inspect_once(self.github_readonly_installed_profile()?, end, stop)
+    }
+    pub(crate) fn github_history_profile_reason(&self)->crate::github_history_protocol::Reason{
+        use crate::github_history_protocol::Reason;
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            if !macos_bindings(){return Reason::RuntimeUnavailable;}
+            return match crate::installed_runtime::HistoryProviderNomination::compiled(){
+                Ok(Some(_))=>Reason::None,Ok(None)=>Reason::ProviderUnavailable,Err(_)=>Reason::ResponseInvalid,
+            };
+        }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        {Reason::RuntimeUnavailable}
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_history_installed(&self,originals:&mut crate::installed_runtime::GitHubHistoryRuntimeSlots,
+        nomination:&crate::github_history_session::Nomination,id:&str,clock:crate::github_history_protocol::Clock,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError>{
+        if self.github_history_profile_reason()!=crate::github_history_protocol::Reason::None{
+            return Err(BridgeError::unavailable("The original managed History runtime is unavailable."));
+        }
+        originals.inspect_once(GitHubHistoryInstalledProfile{_private:()},nomination,id,clock,end,stop)
+    }
+    pub(crate) fn github_setup_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    pub(crate) fn git_read_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_git_read_installed(&self, originals: &mut crate::installed_runtime::GitReadRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.git_read_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitReadInstalledProfile { _private: () }, end, stop)
+    }
+    pub(crate) fn git_local_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_git_local_installed(&self, originals: &mut crate::installed_runtime::GitLocalRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        self.resolve_git_local_installed_for(crate::git_local_protocol::Kind::Stage,originals,end,stop)
+    }
+    pub(crate) fn git_push_profile_available(&self)->bool {
+        self.git_push_profile_available_for(crate::git_local_protocol::Kind::Push)
+    }
+    pub(crate) fn git_push_profile_available_for(&self,kind:crate::git_local_protocol::Kind)->bool {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some_and(|c|c.kind()==kind))}
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        {git_push::available_for(kind)}
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        {false}
+    }
+    pub(crate) fn git_fetch_profile_available(&self)->bool {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.git_fetch_observation.get().is_some(){return self.fetch_observation().is_ok_and(|v|v.is_some())}
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        {git_fetch::available()}
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        {false}
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_git_local_installed_for(&self,kind:crate::git_local_protocol::Kind,
+        originals:&mut crate::installed_runtime::GitLocalRuntimeSlots,end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError> {
+        if !self.git_local_profile_available()
+            || kind==crate::git_local_protocol::Kind::Fetch&&!self.git_fetch_profile_available()
+            || kind.is_push()&&!self.git_push_profile_available_for(kind){return Err(unavailable())}
+        originals.inspect_once(GitLocalInstalledProfile {_private:(),kind, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()?, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:self.push_observation()? },end,stop)
+    }
+    pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_version_allocation_source_installed(&self, originals: &mut crate::installed_runtime::VersionAllocationSourceRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.version_allocation_source_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(VersionAllocationSourceInstalledProfile { _private: () }, end, stop)
+    }
+    pub(crate) fn github_auth_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() && crate::github_auth_nomination::StockGhNomination::compiled().is_some() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_auth_installed(&self, originals: &mut crate::installed_runtime::GitHubAuthRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.github_auth_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitHubAuthInstalledProfile { _private: () }, end, stop)
+    }
+    pub(crate) fn github_device_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() && crate::github_device_protocol::configured().is_some() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_device_installed(&self, originals: &mut crate::installed_runtime::GitHubDeviceRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.github_device_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitHubDeviceInstalledProfile { _private: () }, end, stop)
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_setup_installed(&self, originals: &mut crate::installed_runtime::GitHubSetupRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.github_setup_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitHubSetupInstalledProfile { _private: () }, end, stop)
+    }
+    pub(crate) fn github_preflight_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.github_preflight_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn github_preflight_installed_profile(&self) -> Result<GitHubPreflightInstalledProfile, BridgeError> {
+        if !GitHubPreflightInstalledProfile::bindings_match() { return Err(unavailable()); }
+        Ok(GitHubPreflightInstalledProfile { _private: () })
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn select_github_preflight_observation(&mut self, profile: GitHubPreflightObservationProfile) -> Result<(), BridgeError> {
+        // Called once before constructing the original Supervisor. No renderer,
+        // environment-at-launch, normal constructor or read-only profile can
+        // select this independent action domain.
+        if self.github_preflight_observation.is_some() || !profile.bindings_match() { return Err(unavailable()); }
+        self.github_preflight_observation = Some(profile); Ok(())
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_preflight_installed_profile(&self) -> Result<GitHubPreflightInstalledProfile, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.github_preflight_observation {
+            if profile.bindings_match() { return Ok(GitHubPreflightInstalledProfile { _private: (), observation: Some(profile) }); }
+            return Err(unavailable());
+        }
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubPreflightInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubPreflightInstalledProfile { _private: (),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: None,
+            });
+        }
+        Err(BridgeError::unavailable("The installed GitHub preflight action profile is not qualified."))
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_github_preflight_installed(&self, originals: &mut crate::installed_runtime::GitHubPreflightRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.github_preflight_installed_profile()?, end, stop)
+    }
+    pub(crate) fn github_release_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.github_release_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn github_release_installed_profile(&self) -> Result<GitHubReleaseInstalledProfile, BridgeError> {
+        if !GitHubReleaseInstalledProfile::bindings_match() { return Err(unavailable()); }
+        Ok(GitHubReleaseInstalledProfile { _private: () })
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn select_github_release_observation(&mut self, profile: GitHubReleaseObservationProfile) -> Result<(), BridgeError> {
+        if self.github_release_observation.is_some() || !profile.bindings_match() { return Err(unavailable()); }
+        self.github_release_observation = Some(profile); Ok(())
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_release_installed_profile(&self) -> Result<GitHubReleaseInstalledProfile, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.github_release_observation {
+            if profile.bindings_match() { return Ok(GitHubReleaseInstalledProfile { _private: (), observation: Some(profile) }); }
+            return Err(unavailable());
+        }
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubReleaseInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubReleaseInstalledProfile { _private: (),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: None,
+            });
+        }
+        Err(BridgeError::unavailable("The installed GitHub release action profile is not qualified."))
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_github_release_installed(&self, originals: &mut crate::installed_runtime::GitHubReleaseRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.github_release_installed_profile()?, end, stop)
+    }
+    /// SAME sealed metadata selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn metadata_text_edit_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.metadata_text_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn metadata_text_installed_profile(&self) -> Result<MetadataTextInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(MetadataTextInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn metadata_text_installed_profile(&self) -> Result<MetadataTextInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if MetadataTextInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(MetadataTextInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The metadata text installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_metadata_text_installed(&self, originals: &mut crate::installed_runtime::MetadataTextRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.metadata_text_installed_profile()?, end, stop)
+    }
+    /// SAME sealed version selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn release_version_edit_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.release_version_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn release_version_installed_profile(&self) -> Result<ReleaseVersionInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(ReleaseVersionInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn release_version_installed_profile(&self) -> Result<ReleaseVersionInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if ReleaseVersionInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(ReleaseVersionInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The saved-version installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_release_version_installed(&self, originals: &mut crate::installed_runtime::ReleaseVersionRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.release_version_installed_profile()?, end, stop)
+    }
+    pub(crate) fn metadata_images_edit_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.metadata_images_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    pub(crate) fn metadata_images_selection_profile_available(&self) -> bool {
+        // A public selection cannot mint unusable retained bytes under a
+        // different profile. Selection and edit share the exact fixed image gate.
+        self.metadata_images_edit_profile_available()
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn metadata_images_installed_profile(&self) -> Result<MetadataImagesInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(MetadataImagesInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn metadata_images_installed_profile(&self) -> Result<MetadataImagesInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher")))]
+        if MetadataImagesInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(MetadataImagesInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The public-image installed runtime and native selection profile are not qualified."))
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_metadata_images_installed(&self, originals: &mut crate::installed_runtime::MetadataImagesRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.metadata_images_installed_profile()?, end, stop)
+    }
+    /// Separate fixed entry point for the finite configuration owner. Never
+    /// dispatch stateful work through the passive engine or its supervisor.
+    pub fn resolve_edit(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("config_edit_bootstrap.py");
+            anchored_path(&bootstrap)?;
+            if !fs::metadata(&bootstrap).map_err(|_| unavailable())?.is_file() { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Packaged configuration editing is disabled until its runtime custody and native owner are qualified."))
+        }
+    }
+    // Fixed ordinary selection is shared by the original owner's admission and
+    // inspection. It is not observer permission or evidence of native finality.
+    pub(crate) fn environment_diagnostics_installed_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.environment_diagnostics_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn environment_diagnostics_installed_profile(&self) -> Result<EnvironmentDiagnosticsInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(EnvironmentDiagnosticsInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The build-tool diagnostics installed-runtime selection is unavailable."))
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn environment_diagnostics_installed_profile(&self) -> Result<EnvironmentDiagnosticsInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(EnvironmentDiagnosticsInstalledProfile { _private: () }) }
+        else { Err(BridgeError::unavailable("The build-tool diagnostics installed-runtime selection is unavailable.")) }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_environment_diagnostics_installed(&self, originals: &mut crate::installed_runtime::EnvironmentDiagnosticsRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.environment_diagnostics_installed_profile()?, end, stop)
+    }
+    pub(crate) fn offline_preflight_installed_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.offline_preflight_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn offline_preflight_installed_profile(&self) -> Result<OfflinePreflightInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(OfflinePreflightInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The saved offline-preflight installed-runtime selection is unavailable."))
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn offline_preflight_installed_profile(&self) -> Result<OfflinePreflightInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(OfflinePreflightInstalledProfile { _private: () }) }
+        else { Err(BridgeError::unavailable("The saved offline-preflight installed-runtime selection is unavailable.")) }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_offline_preflight_installed(&self, originals: &mut crate::installed_runtime::OfflinePreflightRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
+    }
+    pub(crate) fn upload_key_installed_profile_available(&self)->bool{
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        {macos_bindings()}
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        {false}
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_upload_key_installed(&self,originals:&mut crate::installed_runtime::UploadKeyRuntimeSlots,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError>{
+        if !self.upload_key_installed_profile_available(){return Err(unavailable());}
+        originals.inspect_once(UploadKeyInstalledProfile{_private:()},end,stop)
+    }
+    pub(crate) fn tool_acquisition_installed_profile_available(&self)->bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_tool_acquisition_installed(&self,originals:&mut crate::installed_runtime::ToolAcquisitionRuntimeSlots,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError> {
+        if !self.tool_acquisition_installed_profile_available(){return Err(unavailable());}
+        originals.inspect_once(ToolAcquisitionInstalledProfile{_private:()},end,stop)
+    }
+    pub(crate) fn local_release_history_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_release_history_installed(&self, originals: &mut crate::installed_runtime::LocalHistoryRuntimeSlots, end:Instant, stop:&tokio::sync::watch::Receiver<bool>)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_release_history_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(LocalReleaseHistoryInstalledProfile { _private: () },end,stop)
+    }
+    pub(crate) fn apple_provisioning_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    pub(crate) fn local_store_preflight_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    pub(crate) fn local_store_prepare_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    pub(crate) fn local_store_reconcile_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    pub(crate) fn local_store_execute_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_apple_provisioning_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.apple_provisioning_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_apple_provisioning_once(AppleProvisioningInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_store_preflight_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_store_preflight_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_preflight_once(LocalStorePreflightInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_store_prepare_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_store_prepare_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_prepare_once(LocalStorePrepareInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_store_reconcile_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_store_reconcile_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_reconcile_once(LocalStoreReconcileInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_store_execute_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_store_execute_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_execute_once(LocalStoreExecuteInstalledProfile { _private: () })
+    }
+    pub(crate) fn artifact_inspection_installed_profile_available(&self)->bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_artifact_inspection_installed(&self, originals:&mut crate::installed_runtime::ArtifactInspectionRuntimeSlots,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError>{
+        if !self.artifact_inspection_installed_profile_available(){return Err(unavailable());}
+        originals.inspect_once(ArtifactInspectionInstalledProfile{_private:()},end,stop)
+    }
+    pub(crate) fn project_recovery_installed_profile_available(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.project_recovery_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn project_recovery_installed_profile(&self) -> Result<ProjectRecoveryInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if ProjectRecoveryInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(ProjectRecoveryInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The project recovery installed-runtime selection is unavailable."))
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn project_recovery_installed_profile(&self) -> Result<ProjectRecoveryInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(ProjectRecoveryInstalledProfile { _private: () }) }
+        else { Err(BridgeError::unavailable("The project recovery installed-runtime selection is unavailable.")) }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    pub(crate) fn resolve_project_recovery_installed(&self, originals: &mut crate::installed_runtime::ProjectRecoveryRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.project_recovery_installed_profile()?, end, stop)
+    }
+    /// Fixed installed full-Xcode domain. No development/ambient runtime fallback.
+    pub(crate) fn ios_archive_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_ios_archive_installed(&self, originals: &mut crate::installed_runtime::IOSArchiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        originals.inspect_once(IOSArchiveInstalledProfile { _private: () }, end, stop)
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_android_build_installed(&self, originals: &mut crate::installed_runtime::AndroidBuildRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.android_build_installed_runtime_available() { return Err(unavailable()); }
+        originals.inspect_once(AndroidBuildInstalledProfile { _private: () }, end, stop)
+    }
+    /// Fixed diagnostics bootstrap, never the passive engine or edit protocol.
+    /// These source/metadata checks do not qualify the neutral cwd, installed
+    /// runtime custody, external tool policy or actual native document owner.
+    pub(crate) fn resolve_environment_diagnostics(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"),
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+            if let Some(core) = &self.environment_fixture_core {
+                // Closed R3 selection only; no change to passive/edit/Store
+                // resolution and no mutable process-wide environment override.
+                anchored_path(core)?;
+                if !fs::metadata(core).map_err(|_| unavailable())?.is_file() || core.extension().is_none_or(|s| s != "zip") { return Err(unavailable()); }
+                runtime.core = core.clone();
+            }
+            let bootstrap = runtime.cwd.join("environment_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../environment_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Packaged build-tool diagnostics remain disabled until their fixed runtime, native owner and neutral cwd are qualified."))
+        }
+    }
+    /// Separate fixed saved-preflight bootstrap. The owner has its own closed
+    /// native/runtime qualification flags; another domain's permit is unusable.
+    pub(crate) fn resolve_offline_preflight(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("offline_preflight_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../offline_preflight_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Saved offline checks remain disabled until their original native owner, runtime custody and neutral cwd are qualified."))
+        }
+    }
+    /// Separate fixed project-recovery bootstrap. The owner has its own closed
+    /// native/runtime qualification flags; another domain's permit is unusable.
+    pub(crate) fn resolve_project_recovery(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("project_recovery_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../project_recovery_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Project recovery remains disabled until its original native owner, runtime custody and neutral cwd are qualified."))
+        }
+    }
+    /// Android has its own fixed entry and owner qualification; an offline
+    /// permit or successful path/hash inspection cannot authorize this domain.
+    /// VerifiedRuntime is selection DATA, not immutable tool/runtime custody.
+    pub(crate) fn resolve_android_build(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions,
+            target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("android_build_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../android_build_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions,
+            target_os = "linux", target_env = "gnu", target_arch = "x86_64")))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Android builds remain disabled until their original native owner, protected toolchain and runtime custody are qualified for this platform."))
+        }
+    }
+    /// Private profile, not another ambient development entry. The closed gate
+    /// precedes even inspection. The latent branch additionally binds every
+    /// selected path/CA byte to the existing explicit compiled manifest anchor;
+    /// that inventory alone is never native/TLS or immutable custody authority.
+    pub(crate) fn resolve_github_readonly(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        if !GITHUB_TLS_PROFILE_QUALIFIED {
+            return Err(BridgeError::unavailable("The GitHub read-only runtime and TLS profile are not qualified."));
+        }
+        #[cfg(all(feature = "development-runtime", debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            deadline(end)?;
+            // Still the same original retained blocking inspection/deadline.
+            // No adjacent hash is inferred and no separate CA trust input exists.
+            self.inspect_bundle_for_packaging(end)?;
+            let python = self.bundle_root.join(PYTHON_RESOURCE);
+            let core = self.bundle_root.join("core.zip");
+            let selected = |name: &str| std::env::var_os(name).map(PathBuf::from).ok_or_else(unavailable);
+            if selected("MRK_DESKTOP_DEV_PYTHON")? != python || selected("MRK_DESKTOP_DEV_CORE")? != core {
+                return Err(BridgeError::unavailable("The GitHub development paths are not the fixed inventoried runtime profile."));
+            }
+            let bootstrap = self.bundle_root.join("github_connection_bootstrap.py");
+            // The helper derives github-ca.pem only from this fixed sibling
+            // directory. Never a CA argument, project cwd or environment path.
+            deadline(end)?;
+            Ok(VerifiedRuntime { python, core, bootstrap, cwd: self.bundle_root.clone() })
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("The GitHub read-only profile is not qualified for this runtime target."))
+        }
+    }
+    /// Closed no-network hosted fixture only. The selection is minted privately
+    /// after admitted Inputs and fixed Case files, never from an env enable.
+    /// This remains the original retained inspection with its original endpoint;
+    /// byte/roster checks are not TLS qualification or immutable runtime custody.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_fixture(&self, end: Instant,
+        selection: &crate::supervisor::GitHubFixtureRuntime) -> Result<VerifiedRuntime, BridgeError> {
+        fn fixture_inventory(core: &Path, expected: &BTreeSet<String>, end: Instant) -> Result<(), BridgeError> {
+            exact_inventory(core, expected, end)?;
+            // Packaged inventories exempt their root manifest. This fixed
+            // fixture has no manifest or other fifth file/import route.
+            match fs::symlink_metadata(core.join("manifest.json")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                _ => return Err(unavailable()),
+            }
+            deadline(end)
+        }
+
+        deadline(end)?;
+        let (python, python_size, python_sha256) = selection.python_binding();
+        let case = selection.case_bytes();
+        if python_size == 0 || python_size > FILE_LIMIT || !sha(python_sha256)
+            || case.is_empty() || case.len() > 16 * 1024 { return Err(unavailable()); }
+        let mut runtime = self.development(end)?;
+        if runtime.python.as_path() != python || runtime.core.as_path() != selection.core()
+            || !fs::metadata(&runtime.core).map_err(|_| unavailable())?.is_dir() { return Err(unavailable()); }
+
+        // Every G1 Case has exactly this source package. The passive member is
+        // retained only for mixed-profile admission under the same Supervisor.
+        let files: [(&str, &[u8]); 4] = [
+            ("mobile_release/__init__.py", include_bytes!("../tests/fixtures/passive_core/__init__.py")),
+            ("mobile_release/_desktop_engine.py", include_bytes!("../tests/fixtures/passive_core/_desktop_engine.py")),
+            ("mobile_release/_desktop_github_engine.py", include_bytes!("../tests/fixtures/github_core/_desktop_github_engine.py")),
+            ("mobile_release/case.json", case),
+        ];
+        let expected = files.iter().map(|(name, _)| (*name).to_owned()).collect::<BTreeSet<_>>();
+        fixture_inventory(&runtime.core, &expected, end)?;
+        if hash_checked(&runtime.python, python_size, end)? != python_sha256 { return Err(unavailable()); }
+        for (name, bytes) in files {
+            if read_checked(&runtime.core.join(name), bytes.len() as u64, end)?.as_slice() != bytes {
+                return Err(unavailable());
+            }
+        }
+        // Always the actual checkout's fixed bootstrap, not a selected path or
+        // callback. No CA, TLS, live engine import or network permission follows.
+        let bootstrap = runtime.cwd.join("github_connection_bootstrap.py");
+        const BOOTSTRAP: &[u8] = include_bytes!("../../github_connection_bootstrap.py");
+        if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+        fixture_inventory(&runtime.core, &expected, end)?;
+        deadline(end)?;
+        runtime.bootstrap = bootstrap;
+        Ok(runtime)
+    }
+    /// Separate finite TLS fixture, never a production gate or an env-selected
+    /// bootstrap. This is still the owner's original blocking inspection and
+    /// endpoint. The private selection was minted against the compile-anchored
+    /// source/runtime/CA/namespace manifest, not a version string or fake core.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_tls_fixture(&self, end: Instant,
+        selection: &crate::supervisor::GitHubTlsRuntime) -> Result<VerifiedRuntime, BridgeError> {
+        fn closed_inventory(root: &Path, names: &BTreeSet<String>, end: Instant) -> Result<(), BridgeError> {
+            exact_inventory(root, names, end)?;
+            // Unlike packaged payloads, neither TLS source nor its private
+            // two-file bootstrap directory has an exempt root manifest.
+            match fs::symlink_metadata(root.join("manifest.json")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                _ => return Err(unavailable()),
+            }
+            deadline(end)
+        }
+        deadline(end)?;
+        let mut runtime = self.development(end)?;
+        if runtime.python.as_path() != selection.python() || runtime.core.as_path() != selection.core()
+            || selection.files().is_empty() || selection.files().len() > FILE_COUNT {
+            return Err(unavailable());
+        }
+        // Includes the genuine source/ZIP, stdlib/import inputs, _ssl/_socket,
+        // mapped loader/libssl/libcrypto, fixed peer/namespace and all six PEMs.
+        // No TLS import, certificate generation or subprocess occurs here.
+        let mut total = 0u64;
+        closed_inventory(selection.source(), selection.source_files(), end)?;
+        for item in selection.files() {
+            let (path, size, expected) = item.parts();
+            if size > FILE_LIMIT || !sha(expected) { return Err(unavailable()); }
+            total = total.checked_add(size).ok_or_else(unavailable)?;
+            if total > TOTAL_LIMIT || hash_checked(path, size, end)? != expected { return Err(unavailable()); }
+        }
+        // Source mode and ZIP mode share the exact genuine implementation. The
+        // ZIP's admitted bytes are independently bound above, not rebuilt here.
+        let sources: [(&str, &[u8]); 4] = [
+            ("mobile_release/__init__.py", include_bytes!("../../../src/mobile_release/__init__.py")),
+            ("mobile_release/api/__init__.py", include_bytes!("../../../src/mobile_release/api/__init__.py")),
+            ("mobile_release/_desktop_github_engine.py", include_bytes!("../../../src/mobile_release/_desktop_github_engine.py")),
+            ("mobile_release/_github_connection_transport.py", include_bytes!("../../../src/mobile_release/_github_connection_transport.py")),
+        ];
+        for (name, bytes) in sources {
+            if read_checked(&selection.source().join(name), bytes.len() as u64, end)?.as_slice() != bytes { return Err(unavailable()); }
+        }
+        let bootstrap = selection.bootstrap();
+        let cwd = bootstrap.parent().ok_or_else(unavailable)?;
+        if !bootstrap.file_name().is_some_and(|name| name == "github_connection_bootstrap.py")
+            || selection.trust().is_empty() || selection.trust().len() as u64 > GITHUB_CA_LIMIT { return Err(unavailable()); }
+        const BOOTSTRAP: &[u8] = include_bytes!("../../github_connection_bootstrap.py");
+        let private_files = ["github_connection_bootstrap.py".to_owned(), "github-ca.pem".to_owned()]
+            .into_iter().collect::<BTreeSet<_>>();
+        closed_inventory(cwd, &private_files, end)?;
+        if read_checked(bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP
+            || read_checked(&cwd.join("github-ca.pem"), GITHUB_CA_LIMIT, end)?.as_slice() != selection.trust() {
+            return Err(unavailable());
+        }
+        closed_inventory(selection.source(), selection.source_files(), end)?;
+        closed_inventory(cwd, &private_files, end)?;
+        deadline(end)?;
+        // The live factory derives its only trust input from this exact private
+        // bootstrap's sibling. Never from the checkout cwd, an argv CA or URL.
+        runtime.bootstrap = bootstrap.to_path_buf();
+        runtime.cwd = cwd.to_path_buf();
+        Ok(runtime)
+    }
+    /// Unqualified preparation helper only; no application command calls this,
+    /// and its result intentionally contains no executable/bootstrap/core paths.
+    pub fn inspect_bundle_for_packaging(&self, end: Instant) -> Result<BundleInspection, BridgeError> {
+        let manifest_anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or_else(unavailable)?;
+        let protocol_anchor = PROTOCOL_ANCHOR.filter(|value| sha(value)).ok_or_else(unavailable)?;
+        let bytes = read_checked(&self.bundle_root.join("manifest.json"), MANIFEST_LIMIT, end)?;
+        if digest(&bytes) != manifest_anchor { return Err(unavailable()); }
+        let manifest: Manifest = serde_json::from_value(manifest_json(&bytes).map_err(|_| unavailable())?).map_err(|_| unavailable())?;
+        if manifest.schema_version != 1 || manifest.protocol != PROTOCOL || manifest.core_version != CORE_VERSION
+            || manifest.target != COMPILED_TARGET || manifest.protocol_sha256 != protocol_anchor
+            || !sha(&manifest.core_sha256) || !sha(&manifest.inventory_sha256)
+            || manifest.files.is_empty() || manifest.files.len() > FILE_COUNT { return Err(unavailable()); }
+        let inventory = serde_json::to_vec(&manifest.files).map_err(|_| unavailable())?;
+        if digest(&inventory) != manifest.inventory_sha256 { return Err(unavailable()); }
+        let mut files = BTreeSet::new();
+        let mut folded = BTreeSet::new();
+        let mut previous: Option<&str> = None;
+        let mut total = 0u64;
+        for item in &manifest.files {
+            if !compiled_payload_path(&item.path) || item.path == "manifest.json" || !sha(&item.sha256)
+                || item.size > FILE_LIMIT
+                || item.path == "github-ca.pem" && (item.size == 0 || item.size > GITHUB_CA_LIMIT)
+                || previous.is_some_and(|value| value >= item.path.as_str())
+                || !files.insert(item.path.clone()) || !folded.insert(item.path.to_ascii_lowercase()) { return Err(unavailable()); }
+            total = total.checked_add(item.size).ok_or_else(unavailable)?;
+            if total > TOTAL_LIMIT { return Err(unavailable()); }
+            previous = Some(&item.path);
+            if item.path == "core.zip" && item.sha256 != manifest.core_sha256 { return Err(unavailable()); }
+        }
+        for required in REQUIRED_RUNTIME_RESOURCES {
+            if !files.contains(required) { return Err(unavailable()); }
+        }
+        exact_inventory(&self.bundle_root, &files, end)?;
+        for item in &manifest.files {
+            if hash_checked(&self.bundle_root.join(&item.path), item.size, end)? != item.sha256 { return Err(unavailable()); }
+        }
+        // Check the selected names and complete inventory again after hashing.
+        exact_inventory(&self.bundle_root, &files, end)?;
+        Ok(BundleInspection { files: manifest.files.len(), target: manifest.target })
+    }
+
+    #[cfg(all(feature = "development-runtime", debug_assertions))]
+    fn development(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        fn selected(name: &str) -> Result<PathBuf, BridgeError> {
+            let value = std::env::var_os(name).ok_or_else(|| BridgeError::unavailable("Explicit development Python/core paths are not configured."))?;
+            let path = PathBuf::from(value);
+            anchored_path(&path)?;
+            Ok(path)
+        }
+        deadline(end)?;
+        let python = selected("MRK_DESKTOP_DEV_PYTHON")?;
+        let core = selected("MRK_DESKTOP_DEV_CORE")?;
+        let bootstrap = Path::new(env!("CARGO_MANIFEST_DIR")).parent().ok_or_else(unavailable)?.join("engine_bootstrap.py");
+        anchored_path(&bootstrap)?;
+        if !fs::metadata(&python).map_err(|_| unavailable())?.is_file()
+            || !fs::metadata(&bootstrap).map_err(|_| unavailable())?.is_file() { return Err(unavailable()); }
+        let core_metadata = fs::metadata(&core).map_err(|_| unavailable())?;
+        if !core_metadata.is_dir() && !(core_metadata.is_file() && core.extension().is_some_and(|extension| extension == "zip")) { return Err(unavailable()); }
+        Ok(VerifiedRuntime { python, core, cwd: bootstrap.parent().ok_or_else(unavailable)?.to_path_buf(), bootstrap })
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_packaged_shell_allowlist_contract() {
+    let mut runtime = RuntimeConfig::packaged(PathBuf::from("/inert-shell-path-must-not-be-opened"));
+    assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
+    // Passive reads follow the current bundled runtime; edit families stay on
+    // the historical binding and therefore remain closed on this runtime.
+    let bindings = PassiveInstalledProfile::current_bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+    let historical = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+    assert_eq!(runtime.project_selection_profile_available(), bindings);
+    assert_eq!(runtime.configuration_edit_profile_available(), historical);
+    assert_eq!(runtime.github_workflow_edit_profile_available(), historical);
+    for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+        "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
+        assert_eq!(runtime.passive_method_available(name), bindings);
+    }
+    for name in ["credentials.assess", "config.save", "metadata.text.prepare",
+        "metadata.text.apply", "unknown"] {
+        assert!(!runtime.passive_method_available(name));
+    }
+    let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
+    let (_sender, stop) = tokio::sync::watch::channel(false);
+    assert!(runtime.resolve_passive_installed(crate::protocol::Method::AssessCredentials, &mut originals, Instant::now(), &stop).is_err());
+    assert!(originals.never_started());
+    assert!(runtime.resolve(Instant::now()).is_err());
+    assert!(runtime.resolve_edit(Instant::now()).is_err());
+
+    let original = std::sync::Arc::new(());
+    let replacement = std::sync::Arc::new(());
+    runtime.claim_original_supervisor();
+    assert!(!runtime.passive_method_available("credentials.assess"));
+    runtime.bind_original_session_document(&original);
+    let available = historical && session_inputs_qualified()
+        && cfg!(all(feature = "custom-protocol", not(feature = "macos-installed-installer")));
+    assert_eq!(runtime.installed_session_available(&original), available);
+    assert_eq!(runtime.passive_method_available("credentials.assess"), available);
+    assert!(!runtime.installed_session_available(&replacement));
+    let mut wrong_profile = RuntimeConfig::packaged(PathBuf::from("/inert-wrong-profile-must-not-be-opened"));
+    wrong_profile.passive_installed = PassiveInstalledSelection::Closed;
+    wrong_profile.claim_original_supervisor();
+    wrong_profile.bind_original_session_document(&original);
+    assert!(!wrong_profile.installed_session_available(&original));
+    assert!(!wrong_profile.passive_method_available("credentials.assess"));
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_configuration_profile_contract() {
+    tests::configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
+    tests::installed_configuration_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_workflow_profile_contract() {
+    tests::workflow_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
+    tests::installed_workflow_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn assert_installed_workflow_profile_contract() {
+    tests::macos_workflow_selection_and_stopped_original_slots_are_inert();
+}
+
+// The Mac installed observer has harness=false. Invoke actual inert checks
+// explicitly; compiling their #[test] definitions is not execution evidence.
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn assert_installed_macos_text_version_profile_contract() {
+    tests::macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites_data_check();
+    tests::macos_saved_text_version_profiles_share_fixed_bindings_not_custody_data_check();
+    #[cfg(not(all(feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        not(feature = "macos-installed-installer"))))]
+    {
+        tests::installed_metadata_selector_is_closed_outside_the_normal_supported_shells();
+        tests::installed_version_selector_is_closed_outside_the_normal_supported_shells();
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_metadata_profile_contract() {
+    tests::metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
+    tests::installed_metadata_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_version_profile_contract() {
+    tests::version_candidate_bindings_are_exactly_the_current_payload();
+    tests::installed_version_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn installed_macos_doctor_recovery_profile_data_check() -> bool {
+    // Compiled selection/path/type DATA only. Do not resolve, arm or inspect a
+    // runtime here; constructors and selection cannot confer executable custody.
+    use std::any::TypeId;
+    let environment = TypeId::of::<EnvironmentDiagnosticsInstalledProfile>();
+    let recovery = TypeId::of::<ProjectRecoveryInstalledProfile>();
+    if environment == recovery { return false; }
+    for foreign in [TypeId::of::<PassiveInstalledProfile>(), TypeId::of::<OfflinePreflightInstalledProfile>(),
+        TypeId::of::<AndroidBuildInstalledProfile>(), TypeId::of::<IOSArchiveInstalledProfile>()] {
+        if environment == foreign || recovery == foreign { return false; }
+    }
+    let selected = macos_bindings();
+    for path in ["/inert-mrk-doctor-recovery-not-opened", "/inert-foreign-bundle-not-opened"] {
+        let runtime = RuntimeConfig::packaged(PathBuf::from(path));
+        if runtime.environment_diagnostics_installed_profile_available() != selected
+            || runtime.project_recovery_installed_profile_available() != selected { return false; }
+        let environment = runtime.environment_diagnostics_installed_profile();
+        let recovery = runtime.project_recovery_installed_profile();
+        if environment.is_ok() != selected || recovery.is_ok() != selected { return false; }
+        if (EnvironmentDiagnosticsInstalledProfile { _private: () }).selection().is_ok() != selected
+            || (ProjectRecoveryInstalledProfile { _private: () }).selection().is_ok() != selected { return false; }
+        if let (Ok(environment), Ok(recovery)) = (environment, recovery) {
+            let (Ok(environment), Ok(recovery)) = (environment.selection(), recovery.selection()) else { return false; };
+            let cwd = crate::installed_runtime::runtime_root();
+            if environment.python != cwd.join("python/bin/python3") || recovery.python != environment.python
+                || environment.core != cwd.join("core.zip") || recovery.core != environment.core
+                || environment.cwd != cwd || recovery.cwd != cwd
+                || environment.bootstrap != cwd.join("environment_bootstrap.py")
+                || recovery.bootstrap != cwd.join("project_recovery_bootstrap.py")
+                || environment.bootstrap == recovery.bootstrap { return false; }
+        }
+    }
+    // Check build tools is not CLI doctor or a newly admitted passive method.
+    for method in ["doctor", "environment.diagnostics", "prepare_project_recovery", "start_project_recovery"] {
+        if macos_installed_passive_method(method) { return false; }
+    }
+    true
+}
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[test]
+fn installed_macos_doctor_recovery_profiles_are_distinct_fixed_data() {
+    assert!(installed_macos_doctor_recovery_profile_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn installed_macos_offline_profile_data_check() -> bool {
+    // Explicit observer/libtest DATA. No inspect, native query, Prepare or IO.
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-offline-profile-not-opened"));
+    let selected = macos_bindings();
+    if runtime.offline_preflight_installed_profile_available() != selected { return false; }
+    for method in ["offline-preflight", "offline.preflight", "preflight.offline",
+        "prepare_offline_preflight", "start_offline_preflight"] {
+        if macos_installed_passive_method(method) { return false; }
+    }
+    match runtime.offline_preflight_installed_profile() {
+        Ok(profile) => {
+            if !selected { return false; }
+            let Ok(selection) = profile.selection() else { return false; };
+            let cwd = crate::installed_runtime::runtime_root();
+            selection.python == cwd.join("python/bin/python3")
+                && selection.bootstrap == cwd.join("offline_preflight_bootstrap.py")
+                && selection.core == cwd.join("core.zip") && selection.cwd == cwd
+        },
+        Err(_) => !selected,
+    }
+}
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[test]
+fn installed_macos_offline_profile_uses_only_its_fixed_entry() {
+    assert!(installed_macos_offline_profile_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn installed_macos_images_profile_data_check() -> bool {
+    // Typed profile DATA only. Never resolve an admitted runtime in this check.
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-images-profile-not-opened"));
+    let selected = macos_bindings();
+    if runtime.metadata_images_edit_profile_available() != selected
+        || runtime.metadata_images_selection_profile_available() != selected { return false; }
+    let profile = runtime.metadata_images_installed_profile();
+    if profile.is_ok() != selected { return false; }
+    let mut originals = crate::installed_runtime::MetadataImagesRuntimeSlots::new();
+    if !originals.never_started() || !originals.no_child_effect() || originals.capability().is_ok() { return false; }
+    if let Ok(profile) = profile {
+        let Ok(data) = profile.selection() else { return false; };
+        let root = crate::installed_runtime::runtime_root();
+        if data.cwd != root || data.python != root.join("python/bin/python3")
+            || data.bootstrap != root.join("config_edit_bootstrap.py") || data.core != root.join("core.zip") { return false; }
+    } else {
+        let (_sender, stop) = tokio::sync::watch::channel(false);
+        if runtime.resolve_metadata_images_installed(&mut originals, Instant::now(), &stop).is_ok()
+            || !originals.never_started() || !originals.no_child_effect() || originals.capability().is_ok() { return false; }
+    }
+    true
+}
+
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[test]
+fn macos_images_selection_and_edit_share_one_sealed_profile() {
+    assert!(installed_macos_images_profile_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
+    // Explicitly called by the harness=false observer. Compiled selection and
+    // method DATA only: no runtime resolution, native query or document permit.
+    use crate::android_build_protocol::Profile;
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-evidence-profile-not-opened"));
+    let selected = macos_bindings();
+    // Compiled catalogue DATA supports both Mac profiles, not the Linux profile.
+    for (profile, expected) in [(Profile::MacArm64, true), (Profile::MacX64, true), (Profile::LinuxX64, false)] {
+        if crate::android_toolchain_macos_policy::native_catalog_supports(profile) != expected { return false; }
+    }
+    let android_supported = matches!(Profile::current(), Some(Profile::MacArm64 | Profile::MacX64));
+    if runtime.project_selection_profile_available() != selected
+        || runtime.evidence_selection_profile_available() != selected
+        || runtime.project_path_selection_profile_available() != (INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && selected)
+        || runtime.android_source_selection_profile_available() != (INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && selected && android_supported) { return false; }
+    for method in ["artifacts.candidate.observe", "release.evidence.observe"] {
+        if !macos_installed_passive_method(method) { return false; }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        if runtime.passive_method_available(method) != selected { return false; }
+    }
+    for method in ["artifacts.candidate.observe ", "Artifacts.Candidate.Observe",
+        "release.evidence.observe ", "Release.Evidence.Observe", "", "unknown",
+        "config.apply", "credentials.assess"] {
+        if macos_installed_passive_method(method) { return false; }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        if runtime.passive_method_available(method) { return false; }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("runtime_path_tests.rs");
+
+    #[test]
+    fn installed_allowlist_is_exactly_the_read_only_project_draft_guidance_and_saved_services() {
+        for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+            "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
+            assert!(linux_installed_passive_method(name));
+        }
+        for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "metadata.text.prepare",
+            "metadata.text.apply", "credentials.assess", "artifacts.candidate.observe ", "Artifacts.Candidate.Observe", "release.evidence.observe ", "Release.Evidence.Observe",
+            "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose",
+            "Release.Version.Observe", "metadata.text.observe ", "Metadata.Text.Validate"] {
+            assert!(!linux_installed_passive_method(name));
+        }
+    }
+    #[test]
+    pub(super) fn macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites() { macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites_data_check(); }
+
+    pub(super) fn macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites_data_check() {
+        for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+            "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate",
+            "artifacts.candidate.observe", "release.evidence.observe"] {
+            assert!(macos_installed_passive_method(name));
+        }
+        for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "credentials.assess",
+            "release.version.edit", "Release.Version.Observe", "release.version.observe ", "metadata.text.observe ", "Metadata.Text.Validate", "metadata.text.prepare",
+            "metadata.text.apply", "environment.diagnostics", "github.connection.refresh",
+            "artifacts.candidate.observe ", "Artifacts.Candidate.Observe", "release.evidence.observe ", "Release.Evidence.Observe",
+            "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose"] {
+            assert!(!macos_installed_passive_method(name));
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    pub(super) fn macos_saved_text_version_profiles_share_fixed_bindings_not_custody() { macos_saved_text_version_profiles_share_fixed_bindings_not_custody_data_check(); }
+
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(super) fn macos_saved_text_version_profiles_share_fixed_bindings_not_custody_data_check() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-text-version-data-only"));
+        let admitted = macos_bindings();
+        assert_eq!(runtime.metadata_text_edit_profile_available(), admitted);
+        assert_eq!(runtime.release_version_edit_profile_available(), admitted);
+        let metadata = runtime.metadata_text_installed_profile();
+        let version = runtime.release_version_installed_profile();
+        assert_eq!(metadata.is_ok(), admitted);
+        assert_eq!(version.is_ok(), admitted);
+        // Paths are fixed selection DATA, not original custody or a spawn.
+        let cwd = crate::installed_runtime::runtime_root();
+        for selection in [metadata.and_then(|profile| profile.selection()), version.and_then(|profile| profile.selection())] {
+            assert_eq!(selection.is_ok(), admitted);
+            if let Ok(selection) = selection {
+                assert_eq!(selection.cwd, cwd);
+                assert_eq!(selection.python, cwd.join("python/bin/python3"));
+                assert_eq!(selection.bootstrap, cwd.join("config_edit_bootstrap.py"));
+                assert_eq!(selection.core, cwd.join("core.zip"));
+            }
+        }
+        // Unarmed inspection refuses before any native call/open, even when the
+        // profile is admitted. Each inert book owes its OWN one-use settlement.
+        let (_sender, stop) = tokio::sync::watch::channel(true);
+        let end = Instant::now() + std::time::Duration::from_secs(1);
+        let mut metadata = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+        let mut version = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
+        assert!(runtime.resolve_metadata_text_installed(&mut metadata, end, &stop).is_err());
+        assert!(runtime.resolve_release_version_installed(&mut version, end, &stop).is_err());
+        assert!(metadata.never_started());
+        assert!(version.never_started());
+        assert!(metadata.no_child_effect() && version.no_child_effect());
+        assert!(metadata.transfer_once().is_err() && metadata.capability().is_err());
+        assert!(version.transfer_once().is_err() && version.capability().is_err());
+        assert!(!metadata.settled() && !version.settled());
+        assert_eq!(metadata.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
+        assert!(metadata.settled() && !version.settled());
+        assert_eq!(version.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
+        assert!(version.settled());
+        assert_eq!(metadata.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
+        assert_eq!(version.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
+        assert_eq!(runtime.metadata_images_edit_profile_available(), admitted);
+        assert_eq!(runtime.metadata_images_selection_profile_available(), admitted);
+        assert_eq!(runtime.project_path_selection_profile_available(), INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && admitted);
+        assert_eq!(runtime.android_source_selection_profile_available(), INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && admitted && cfg!(any(target_arch = "aarch64", target_arch = "x86_64")));
+        assert_eq!(runtime.evidence_selection_profile_available(), admitted);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_evidence_picker_requires_the_installed_profile_not_project_field_qualification() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-profile-data-only"));
+        assert_eq!(runtime.project_path_selection_profile_available(),
+            INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && runtime.project_selection_profile_available());
+        assert_eq!(runtime.evidence_selection_profile_available(), runtime.project_selection_profile_available());
+        assert_eq!(runtime.android_source_selection_profile_available(),
+            INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && runtime.project_selection_profile_available() && cfg!(any(target_arch = "aarch64", target_arch = "x86_64")));
+        #[cfg(all(target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            assert_eq!(runtime.evidence_selection_profile_available(), macos_bindings());
+            assert!(installed_macos_evidence_profile_data_check());
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        for method in ["artifacts.candidate.observe", "release.evidence.observe"] {
+            assert_eq!(runtime.passive_method_available(method), runtime.evidence_selection_profile_available());
+        }
+    }
+    #[test]
+    fn payload_names_are_portable_and_unambiguous() {
+        assert_eq!(REQUIRED_RUNTIME_RESOURCES, [
+            "android_build_bootstrap.py", "artifact_inspection_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+            "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
+            "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "github_setup_bootstrap.py", "ios_archive_bootstrap.py",
+            "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
+        ]);
+        for name in REQUIRED_RUNTIME_RESOURCES { assert!(safe_payload_path(name)); }
+        assert!(safe_payload_path("python/lib/libstdc++.so.6"));
+        for name in ["", "/core.zip", "../core.zip", "a/./b", "a//b", "a\\b", "a:b", "NUL.txt", "com1", "LPT9.log", "trailing.", "x ", "é.py"] { assert!(!safe_payload_path(name)); }
+    }
+    #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+    #[test]
+    fn production_gate_does_not_open_even_a_missing_bundle() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/this-path-must-not-be-opened"));
+        assert_eq!(runtime.resolve(Instant::now() + std::time::Duration::from_secs(1)).err().map(|error| error.code), Some("runtime_unavailable".into()));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_installed_selection_is_exact_normal_data_not_the_development_tls_gate() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-installed-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && GitHubReadOnlyInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        assert_eq!(runtime.github_readonly_installed_profile_available(), expected);
+        let profile = runtime.github_readonly_installed_profile();
+        assert_eq!(profile.is_ok(), expected);
+        assert!(GitHubReadOnlyInstalledProfile::bindings_match(PassiveInstalledProfile::TARGET,
+            Some(PassiveInstalledProfile::MANIFEST), Some(PassiveInstalledProfile::PROTOCOL)));
+        for (target, manifest, protocol) in [
+            ("aarch64-apple-darwin", Some(PassiveInstalledProfile::MANIFEST), Some(PassiveInstalledProfile::PROTOCOL)),
+            (PassiveInstalledProfile::TARGET, Some("0000000000000000000000000000000000000000000000000000000000000000"), Some(PassiveInstalledProfile::PROTOCOL)),
+            (PassiveInstalledProfile::TARGET, Some(PassiveInstalledProfile::MANIFEST), None),
+        ] { assert!(!GitHubReadOnlyInstalledProfile::bindings_match(target, manifest, protocol)); }
+        if let Ok(profile) = profile {
+            let selected = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
+                .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(selected.bootstrap, root.join("github_connection_bootstrap.py"));
+            assert_eq!(selected.python, root.join("python/bin/python3"));
+            assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        } else {
+            // Closed selection performs no native inspection, and cannot mint a
+            // capability from a path, passive profile, or the legacy TLS flag.
+            let mut slots = crate::installed_runtime::GitHubReadOnlyRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_readonly_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_preflight_installed_selection_requires_its_own_normal_publisher_binding() {
+        let target = PassiveInstalledProfile::TARGET;
+        let manifest = Some(PassiveInstalledProfile::MANIFEST);
+        let protocol = Some(PassiveInstalledProfile::PROTOCOL);
+        assert!(GitHubPreflightInstalledProfile::binding_values_match(target, manifest, protocol, true));
+        for (target, manifest, protocol, publisher_bound) in [
+            ("aarch64-apple-darwin", manifest, protocol, true),
+            (target, None, protocol, true),
+            (target, Some("0000000000000000000000000000000000000000000000000000000000000000"), protocol, true),
+            (target, manifest, None, true),
+            (target, manifest, Some("0000000000000000000000000000000000000000000000000000000000000000"), true),
+            (target, manifest, protocol, false),
+        ] { assert!(!GitHubPreflightInstalledProfile::binding_values_match(target, manifest, protocol, publisher_bound)); }
+        assert!(!GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-preflight-installed-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_preflight_protocol::publisher_bound();
+        assert_eq!(runtime.github_preflight_profile_available(), expected);
+        let profile = runtime.github_preflight_installed_profile();
+        assert_eq!(profile.is_ok(), expected);
+        let release_expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_release_protocol::publisher_bound();
+        assert_eq!(runtime.github_release_profile_available(), release_expected);
+        if let Ok(profile) = profile {
+            assert_eq!(profile.manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+            let selected = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(target).join(manifest.unwrap());
+            assert_eq!(selected.bootstrap, root.join("github_preflight_bootstrap.py"));
+            assert_eq!(selected.python, root.join("python/bin/python3"));
+            assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        } else {
+            // Refusal happens before inspection: no ledger or launch authority.
+            let mut slots = crate::installed_runtime::GitHubPreflightRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_preflight_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_release_installed_selection_requires_its_own_normal_publisher_binding() {
+        let target = PassiveInstalledProfile::TARGET;
+        let manifest = Some(PassiveInstalledProfile::MANIFEST);
+        let protocol = Some(PassiveInstalledProfile::PROTOCOL);
+        assert!(GitHubReleaseInstalledProfile::binding_values_match(target, manifest, protocol, true));
+        for (target, manifest, protocol, publisher_bound) in [
+            ("", manifest, protocol, true),
+            ("aarch64-apple-darwin", manifest, protocol, true),
+            (target, None, protocol, true),
+            (target, Some("0000000000000000000000000000000000000000000000000000000000000000"), protocol, true),
+            (target, manifest, None, true),
+            (target, manifest, Some("0000000000000000000000000000000000000000000000000000000000000000"), true),
+            (target, manifest, protocol, false),
+        ] { assert!(!GitHubReleaseInstalledProfile::binding_values_match(target, manifest, protocol, publisher_bound)); }
+        assert!(!GITHUB_RELEASE_NATIVE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED);
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-release-installed-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_release_protocol::publisher_bound();
+        assert_eq!(runtime.github_release_profile_available(), expected);
+        let profile = runtime.github_release_installed_profile();
+        assert_eq!(profile.is_ok(), expected);
+        if let Ok(profile) = profile {
+            let selected = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(target).join(manifest.unwrap());
+            assert_eq!(selected.bootstrap, root.join("github_release_bootstrap.py"));
+            assert_eq!(selected.python, root.join("python/bin/python3"));
+            assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Darwin", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        } else {
+            // No publisher/normal tuple means no inspection or release capability.
+            let mut slots = crate::installed_runtime::GitHubReleaseRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_release_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_installed_observation_keeps_normal_discovery_and_rejects_derivatives_in_normal_selection() {
+        for selected in [GitHubReadOnlyObservationProfile::Normal, GitHubReadOnlyObservationProfile::DialRealCa,
+            GitHubReadOnlyObservationProfile::DialSyntheticCa] {
+            let mut runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-observation-data-only"));
+            let normal = RuntimeConfig::packaged(PathBuf::from("/inert-normal-github-data-only"));
+            if !GitHubReadOnlyInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+                assert!(runtime.select_github_readonly_observation(selected).is_err());
+                assert!(!runtime.github_readonly_installed_profile_available());
+                continue;
+            }
+            assert!(runtime.select_github_readonly_observation(selected).is_ok());
+            assert!(runtime.select_github_readonly_observation(selected).is_err());
+            let profile = runtime.github_readonly_installed_profile().unwrap();
+            assert_eq!(profile.manifest_anchor().unwrap(), selected.manifest_sha256());
+            assert_eq!(profile.selection().unwrap().cwd, PathBuf::from("/var/lib/mobile-release-kit/versions")
+                .join(PassiveInstalledProfile::TARGET).join(selected.manifest_sha256()));
+            assert_eq!(normal.github_readonly_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+            assert_eq!(runtime.passive_installed_profile().unwrap().selection().unwrap().cwd,
+                normal.passive_installed_profile().unwrap().selection().unwrap().cwd);
+        }
+        for selected in [GitHubReadOnlyObservationProfile::DialRealCa, GitHubReadOnlyObservationProfile::DialSyntheticCa] {
+            assert!(!GitHubReadOnlyInstalledProfile::bindings_match(PassiveInstalledProfile::TARGET,
+                Some(selected.manifest_sha256()), Some(PassiveInstalledProfile::PROTOCOL)));
+        }
+    }
+    #[test]
+    fn github_profile_gate_refuses_before_inventory_or_development_selection() {
+        assert!(!GITHUB_TLS_PROFILE_QUALIFIED);
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-path-must-not-be-opened"));
+        let error = runtime.resolve_github_readonly(Instant::now()).unwrap_err();
+        assert_eq!(error.code, "runtime_unavailable");
+        assert_eq!(error.message, "The GitHub read-only runtime and TLS profile are not qualified.");
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[test]
+    fn installed_tools_and_offline_selectors_are_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-command-path-must-not-be-opened"));
+        assert!(!runtime.environment_diagnostics_installed_profile_available());
+        assert!(!runtime.offline_preflight_installed_profile_available());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut tools = crate::installed_runtime::EnvironmentDiagnosticsRuntimeSlots::new();
+            let mut offline = crate::installed_runtime::OfflinePreflightRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_environment_diagnostics_installed(&mut tools, Instant::now(), &stop).is_err());
+            assert!(runtime.resolve_offline_preflight_installed(&mut offline, Instant::now(), &stop).is_err());
+            assert!(tools.never_started() && !tools.settled() && tools.capability().is_err());
+            assert!(offline.never_started() && !offline.settled() && offline.capability().is_err());
+        }
+    }
+    #[test]
+    fn android_runtime_selection_is_compile_data_and_its_owner_claim_never_reopens() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-android-selection-data"));
+        let clone = runtime.clone();
+        assert!(runtime.claim_original_android_owner());
+        assert!(!clone.claim_original_android_owner() && !runtime.claim_original_android_owner());
+        drop(runtime);
+        assert!(!clone.clone().claim_original_android_owner());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let expected = cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) && macos_bindings() && !cfg!(feature = "windows-runtime-publisher");
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let expected = false;
+        // The claim does not manufacture absent/mismatched runtime DATA. The
+        // shared exact tuple's missing/different vectors are tested below.
+        assert_eq!(clone.android_build_installed_runtime_available(), expected);
+    }
+    #[test]
+    fn diagnostics_owner_claim_is_separate_shared_and_never_reopens() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-diagnostics-selection-data"));
+        let clone = runtime.clone();
+        assert!(runtime.claim_original_diagnostics_owner());
+        assert!(!clone.claim_original_diagnostics_owner() && !runtime.claim_original_diagnostics_owner());
+        assert!(clone.claim_original_android_owner()); // Separate domain, not another diagnostics grant.
+        drop(runtime);
+        assert!(!clone.clone().claim_original_diagnostics_owner());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let expected = false;
+        assert_eq!(clone.environment_diagnostics_installed_profile_available(), expected);
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn installed_tools_and_offline_profiles_are_fixed_selection_data_only() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-command-data-only"));
+        let offline_expected = cfg!(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        let tools_expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        let tools = runtime.environment_diagnostics_installed_profile(); let offline = runtime.offline_preflight_installed_profile();
+        assert_eq!(runtime.environment_diagnostics_installed_profile_available(), tools_expected);
+        assert_eq!(runtime.offline_preflight_installed_profile_available(), offline_expected);
+        assert_eq!((tools.is_ok(), offline.is_ok()), (tools_expected, offline_expected));
+        // No native inspection here, even for an exactly bound installed build.
+        let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        if let Ok(profile) = tools {
+            let data = profile.selection().unwrap();
+            assert_eq!(data.bootstrap, root.join("environment_bootstrap.py"));
+            assert_eq!(data.python, root.join("python/bin/python3")); assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+        }
+        if let Ok(profile) = offline {
+            let data = profile.selection().unwrap();
+            assert_eq!(data.bootstrap, root.join("offline_preflight_bootstrap.py"));
+            assert_eq!(data.python, root.join("python/bin/python3")); assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
+    #[test]
+    fn passive_installed_profile_refuses_an_inert_bundle_before_inspection() {
+        // A pathname is DATA only: no channel, task, descriptor or profile.
+        // The owner seam calls this exact gate before any inspection effect.
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-passive-path-must-not-be-opened"));
+        assert!(!runtime.project_selection_profile_available());
+        let error = runtime.passive_installed_profile().err().unwrap();
+        assert_eq!(error.code, "runtime_unavailable");
+        assert_eq!(error.message, "The passive installed-runtime release and custody profile are not qualified.");
+    }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "macos-installed-installer"), not(feature = "ubuntu-runtime-publisher")))))]
+    #[test]
+    fn installed_configuration_selector_is_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-config-path-must-not-be-opened"));
+        assert!(!runtime.configuration_edit_profile_available());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut slots = crate::installed_runtime::ConfigurationRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_configuration_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && !slots.settled()); // Selector refusal before ANY inspection.
+            assert!(slots.capability().is_err());
+        }
+    }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "macos-installed-installer"), not(feature = "ubuntu-runtime-publisher")))))]
+    #[test]
+    fn installed_workflow_selector_is_closed_outside_the_normal_installed_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-workflow-path-must-not-be-opened"));
+        assert!(!runtime.github_workflow_edit_profile_available());
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        {
+            let mut slots = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && !slots.settled() && slots.capability().is_err());
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            assert_eq!(slots.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled()); // Original EMPTY bookkeeping, not native execution.
+        }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn installed_macos_workflow_profile_contract_is_inert() { assert_installed_workflow_profile_contract(); }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(super) fn macos_workflow_selection_and_stopped_original_slots_are_inert() {
+        // These assertions use this build's actual sealed compile inputs, not
+        // a substitute executable profile. Run closed feature/binding builds
+        // separately; this DATA contract cannot qualify an installed runtime.
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-macos-workflow-not-opened"));
+        let selected = runtime.github_workflow_installed_profile();
+        let expected = crate::macos_build_profile::MacBuildTarget::matches_compiled(COMPILED_TARGET) && MANIFEST_ANCHOR.is_some_and(sha)
+            && PROTOCOL_ANCHOR == Some(crate::installed_runtime::PROTOCOL_SHA)
+            && cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")));
+        assert_eq!(macos_bindings(), expected);
+        assert_eq!(selected.is_ok(), expected);
+        assert_eq!(runtime.github_workflow_edit_profile_available(), expected);
+        let mut slots = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
+        assert!(slots.never_started() && !slots.settled() && slots.no_child_effect());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        let (_sender, stop) = tokio::sync::watch::channel(true);
+        if let Ok(profile) = selected {
+            let data = profile.selection().unwrap();
+            let root = crate::macos_install_paths::runtime_root();
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            // An unarmed original refuses before real-user/any native acquisition.
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect());
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
+        } else {
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started()); // Selector refusal precedes inspection.
+        }
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err() && !slots.settled());
+        assert_eq!(slots.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
+        assert!(slots.settled() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
+        let mut interrupted = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
+        interrupted.mark_interrupted();
+        assert!(!interrupted.never_started() && interrupted.no_child_effect());
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
+        assert!(!interrupted.settled());
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn workflow_candidate_bindings_data_contract() { workflow_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn workflow_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(GitHubWorkflowInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)), (target, None, Some(protocol)),
+            (target, Some(manifest), None), (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+        ] { assert!(!GitHubWorkflowInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_workflow_profile_contract_is_inert() { assert_installed_workflow_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_workflow_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-workflow-data-only"));
+        let profile = runtime.github_workflow_installed_profile();
+        assert_eq!(runtime.github_workflow_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), GitHubWorkflowInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            let mut slots = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            // Sticky STOP precedes uname/open: this is empty DATA bookkeeping,
+            // never an executed runtime, transferred ledger or native witness.
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))))]
+    #[test]
+    pub(super) fn installed_metadata_selector_is_closed_outside_the_normal_supported_shells() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-metadata-path-must-not-be-opened"));
+        assert!(!runtime.metadata_text_edit_profile_available());
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        {
+            let mut slots = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_metadata_text_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && !slots.settled() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn metadata_candidate_bindings_data_contract() { metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn version_candidate_bindings_data_contract() { version_candidate_bindings_are_exactly_the_current_payload(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn version_candidate_bindings_are_exactly_the_current_payload() {
+        let (target, manifest, protocol) = ("x86_64-unknown-linux-gnu",
+            "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
+            "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5");
+        assert_eq!(ReleaseVersionInstalledProfile::TARGET, target);
+        assert_eq!(ReleaseVersionInstalledProfile::SOURCE_BINDING, Some((manifest, protocol)));
+        assert!(ReleaseVersionInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            (target, None, None), (target, None, Some(protocol)), (target, Some(manifest), None),
+            (target, Some("e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"), Some(protocol)),
+            (target, Some("a2297f8c43ea5469bbe4c56f51ebd61fcb127872d5cc72bee8d3cc75a5f8b1d6"), Some(protocol)),
+            (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)),
+            ("x86_64-pc-windows-msvc", Some(manifest), Some(protocol)),
+            ("aarch64-apple-darwin", Some(manifest), Some(protocol)),
+        ] { assert!(!ReleaseVersionInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))))]
+    #[test]
+    pub(super) fn installed_version_selector_is_closed_outside_the_normal_supported_shells() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-path-must-not-be-opened"));
+        assert!(!runtime.release_version_edit_profile_available());
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        {
+            let mut slots = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            assert!(runtime.release_version_installed_profile().is_err());
+            assert!(runtime.resolve_release_version_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && !slots.settled() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_version_profile_contract_is_inert() { assert_installed_version_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_version_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-source-data-only"));
+        let profile = runtime.release_version_installed_profile();
+        assert_eq!(runtime.release_version_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), ReleaseVersionInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        let mut slots = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
+        let (_sender, stop) = tokio::sync::watch::channel(true);
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let (manifest, _) = ReleaseVersionInstalledProfile::SOURCE_BINDING.unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(ReleaseVersionInstalledProfile::TARGET).join(manifest);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            // Sticky STOP precedes uname/open: these are the original empty DATA
+            // slots, not a native witness, transferred ledger or child capability.
+            assert!(runtime.resolve_release_version_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled() && slots.capability().is_err());
+        } else {
+            // Missing/stale compiled anchors refuse before even empty-slot inspection.
+            assert!(runtime.resolve_release_version_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && !slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(MetadataTextInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)), (target, None, Some(protocol)),
+            (target, Some(manifest), None), (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+        ] { assert!(!MetadataTextInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_metadata_profile_contract_is_inert() { assert_installed_metadata_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_metadata_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-metadata-data-only"));
+        let profile = runtime.metadata_text_installed_profile();
+        assert_eq!(runtime.metadata_text_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), MetadataTextInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            let mut slots = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            // Sticky STOP precedes uname/open: this is empty DATA bookkeeping,
+            // never an executed runtime, transferred ledger or native witness.
+            assert!(runtime.resolve_metadata_text_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn configuration_candidate_bindings_data_contract() { configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(ConfigurationInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)), (target, None, Some(protocol)),
+            (target, Some(manifest), None), (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+        ] { assert!(!ConfigurationInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_configuration_profile_contract_is_inert() { assert_installed_configuration_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_configuration_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        // Even in the selected shell this test performs NO uname/open/close or
+        // child work: sticky STOP refuses before the first native checkpoint.
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-config-data-only"));
+        let profile = runtime.configuration_installed_profile();
+        assert_eq!(runtime.configuration_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), ConfigurationInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            let mut slots = crate::installed_runtime::ConfigurationRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            assert!(runtime.resolve_configuration_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled); // Empty; not a native close witness.
+            assert!(slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn passive_candidate_bindings_are_exact_data_not_digest_shape() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(PassiveInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let different = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)),
+            (target, None, Some(protocol)), (target, Some(manifest), None),
+            (target, Some(different.as_str()), Some(protocol)), (target, Some(manifest), Some(different.as_str())),
+        ] { assert!(!PassiveInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn packaged_shell_selects_only_fixed_passive_data_without_opening_other_methods() {
+        assert_packaged_shell_allowlist_contract();
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn passive_candidate_selects_only_fixed_data_and_never_opens_path_launch() {
+        // No native inspection or capability is performed/fabricated here.
+        assert_installed_session_selection_contract();
+        let candidate = RuntimeConfig::installed_passive_candidate_a();
+        assert!(matches!(candidate.passive_installed, PassiveInstalledSelection::CandidateA));
+        assert!(!candidate.project_selection_profile_available());
+        assert!(!candidate.configuration_edit_profile_available());
+        let packaged = RuntimeConfig::packaged(PathBuf::from("/inert-passive-candidate-path"));
+        assert!(matches!(packaged.passive_installed, PassiveInstalledSelection::Closed));
+        assert!(packaged.passive_installed_profile().is_err());
+        assert!(candidate.resolve(Instant::now()).is_err());
+        assert!(candidate.resolve_edit(Instant::now()).is_err());
+        let mut configuration = crate::installed_runtime::ConfigurationRuntimeSlots::new();
+        let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
+        let (_sender, stop) = tokio::sync::watch::channel(false);
+        assert!(candidate.resolve_configuration_installed(&mut configuration, Instant::now(), &stop).is_err());
+        let mut metadata = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+        assert!(!candidate.metadata_text_edit_profile_available());
+        assert!(candidate.resolve_metadata_text_installed(&mut metadata, Instant::now(), &stop).is_err());
+        assert!(metadata.never_started() && metadata.capability().is_err());
+        assert!(configuration.never_started()); // Passive candidate never acquires configuration authority.
+        assert!(candidate.resolve_passive_installed(crate::protocol::Method::AssessCredentials, &mut originals, Instant::now(), &stop).is_err());
+        assert!(originals.never_started()); // An unselected method cannot begin inspection.
+        let profile = candidate.passive_installed_profile();
+        assert_eq!(profile.is_ok(), PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.cwd, root);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("engine_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip"));
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+        }
+    }
+}
+
+// Windows version selection/inspection DATA. No owner, command, availability or
+// native-success flag is produced here. Pure helpers are testable on Linux too.
+include!("runtime_windows_version.rs");
+
+#[cfg(test)]
+#[test]
+fn persistence_selection_keeps_original_document_and_fixed_helper_pin_bounds() {
+    use std::sync::Arc;
+    let hash = "b".repeat(64);
+    assert!(persistence_helper_pins(Some(&hash), Some("1")));
+    assert!(persistence_helper_pins(Some(&hash), Some("33554432")));
+    for (digest, size) in [(None, Some("1")), (Some("invalid"), Some("1")), (Some(hash.as_str()), None),
+        (Some(hash.as_str()), Some("0")), (Some(hash.as_str()), Some("33554433")),
+        (Some(hash.as_str()), Some("-1")), (Some(hash.as_str()), Some("18446744073709551616"))] {
+        assert!(!persistence_helper_pins(digest, size));
+    }
+    let mut original = RuntimeConfig::packaged(PathBuf::new());
+    let mut second = original.clone();
+    let document = Arc::new(()); let replacement = Arc::new(());
+    assert!(!original.installed_persistence_available(&document));
+    original.claim_original_supervisor(); original.bind_original_session_document(&document);
+    second.claim_original_supervisor(); second.bind_original_session_document(&replacement);
+    assert!(!second.installed_persistence_available(&replacement));
+    assert!(!original.installed_persistence_available(&replacement));
+    let eligible = cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && INSTALLED_MAC_PERSISTENCE_QUALIFIED
+        && !cfg!(feature = "windows-runtime-publisher") && original.installed_session_available(&document)
+        && persistence_helper_pins(option_env!("MRK_MACOS_VAULT_HELPER_SHA256"), option_env!("MRK_MACOS_VAULT_HELPER_BYTES"));
+    assert_eq!(original.installed_persistence_available(&document), eligible);
+    drop(document); original.bind_original_session_document(&replacement);
+    assert!(!original.installed_persistence_available(&replacement));
+}

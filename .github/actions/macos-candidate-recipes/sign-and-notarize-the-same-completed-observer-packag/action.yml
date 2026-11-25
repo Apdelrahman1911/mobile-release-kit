@@ -1,0 +1,38 @@
+name: "Sign and notarize the same completed observer package before final P"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Sign and notarize the same completed observer package before final P"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # One fixed productbuild original (30s) embeds SOURCE recovery guidance.
+        # The same existing owner keeps its 1740s work / 1800s hard endpoints.
+        # A separate Installer identity signs the completed outer product, not its component.
+        # Its private keychain closes before the bounded P8 notary wait;
+        # Accepted, append-prefix POST, native validation and full audit all
+        # precede final444 publication, P, the producer signature and Installer.
+        # Only the helper's finite failure diagnostic goes to the job log;
+        # native signing/notary captures remain private inside its owner.
+        set +e
+        MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+        MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+        MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py finalize-package --target "$MRK_MACOS_TARGET" \
+          > "$MRK_MACOS_WORK/package-finalization.stdout"
+        finalization_status=$?
+        printf '%s\n' "$finalization_status" > "$MRK_MACOS_WORK/package-finalization.status"
+        finalization_status_saved=$?
+        unset MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+        set -e
+        if [[ "$finalization_status" != 0 ]]; then exit "$finalization_status"; fi
+        [[ "$finalization_status_saved" == 0 ]] || exit "$finalization_status_saved"
+        # The following same-owner package-install phase requires BOTH this
+        # actual original0/status and the retained closed receipt, not a flag.

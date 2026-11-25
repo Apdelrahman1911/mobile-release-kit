@@ -270,3 +270,70 @@ class IosUploadValidationTest < Minitest::Test
     assert_equal @value, validate(module_root: installed_modules, tooling_directory: installed_tooling)
   end
 end
+
+# Pure path/argv fixtures only. No UploadProcessFixture/native child is started;
+# these constructors are not a signed-runtime or native-finality attestation.
+class IosUploadOriginTest < Minitest::Test
+  def test_origin_paired_zip_is_fixed_to_loaded_adapter_python_and_tooling
+    Dir.mktmpdir("mrk-validator-origin-") do |directory|
+      root = File.join(File.realpath(directory), "runtime with spaces")
+      adapter = File.join(root, "store/tooling/fastlane")
+      python = File.join(root, "python/bin/python3")
+      archive = File.join(root, "core.zip")
+      FileUtils.mkdir_p(adapter); FileUtils.mkdir_p(File.dirname(python))
+      File.write(python, "inert interpreter DATA"); File.chmod(0o700, python)
+      File.write(archive, "inert archive DATA: actual ZIP bootstrap is tested separately")
+      arguments = { python: python, module_root: archive, tooling_directory: adapter, adapter_directory: adapter }
+      %w[ios android].each do |platform|
+        assert_equal archive, MobileReleaseKit::NativeUploadValidation.module_origin!(**arguments, platform: platform)
+        [{ python: RbConfig.ruby }, { module_root: File.join(root, "other.zip") },
+         { tooling_directory: File.dirname(adapter) }, { adapter_directory: File.realpath(File.expand_path("../../fastlane", __dir__)) },
+         { module_root: archive + "/../core.zip" }].each do |change|
+          assert_raises(MobileReleaseKit::ContractError) do
+            MobileReleaseKit::NativeUploadValidation.module_origin!(**arguments.merge(change), platform: platform)
+          end
+        end
+      end
+      File.rename(archive, archive + ".original"); File.symlink(archive + ".original", archive)
+      assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit::NativeUploadValidation.module_origin!(**arguments, platform: "ios") }
+      File.unlink(archive); File.write(archive, "inert archive DATA")
+      File.rename(python, python + ".original"); File.symlink(python + ".original", python)
+      assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit::NativeUploadValidation.module_origin!(**arguments, platform: "ios") }
+    end
+  end
+
+  def test_origin_directory_retains_source_mismatch_and_wheel_module_checks
+    source = File.realpath(File.expand_path("../../src", __dir__))
+    adapter = File.realpath(File.expand_path("../../fastlane", __dir__))
+    %w[ios android].each do |platform|
+      assert_equal source, MobileReleaseKit::NativeUploadValidation.module_origin!(python: RbConfig.ruby, module_root: source,
+        tooling_directory: adapter, adapter_directory: adapter, platform: platform)
+    end
+    Dir.mktmpdir("mrk-validator-wheel-") do |directory|
+      root = File.realpath(directory); modules = File.join(root, "lib/site-packages"); tooling = File.join(root, "share/mobile-release-kit/fastlane")
+      FileUtils.mkdir_p(File.join(modules, "mobile_release")); FileUtils.mkdir_p(tooling)
+      %w[ios android].each do |platform|
+        File.write(File.join(modules, "mobile_release/#{platform}_upload_validation.py"), "inert module DATA")
+        args = { python: RbConfig.ruby, module_root: modules, tooling_directory: tooling, adapter_directory: adapter, platform: platform }
+        assert_equal modules, MobileReleaseKit::NativeUploadValidation.module_origin!(**args)
+        assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit::NativeUploadValidation.module_origin!(**args.merge(tooling_directory: adapter)) }
+      end
+    end
+  end
+
+  def test_origin_ios_current_adapter_supplies_actual_directory_before_capture
+    calls = []
+    refusal = ->(**arguments) { calls << arguments; raise MobileReleaseKit::ContractError, "inert origin refusal" }
+    MobileReleaseKit::NativeUploadValidation.stub(:module_origin!, refusal) do
+      assert_raises(MobileReleaseKit::ContractError) do
+        MobileReleaseKit::IosUploadValidation.current!(python: RbConfig.ruby, module_root: "/inert/core.zip", app_root: "/inert/app",
+          config_path: "release/mobile-release.json", intent_path: "intent.json", ipa_path: "candidate.ipa", intent_sha256: "a" * 64,
+          environment: {}, tooling_directory: "/inert/runtime/store/tooling/fastlane")
+      end
+    end
+    assert_equal 1, calls.length
+    assert_equal "ios", calls[0].fetch(:platform)
+    assert_equal File.realpath(File.expand_path("../../fastlane", __dir__)), calls[0].fetch(:adapter_directory)
+    assert_equal "/inert/core.zip", calls[0].fetch(:module_root)
+  end
+end

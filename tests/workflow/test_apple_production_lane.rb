@@ -98,11 +98,16 @@ class AppleProductionLaneTest < Minitest::Test
     ENV["MOBILE_RELEASE_STORE_RECEIPT_PATH"] = "precondition.json"
     lane
     @precondition = read_document("precondition.json")
-    payload = {
+    # Keep the complete CI envelope; the scenario overrides below remain
+    # inert lane DATA, not a Python/native artifact qualification.
+    fixture_stage = { "candidate" => "candidate", "external-testing" => "external", "production-submit" => "production" }.fetch("production-submit")
+    envelope = JSON.parse(File.read(File.expand_path("../fixtures/intent-#{fixture_stage}-valid.json", __dir__)))
+    envelope.delete("integrity")
+    payload = envelope.merge({
       "schemaVersion" => 1, "documentType" => "store-operation-intent", "stage" => "production-submit", "platform" => "ios",
       "storePrecondition" => @precondition, "authorizedBy" => @authority.dup,
       "privateStateCommitments" => @precondition.fetch("snapshot").fetch("privateStateCommitments"),
-    }
+    })
     @intent_digest = Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(payload))
     payload["integrity"] = { "algorithm" => "sha256", "sha256" => @intent_digest }
     File.write(File.join(@root, "intent.json"), JSON.generate(payload))

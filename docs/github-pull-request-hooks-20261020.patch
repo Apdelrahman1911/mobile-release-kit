@@ -1,0 +1,1237 @@
+--- a/src/mobile_release/_github_connection_transport.py
++++ b/src/mobile_release/_github_connection_transport.py
+@@ -56,9 +56,13 @@
+     VERSION_ENROLLMENT = "version-enrollment"
+     REPOSITORY_CREATE = "repository-create"
+     ACTIVITY = "activity"
++    PULL_REQUEST = "pull-request"
+
+
+ class _ResponseRole(Enum):
++    PULL_REQUEST_OBJECT = "pull-request-object"
++    PULL_REQUEST_LIST = "pull-request-list"
++    PULL_REQUEST_WRITE = "pull-request-write"
+     ACTIVITY_OBJECT = "activity-object"
+     ACTIVITY_LIST = "activity-list"
+     REPOSITORY_CREATE_ACCOUNT = "repository-create-account"
+@@ -122,6 +126,10 @@
+     """Closed private roles, never caller-provided numeric limits."""
+     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
+         raise ValueError("Invalid fixed GitHub response role")
++    if role in {_ResponseRole.PULL_REQUEST_OBJECT, _ResponseRole.PULL_REQUEST_LIST, _ResponseRole.PULL_REQUEST_WRITE}:
++        if profile is not _ExchangeProfile.PULL_REQUEST:
++            raise ValueError("Fixed draft-PR role belongs to another action")
++        return 256 * 1024, 1024
+     if role in {_ResponseRole.ACTIVITY_OBJECT, _ResponseRole.ACTIVITY_LIST}:
+         if profile is not _ExchangeProfile.ACTIVITY:
+             raise ValueError("Fixed activity role belongs to another action")
+@@ -153,6 +161,10 @@
+
+ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
+     limits = _role_limits(profile, role)
++    if profile is _ExchangeProfile.PULL_REQUEST:
++        from ._github_pull_request_transport import validate_endpoint
++        validate_endpoint(role, method, path)
++        return limits
+     if profile is _ExchangeProfile.ACTIVITY:
+         from ._github_activity_transport import validate_endpoint
+         validate_endpoint(role, method, path)
+@@ -334,7 +346,7 @@
+         if type(started) not in (int, float):
+             raise ReadFailure("network-unavailable")
+         self.started = started
+-        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else READ_SECONDS)
++        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else READ_SECONDS)
+         self.monotonic = monotonic
+         self.wall = wall
+         self.body_bytes = 0
+@@ -342,16 +354,16 @@
+         self.profile = _profile
+         self.requests = 0
+         self.body_total_limit = (4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
+-                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else MAX_BODY_TOTAL)
++                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else MAX_BODY_TOTAL)
+         if not math.isfinite(started) or not math.isfinite(self.end):
+             raise ReadFailure("network-unavailable")
+
+     def claim_request(self) -> None:
+         # Other existing profiles retain their own original finite schedules.
+         # Allocation adds a second private bound, never a logical retry owner.
+-        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY}:
++        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST}:
+             self.remaining()
+-            if self.requests >= (8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else 10):
++            if self.requests >= (12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else 10):
+                 raise ReadFailure("response-limit")
+             self.requests += 1
+
+@@ -747,7 +759,8 @@
+             delays.append(delay)
+     delay = None if blocked else max(delays) if delays else 60 if recognized else None
+     base = _status_reason(head.status)
+-    if (head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
++    if (head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
++            or head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
+             or head.status == 404 and _role is _ResponseRole.REPOSITORY_CREATE_LOOKUP
+             or head.status == 201 and _role is _ResponseRole.PUBLICATION_CREATE
+             or head.status == 404 and _role is _ResponseRole.PUBLICATION_READ
+@@ -835,7 +848,7 @@
+             return _failed("response-invalid", control)
+         except ReadFailure as error:
+             return _failed(error.reason, control)
+-    if head.status != 200 and not (head.status == 201 and response.role in {_ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE}):
++    if head.status != 200 and not (head.status == 201 and response.role in {_ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE, _ResponseRole.PULL_REQUEST_WRITE}):
+         # Never read/parse/retain arbitrary error bodies, even JSON-looking ones.
+         if head.status == 403 and control["reason"] == "rate-limited":
+             return _failed("rate-limited", control)
+@@ -850,10 +863,16 @@
+                 break
+             chunks.append(block)
+         body = _decode_json(b"".join(chunks), limit=response.maximum, nodes=20_000, depth=24)
+-        expected = list if response.role in {_ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST} else dict
++        expected = list if response.role in {_ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST, _ResponseRole.PULL_REQUEST_LIST} else dict
+         maximum_rows = 30 if response.role is _ResponseRole.ACTIVITY_LIST else 2
+         if type(body) is not expected or expected is list and len(body) > maximum_rows:
+             raise ReadFailure("response-invalid")
++        if response.role is _ResponseRole.PULL_REQUEST_LIST and body == []:
++            _, present, valid = _single(head.headers, "link")
++            if present or not valid:
++                # An empty page with any continuation/ambiguous Link cannot
++                # become the draft-PR pre-send empty-window observation.
++                raise ReadFailure("response-limit")
+         return ReadResult({"status": head.status, "body": body, "failure": "none"}, control)
+     except _JsonLimit:
+         return _failed("response-limit", control)
+@@ -1078,13 +1097,13 @@
+             or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
+         raise ValueError("Invalid fixed GitHub transport input")
+     _role_limits(_profile, _ResponseRole.STANDARD)
+-    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} and api_version != "2026-03-10":
++    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} and api_version != "2026-03-10":
+         raise ValueError("Fixed Setup API version differs")
+     if _setup_budget is not None:
+-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY}
++        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST}
+                 or _setup_budget.profile is not _profile
+                 or _setup_budget.started != started
+-                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else READ_SECONDS)
++                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else READ_SECONDS)
+                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
+             raise ValueError("Invalid same-original Setup budget")
+         _setup_budget._secret_exchange_claimed = True
+@@ -1114,6 +1133,9 @@
+             _setup_body(_profile, _role, body, path=path)
+         elif _profile is _ExchangeProfile.VERSION_ALLOCATION:
+             _allocation_body(_profile, _role, body, path=path)
++        elif _profile is _ExchangeProfile.PULL_REQUEST:
++            from ._github_pull_request_transport import validate_body
++            validate_body(_role, body)
+         elif _profile is _ExchangeProfile.REPOSITORY_CREATE:
+             from ._github_repository_create_transport import validate_body
+             validate_body(_role, body)
+@@ -1130,7 +1152,7 @@
+                 or "#" in path or "\\" in path
+                 or method == "GET" and body is not None
+                 or method == "POST" and _profile is not _ExchangeProfile.SETUP
+-                and (type(body) is not bytes or not 1 <= len(body) <= (384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 2048))):
++                and (type(body) is not bytes or not 1 <= len(body) <= (384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 32 * 1024 if _profile is _ExchangeProfile.PULL_REQUEST else 2048))):
+             raise ValueError("Invalid fixed GitHub transport request")
+         budget.claim_request()  # Before any native/socket send, including a failed one.
+         original_response: list[Any] = [None]
+--- a/src/mobile_release/_desktop_github_setup_engine.py
++++ b/src/mobile_release/_desktop_github_setup_engine.py
+@@ -76,6 +76,11 @@
+         header = policy._frame(initial, policy.MAX_INITIAL_BYTES, nodes=256, depth=8)
+         if type(header) is dict and header.get("protocol") == "mrk-github-setup-publication/1":
+             from ._github_setup_publication_runtime import run_owned
++            end = started + 60.0
++            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
++            request = None
++        elif type(header) is dict and header.get("protocol") == "mrk-github-pull-request/1":
++            from ._desktop_github_pull_request import run_owned
+             end = started + 60.0
+             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+             request = None
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -60,6 +60,10 @@
+ #[path = "supervisor_repository_create.rs"]
+ mod repository_create;
+ pub(crate) use repository_create::{RepositoryCreateReceipt, RepositoryCreateTicket};
++use crate::github_pull_request_protocol as pull_request_protocol;
++#[path = "supervisor_github_pull_request.rs"]
++mod pull_request;
++pub(crate) use pull_request::{GitHubPullRequestReceipt, GitHubPullRequestTicket};
+ use crate::github_activity_protocol;
+ #[path = "supervisor_github_activity.rs"]
+ mod activity;
+@@ -247,6 +251,9 @@
+     repository_create_receipt: Option<Arc<Mutex<RepositoryCreateReceipt>>>,
+     repository_create_request: Option<repository_create_protocol::Request>,
+     repository_create_gate: Option<crate::asset_session::RepositoryCreateGoGate>,
++    pull_request_receipt: Option<Arc<Mutex<GitHubPullRequestReceipt>>>,
++    pull_request_request: Option<pull_request_protocol::Request>,
++    pull_request_gate: Option<crate::asset_session::GitHubPullRequestGoGate>,
+     github_activity_receipt: Option<Arc<Mutex<GitHubActivityReceipt>>>,
+     github_activity_request: Option<github_activity_protocol::Request>,
+     github_activity_gate: Option<crate::asset_session::GitHubActivityGoGate>,
+@@ -312,11 +319,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -328,6 +335,7 @@
+             Self::GitHubSetup => setup_protocol::RESPONSE_LIMIT,
+             Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
+             Self::RepositoryCreate => repository_create_protocol::RESPONSE_LIMIT,
++            Self::GitHubPullRequest => pull_request_protocol::RESPONSE_LIMIT,
+             Self::GitHubActivity => github_activity_protocol::RESPONSE_LIMIT,
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
+@@ -352,7 +360,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubActivity => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActivity => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -367,6 +375,7 @@
+     Setup { request: setup_protocol::Request, gate: crate::asset_session::GitHubSetupGoGate, material: Option<SetupNativeAdmission> },
+     Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
+     RepositoryCreate { request: repository_create_protocol::Request, gate: crate::asset_session::RepositoryCreateGoGate, end: Instant },
++    GitHubPullRequest { request: pull_request_protocol::Request, gate: crate::asset_session::GitHubPullRequestGoGate, end: Instant },
+     GitHubActivity { request: github_activity_protocol::Request, gate: crate::asset_session::GitHubActivityGoGate, end: Instant },
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
+@@ -378,13 +387,13 @@
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -458,6 +467,7 @@
+     Setup(Arc<Mutex<GitHubSetupReceipt>>),
+     Publication(Arc<Mutex<GitHubPublicationReceipt>>),
+     RepositoryCreate(Arc<Mutex<RepositoryCreateReceipt>>),
++    GitHubPullRequest(Arc<Mutex<GitHubPullRequestReceipt>>),
+     GitHubActivity(Arc<Mutex<GitHubActivityReceipt>>),
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
+@@ -949,6 +959,10 @@
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, RepositoryCreateReceipt::Pending) { *receipt = RepositoryCreateReceipt::RetainedUnknown; }
+         }
++        if let Some(receipt) = &self.pull_request_receipt {
++            let mut receipt = lock(receipt);
++            if matches!(&*receipt, GitHubPullRequestReceipt::Pending) { *receipt = GitHubPullRequestReceipt::RetainedUnknown; }
++        }
+         if let Some(receipt) = &self.github_activity_receipt {
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, GitHubActivityReceipt::Pending) { *receipt = GitHubActivityReceipt::RetainedUnknown; }
+@@ -1123,6 +1137,21 @@
+                     }
+                 }
+             }
++            Profile::GitHubPullRequest => {
++                drop(reply);
++                let outcome = result.and_then(|value| match value {
++                    ReadOutcome::GitHubPullRequest(value) => Ok(value), _ => Err(BridgeError::protocol()),
++                });
++                if let Some(receipt) = &self.pull_request_receipt {
++                    let mut receipt = lock(receipt);
++                    let was_unknown = was_unknown || matches!(&*receipt, GitHubPullRequestReceipt::RetainedUnknown);
++                    if !matches!(&*receipt, GitHubPullRequestReceipt::Settled { .. }) {
++                        *receipt = GitHubPullRequestReceipt::Settled {
++                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
++                        };
++                    }
++                }
++            }
+             Profile::GitHubActivity => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1363,13 +1392,14 @@
+         let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+-        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
++        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
+             AdmissionRequest::VersionEnrollment(admission)=>Some(admission.work_end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+         let endpoint = git_local_endpoints.map_or_else(|| version_allocation_source_endpoints.map_or_else(|| git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work), |original| original.work), |original| original.work);
+         let profile = request.profile();
+         let repository_create_receipt = match &completion { CompletionTarget::RepositoryCreate(value) => Some(value.clone()), _ => None };
++        let pull_request_receipt = match &completion { CompletionTarget::GitHubPullRequest(value) => Some(value.clone()), _ => None };
+         let github_activity_receipt = match &completion { CompletionTarget::GitHubActivity(value) => Some(value.clone()), _ => None };
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+@@ -1383,6 +1413,7 @@
+             (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
+             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
+             (Profile::RepositoryCreate,CompletionTarget::RepositoryCreate(_))=>(None,None,None,None,None,None,None),
++            (Profile::GitHubPullRequest,CompletionTarget::GitHubPullRequest(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubActivity,CompletionTarget::GitHubActivity(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) | (Profile::VersionEnrollment, CompletionTarget::VersionEnrollment) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+@@ -1396,13 +1427,17 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
+         let (version_enrollment,request)=match request {
+             AdmissionRequest::VersionEnrollment(admission)=>(Some(admission.invocation),None),
+             other=>(None,Some(other)),
+         };
+         let (repository_create,request)=match request {
+             Some(AdmissionRequest::RepositoryCreate{request,gate,..})=>(Some((request,gate)),None),
++            other=>(None,other),
++        };
++        let (pull_request,request)=match request {
++            Some(AdmissionRequest::GitHubPullRequest{request,gate,..})=>(Some((request,gate)),None),
+             other=>(None,other),
+         };
+         let (github_activity,request)=match request {
+@@ -1423,6 +1458,10 @@
+         if let Some(original)=&version_enrollment { bytes=crate::version_enrollment_protocol::encode_initial(&id,&original.request)?; }
+         let (repository_create_request,repository_create_gate)=match repository_create {
+             Some((request,gate))=>{bytes=repository_create_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
++            None=>(None,None),
++        };
++        let (pull_request_request,pull_request_gate)=match pull_request {
++            Some((request,gate))=>{bytes=pull_request_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
+             None=>(None,None),
+         };
+         let (github_activity_request,github_activity_gate)=match github_activity {
+@@ -1471,6 +1510,7 @@
+             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
+             publication_receipt,publication_request,publication_gate,
+             repository_create_receipt,repository_create_request,repository_create_gate,
++            pull_request_receipt,pull_request_request,pull_request_gate,
+             github_activity_receipt,github_activity_request,github_activity_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+             history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
+@@ -1808,7 +1848,7 @@
+ }
+
+ #[derive(Clone, Copy)]
+-enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubActivity, History, VersionEnrollment }
++enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubPullRequest, GitHubActivity, History, VersionEnrollment }
+
+ async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest: String,
+     kind: ReadyKind, profile: Profile, ready: oneshot::Sender<Result<(), BridgeError>>,
+@@ -1834,6 +1874,7 @@
+                         (Profile::GitHubSetup, ReadyKind::Setup) => setup_protocol::decode_ready(&header, &id, &digest),
+                         (Profile::GitHubPublication,ReadyKind::Publication)=>publication_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::RepositoryCreate,ReadyKind::RepositoryCreate)=>repository_create_protocol::decode_ready(&header,&id,&digest),
++                        (Profile::GitHubPullRequest,ReadyKind::GitHubPullRequest)=>pull_request_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubActivity,ReadyKind::GitHubActivity)=>github_activity_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::VersionEnrollment,ReadyKind::VersionEnrollment)=>crate::version_enrollment_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubHistory, ReadyKind::History) => history_protocol::decode_ready(&header, &id, &digest),
+@@ -1935,6 +1976,13 @@
+                 => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::RepositoryCreate)),
+             _=>Err(BridgeError::cleanup_unknown()),
+         },
++        Profile::GitHubPullRequest => match (&owner.pull_request_gate,&owner.pull_request_request) {
++            (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
++                && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
++                && owner.setup_request.is_none() && owner.publication_gate.is_none() && owner.publication_request.is_none()
++                => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubPullRequest)),
++            _=>Err(BridgeError::cleanup_unknown()),
++        },
+         Profile::GitHubActivity => match (&owner.github_activity_gate,&owner.github_activity_request) {
+             (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
+                 && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
+@@ -2038,14 +2086,14 @@
+ }
+ fn github_setup_selected(profile: Profile) -> bool {
+     cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && !cfg!(all(feature = "development-runtime", debug_assertions))
+-        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment)
++        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment)
+ }
+
+ fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
+     stopping: bool, disabled: bool, stop: bool) -> bool {
+     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
+         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+-        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
++        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
+         | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
+         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+ }
+@@ -2539,7 +2587,7 @@
+             let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+             let owners = lock(&inner.owners); let state = lock(&owner.state);
+             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+-                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
++                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+             }
+             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+@@ -2742,7 +2790,7 @@
+     // no environment/native call is added between claim and child creation.
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
+-    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
++    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubPullRequest=>Profile::GitHubPullRequest,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
+         _=>return Err(AcquisitionError::unsupported("Unexpected Setup runtime profile"))};
+     let owners = lock(&inner.owners); let state = lock(&owner.state);
+     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+@@ -3153,7 +3201,7 @@
+                 }
+                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
+             },
+-            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment => {
++            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if github_setup_selected(profile) {
+                     let native = inspection_setup.ok_or_else(|| {
+@@ -3275,7 +3323,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -3351,7 +3399,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3581,10 +3629,10 @@
+             Ok(value)=>(Some(value.candidate),Some(value.ack)),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
+         }
+     }else{(None,None)};
+-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
++    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
+         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
+     } else { (None, None) };
+-    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
++    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+     // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
+     let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+@@ -3672,6 +3720,7 @@
+                 Profile::GitHubSetup => owner.setup_request.as_ref().map(|_| ReadyKind::Setup),
+                 Profile::GitHubPublication=>owner.publication_request.as_ref().map(|_|ReadyKind::Publication),
+                 Profile::RepositoryCreate=>owner.repository_create_request.as_ref().map(|_|ReadyKind::RepositoryCreate),
++                Profile::GitHubPullRequest=>owner.pull_request_request.as_ref().map(|_|ReadyKind::GitHubPullRequest),
+                 Profile::GitHubActivity=>owner.github_activity_request.as_ref().map(|_|ReadyKind::GitHubActivity),
+                 Profile::VersionEnrollment=>owner.version_enrollment.as_ref().map(|_|ReadyKind::VersionEnrollment),
+                 Profile::GitHubHistory => owner.history_nomination.as_ref().map(|_| ReadyKind::History), _ => None,
+@@ -4046,6 +4095,9 @@
+         Some(output) if matches!(profile,Profile::RepositoryCreate)=>owner.repository_create_request.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|request|repository_create_protocol::decode_reply(&owner.id,&output.bytes,request))
+             .map(ReadOutcome::RepositoryCreate),
++        Some(output) if matches!(profile,Profile::GitHubPullRequest)=>owner.pull_request_request.as_ref().ok_or_else(BridgeError::protocol)
++            .and_then(|request|pull_request_protocol::decode_reply(&owner.id,&output.bytes,request))
++            .map(ReadOutcome::GitHubPullRequest),
+         Some(output) if matches!(profile,Profile::GitHubActivity)=>owner.github_activity_request.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|request|github_activity_protocol::decode_reply(&owner.id,&output.bytes,request))
+             .map(ReadOutcome::GitHubActivity),
+@@ -6332,6 +6384,7 @@
+             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
+             publication_receipt:None,publication_request:None,publication_gate:None,
+             repository_create_receipt:None,repository_create_request:None,repository_create_gate:None,
++            pull_request_receipt:None,pull_request_request:None,pull_request_gate:None,
+             github_activity_receipt:None,github_activity_request:None,github_activity_gate:None,
+             history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_enrollment:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -17,6 +17,8 @@
+ pub(crate) mod repository_create;
+ #[path = "github_activity_session.rs"]
+ pub(crate) mod activity;
++#[path = "github_pull_request_session.rs"]
++pub(crate) mod pull_request;
+ #[path = "github_version_enrollment_session.rs"]
+ pub(crate) mod enrollment;
+ #[path = "github_auth_provider.rs"]
+@@ -540,6 +542,7 @@
+     publication: publication::State,
+     repository_create: repository_create::State,
+     activity: activity::State,
++    pull_request: pull_request::State,
+     enrollment: Option<enrollment::Hold>,
+     history: crate::github_history_session::State,
+ }
+@@ -547,7 +550,7 @@
+     pub(crate) fn new() -> Self {
+         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
+             cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
+-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(), enrollment:None, history: crate::github_history_session::State::new() }
++            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(), enrollment:None, history: crate::github_history_session::State::new() }
+     }
+     pub(crate) fn snapshot(&self) -> Status { self.status.clone() }
+     // Original idle-session generation, not a public status revision. Ordinary
+@@ -579,9 +582,9 @@
+         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
+     }
+     pub(crate) fn material_settled(&self) -> bool {
+-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) && self.enrollment.is_none()
+-    }
+-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() }
++        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none()
++    }
++    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() }
+     fn fact_retirement(&mut self, reason: Reason) {
+         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
+     }
+@@ -593,7 +596,7 @@
+         }
+     }
+     fn room(&mut self) -> Result<(), BridgeError> {
+-        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
++        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
+         if self.unknown { return Err(refused(Reason::CleanupUnknown)); } Ok(())
+     }
+     pub(crate) fn exhaust(&mut self) {
+@@ -612,6 +615,7 @@
+         self.publication.retired(Reason::CleanupUnknown);
+         self.repository_create.retired(Reason::CleanupUnknown);
+         self.activity.retired(Reason::CleanupUnknown);
++        self.pull_request.retired(Reason::CleanupUnknown);
+         self.unknown_operation();
+         self.retire_inner(Reason::CleanupUnknown, false);
+         if let Some(session) = &mut self.status.session {
+@@ -640,6 +644,7 @@
+         self.publication.retired(reason);
+         self.repository_create.retired(reason);
+         self.activity.retired(reason);
++        self.pull_request.retired(reason);
+         if let Some(hold)=&self.enrollment { hold.stop(reason==Reason::CleanupUnknown); }
+         let history_before=self.history.snapshot();
+         if reason==Reason::CleanupUnknown{self.history.unknown();}else{self.history.stop();}
+@@ -660,11 +665,11 @@
+         let reason = private.retirement.unwrap_or(reason);
+         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
+         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
+-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) && self.enrollment.is_none() { self.complete_retirement(); }
++        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() { self.complete_retirement(); }
+     }
+     fn complete_retirement(&mut self) {
+         let Some(private) = &mut self.private else { return; };
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() { return; }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return; }
+         private.token = None;
+         if self.unknown {
+             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
+@@ -860,11 +865,13 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.pull_request.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent();
+         self.setup.view.operation = None; self.setup.view.session_id = None; self.setup.view.observed = None;
+         self.publication.reset();
+         self.repository_create.reset();
+         self.activity.reset();
++        self.pull_request.reset();
+         self.setup.finish(setup_before);
+         let before = self.status.clone();
+         self.status.session = Some(session); self.status.operation = Some(operation);
+@@ -875,7 +882,7 @@
+         self.room()?;
+         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
+         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() { return Err(refused(Reason::Busy)); }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(refused(Reason::Busy)); }
+         if let Some(reason) = private.retirement { return Err(refused(reason)); }
+         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
+         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
+@@ -890,6 +897,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.pull_request.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         operation.id.push_str(ticket.operation_id());
+         // There is no await or callback between the recheck and storing the
+@@ -914,7 +922,7 @@
+     pub(crate) fn preflight_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_preflight_protocol::Status {
+         use crate::{github_preflight_protocol::Reason as R, github_preflight_session::connection_reason};
+         let before = self.preflight.snapshot(); self.preflight.expire_consent(now);
+-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !crate::github_preflight_protocol::publisher_bound() { R::PublisherUnconfigured }
+             else if !qualified { R::Unqualified }
+@@ -972,6 +980,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.pull_request.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root });
+         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
+@@ -1038,8 +1047,8 @@
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1153,7 +1162,7 @@
+     pub(crate) fn release_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_release_protocol::Status {
+         use crate::{github_release_protocol::Reason as R, github_release_session::connection_reason};
+         let before = self.release.snapshot(); self.release.expire_consent(now);
+-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !crate::github_release_protocol::publisher_bound() { R::PublisherUnconfigured }
+             else if !qualified { R::Unqualified }
+@@ -1216,6 +1225,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.pull_request.context_changed();
+         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         self.release.start(s::Active { ticket, request, session_id, project_id, generation, root });
+@@ -1283,8 +1293,8 @@
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1398,7 +1408,7 @@
+     pub(crate) fn setup_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_setup_protocol::Status {
+         use crate::{github_setup_protocol::Reason as R, github_setup_session::connection_reason};
+         let before = self.setup.snapshot(); self.setup.expire_consent(now); self.setup.observe_go();
+-        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !qualified { R::Unqualified }
+             else if self.native_work_pending() { R::Busy }
+@@ -1420,10 +1430,11 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.pull_request.context_changed();
+     }
+     pub(crate) fn setup_ensure_idle(&self) -> Result<(), BridgeError> {
+-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
+-        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
++        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
+         Ok(())
+     }
+     pub(crate) fn setup_secret_work_pending(&self)->bool{
+@@ -1520,6 +1531,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.pull_request.context_changed();
+         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
+         self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end }, setup_before);
+@@ -1624,8 +1636,8 @@
+         let active = self.setup.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request
+             && v.generation == generation && &v.root == root && edit.matches(&v.edit_stamp))
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
+         if active.consent_end.is_some_and(|end| now >= end) { return Err(s::refused(p::Reason::ConsentExpired)); }
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+@@ -1843,6 +1855,7 @@
+         let other=self.preflight.snapshot();self.preflight.revoke_consent();self.preflight.finish(other);
+         let other=self.release.snapshot();self.release.revoke_consent();self.release.finish(other);
+         let other=self.setup.snapshot();self.setup.revoke_consent();self.setup.finish(other);
++        self.pull_request.context_changed();
+         self.history.start(s::Active{ticket,nomination},before);
+         let before=self.status.clone();self.capability(now,Reason::None);self.finish(before);Ok(self.history.snapshot())
+     }
+@@ -1959,7 +1972,7 @@
+             .checked_add(self.release.retained_heap_bytes_if_quiescent()?.checked_add(self.setup.retained_heap_bytes_if_quiescent()?)?)?
+             .checked_add(self.history.retained_heap_bytes_if_quiescent()?)?
+             .checked_add(self.publication.heap()?)?
+-            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?;
++            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?;
+         if let Some(private) = &self.private {
+             if private.ticket.is_some() || private.gh_hold.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
+             // Borrow the private original. Never clone its token or print bytes.
+--- a/desktop/src-tauri/src/github_publication_session.rs
++++ b/desktop/src-tauri/src/github_publication_session.rs
+@@ -411,6 +411,7 @@
+         let old = self.setup.snapshot();
+         self.setup.revoke_consent();
+         self.setup.finish(old);
++        self.pull_request.context_changed();
+         self.publication.revoke_consent();
+         self.publication.view.pending.clear();
+         self.publication.view.pull = None;
+@@ -662,6 +663,7 @@
+             return Err(refused(p::Reason::InvalidInput));
+         }
+         self.publication.context_changed();
++        self.pull_request.context_changed();
+         Ok(self.publication.view.clone())
+     }
+     pub(crate) fn publication_discard(
+@@ -714,7 +716,7 @@
+         if self.preflight.native_work_pending()
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+-            || (self.history.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
++            || (self.history.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+         {
+             return Err(refused(p::Reason::Busy));
+         }
+--- a/desktop/src-tauri/src/github_repository_create_session.rs
++++ b/desktop/src-tauri/src/github_repository_create_session.rs
+@@ -409,6 +409,7 @@
+         self.setup.revoke_consent();
+         self.setup.finish(b);
+         self.publication.context_changed();
++        self.pull_request.context_changed();
+         self.repository_create.revoke_consent();
+         // Pending records are retained for explanation across a readback. They
+         // never substitute for the private prepared consent or authorize POST.
+@@ -670,6 +671,7 @@
+             return Err(refused(p::Reason::InvalidInput));
+         }
+         self.repository_create.context_changed();
++        self.pull_request.context_changed();
+         Ok(self.repository_create.view.clone())
+     }
+     pub(crate) fn repository_create_discard(
+@@ -724,7 +726,7 @@
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+             || self.publication.native_work_pending()
+-            || self.activity.native_work_pending()
++            || self.pull_request.native_work_pending() || self.activity.native_work_pending()
+             || self.enrollment.is_some()
+         {
+             return Err(refused(p::Reason::Busy));
+--- a/desktop/src-tauri/src/github_activity_session.rs
++++ b/desktop/src-tauri/src/github_activity_session.rs
+@@ -334,6 +334,7 @@
+         self.setup.finish(b0);
+         self.publication.context_changed();
+         self.repository_create.context_changed();
++        self.pull_request.context_changed();
+         self.activity.view.result = None;
+         self.activity.view.operation = Some(p::Operation {
+             id: ticket.operation_id().into(),
+@@ -419,7 +420,7 @@
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+             || self.publication.native_work_pending()
+-            || self.repository_create.native_work_pending()
++            || self.pull_request.native_work_pending() || self.repository_create.native_work_pending()
+             || self.enrollment.is_some()
+         {
+             return Err(refused(p::Reason::Busy));
+--- a/desktop/src-tauri/src/github_version_enrollment_session.rs
++++ b/desktop/src-tauri/src/github_version_enrollment_session.rs
+@@ -145,6 +145,7 @@
+         self.setup.revoke_consent();
+         self.setup.finish(before);
+         self.publication.revoke_consent();self.repository_create.context_changed();
++        self.pull_request.context_changed();
+         Ok(pins)
+     }
+     pub(crate) fn version_enrollment_current(
+@@ -162,7 +163,7 @@
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+-            || (self.publication.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
++            || (self.publication.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+         {
+             return Err(p::refused(p::Reason::TargetChanged));
+         }
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -138,6 +138,9 @@
+ #[path = "asset_session_github_activity.rs"]
+ mod activity;
+ pub(crate) use activity::GitHubActivityGoGate;
++#[path = "asset_session_github_pull_request.rs"]
++mod pull_request;
++pub(crate) use pull_request::GitHubPullRequestGoGate;
+ pub(crate) use github_variable::GitHubVariableMaterial;
+
+ #[path = "asset_session_android_signing.rs"]
+@@ -3983,6 +3986,7 @@
+         self.github_publication_observe_locked(state, now, gate);
+         self.repository_create_observe_locked(state, now, gate);
+         self.github_activity_observe_locked(state, now, gate);
++        self.pull_request_observe_locked(state, now, gate);
+         self.github_history_observe_locked(state, now, gate);
+     }
+     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -298,6 +298,7 @@
+ mod github_publication_protocol;
+ mod github_repository_create_protocol;
+ mod github_activity_protocol;
++mod github_pull_request_protocol;
+ mod github_setup_session;
+ mod github_history_protocol;
+ mod github_history_session;
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2281,6 +2281,48 @@
+ async fn github_repository_create_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+     repository_create_command("github_repository_create_cancel", &webview, &request, &state)
++}
++
++fn pull_request_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
++    let value = crate::github_pull_request_protocol::raw_input(name, bytes)?;
++    state.document.pull_request_command(name, &value)
++}
++#[tauri::command]
++async fn github_pull_request_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_status", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_pull_request_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_prepare", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_pull_request_create(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_create", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_pull_request_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_pending", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_pull_request_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_reconcile", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_pull_request_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_discard", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_pull_request_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
++    pull_request_command("github_pull_request_cancel", &webview, &request, &state)
+ }
+
+ fn github_activity_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+@@ -2889,6 +2931,7 @@
+         let mut github_setup_revision = None;
+         let mut github_publication_revision = None;
+         let mut repository_create_revision = None;
++        let mut pull_request_revision = None;
+         let mut github_activity_revision = None;
+         let mut github_history_revision = None;
+         let mut preflight_revision = None;
+@@ -3032,6 +3075,11 @@
+             if repository_create_revision!=Some(status.revision){
+                 repository_create_revision=Some(status.revision);
+                 let _=app.emit_to(MAIN_WINDOW,crate::github_repository_create_protocol::EVENT,&status);
++            }
++            let status=document.pull_request_status();
++            if pull_request_revision!=Some(status.revision){
++                pull_request_revision=Some(status.revision);
++                let _=app.emit_to(MAIN_WINDOW,crate::github_pull_request_protocol::EVENT,&status);
+             }
+             let status=document.github_activity_status();
+             if github_activity_revision!=Some(status.revision){
+@@ -4851,6 +4899,7 @@
+             github_release_reconcile, github_release_pending, github_release_cancel,
+             github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
+             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
++            github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
+             github_activity_status, github_activity_read, github_activity_cancel,
+             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
+             github_history_status, github_history_start, github_history_cancel,
+--- a/desktop/src-tauri/src/passive_management_tests.rs
++++ b/desktop/src-tauri/src/passive_management_tests.rs
+@@ -27,6 +27,7 @@
+         setup_receipt: None, setup_request: None, setup_gate: None,
+         publication_receipt: None, publication_request: None, publication_gate: None,
+         repository_create_receipt: None, repository_create_request: None, repository_create_gate: None,
++        pull_request_receipt: None, pull_request_request: None, pull_request_gate: None,
+         github_activity_receipt: None, github_activity_request: None, github_activity_gate: None,
+         setup_material: None, setup_first_bound: None, secret_sealed: Mutex::new(None),
+         history_receipt: None, history_nomination: None, history_gate: None, history_endpoints: None, gh_auth: None, gh_auth_endpoints: None,
+@@ -73,7 +74,7 @@
+     let outcome = match rig.owner.profile {
+         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
+         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
+-        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
++        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
+     };
+     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
+         driver.await.unwrap();
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -73,6 +73,7 @@
+ #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
+ #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
+ #[path = "../src/github_activity_protocol.rs"] mod github_activity_protocol;
++#[path = "../src/github_pull_request_protocol.rs"] mod github_pull_request_protocol;
+ #[path = "../src/error.rs"] mod error;
+ #[path = "../src/protocol.rs"] mod protocol;
+ #[path = "../src/environment.rs"] mod environment;
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -336,6 +336,7 @@
+             "github_release_reconcile", "github_release_pending", "github_release_cancel",
+             "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
+             "github_activity_status", "github_activity_read", "github_activity_cancel",
++            "github_pull_request_status", "github_pull_request_prepare", "github_pull_request_create", "github_pull_request_pending", "github_pull_request_reconcile", "github_pull_request_discard", "github_pull_request_cancel",
+             "github_repository_create_status", "github_repository_create_prepare", "github_repository_create_create", "github_repository_create_pending", "github_repository_create_reconcile", "github_repository_create_discard", "github_repository_create_cancel",
+             "github_setup_publication_status", "github_setup_publication_prepare", "github_setup_publication_publish", "github_setup_publication_pending", "github_setup_publication_reconcile", "github_setup_publication_discard", "github_setup_publication_cancel",
+             "github_history_status", "github_history_start", "github_history_cancel",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -71,6 +71,13 @@
+     "allow-github-activity-status",
+     "allow-github-activity-read",
+     "allow-github-activity-cancel",
++    "allow-github-pull-request-status",
++    "allow-github-pull-request-prepare",
++    "allow-github-pull-request-create",
++    "allow-github-pull-request-pending",
++    "allow-github-pull-request-reconcile",
++    "allow-github-pull-request-discard",
++    "allow-github-pull-request-cancel",
+     "allow-github-repository-create-status", "allow-github-repository-create-prepare", "allow-github-repository-create-create", "allow-github-repository-create-pending", "allow-github-repository-create-reconcile", "allow-github-repository-create-discard", "allow-github-repository-create-cancel",
+     "allow-github-setup-publication-status", "allow-github-setup-publication-prepare", "allow-github-setup-publication-publish", "allow-github-setup-publication-pending", "allow-github-setup-publication-reconcile", "allow-github-setup-publication-discard", "allow-github-setup-publication-cancel",
+     "allow-github-history-status", "allow-github-history-start", "allow-github-history-cancel",
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -15,6 +15,8 @@
+ import { GitHubRepositoryCreateController } from './githubRepositoryCreateController.ts';
+ import { GitHubActivityController } from './githubActivityController.ts';
+ import { GitHubActivity } from './components/GitHubActivity.tsx';
++import { GitHubPullRequestController } from './githubPullRequestController.ts';
++import { GitHubPullRequest } from './components/GitHubPullRequest.tsx';
+ import { GitHubRepositoryCreate } from './components/GitHubRepositoryCreate.tsx';
+ import { ArtifactInspectionController, artifactInspectionOwnerReason } from './artifactInspection.ts';
+ import { artifactInspectionError } from './artifactInspectionProtocol.ts';
+@@ -231,6 +233,9 @@
+   const activityRef = useRef<GitHubActivityController | null>(null);
+   const activityAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+   const activityBusy = useCallback(() => activityRef.current?.ownerReason() ?? null, []);
++  const pullRequestRef = useRef<GitHubPullRequestController | null>(null);
++  const pullRequestAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
++  const pullRequestBusy = useCallback(() => pullRequestRef.current?.ownerReason() ?? null, []);
+   // One read coordinator owns the original promises across all pages. Local
+   // commit drafts belong to immutable native-service/project ports, not rows.
+   const gitLocalRef = useRef<GitLocalController | null>(null);
+@@ -271,6 +276,7 @@
+     versionEnrollmentRef.current?.beforeContextIntent();
+     repositoryCreateRef.current?.beforeWorkspaceAction();
+     activityRef.current?.beforeWorkspaceAction();
++    pullRequestRef.current?.beforeWorkspaceAction();
+     retireGitRead();
+     identityRef.current?.actions?.beforeContextIntent();
+     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
+@@ -326,17 +332,18 @@
+   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
+   // Existing reciprocal admission callbacks also retain the original path
+   // picker, even after its display eligibility was retired by a local edit.
+-  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
++  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+     (excludeHistory ? null : historyBusy()) ??
+     (excludeRepositoryCreate ? null : repositoryCreateBusy()) ??
+     (excludeActivity ? null : activityBusy()) ??
++    (excludePullRequest ? null : pullRequestBusy()) ??
+     (!excludePublication && githubPublicationControllerRef.current ? githubPublicationOwnerReason(githubPublicationControllerRef.current.getSnapshot()) : null) ??
+     (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
+     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
+     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
+     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
+     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
+-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy]);
++    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy]);
+   // Tools excludes only itself. Existing peers, passive observation and every
+   // ordinary mutation admission include the original tool operation below.
+   const savedOwnersBusy = useCallback((...args: Parameters<typeof savedOwnersWithoutToolsBusy>) =>
+@@ -359,6 +366,7 @@
+     versionEnrollmentRef.current?.syncContext();
+     repositoryCreateRef.current?.syncContext();
+     activityRef.current?.syncContext();
++    pullRequestRef.current?.syncContext();
+   }, [connectionDocumentId]);
+   const advanceConnectionContext = () => {
+     if (connectionProjectGeneration.current === 0xffff_ffff) connectionGenerationLost.current = true;
+@@ -437,7 +445,7 @@
+       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
+     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
+-    recoveryUnavailable: () => activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
++    recoveryUnavailable: () => pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
+     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
+     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
+@@ -508,6 +516,10 @@
+     githubConnection.getSnapshot, () => activityAdmission.current()));
+   activityRef.current = githubActivity;
+   const activityState = useSyncExternalStore(githubActivity.subscribe, githubActivity.getSnapshot, githubActivity.getSnapshot);
++  const [githubPullRequest] = useState(() => new GitHubPullRequestController(
++    githubConnection.getSnapshot, () => pullRequestAdmission.current()));
++  pullRequestRef.current = githubPullRequest;
++  const pullRequestState = useSyncExternalStore(githubPullRequest.subscribe, githubPullRequest.getSnapshot, githubPullRequest.getSnapshot);
+   const [versionEnrollment] = useState(() => new VersionEnrollmentController({ current: () => {
+     const service = pathService.current;
+     return { port: service.api?.mode === 'native' ? service.api.versionEnrollment ?? null : null,
+@@ -726,6 +738,19 @@
+       connection.context?.projectId === selected && current.account.state === 'observed' &&
+       current.repository.state === 'observed' ? null : 'Connect the intended GitHub account and repository first.';
+   };
++  // Draft PR creation has its own exact-text consent on the same connection.
++  // It excludes only itself, not reads, other reviews or uncertain originals.
++  pullRequestAdmission.current = () => {
++    const blocked = savedCommandBusy(false, false, false, false, false, false, false, false, false, false, true) ??
++      savedOwnersPrerequisiteReason(false, false, undefined, false, true);
++    if (blocked) return blocked;
++    if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
++      return 'Finish the prepared GitHub review before reviewing a draft pull request.';
++    const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
++    return selected && current?.session?.projectId === selected && connection.context?.projectId === selected &&
++      current.account.state === 'observed' && current.repository.state === 'observed'
++      ? null : 'Connect the intended existing GitHub repository and account first.';
++  };
+   // Identity excludes ONLY itself; all original passive/private/build owners
+   // and retained GitHub reviews still block a new source edit.
+   identityAdmission.current = () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+@@ -741,7 +766,7 @@
+     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+       ? 'Finish the prepared GitHub review before connecting another account.' : null);
+   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
+-    activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
++    pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+   const [artifactInspection] = useState(() => new ArtifactInspectionController({
+     selectedProject: () => {
+       const current=workspaceRef.current;
+@@ -934,7 +959,7 @@
+     const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
+     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
+     const project = workspaceRef.current.selectedId;
+-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
++    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
+     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
+     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
+     // Bound normal+revoke slots; revoke remains available during first Allow.
+@@ -959,7 +984,7 @@
+       if (book[slot] === work) book[slot] = null;
+       setAgentRequestPending(book.normal !== null || book.revoke !== null);
+     }
+-  }, [activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
++  }, [pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
+   identityInvalidation.current = (projectId) => {
+     snapshotIntentBatch(projectId);
+     dispatch({ type: 'project-identity-intent', projectId });
+@@ -1139,6 +1164,8 @@
+   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+
+   const bootstrap = useCallback(async () => {
++    const originalPullRequest = pullRequestBusy();
++    if (originalPullRequest) { setBootError({ code: 'github_pull_request_busy', message: originalPullRequest, retryable: false }); return; }
+     const originalActivity = activityBusy();
+     if (originalActivity) { setBootError({ code: 'github_activity_busy', message: originalActivity, retryable: false }); return; }
+     const originalRepository = repositoryCreateBusy();
+@@ -1190,7 +1217,7 @@
+     connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
+     githubGhEntry.attach(null, null); // Refuses replacement if an original read intervened.
+     void githubConnection.attach(null);
+-    void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null);
++    void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null);
+     void githubPreflight.connect(null);
+     void githubRelease.connect(null);
+     void githubHistory.connect(null);
+@@ -1237,6 +1264,7 @@
+       void githubRemoteSetup.connect(connection); void githubPublication.connect(connection);
+       repositoryCreate.connect(connection.githubRepositoryCreate ?? null);
+       githubActivity.connect(connection.githubActivity ?? null);
++      githubPullRequest.connect(connection.githubPullRequest ?? null);
+       void githubPreflight.connect(connection);
+       void githubRelease.connect(connection);
+       void githubHistory.connect(connection);
+@@ -1285,14 +1313,14 @@
+         githubGhEntry.beforeContextIntent();
+         connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
+         githubGhEntry.attach(null, null);
+-        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
++        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
+         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
+       }
+     } finally {
+       passivePending.current -= 1; setPassivePending(passivePending.current);
+       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
+     }
+-  }, [githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
++  }, [githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+
+   // Before bootstrap: retire consent on the actual saved/key projection, and
+   // keep the view responsive to peer-owner changes without renewing an intent.
+@@ -1330,6 +1358,7 @@
+   }, [githubConnection, versionEnrollment]);
+   useEffect(() => githubConnection.subscribe(repositoryCreate.syncContext), [githubConnection, repositoryCreate]);
+   useEffect(() => githubConnection.subscribe(githubActivity.syncContext), [githubConnection, githubActivity]);
++  useEffect(() => githubConnection.subscribe(githubPullRequest.syncContext), [githubConnection, githubPullRequest]);
+   useEffect(() => githubConnection.subscribe(githubPublication.syncContext), [githubConnection, githubPublication]);
+   useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
+   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
+@@ -1406,6 +1435,7 @@
+   useEffect(() => () => githubPublication.dispose(), [githubPublication]);
+   useEffect(() => () => repositoryCreate.dispose(), [repositoryCreate]);
+   useEffect(() => () => githubActivity.dispose(), [githubActivity]);
++  useEffect(() => () => githubPullRequest.dispose(), [githubPullRequest]);
+   useEffect(() => () => githubRemoteSetup.dispose(), [githubRemoteSetup]);
+   useEffect(() => () => githubPreflight.dispose(), [githubPreflight]);
+   useEffect(() => () => githubRelease.dispose(), [githubRelease]);
+@@ -1859,6 +1889,7 @@
+             </div></div>}
+         {page !== 'github' && <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubActivity controller={githubActivity} state={activityState} compact onShow={() => navigate('github')} />}
++        {page !== 'github' && <GitHubPullRequest controller={githubPullRequest} state={pullRequestState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <VersionEnrollmentPanel controller={versionEnrollment} compact />}
+         {page !== 'github' && <GitHubPublication state={githubPublicationState} controller={githubPublication} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} compact onShow={() => navigate('github')} onHelp={setHelp} />}
+@@ -1962,6 +1993,11 @@
+           activityView={<GitHubActivity controller={githubActivity} state={activityState}
+             branchSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id
+               ? gitReadState.observation?.observation.branch ?? null : null} />}
++          pullRequestView={<GitHubPullRequest controller={githubPullRequest} state={pullRequestState}
++            repository={connectionState.context?.repository ?? null}
++            baseSuggestion={connectionState.status?.repository.state === 'observed' ? connectionState.status.repository.value?.defaultBranch ?? null : null}
++            headSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id
++              ? gitReadState.observation?.observation.branch ?? null : null} />}
+           remoteTasks={[
+             { id: 'publication', title: 'Publish setup as a draft pull request',
+               description: 'Review the five supported setup files before publishing them. This does not upload your application source.',
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -432,6 +432,7 @@
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+   readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;
++  readonly githubPullRequest?: import('./githubPullRequestProtocol.ts').PullRequestPort | null;
+   readonly gitLocal?: import('./gitLocalProtocol.ts').GitLocalApi | null;
+   // Fixed original native owner only; no preview or generic transport fallback.
+   readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -92,12 +92,13 @@
+ import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+ import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+ import { createGitHubActivityPort } from './githubActivityProtocol.ts';
++import { createGitHubPullRequestPort } from './githubPullRequestProtocol.ts';
+ import { createGitLocalApi } from './gitLocalProtocol.ts';
+ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -411,6 +412,7 @@
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
++    githubPullRequest: createGitHubPullRequestPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     gitLocal: createGitLocalApi(mode, invoke),
+     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
+     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
+--- a/desktop/src/pages/GitHub.tsx
++++ b/desktop/src/pages/GitHub.tsx
+@@ -105,7 +105,7 @@
+   </section>;
+ }
+
+-export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView, activityView, remoteTasks }: {
++export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView, activityView, pullRequestView, remoteTasks }: {
+   info: AppInfo | null;
+   session: ProjectSession | null;
+   state: GitHubSetupState;
+@@ -118,6 +118,7 @@
+   nativeReview: ReactNode;
+   connectionView: ReactNode;
+   activityView: ReactNode;
++  pullRequestView: ReactNode;
+   remoteTasks: readonly GitHubTaskSection[];
+ }) {
+   const [inputHelpOpen, setInputHelpOpen] = useState({ repository: false, sha: false, snapshot: false });
+@@ -135,6 +136,7 @@
+     </div></div>}
+     {connectionView}
+     {activityView}
++    {pullRequestView}
+     <div className="notice notice-info"><Icon name="shield" /><div><strong>Prepare workflow files on this computer</strong><p>Choose the template source, then use <strong>Review local workflow files</strong> below. That review has its own confirmation before saving. The optional text preview does not save files or contact GitHub.</p></div></div>
+     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
+       <SectionHeading title="Choose workflow templates" description="Enter the Mobile Release Kit repository and full commit to use for local workflow files. This is separate from your app’s repository above; the ? buttons explain where to find both values."><Badge>{state.pending ? 'Preparing optional preview…' : 'Not applied'}</Badge></SectionHeading>
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/github-activity.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+--- a/desktop/src/components/GitHubActivity.tsx
++++ b/desktop/src/components/GitHubActivity.tsx
+@@ -88,7 +88,7 @@
+       <ProgressiveDisclosure title="Help: access, limits and separate write actions">
+         <p>The connected account needs read access to this repository’s Pull requests, Actions, Checks and commit statuses. Organization SSO and token restrictions still apply. Missing access is not an empty or successful result.</p>
+         <p>Each explicit read uses one bounded page per section. GitHub can change between reads; the selected head or attempt is checked again at the end. Provider links, raw bodies, patches, logs and artifact contents are not shown here.</p>
+-        <p>Creating a pull request and rerunning failed jobs are separate planned actions with their own review and authorization. Reading this view does not enable them. Existing toolkit publication and release tasks remain separate below.</p>
++        <p>Draft pull request creation has a separate explicit review below. Marking a PR ready for review and rerunning failed jobs remain unfinished actions with their own authorization. Reading this view does not enable them. Existing toolkit publication and release tasks remain separate below.</p>
+       </ProgressiveDisclosure>
+     </>}
+   </section>;

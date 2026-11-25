@@ -1,0 +1,37 @@
+name: "Build and sign the fixed resident image and C facades"
+description: "Shared original recipe; job retains its original result and timeout"
+outputs:
+  image-release-id:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.image-release-id }}"
+  desktop-facade-sha256:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.desktop-facade-sha256 }}"
+  sha256:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.sha256 }}"
+  resident-image-sha256:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.resident-image-sha256 }}"
+  entry-sha256:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.entry-sha256 }}"
+runs:
+  using: "composite"
+  steps:
+    - name: "Build and sign the fixed resident image and C facades"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # The same original owner builds the real resident dylib and fixed C
+        # facades, then retires its target. No helper registration or execution.
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare --target "$MRK_MACOS_TARGET" >> "$GITHUB_OUTPUT"
+        unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD

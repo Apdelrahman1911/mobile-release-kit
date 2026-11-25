@@ -1,0 +1,808 @@
+diff --git a/desktop/src-tauri/src/git_local_protocol.rs b/desktop/src-tauri/src/git_local_protocol.rs
+--- a/desktop/src-tauri/src/git_local_protocol.rs
++++ b/desktop/src-tauri/src/git_local_protocol.rs
+@@ -2,7 +2,7 @@
+ //! Draft author/message stay private; public projections contain only bounded
+ //! review/intent facts. Child publication and terminal frames never settle the
+ //! original native invocation. No serialized plan is accepted for execution.
+-use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, protocol::{strict_json, valid_id}};
++use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, git_switch_protocol as switch, protocol::{strict_json, valid_id}};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+ use sha2::{Digest, Sha256};
+@@ -54,7 +54,7 @@
+ 
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="lowercase")]
+-pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate }
++pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch }
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="lowercase")]
+ pub(crate) enum Phase { Prepare, Apply }
+@@ -74,7 +74,7 @@
+ // paths/message/identity nor a fabricated empty whole-index review.
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum Action { Files(FileAction), Branch(branch::Action) }
++pub(crate) enum Action { Files(FileAction), Branch(branch::Action), Switch(switch::Action) }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct FileAction {
+@@ -85,17 +85,17 @@
+     identity: Option<Identity>,
+ }
+ impl Action {
+-    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate } }
+-    pub(crate) fn expected_revision(&self) -> &str { match self { Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision } }
++    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch } }
++    pub(crate) fn expected_revision(&self) -> &str { match self { Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision } }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+-            Self::Branch(v)=>v.valid(),
++            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(),
+             Self::Files(v)=>read::digest(&v.expected_revision) && match v.kind {
+                 Kind::Commit => v.paths.is_empty()
+                     && v.identity.as_ref().is_some_and(Identity::valid)
+                     && v.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
+                 Kind::Stage|Kind::Unstage => paths(&v.paths) && v.message.is_none() && v.identity.is_none(),
+-                Kind::BranchCreate => false,
++                Kind::BranchCreate|Kind::BranchSwitch => false,
+             },
+         }
+     }
+@@ -103,12 +103,13 @@
+         match self {
+             Self::Files(v)=>PublicAction::Files(PublicFileAction {kind:v.kind,expected_revision:v.expected_revision.clone(),paths:v.paths.clone()}),
+             Self::Branch(v)=>PublicAction::Branch(v.clone()),
++            Self::Switch(v)=>PublicAction::Switch(v.clone()),
+         }
+     }
+ }
+ #[derive(Clone, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action) }
++pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action), Switch(switch::Action) }
+ #[derive(Clone, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase")]
+ pub(crate) struct PublicFileAction { pub(crate) kind:Kind, pub(crate) expected_revision:String, pub(crate) paths:Vec<String> }
+@@ -131,7 +132,7 @@
+     }
+     need(match name {
+         "git_local_prepare" => keys(&body,&["projectId","expectedDocumentRevision","action"])
+-            && if body["action"]["kind"] == "branch-create" {
++            && if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch")) {
+                 keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","name"])
+             } else { keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]) },
+         "git_local_apply" => keys(&body,&["projectId","expectedDocumentRevision","reviewId"]),
+@@ -152,7 +153,7 @@
+ 
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum Review { Files(FileReview), Branch(branch::Review) }
++pub(crate) enum Review { Files(FileReview), Branch(branch::Review), Switch(switch::Review) }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct FileReview {
+@@ -161,18 +162,19 @@
+     pub(crate) expected_index: String, pub(crate) review_digest: String,
+ }
+ impl Review {
+-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate} }
+-    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision} }
+-    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head)} }
+-    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref()} }
+-    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index, Self::Branch(v)=>&v.expected_index} }
+-    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest} }
++    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch} }
++    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision} }
++    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head)} }
++    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch)} }
++    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index, Self::Branch(v)=>&v.expected_index, Self::Switch(v)=>&v.expected_index} }
++    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest, Self::Switch(v)=>&v.review_digest} }
+     pub(crate) fn file(&self) -> Option<&FileReview> { match self {Self::Files(v)=>Some(v),_=>None} }
++    pub(crate) fn switch_details(&self) -> Option<&switch::Review> {match self {Self::Switch(v)=>Some(v),_=>None}}
+     pub(crate) fn branch_details(&self) -> Option<&branch::Review> { match self {Self::Branch(v)=>Some(v),_=>None} }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+-            Self::Branch(v)=>v.valid(),
+-            Self::Files(v)=>v.action != Kind::BranchCreate && read::digest(&v.expected_revision)
++            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(),
++            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch) && read::digest(&v.expected_revision)
+                 && read::digest(&v.expected_index) && read::digest(&v.review_digest)
+                 && paths(&v.paths) && v.whole_index == (v.action == Kind::Commit)
+                 && v.head.as_deref().is_none_or(read::oid) && v.branch.as_deref().is_none_or(read::branch)
+@@ -182,13 +184,16 @@
+     fn matches(&self, action: &Action) -> bool {
+         self.valid() && action.valid() && match (self,action) {
+             (Self::Branch(v),Action::Branch(a))=>v.matches(a),
++            (Self::Switch(v),Action::Switch(a))=>v.matches(a),
+             (Self::Files(v),Action::Files(a))=>v.action == a.kind && v.expected_revision == a.expected_revision
+                 && (a.kind == Kind::Commit || v.paths == a.paths),
+             _=>false,
+         }
+     }
+     fn decode(value:&Value) -> Result<Self,BridgeError> {
+-        need(if value["action"] == "branch-create" {
++        need(if value["action"] == "branch-switch" {
++            keys(value,switch::REVIEW_KEYS)
++        } else if value["action"] == "branch-create" {
+             keys(value,&["action","name","targetRef","expectedRevision","expectedReferenceRevision","head","branch","expectedIndex","reviewDigest"])
+         } else { keys(value,&["action","expectedRevision","paths","wholeIndex","head","branch","expectedIndex","reviewDigest"]) })?;
+         serde_json::from_value(value.clone()).map_err(|_|BridgeError::protocol())
+@@ -196,7 +201,7 @@
+ }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent) }
++pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent), Switch(switch::Intent) }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct FileIntent {
+@@ -205,18 +210,19 @@
+     pub(crate) candidate_index: Option<String>, pub(crate) candidate_commit: Option<String>,
+ }
+ impl Intent {
+-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate} }
+-    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision} }
+-    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref()} }
+-    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head)} }
+-    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index,Self::Branch(v)=>&v.expected_index} }
+-    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)=>None} }
+-    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)=>None} }
++    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch} }
++    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision} }
++    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref)} }
++    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head)} }
++    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index,Self::Branch(v)=>&v.expected_index, Self::Switch(v)=>&v.expected_index} }
++    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)=>None,Self::Switch(v)=>Some(&v.candidate_index)} }
++    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)|Self::Switch(_)=>None} }
+     pub(crate) fn reference_oid(&self) -> Option<&str> { match self {Self::Files(v) if v.action==Kind::Commit=>v.candidate_commit.as_deref(),Self::Branch(v)=>Some(&v.candidate_ref_oid),_=>None} }
++    pub(crate) fn switch_details(&self) -> Option<&switch::Intent> {match self {Self::Switch(v)=>Some(v),_=>None}}
+     pub(crate) fn branch_details(&self) -> Option<&branch::Intent> { match self {Self::Branch(v)=>Some(v),_=>None} }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+-            Self::Branch(v)=>v.valid(),
++            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(),
+             Self::Files(v)=>read::digest(&v.expected_revision) && read::digest(&v.expected_index)
+                 && v.expected_head.as_deref().is_none_or(read::oid) && v.expected_ref.as_deref().is_none_or(read::branch)
+                 && (v.expected_head.is_some() || v.expected_ref.is_some()) && match v.action {
+@@ -224,20 +230,23 @@
+                         && v.candidate_commit.as_deref().is_some_and(|oid|read::oid(oid)
+                             && v.expected_head.as_ref().is_none_or(|h|h.len() == oid.len())),
+                     Kind::Stage|Kind::Unstage => v.candidate_commit.is_none() && v.candidate_index.as_deref().is_some_and(read::digest),
+-                    Kind::BranchCreate=>false,
++                    Kind::BranchCreate|Kind::BranchSwitch=>false,
+                 },
+         }
+     }
+     pub(crate) fn matches(&self, review: &Review) -> bool {
+         self.valid() && review.valid() && match (self,review) {
+             (Self::Branch(v),Review::Branch(r))=>v.matches(r),
++            (Self::Switch(v),Review::Switch(r))=>v.matches(r),
+             (Self::Files(v),Review::Files(r))=>v.action == r.action && v.expected_revision == r.expected_revision
+                 && v.expected_ref == r.branch && v.expected_head == r.head && v.expected_index == r.expected_index,
+             _=>false,
+         }
+     }
+     fn decode(value:&Value) -> Result<Self,BridgeError> {
+-        need(if value["action"] == "branch-create" {
++        need(if value["action"] == "branch-switch" {
++            keys(value,switch::INTENT_KEYS)
++        } else if value["action"] == "branch-create" {
+             keys(value,&["action","expectedRevision","expectedReferenceRevision","expectedRef","expectedHead","expectedIndex","targetRef","expectedTargetAbsent","candidateRefOid"])
+         } else { keys(value,&["action","expectedRevision","expectedRef","expectedHead","expectedIndex","candidateIndex","candidateCommit"]) })?;
+         serde_json::from_value(value.clone()).map_err(|_|BridgeError::protocol())
+@@ -247,11 +256,22 @@
+ pub(crate) struct Request {
+     pub(crate) id: String, pub(crate) action: Action, pub(crate) context: Context, pub(crate) clock: Clock,
+     pub(crate) phase: Phase, pub(crate) binding: Option<ApplyBinding>, pub(crate) digest: String,
+-    pub(crate) native: Native, bytes: Vec<u8>,
++    pub(crate) native: Native, pub(crate) switch_sources:Option<switch::Sources>, bytes: Vec<u8>,
+ }
+ impl Request {
+     pub(crate) fn from_original(id: &str, action: &Action, context: &Context, native: &Native,
+         clock: Clock, binding: Option<ApplyBinding>) -> Result<Self,BridgeError> {
++        Self::from_sources(id,action,context,native,clock,binding,None)
++    }
++    /// Projection from the SAME retained native Book; never public input or a
++    /// substitute for the Preparing row/current Doc/actual source checks.
++    pub(crate) fn from_switch_original(id:&str,action:&Action,context:&Context,native:&Native,
++        clock:Clock,binding:Option<ApplyBinding>,sources:Option<switch::Sources>)->Result<Self,BridgeError> {
++        need(action.kind()==Kind::BranchSwitch)?;
++        Self::from_sources(id,action,context,native,clock,binding,sources)
++    }
++    fn from_sources(id:&str,action:&Action,context:&Context,native:&Native,
++        clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>)->Result<Self,BridgeError> {
+         need(valid_id(id) && action.valid() && valid_id(&context.project_id) && valid_id(&context.revision)
+             && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
+             && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000))?;
+@@ -261,13 +281,19 @@
+                 && (1..=u64::MAX-2).contains(&selected.journal_revision))?;
+             Phase::Apply
+         } else { Phase::Prepare };
+-        let mut bytes = serde_json::to_vec(&json!({"protocol":PROTOCOL,"id":id,"phase":phase,"action":action,
++        let mut value=json!({"protocol":PROTOCOL,"id":id,"phase":phase,"action":action,
+             "reviewDigest":binding.as_ref().map(|s|s.review.review_digest()),
+-            "journalRevision":binding.as_ref().map(|s|s.journal_revision),"context":context,"native":native,"clock":clock}))
+-            .map_err(|_|BridgeError::protocol())?;
++            "journalRevision":binding.as_ref().map(|s|s.journal_revision),"context":context,"native":native,"clock":clock});
++        if action.kind()==Kind::BranchSwitch {
++            need(match (&binding,&switch_sources) {
++                (None,None)=>true,(Some(b),Some(s))=>b.review.switch_details().is_some_and(|r|s.valid(native,r)),_=>false,
++            })?;
++            value["switch"]=serde_json::to_value(&switch_sources).map_err(|_|BridgeError::protocol())?;
++        } else {need(switch_sources.is_none())?;}
++        let mut bytes=serde_json::to_vec(&value).map_err(|_|BridgeError::protocol())?;
+         bytes.push(b'\n'); need(bytes.len() <= REQUEST_LIMIT)?;
+         let digest = hash(&bytes);
+-        Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest,native:native.clone(),bytes})
++        Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest,native:native.clone(),switch_sources,bytes})
+     }
+     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
+     pub(crate) fn go(&self) -> Vec<u8> { format!("MRK-GIT-LOCAL-GO/1 {}\n",self.digest).into_bytes() }
+@@ -316,7 +342,7 @@
+             if self.phase == Phase::Prepare {
+                 need(candidate.is_none() && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns
+                     && terminal.publication == Publication::NotReported
+-                    && keys(&terminal.result,if self.action.kind()==Kind::BranchCreate {&["review"]} else {&["review","diff"]}))?;
++                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch) {&["review"]} else {&["review","diff"]}))?;
+                 let review = Review::decode(&terminal.result["review"])?;
+                 need(review.matches(&self.action))?;
+                 if let Some(review) = review.file() {
+@@ -327,10 +353,12 @@
+         }
+         Ok(terminal)
+     }
+-    fn reason(&self,value:&str)->bool {read::reason(value) || self.action.kind()==Kind::BranchCreate && branch::reason(value)}
++    fn reason(&self,value:&str)->bool {read::reason(value) || self.action.kind()==Kind::BranchCreate && branch::reason(value)
++        || self.action.kind()==Kind::BranchSwitch && switch::reason(value)}
+     fn validate_applied(&self, terminal:&Terminal, candidate:Option<&Candidate>) -> Result<(),BridgeError> {
+         let r = &terminal.result;
+-        need(keys(r,&["operationId","action","state","settlement","reason","observation","intent"])
++        need(keys(r,if self.action.kind()==Kind::BranchSwitch {switch::RESULT_KEYS}
++            else {&["operationId","action","state","settlement","reason","observation","intent"]})
+             && r["operationId"] == self.id && r["action"] == json!(self.action.kind()) && r["settlement"] == "settled")?;
+         let state = r["state"].as_str().ok_or_else(BridgeError::protocol)?;
+         need(matches!(state,"succeeded"|"failed"|"recovery-required"))?;
+@@ -340,10 +368,12 @@
+             let intent = Intent::decode(&r["intent"])?;
+             need(candidate.request_digest == self.digest && intent == candidate.intent)?;
+         }
++        if self.action.kind()==Kind::BranchSwitch {return switch::validate_applied(self,terminal,candidate)}
+         if terminal.publication != Publication::NotReported {
+             need(candidate.is_some() && terminal.publication == match self.action.kind() {
+                 Kind::Commit=>Publication::RefReturned,Kind::BranchCreate=>Publication::BranchRefReturned,
+                 Kind::Stage|Kind::Unstage=>Publication::IndexReturned,
++                Kind::BranchSwitch=>return Err(BridgeError::protocol()),
+             })?;
+         }
+         if state == "succeeded" {
+@@ -361,7 +391,8 @@
+ pub(crate) struct Candidate { request_digest:String, pub(crate) digest:String, pub(crate) intent:Intent }
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="kebab-case")]
+-pub(crate) enum Publication { NotReported, IndexReturned, RefReturned, BranchRefReturned }
++pub(crate) enum Publication { NotReported, IndexReturned, RefReturned, BranchRefReturned,
++    SwitchCheckoutReturned, SwitchLogReturned, SwitchHeadReturned, SwitchIndexReturned }
+ #[derive(Clone, Deserialize)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct Terminal {
+diff --git a/desktop/src-tauri/src/git_local_state.rs b/desktop/src-tauri/src/git_local_state.rs
+--- a/desktop/src-tauri/src/git_local_state.rs
++++ b/desktop/src-tauri/src/git_local_state.rs
+@@ -3,7 +3,7 @@
+ //! IO methods run only in original finite jobs, outside Doc/Edit/Host locks.
+ use crate::{application_service::ProjectBinding, application_state_store::{Cleanup,Durability,Effect,Namespace,NativeUse,
+     PrivateStateDirectory,Revision,Snapshot,StateError},git_local_protocol as wire,protocol::{strict_json,valid_id},
+-    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch};
++    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch,git_switch_protocol as switch};
+ use serde::{Deserialize,Serialize};
+ use std::sync::Arc;
+ 
+@@ -33,6 +33,8 @@
+     candidate_index:Option<String>,candidate_commit:Option<String>,phase:Phase,outcome:Option<Completion>,
+     #[serde(default,skip_serializing_if="Option::is_none")]
+     branch:Option<branch::Journal>,
++    #[serde(default,skip_serializing_if="Option::is_none")]
++    switch:Option<switch::Journal>,
+ }
+ impl Row {
+     fn preparing(project:&ProjectBinding,id:&str,review:&wire::Review)->Result<Self> {
+@@ -41,7 +43,7 @@
+         let row=Self {project_id:project.project_id.as_str().to_owned(),operation_id:id.into(),action:review.action(),
+             review_digest:review.review_digest().into(),expected_revision:review.expected_revision().into(),expected_ref:review.branch().map(str::to_owned),
+             expected_head:review.head().map(str::to_owned),expected_index:review.expected_index().into(),candidate_index:None,candidate_commit:None,
+-            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing)};
++            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing)};
+         row.validate()?;Ok(row)
+     }
+     fn has_candidate(&self)->bool {
+@@ -49,7 +51,10 @@
+             ||self.branch.as_ref().is_some_and(|b|b.candidate_ref_oid.is_some())
+     }
+     fn intent(&self)->Option<wire::Intent> {
+-        if let Some(b)=&self.branch {
++        if let Some(s)=&self.switch {
++            s.intent(&self.expected_revision,self.expected_ref.as_deref()?,self.expected_head.as_deref()?,
++                &self.expected_index,self.candidate_index.as_deref()?).map(wire::Intent::Switch)
++        } else if let Some(b)=&self.branch {
+             Some(wire::Intent::Branch(branch::Intent {action:branch::Kind::Create,expected_revision:self.expected_revision.clone(),
+                 expected_reference_revision:b.expected_reference_revision.clone(),expected_ref:self.expected_ref.clone(),
+                 expected_head:self.expected_head.clone()?,expected_index:self.expected_index.clone(),target_ref:b.target_ref.clone(),
+@@ -68,12 +73,19 @@
+             && (self.expected_head.is_some()||self.expected_ref.is_some())
+             && (self.action!=wire::Kind::Commit||self.expected_ref.is_some())
+             && match self.action {
+-                wire::Kind::BranchCreate=>self.candidate_index.is_none() && self.candidate_commit.is_none()
++                wire::Kind::BranchSwitch=>self.branch.is_none() && self.candidate_commit.is_none()
++                    && self.switch.as_ref().is_some_and(|s|s.valid(self.expected_head.as_deref(),self.expected_ref.as_deref(),self.candidate_index.as_deref())),
++                wire::Kind::BranchCreate=>self.switch.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
+                     && self.branch.as_ref().is_some_and(|b|b.valid(self.expected_head.as_deref())
+                         && self.expected_ref.as_deref()!=Some(b.target_ref.as_str())),
+-                _=>self.branch.is_none(),
++                _=>self.branch.is_none() && self.switch.is_none(),
+             }
+             && (!self.has_candidate()||self.intent().is_some_and(|v|v.valid())))?;
++        need(self.switch.as_ref().is_none_or(|s|s.final_state.as_ref().is_none_or(|d|
++            self.phase==Phase::Finished && self.has_candidate()
++            && match self.outcome {Some(Completion::Succeeded)=>d.successful(),Some(Completion::RecoveryRequired)=>d.valid(),_=>false})))?;
++        need(self.action!=wire::Kind::BranchSwitch || self.outcome!=Some(Completion::Succeeded)
++            || self.switch.as_ref().and_then(|s|s.final_state.as_ref()).is_some_and(switch::FinalData::successful))?;
+         need(match self.phase {
+             Phase::Preparing=> !self.has_candidate() && self.outcome.is_none(),
+             Phase::Candidate=> self.has_candidate() && self.outcome.is_none(),
+@@ -92,25 +104,43 @@
+             && self.expected_ref==original.expected_ref && self.expected_head==original.expected_head && self.expected_index==original.expected_index
+             && match (&self.branch,&original.branch) {
+                 (Some(b),Some(o))=>b.same_original(o),(None,None)=>true,_=>false,
++            } && match (&self.switch,&original.switch) {
++                (Some(s),Some(o))=>s.same_original(o),(None,None)=>true,_=>false,
+             }
+     }
+     fn candidate(&mut self,intent:&wire::Intent)->Result<()> {
+         need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action() && self.expected_revision==intent.expected_revision()
+             && self.expected_ref.as_deref()==intent.expected_ref() && self.expected_head.as_deref()==intent.expected_head()
+             && self.expected_index==intent.expected_index())?;
+-        match (&mut self.branch,intent.branch_details()) {
+-            (Some(b),Some(i))=>{need(b.accepts(i))?;b.candidate_ref_oid=Some(i.candidate_ref_oid.clone());},
+-            (None,None)=>{self.candidate_index=intent.candidate_index().map(str::to_owned);self.candidate_commit=intent.candidate_commit().map(str::to_owned);},
+-            _=>return Err(Error::Conflict.into()),
++        if let Some(s)=&mut self.switch {
++            let i=intent.switch_details().ok_or_else(||StateError::from(Error::Conflict))?;
++            need(s.accepts(i))?;s.candidate(i);self.candidate_index=Some(i.candidate_index.clone());
++        } else {
++            need(intent.switch_details().is_none())?;
++            match (&mut self.branch,intent.branch_details()) {
++                (Some(b),Some(i))=>{need(b.accepts(i))?;b.candidate_ref_oid=Some(i.candidate_ref_oid.clone());},
++                (None,None)=>{self.candidate_index=intent.candidate_index().map(str::to_owned);self.candidate_commit=intent.candidate_commit().map(str::to_owned);},
++                _=>return Err(Error::Conflict.into()),
++            }
+         }
+         self.phase=Phase::Candidate;self.validate()
+     }
+-    fn finish(&mut self,outcome:Completion)->Result<()> {
++    fn finish(&mut self,outcome:Completion)->Result<()> {self.finish_with_switch(outcome,None)}
++    fn finish_with_switch(&mut self,outcome:Completion,details:Option<&switch::FinalData>)->Result<()> {
+         need(self.phase!=Phase::Finished)?;
++        need(details.is_none() || self.action==wire::Kind::BranchSwitch && self.has_candidate()
++            && matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
++            && details.is_some_and(switch::FinalData::valid)
++            && self.switch.as_ref().is_some_and(|s|s.final_state.is_none()))?;
++        need(self.action!=wire::Kind::BranchSwitch || outcome!=Completion::Succeeded
++            || details.is_some_and(switch::FinalData::successful))?;
+         // A persisted candidate makes a cancelled/refused child uncertain with
+         // respect to publication. No negative result is upgraded to unsent.
+         need(!matches!(outcome,Completion::Failed|Completion::Cancelled)||!self.has_candidate())?;
+         need(outcome!=Completion::Succeeded||self.has_candidate())?;
++        if let Some(details)=details {
++            self.switch.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
++        }
+         self.phase=Phase::Finished;self.outcome=Some(outcome);self.validate()
+     }
+ }
+@@ -120,13 +150,14 @@
+ impl State {
+     fn empty()->Self {Self {schema_version:1,protocol:PROTOCOL.into(),rows:vec![]}}
+     fn bytes(&self)->Result<Vec<u8>> {
+-        need(matches!(self.schema_version,1|2) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
++        need(matches!(self.schema_version,1|2|3) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
+             && self.rows.windows(2).all(|p|p[0].project_id<p[1].project_id))?;
+         // Supervisor text is process-local, not a global or durable operation
+         // identity. Rows are partitioned by the service's stable project ID;
+         // only the retained live Original/NativeUse can amend a pending row.
+         for row in &self.rows {
+-            need(self.schema_version==2 || row.branch.is_none() && row.action!=wire::Kind::BranchCreate)?;
++            need(self.schema_version>=2 || row.branch.is_none() && row.action!=wire::Kind::BranchCreate)?;
++            need(self.schema_version==3 || row.switch.is_none() && row.action!=wire::Kind::BranchSwitch)?;
+             row.validate()?;
+         }
+         let value=serde_json::to_value(self).map_err(|_|StateError::from(Error::InvalidRequest))?;
+@@ -145,14 +176,14 @@
+     }
+     fn reserve(&mut self,row:Row)->Result<()> {
+         need(row.phase==Phase::Preparing)?;
+-        let branch = row.action==wire::Kind::BranchCreate;
++        let schema = match row.action {wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
+         if let Some(index)=self.rows.iter().position(|r|r.project_id==row.project_id) {
+             if !self.rows[index].replaceable() {return Err(Error::RecoveryRequired.into());}
+             self.rows[index]=row;
+         } else {if self.rows.len()>=MAX_ROWS {return Err(Error::Busy.into());}self.rows.push(row);}
+-        // Only explicit branch Apply's Preparing CAS upgrades the same document.
+-        // Reading schema1 never rewrites it; other pending rows stay exact.
+-        if branch {self.schema_version=2;}
++        // Only explicit Apply's Preparing CAS can upgrade the same document.
++        // Reads never rewrite schema1/2; all other pending rows stay exact.
++        self.schema_version=self.schema_version.max(schema);
+         self.rows.sort_by(|a,b|a.project_id.cmp(&b.project_id));self.bytes()?;Ok(())
+     }
+ }
+@@ -248,7 +279,7 @@
+         self.retained(original)?;need(joined.matches(&self.native_use,original))?;
+         let mut state=self.current(expected)?;
+         let row=state.rows.iter_mut().find(|r|r.same_original(&original.preparing)).ok_or_else(||StateError::from(Error::Conflict))?;
+-        row.finish(joined.completion())?;let row=row.clone();self.publish(expected,&state,row,original.clone())
++        row.finish_with_switch(joined.completion(),joined.switch_final())?;let row=row.clone();self.publish(expected,&state,row,original.clone())
+     }
+ }
+ 
+@@ -259,3 +290,7 @@
+ #[cfg(test)]
+ #[path="git_branch_state_tests.rs"]
+ mod branch_tests;
++
++#[cfg(test)]
++#[path="git_switch_state_tests.rs"]
++mod switch_tests;
+diff --git a/desktop/src-tauri/src/git_branch_state_tests.rs b/desktop/src-tauri/src/git_branch_state_tests.rs
+--- a/desktop/src-tauri/src/git_branch_state_tests.rs
++++ b/desktop/src-tauri/src/git_branch_state_tests.rs
+@@ -46,7 +46,7 @@
+     let mut state=State::empty();state.reserve(row(2)).unwrap();let good=snapshot(&state);
+     for mutate in [
+         (|v:&mut serde_json::Value|v["schemaVersion"]=json!(1)) as fn(&mut serde_json::Value),
+-        |v|v["schemaVersion"]=json!(3),
++        |v|v["schemaVersion"]=json!(4),
+         |v|v["rows"][0]["branch"]["expectedTargetAbsent"]=json!(false),
+         |v|v["rows"][0]["branch"]["targetRef"]=json!("refs/heads/main"),
+         |v|v["rows"][0]["candidateIndex"]=json!("4".repeat(64)),
+diff --git a/desktop/src-tauri/src/supervisor_git_local.rs b/desktop/src-tauri/src/supervisor_git_local.rs
+--- a/desktop/src-tauri/src/supervisor_git_local.rs
++++ b/desktop/src-tauri/src/supervisor_git_local.rs
+@@ -45,16 +45,26 @@
+ /// Publication only permits the exact original old-FD successor comparison;
+ /// it is deliberately NOT journal finality or a successful operation receipt.
+ pub(crate) struct GitLocalPublication {
+-    request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,
++    request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,publication:wire::Publication,
+ }
+ impl GitLocalPublication {
+     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
+         ->Result<&wire::Intent,crate::asset_commands::Reason> {
+-        if self.request.id!=id || &self.request.native!=native
++        if self.request.action.kind()==wire::Kind::BranchSwitch || self.request.id!=id || &self.request.native!=native
+             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
+             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
+         Ok(&self.candidate.intent)
+     }
++    pub(crate) fn switch_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_switch_protocol::Sources)
++        ->Result<(&crate::git_switch_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
++        if self.request.action.kind()!=wire::Kind::BranchSwitch || self.request.id!=id || &self.request.native!=native
++            || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
++            || self.request.switch_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
++            || self.publication==wire::Publication::NotReported || crate::git_switch_protocol::effect(self.publication).is_none() {
++            return Err(crate::asset_commands::Reason::SourceChanged)
++        }
++        Ok((self.candidate.intent.switch_details().ok_or(crate::asset_commands::Reason::SourceChanged)?,self.publication))
++    }
+ }
+ /// Created only from management_ready + the SAME actual Resources after the
+ /// process/source/native/driver/watchdog and prior state jobs returned. Final
+@@ -62,6 +72,7 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) struct GitLocalNativeJoined {
+     native_use:Arc<NativeUse>,original:Arc<Original>,completion:Completion,
++    switch_final:Option<crate::git_switch_protocol::FinalData>,
+ }
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl GitLocalNativeJoined {
+@@ -69,6 +80,7 @@
+         Arc::ptr_eq(&self.native_use,native_use)&&Arc::ptr_eq(&self.original,original)
+     }
+     pub(crate) fn completion(&self)->Completion {self.completion}
++    pub(crate) fn switch_final(&self)->Option<&crate::git_switch_protocol::FinalData> {self.switch_final.as_ref()}
+ }
+ #[derive(Clone)]
+ pub(crate) enum GitLocalReceipt {
+@@ -177,11 +189,11 @@
+             let result=runtime.resolve_git_local_installed(&mut native,owner.endpoint(),&stop);
+             owner.observe_native_failure(native.first_failure());result?};
+         let review=self.gate.review();
+-        let snapshot={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++        let (snapshot,switch_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+             let result=sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
+                 &owner.id,review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
+-            sources.native_snapshot().map_err(source_error)?.clone()};
++            (sources.native_snapshot().map_err(source_error)?.clone(),sources.switch_projection().map_err(source_error)?.cloned())};
+         let binding=match (self.phase,review,preparing) {
+             (wire::Phase::Prepare,None,None)=>None,
+             (wire::Phase::Apply,Some(review),Some(ack))=>Some(wire::ApplyBinding {review,journal_revision:ack.revision.0}),
+@@ -191,7 +203,9 @@
+         let mut clock=mrk_macos_installed_native::vault_helper_wire::ClockBridge::capture().ok_or_else(BridgeError::cleanup_unknown)?;
+         let clock_data=wire::Clock {work_end_ns:clock.endpoint(ends.work).ok_or_else(BridgeError::cleanup_unknown)?,
+             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
+-        let request=Arc::new(wire::Request::from_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding)?);
++        let request=Arc::new(if self.action.kind()==wire::Kind::BranchSwitch {
++            wire::Request::from_switch_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,switch_sources)?
++        } else {wire::Request::from_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding)?});
+         let mut slot=self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+         let mut bridge=self.clock.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+         if slot.is_some()||bridge.is_some() {return Err(BridgeError::cleanup_unknown())}
+@@ -250,7 +264,7 @@
+             }
+             let mut slot=self.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+             if slot.is_some() {return Err(BridgeError::cleanup_unknown())}
+-            *slot=Some(GitLocalPublication {request:request.clone(),candidate});
++            *slot=Some(GitLocalPublication {request:request.clone(),candidate,publication:terminal.publication});
+         }
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+         if let Some(first)=terminal.first_failure_ns {
+@@ -360,7 +374,18 @@
+         }else if owner.preflight_go_claimed.load(Ordering::SeqCst) && reply.is_none() {return Err(BridgeError::cleanup_unknown())}
+         else if state.error.as_ref().is_some_and(|e|matches!(e.code.as_str(),"cancelled"|"shutting_down")) {Completion::Cancelled}
+         else {Completion::Failed};
+-        Ok(Some(GitLocalNativeJoined {native_use,original,completion}))
++        // Historical detail is copied only from this original positive
++        // publication after ALL earlier management/source/runtime returns.
++        // No candidate/readback/negative result can manufacture this evidence.
++        let switch_final=if invocation.action.kind()==wire::Kind::BranchSwitch {
++            let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++            match publication.as_ref() {
++                Some(p)=>Some(crate::git_switch_protocol::FinalData::from_returned(&p.request,&p.candidate,
++                    reply.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,p.publication)?),
++                None=>None,
++            }
++        } else {None};
++        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final}))
+     })();
+     let joined=match joined {Ok(value)=>value,Err(error)=>{owner.fail(error);owner.unknown(inner);return false}};
+     let local=r.git_local.as_mut().expect("same retained facet");local.finalizing=true;
+@@ -424,8 +449,18 @@
+         observe_source_failure(owner,sources.first_failure());
+         if let Err(reason)=result {owner.fail(source_error(reason));}
+     }
+-    let source_closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
+-    let runtime_closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
++    // Switch retains its exact target lock until the original runtime closes
++    // are known too. All old actions keep their original order. This body is
++    // already after process/pipe joins; later management/journal/NativeUse
++    // joins are still mandatory, never inferred from a positive publication.
++    let (source_closed,runtime_closed)=if local.action.kind()==wire::Kind::BranchSwitch {
++        let closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
++        if !matches!(closed,CloseOutcome::Settled) {sources.retain_switch_unknown();return CloseOutcome::Unknown}
++        (sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok(),closed)
++    } else {
++        let closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
++        (closed,native.settle_originals(&mut |first|owner.native_cleanup_expired(first)))
++    };
+     if !source_closed||!sources.settled()||!matches!(runtime_closed,CloseOutcome::Settled) {CloseOutcome::Unknown}
+     else {CloseOutcome::Settled}
+ }
+@@ -638,3 +673,7 @@
+ #[cfg(test)]
+ #[path="supervisor_git_local_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++#[path="git_switch_supervisor_tests.rs"]
++mod switch_tests;
+diff --git a/desktop/src-tauri/src/git_local_sources_macos.rs b/desktop/src-tauri/src/git_local_sources_macos.rs
+--- a/desktop/src-tauri/src/git_local_sources_macos.rs
++++ b/desktop/src-tauri/src/git_local_sources_macos.rs
+@@ -12,6 +12,9 @@
+ use sha2::{Digest, Sha256};
+ use std::time::Instant;
+ use zeroize::Zeroizing;
++
++#[path="git_switch_sources_macos.rs"]
++mod switch_sources;
+ 
+ const SOURCE_LIMIT: usize = 128;
+ struct RefEdge {
+@@ -67,6 +70,7 @@
+     reference: Option<RefEdge>,
+     replacement: Option<Replacement>,
+     post_claimed: bool,
++    switch:Option<switch_sources::State>,
+ }
+ impl Drop for GitLocalSources {
+     fn drop(&mut self) {
+@@ -92,7 +96,7 @@
+             git: None,
+             indices: [None; 4],
+             operation_id: None, review: None, reference: None, replacement: None,
+-            post_claimed: false,
++            post_claimed: false, switch:None,
+         }
+     }
+     pub(crate) fn not_started(&self) -> bool {
+@@ -102,7 +106,8 @@
+         SOURCE_LIMIT
+             .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
+             .checked_add(std::mem::size_of::<Self>() + 65536 + 5 * PATH_LIMIT + 4096)?
+-            .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
++            .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?
++            .checked_add(switch_sources::State::working_bytes()?)
+     }
+     pub(crate) fn first_failure(&self) -> Option<(Failure, Instant)> {
+         self.acl.as_ref().and_then(SnapshotBook::first_failure)
+@@ -275,6 +280,7 @@
+         Ok(current)
+     }
+     fn snapshot_original(&self, index: usize, maximum: u64, stop: &mut dyn FnMut() -> bool) -> Result<wire::Snapshot, Reason> {
++        if self.switch_is_old(index) {return self.switch_snapshot_original(index,maximum,stop)}
+         let Some(replacement) = self.replacement.as_ref().filter(|v|v.old==Some(index)) else {return self.snapshot(index,maximum,stop)};
+         checkpoint(stop)?;
+         let held = stat::fstat(self.book.fd(index)?).map_err(|_|Reason::SourceChanged)?;
+@@ -292,12 +298,18 @@
+     /// witness; candidate-shaped DATA alone cannot call this exception.
+     pub(crate) fn post_returned(&mut self, publication: Option<&GitLocalPublication>,
+         stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+-        if self.finished || self.first.is_some() || self.post_claimed {return Err(Reason::SourceChanged)}
++        if self.finished || self.first.is_some() || self.post_claimed {
++            if self.switch.is_some() {self.retain_switch_unknown();return Err(Reason::CleanupUnknown)}
++            return Err(Reason::SourceChanged)
++        }
+         self.post_claimed = true;
+         let result = (|| {
+             if let Some(publication) = publication {
+                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
++                if review.action()==wire::Kind::BranchSwitch {
++                    self.switch_returned(publication,stop)?;return self.post_inner(stop)
++                }
+                 let intent = publication.intent_for(self.operation_id.as_deref().ok_or(Reason::SourceChanged)?,native,review)?.clone();
+                 if self.replacement.is_some() {return Err(Reason::SourceChanged)}
+                 let uid = native.uid;
+@@ -313,6 +325,7 @@
+                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
+                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
+                     },
++                    wire::Kind::BranchSwitch=>return Err(Reason::SourceChanged),
+                 };
+                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
+                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
+@@ -321,6 +334,9 @@
+             }
+             self.post_inner(stop)
+         })();
++        // After a child return, a missing/failed exact switch-source rematch
++        // cannot release the target lock as a harmless stale-source refusal.
++        if result.is_err() && self.switch.is_some() {self.retain_switch_unknown();return Err(Reason::CleanupUnknown)}
+         self.remember(result)
+     }
+     pub(crate) fn inspect(&mut self, root: &RegisteredRoot, runtime_live: usize, id: &str,
+@@ -339,7 +355,9 @@
+             let project_parts = parts(&root.path)?;
+             let tool_parts = parts(Path::new(wire::TOOL_PATH))?;
+             let parent_parts = &tool_parts[..tool_parts.len() - 1];
+-            let capacity = roster_limit([project_parts.len(), parent_parts.len()], 42 + source_extra(&project_parts))?;
++            let extra=(42usize).checked_add(source_extra(&project_parts))
++                .and_then(|n|switch_sources::State::extra(review).and_then(|s|n.checked_add(s))).ok_or(Reason::Capacity)?;
++            let capacity = roster_limit([project_parts.len(), parent_parts.len()], extra)?;
+             if capacity > SOURCE_LIMIT
+                 || capacity
+                     .checked_add(runtime_live)
+@@ -410,6 +428,7 @@
+                 return Err(Reason::SourceRefused);
+             }
+             self.native = Some(native);
++            if review.is_some_and(|v|v.action()==wire::Kind::BranchSwitch) {self.capture_switch(project,stop)?;}
+             if review.is_some_and(|v| matches!(v.action(),wire::Kind::Commit|wire::Kind::BranchCreate)) { self.capture_reference(stop)?; }
+             self.post_inner(stop)
+         })();
+@@ -426,7 +445,9 @@
+             filesystem(fd, stop)?;
+             let held = stat::fstat(fd).map_err(|_| Reason::SourceChanged)?;
+             checkpoint(stop)?;
+-            if self.replacement.as_ref().is_some_and(|v|v.old==Some(index)) {
++            if self.switch_is_old(index) {
++                self.switch_old_identity(index,&held)?;
++            } else if self.replacement.as_ref().is_some_and(|v|v.old==Some(index)) {
+                 self.old_identity(index,&held)?;
+             } else {
+                 let named = if let Some(parent) = slot.parent {
+@@ -514,7 +535,7 @@
+             let maximum = if matches!(replacement.intent.action(),wire::Kind::Commit|wire::Kind::BranchCreate) {65} else {wire::INDEX_LIMIT};
+             if self.snapshot(replacement.successor,maximum,stop)? != replacement.successor_snapshot {return Err(Reason::SourceChanged)}
+         }
+-        Ok(())
++        self.post_switch(stop)
+     }
+     pub(crate) fn post(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+         if self.finished || self.first.is_some() || self.post_claimed {
+@@ -543,7 +564,7 @@
+                 return Err(Reason::CleanupUnknown);
+             }
+         }
+-        if expired(self.first_failure()) || !self.book.close_all() || expired(self.first_failure()) {
++        if expired(self.first_failure()) || !self.close_switch_book(expired) || expired(self.first_failure()) {
+             return Err(Reason::CleanupUnknown);
+         }
+         self.close_failed = false;
+diff --git a/desktop/src-tauri/src/asset_source_macos.rs b/desktop/src-tauri/src/asset_source_macos.rs
+--- a/desktop/src-tauri/src/asset_source_macos.rs
++++ b/desktop/src-tauri/src/asset_source_macos.rs
+@@ -357,27 +357,34 @@
+     pub(crate) fn retire_application_probe(&mut self) -> bool {
+         self.not_started() || self.settled() || self.close_all()
+     }
++    // Exact original one-attempt close, shared only with the fixed switch
++    // last-lock retirement. No slot movement, replacement owner or retry.
++    fn close_slot(slot:&mut Descriptor,failed:&mut dyn FnMut(Reason))->bool {
++        let mut known=true;
++        if !slot.acl.iter().all(|call| call.settled()) { known = false; failed(Reason::CleanupUnknown); }
++        match slot.state {
++            OriginalState::Reserved => { slot.state = OriginalState::NoHandle; }
++            OriginalState::NoHandle | OriginalState::Closed => {}
++            OriginalState::Owned => {
++                slot.state = OriginalState::Closing;
++                match slot.fd.take() {
++                    Some(fd) => match unistd::close(fd) {
++                        Ok(()) => { slot.state = OriginalState::Closed; }
++                        Err(_) => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
++                    },
++                    None => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
++                }
++            }
++            OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; failed(Reason::CleanupUnknown); }
++        }
++        known
++    }
+     fn close_all_observing(&mut self, failed: &mut dyn FnMut(Reason)) -> bool {
+         // Continue independent original closes; never retry EINTR or reconstruct
+         // a numeric descriptor, and never equate Drop with known settlement.
+         let mut known = true;
+         for slot in self.slots.iter_mut().rev() {
+-            if !slot.acl.iter().all(|call| call.settled()) { known = false; failed(Reason::CleanupUnknown); }
+-            match slot.state {
+-                OriginalState::Reserved => { slot.state = OriginalState::NoHandle; }
+-                OriginalState::NoHandle | OriginalState::Closed => {}
+-                OriginalState::Owned => {
+-                    slot.state = OriginalState::Closing;
+-                    match slot.fd.take() {
+-                        Some(fd) => match unistd::close(fd) {
+-                            Ok(()) => { slot.state = OriginalState::Closed; }
+-                            Err(_) => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
+-                        },
+-                        None => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
+-                    }
+-                }
+-                OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; failed(Reason::CleanupUnknown); }
+-            }
++            known=Self::close_slot(slot,failed)&&known;
+         }
+         self.terminal = true; known && self.settled()
+     }
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -107,6 +107,7 @@
+ mod version_enrollment_protocol;
+ mod git_local_protocol;
+ mod git_branch_protocol;
++mod git_switch_protocol;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod git_local_state;
+ mod service_protocol;
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -16,6 +16,7 @@
+ #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
+ #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
+ #[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
++#[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "../src/git_local_state.rs"] mod git_local_state;
+ #[path = "../src/service_protocol.rs"] mod service_protocol;

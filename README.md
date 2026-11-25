@@ -70,7 +70,11 @@ bundle IDs must keep its additional profile installation/export preparation in a
 project-owned signing step; it is not supported by the shared profile inventory. Nested-code
 validation still inspects the signed output, but does not provision those extra targets.
 
-Desktop distribution, non-Gradle Android builds, non-Xcode Apple builds, certificate creation, account/IAM provisioning, and automatic public rollout are intentionally outside this repository.
+Non-Gradle Android builds, non-Xcode Apple builds, certificate creation, account/IAM provisioning, and automatic public rollout are outside the toolkit's supported scope.
+
+The separate [Rust desktop application](docs/desktop.md) is under development.
+It is not yet a standalone distribution or a production-ready alternative to the CLI;
+desktop capabilities and qualification are tracked separately from toolkit remediation.
 
 ### Native validation prerequisites
 

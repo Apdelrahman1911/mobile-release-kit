@@ -1,0 +1,8 @@
+97f6e4daa6a0197366226df7ff650a6af1bc823db79553a32b189c6935e6964e  desktop/src-tauri/src/asset_session_gh_auth.rs
+bf0cc68e41d856215ee5c73e2a2c02e4e9bbe2905a5916a0853e630b47800165  desktop/src-tauri/src/github_auth_entry_protocol.rs
+34ff5211896419506b469821e85420f286bcfd3214dc96c8999a0871fa773b84  docs/github-auth-picker-integration-2026-10-19.patch
+d12918b6394c63af491101976d87778c9161741a6463b16351ef3b254db5b91c  docs/github-auth-picker-integration-2026-10-19.md
+ab38aa9702fcfe804a6104c550748ecd3d15fae6d9ebf5b4781cff73347c73aa  docs/github-auth-document-integration-current-2026-10-19.patch
+4332c2daf4584db3befbee750a5f3da514b03ebca0bc02ddd00985f77b83114a  verification/gh-auth-picker-patch-20261019.json
+487ab8b09c8535179f91343c9db6f8025714ebf1e4676a5e6eb723b039f058f9  verification/gh-auth-picker-static-20261019.log
+4c952cf9c64e0e72ed2563f3856ee3b3296b6f50ad78a158e1f0d54bc4bc6b09  verification/gh-auth-current-parent-patch-20261019.log

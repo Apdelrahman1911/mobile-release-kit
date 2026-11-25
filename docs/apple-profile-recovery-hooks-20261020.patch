@@ -1,0 +1,323 @@
+--- a/desktop/src-tauri/src/apple_provisioning_protocol.rs
++++ b/desktop/src-tauri/src/apple_provisioning_protocol.rs
+@@ -29,6 +29,9 @@
+
+ #[path = "apple_provisioning_recovery_selection.rs"]
+ mod recovery_selection;
++#[path = "apple_provisioning_profile_recovery_selection.rs"]
++mod profile_recovery_selection;
++pub(crate) use profile_recovery_selection::{profile_recovery_history, ProfileRecoveryHistory, PROFILE_RECOVERY_LIMIT};
+ pub(crate) use recovery_selection::{
+     recovery_history, recovery_scope_matches, RecoveryHistory, RECOVERY_LIMIT,
+ };
+@@ -1152,6 +1155,8 @@
+     pub(crate) reason: Reason,
+     pub(crate) result: Option<ResultData>,
+     pub(crate) recovery: Option<RecoveryHistory>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub(crate) profile_recovery: Option<ProfileRecoveryHistory>,
+     #[serde(skip_serializing_if="Option::is_none")]
+     pub(crate) saved_profile: Option<crate::credential_setup::KeyReference>,
+ }
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+@@ -13,6 +13,8 @@
+ use crate::apple_provisioning_protocol as apple_wire;
+ #[path="saved_command_apple_profile_review.rs"]
+ mod profile_review;
++#[path = "saved_command_apple_profile_recovery.rs"]
++mod profile_recovery;
+
+ /// Worker/provider/source and material CONSUMERS, driver/manager and all
+ /// PRE-final-CAS jobs have joined. The same material loan remains retained for
+@@ -96,6 +98,7 @@
+     recovery: Option<RecoveryPublication>,
+     profile_review: Option<Arc<profile_review::Review>>,
+     profile_saved: Option<profile_review::SavedPublication>,
++    profile_recovery: Option<profile_recovery::Publication>,
+ }
+
+ // Detached historical DATA only. It must not keep a finished Session,
+@@ -191,6 +194,7 @@
+             reason: self.reason.apple(),
+             result,
+             recovery: None,
++            profile_recovery: None,
+             saved_profile:None,
+         })
+     }
+@@ -200,13 +204,15 @@
+     registry.review = None;
+     registry.profile_review = None;
+     let saved_changed=registry.profile_saved.take().is_some();
++    let profile_history_changed = registry.profile_recovery.take().is_some();
+     // Public historical DATA may be withdrawn, never replaced or upgraded.
+     // Idle context invalidation must advance the same original status revision.
+-    registry.recovery.take().is_some() || saved_changed
++    registry.recovery.take().is_some() || saved_changed || profile_history_changed
+ }
+
+ pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
+     profile_review::project(registry,projection);
++    profile_recovery::project(registry, projection);
+     projection.recovery = None;
+     if let Some(stored) = &registry.recovery {
+         if projection.operation_id == stored.reference.operation_id
+@@ -229,7 +235,8 @@
+     apple_wire::RECOVERY_LIMIT
+         .checked_mul(2)?
+         .checked_add(apple_wire::IPC_LIMIT)?
+-        .checked_add(std::mem::size_of::<RecoveryPublication>())
++        .checked_add(std::mem::size_of::<RecoveryPublication>())?
++        .checked_add(profile_recovery::backing_bytes()?)
+ }
+
+ pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
+@@ -673,6 +680,7 @@
+     registry.review = None;
+     registry.recovery = None;
+     registry.profile_review=None;registry.profile_saved=None;
++    registry.profile_recovery = None;
+     if owner.domain != SavedCommandDomain::AppleProvisioning
+         || active.unknown
+         || active.context_invalidated
+@@ -698,6 +706,7 @@
+     if !native_complete(owner) { return; }
+     if context.mode.profile() {
+         if owner.apple_profile.get().is_some_and(|profile|profile.clock().completed()) {
++            profile_recovery::publish(registry, owner);
+             profile_review::publish(registry,active,owner,terminal);
+         }
+         return;
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
+@@ -879,3 +879,20 @@
+     };
+     apple_wire::recovery_history(account, &binding.scope).ok()
+ }
++
++// Same INITIAL receipt and retirement cut as Bundle history. A profile result
++// or cached row is not a native join. Missing receipt never becomes an empty list.
++pub(super) fn profile_history(owner: &Session) -> Option<apple_wire::ProfileRecoveryHistory> {
++    if owner.apple.input().ok()?.context().mode != apple_wire::Mode::ProfileReview {
++        return None;
++    }
++    let binding = owner.apple.request_binding().ok()?;
++    let jobs = owner.apple.native.try_lock().ok()?;
++    if !jobs.complete || !jobs.sealed || !jobs.slots.iter().all(Slot::known) {
++        return None;
++    }
++    let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
++        return None;
++    };
++    apple_wire::profile_recovery_history(account, &binding.scope).ok()
++}
+--- a/desktop/src/appleProvisioningTypes.ts
++++ b/desktop/src/appleProvisioningTypes.ts
+@@ -1,5 +1,6 @@
+ // Public comparison/status DATA. Native owns the selected P8, issuer-wide
+ // journal, consent, single provider write and every original cleanup join.
++import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
+ import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
+ import type { SavedConfigContent, OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
+
+@@ -54,6 +55,7 @@
+   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
+   outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | null;
+   savedProfile?: AppleProfileSavedReference;
++  profileRecovery?: AppleProfileRecoveryHistory;
+   recovery: AppleRecoveryHistory | null;
+ }
+ export interface AppleProvisioningStatus {
+--- a/desktop/src/appleProvisioningProtocol.ts
++++ b/desktop/src/appleProvisioningProtocol.ts
+@@ -1,5 +1,6 @@
+ // Exactly the original native Bundle-ID protocol. No Access query/consent,
+ // provider JSON, journal row, issuer override, secret or local path is accepted.
++import { parseAppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
+ import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
+ import { APPLE_PROFILE_MODES, isAppleProfileMode, parseAppleProfileSetupResult, parseAppleProfileSavedReference } from './appleProfileSetup.ts';
+ import { parseAndroidBuildSavedVersion } from './androidBuildProtocol.ts';
+@@ -123,7 +124,7 @@
+         !oneOf(v.availability, ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified'])) return null;
+     const op = v.operation;
+     if (op === null) return v as unknown as AppleProvisioningStatus;
+-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : [])]) ||
++    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'profileRecovery') ? ['profileRecovery'] : [])]) ||
+         !token(op.operationId) || !token(op.ownerGeneration) || !oneOf(op.phase, phases) || typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, reasons) ||
+         !keys(op.context, [...requestFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
+     const prepared = { ...op.context }; delete prepared.operation;
+@@ -133,6 +134,12 @@
+         [prepared.recordId, prepared.p12RecordId].includes(saved.recordId) ||
+         !['profile-reuse', 'profile-create'].includes(prepared.mode) || op.phase !== 'terminal' || op.outcome !== 'complete' ||
+         parseAppleProfileSetupResult(op.result, prepared.mode)?.decision !== 'download-returned')) return null;
++    if (Object.hasOwn(op, 'profileRecovery')) {
++      const history = parseAppleProfileRecoveryHistory(op.profileRecovery);
++      if (!history || prepared.mode !== 'profile-review' || op.phase !== 'terminal' || op.outcome !== 'complete' || op.recovery !== null) return null;
++      const unresolved = history.hiddenUnresolved > 0 || history.attempts.some(row => row.unresolved);
++      if (unresolved && parseAppleProfileSetupResult(op.result, prepared.mode)?.decision !== 'blocked') return null;
++    }
+     if (op.recovery !== null) {
+       const history = parseAppleRecoveryHistory(op.recovery);
+       if (!history || op.context.mode !== 'review' || op.phase !== 'terminal' || op.outcome !== 'complete') return null;
+@@ -161,6 +168,10 @@
+     // Context loss may withdraw historical DATA at a newer original status
+     // revision. No terminal result, recorded disposition or list is replaced.
+     before.recovery !== null && after.recovery === null && sameOfflineData({ ...before, recovery: null }, after) ||
++    // Withdrawing profile history changes no earlier provider/save/native axis.
++    before.profileRecovery !== undefined && after.profileRecovery === undefined && (() => {
++      const { profileRecovery: _history, ...without } = before; return sameOfflineData(without, after);
++    })() ||
+     // Native context loss may also withdraw the exact detached saved-record DATA.
+     before.savedProfile !== undefined && after.savedProfile === undefined && (() => {
+       const { savedProfile: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);
+--- a/desktop/src/appleProvisioningController.ts
++++ b/desktop/src/appleProvisioningController.ts
+@@ -1,5 +1,6 @@
+ // App-held UI coordination only. Neither promises, events nor comparison
+ // counters can settle the original native Session or its account-wide journal.
++import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
+ import { appleProfileInputBase, retainedAppleProfileInput, isAppleProfileMode } from './appleProfileSetup.ts';
+ import type { AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
+ import { localStoreRequest } from './localStorePreflight.ts';
+@@ -36,6 +37,7 @@
+   pending: 'prepare' | 'start' | null; requestPending: boolean; cancelPending: boolean;
+   status: AppleProvisioningStatus | null; projectId: string | null; ios: boolean;
+   previousAttempts: AppleRecoveryHistory | null; continueReason: string | null;
++  previousProfileAttempts: AppleProfileRecoveryHistory | null; profileContinueReason: string | null;
+   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
+   consent: (AppleProvisioningIdentity & { mode: AppleProvisioningMode; acknowledged: boolean }) | null;
+   result: AppleProvisioningResult | null; reviewReference: AppleProvisioningIdentity | null;
+@@ -71,6 +73,7 @@
+   private restored: Reference | null = null;
+   private profileReview: (Reference & { action: 'profile-reuse' | 'profile-create' }) | null = null;
+   private profileAttempt: Reference | null = null;
++  private restoredProfile: Reference | null = null;
+   private witness: Witness | null = null;
+   private status: AppleProvisioningStatus | null = null;
+   private issue: Issue | null = null;
+@@ -144,12 +147,21 @@
+         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+     return op.recovery;
+   }
++  private profileReconciliationReference(): Reference | null {
++    return this.referenceCurrent(this.restoredProfile) ? this.restoredProfile : this.referenceCurrent(this.profileAttempt) ? this.profileAttempt : null;
++  }
++  private previousProfileAttempts(): AppleProfileRecoveryHistory | null {
++    const a = this.attempt, op = this.status?.operation;
++    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
++        !sameAppleIdentity(a.identity, op) || a.request.mode !== 'profile-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
++    return op.profileRecovery ?? null;
++  }
+   private reason(mode: AppleProvisioningMode): string | null {
+     const base = this.baseReason(isAppleProfileMode(mode)); if (base) return base;
+     if (mode === 'profile-reuse' || mode === 'profile-create') {
+       if (!this.referenceCurrent(this.profileReview) || this.profileReview?.action !== mode) return 'Finish a current signing review first. Only its exact reuse or create choice can continue.';
+     }
+-    if (mode === 'profile-reconcile' && !this.referenceCurrent(this.profileAttempt)) return 'No matching profile attempt is selected. Keep earlier pending attempts; this action never repeats their request.';
++    if (mode === 'profile-reconcile' && !this.profileReconciliationReference()) return 'No matching profile attempt is selected. Keep earlier pending attempts; this action never repeats their request.';
+     if (mode === 'register') {
+       if (!this.referenceCurrent(this.review)) return 'First finish a current reuse-first review. A key-only not-returned result is not global availability or permission.';
+       if (!this.declaredNew) return 'Explicitly declare this is a new application, not a change to an existing store identity.';
+@@ -181,12 +193,13 @@
+       profileResult: readResult?.scope === 'local-ios-profile-setup' ? readResult : null,
+       savedProfile: readResult?.scope === 'local-ios-profile-setup' ? op?.savedProfile ?? null : null,
+       profileReviewReference: this.referenceCurrent(this.profileReview) ? this.profileReview.identity : null,
+-      profileAttemptReference: this.profileAttempt?.identity ?? null,
++      profileAttemptReference: this.restoredProfile?.identity ?? this.profileAttempt?.identity ?? null,
+       profileReviewReason: this.reason('profile-review'), profileReuseReason: this.reason('profile-reuse'),
+       profileCreateReason: this.reason('profile-create'), profileReconcileReason: this.reason('profile-reconcile'),
+       reviewReference: this.referenceCurrent(this.review) ? this.review.identity : null,
+       registrationReference: this.restored?.identity ?? this.registration?.identity ?? null,
+       previousAttempts: this.previousAttempts(), continueReason: this.baseReason(),
++      previousProfileAttempts: this.previousProfileAttempts(), profileContinueReason: this.baseReason(true),
+       reviewReason: this.reason('review'), registerReason: this.reason('register'), reconcileReason: this.reason('reconcile'),
+       startReason: this.startReason(), canRead: !!this.original && !this.read && (!this.connectionRetired || !this.settled()),
+       canCancel: !!this.original && !!cancelId && !this.cancellation && !sameAppleIdentity(this.cancelClaim, cancelId) && active(op),
+@@ -198,7 +211,7 @@
+     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
+   }
+   private fail(issue: Issue = 'unconfirmed'): void {
+-    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null;
++    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null;
+     if (this.attempt) this.attempt.retired = true;
+     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
+   }
+@@ -210,7 +223,7 @@
+     this.publish();
+   };
+   invalidate = (): void => {
+-    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.declaredNew = false;
++    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.declaredNew = false;
+     if (this.attempt) this.attempt.retired = true;
+     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
+     this.publish();
+@@ -247,7 +260,7 @@
+       try { this.off?.(); } catch { this.fail(); return; }
+     }
+     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
+-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.clearConsent(); this.witness = this.capture(); this.publish();
++    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+     if (!api) return;
+     const pending = (async () => {
+       try {
+@@ -328,6 +341,24 @@
+     if (!sameContinuation()) return Promise.resolve();
+     return this.prepareIntent('reconcile', continuation);
+   };
++  continuePreviousProfile = (operationId: string, ownerGeneration: string): Promise<void> => {
++    this.syncProject();
++    if (this.disposed || !this.visible || this.baseReason(true) || !this.original || !this.witness) return Promise.resolve();
++    const row = this.previousProfileAttempts()?.attempts.find(candidate => sameAppleIdentity(candidate.reference, { operationId, ownerGeneration }));
++    if (!row) return Promise.resolve();
++    const continuation = { api: this.original, witness: this.witness, epoch: this.epoch + 1 };
++    const sameContinuation = () => this.original === continuation.api && this.witness === continuation.witness &&
++      this.epoch === continuation.epoch && !this.disposed && !this.connectionRetired;
++    this.invalidate();
++    if (!sameContinuation()) return Promise.resolve();
++    // Explicit historical selection adopts DISPLAY text and a read-only prior
++    // reference, never the old Review/save destination/key/native settlement.
++    this.displayName = row.displayName;
++    this.restoredProfile = freeze({ identity: identity(row.reference), witness: continuation.witness, displayName: row.displayName, expires: null });
++    this.publish();
++    if (!sameContinuation()) return Promise.resolve();
++    return this.prepareIntent('profile-reconcile', continuation);
++  };
+   prepare = (mode: AppleProvisioningMode): Promise<void> => this.prepareIntent(mode);
+   private prepareIntent(mode: AppleProvisioningMode, continuation?: { api: AppleProvisioningApi; witness: Witness; epoch: number }): Promise<void> {
+     const profileEpoch = this.epoch;
+@@ -339,7 +370,7 @@
+         this.epoch !== continuation.epoch)) return Promise.resolve();
+     if (this.disposed || !this.visible || this.reason(mode) || !this.original || !this.witness || !this.status) return Promise.resolve();
+     const reference = mode === 'review' || mode === 'profile-review' ? null : mode === 'register' ? this.review?.identity :
+-      mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity : mode === 'profile-reconcile' ? this.profileAttempt?.identity : this.reconciliationReference()?.identity;
++      mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity : mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
+     const request = parseAppleProvisioningRequest({ ...this.witness.base, mode, reference, newApplication: mode === 'register', displayName: this.displayName });
+     if (!request) return Promise.resolve();
+     const api = this.original, a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
+--- a/desktop/src/components/AppleSigningSetup.tsx
++++ b/desktop/src/components/AppleSigningSetup.tsx
+@@ -1,3 +1,4 @@
++import { AppleProfileRecovery } from './AppleProfileRecovery.tsx';
+ import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
+ import { appleProfileResultCopy, isAppleProfileMode, type AppleProfileMode } from '../appleProfileSetup.ts';
+
+@@ -50,6 +51,7 @@
+       <button type="button" disabled={!!state.startReason} onClick={() => void controller.start(permission.operationId, permission.ownerGeneration)}>Start</button>
+       {state.startReason && <p className="save-note">{state.startReason}</p>}
+     </div>}
++    <AppleProfileRecovery controller={controller} state={state} />
+     {state.profileAttemptReference && <div className="actions">
+       <button type="button" disabled={!!state.profileReconcileReason} onClick={() => void controller.prepare('profile-reconcile')}>Prepare read-only check of earlier request</button>
+       {state.profileReconcileReason && <p className="save-note">{state.profileReconcileReason}</p>}
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {

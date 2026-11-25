@@ -1,0 +1,26 @@
+DRAFT - successor verification scope
+
+This supplemental text is candidate notice content only. It records no H/A/B
+execution, artifact identity, result or acceptance.
+
+A is a DATA-preparation step. B is a separately admitted, limited smoke check;
+it can execute the prepared candidate and is not DATA-only. Neither has run or
+passed merely because this notice inventory exists.
+
+The original H notices and REBUILD.md are carried unchanged. Their paths refer
+to the original hosted-evidence.tar layout, especially recipient/notices/,
+recipient/sources/, controls/, inputs/ and work/receipts/, not this successor's
+python/licenses/ directory.
+
+The successor design preserves the companion H source kit as the unchanged
+triple hosted-evidence.tar, retained-files.json and hosted-summary.json (under
+source-kit/ in the successor artifact). No source-kit repackaging, replacement
+H source producer or reconstructed H result is implied. Actual original H
+bytes, contents and result correspondence still require separate acceptance.
+
+Any eventual preparation or smoke result is limited to its actual recorded
+scope. This text asserts no installed-runtime custody, TLS/loader qualification,
+general native acceptance, legal clearance or Desktop/product readiness. Source
+and relink materials retain their original scope and LGPL-2.1 section 6(a)/(d)
+route; no successful modified reconstruction, new source offer, delivery
+fulfillment or production-authentication change is asserted.

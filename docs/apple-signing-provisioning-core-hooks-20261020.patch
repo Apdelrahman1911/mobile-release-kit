@@ -1,0 +1,72 @@
+--- a/src/mobile_release/apple_provisioning.py
++++ b/src/mobile_release/apple_provisioning.py
+@@ -401,7 +401,8 @@
+     return profile
+
+
+-def validate_profile_claims(plan: ProvisioningPlan, profile: api.Profile, payload: dict, *, now: datetime) -> None:
++def validate_profile_claims(plan: ProvisioningPlan, profile: api.Profile, payload: dict, *, now: datetime,
++                            deadline=None) -> None:
+     """Pure policy comparison AFTER authentication, never authentication itself.
+
+     Public for focused synthetic tests. No result/certificate assignment token is
+@@ -428,7 +429,7 @@
+                 and api.digest(certificates[0]) == plan.binding.certificate_sha256, "profile_certificate_mismatch")
+     try:
+         _ipa_profile_policy(payload, plan.target.bundle_id, plan.target.team_id)
+-        validate_profile_entitlements(plan.target.entitlements(), payload.get("Entitlements", {}))
++        validate_profile_entitlements(plan.target.entitlements(), payload.get("Entitlements", {}), deadline=deadline)
+     except api.ValidationError:
+         raise ProvisioningError("profile_entitlements_mismatch") from None
+
+@@ -443,7 +444,7 @@
+
+
+ def authenticate_downloaded_profile(plan: ProvisioningPlan, response: api.AppleResponse, *,
+-                                    cancellation, now: datetime) -> AuthenticatedProfile:
++                                    cancellation, now: datetime, deadline=None) -> AuthenticatedProfile:
+     """Actual existing macOS CMS/finality boundary; no decode-only fallback.
+
+     The actual credentials owner must retain the same current key loan and
+@@ -454,8 +455,10 @@
+     from ._profile_callers import consume_profile_evidence
+     from .inspection import InspectionDeadline
+     from .ios_profiles import decode_authenticated_profile
++    deadline = deadline if deadline is not None else InspectionDeadline()
++    deadline.check()
++    cancellation.check()
+     profile = validate_download(plan, response, now=now)
+-    deadline = InspectionDeadline()
+     evidence = ProfileCallEvidence(operation="decode")
+     primary, payload = None, None
+     try:
+@@ -471,5 +474,5 @@
+     cancellation.check()
+     # Native authentication can outlive a profile/certificate's last seconds.
+     # Recheck actual current time, not only the pre-call observation timestamp.
+-    validate_profile_claims(plan, profile, payload, now=datetime.now(timezone.utc))
++    validate_profile_claims(plan, profile, payload, now=datetime.now(timezone.utc), deadline=deadline)
+     return AuthenticatedProfile(profile, plan.binding.key_ref, plan.binding.certificate_sha256)
+--- a/src/mobile_release/apple_provisioning_recovery.py
++++ b/src/mobile_release/apple_provisioning_recovery.py
+@@ -338,13 +338,18 @@
+             # not silently attribute/adopt it or enable the next write.
+             return self._save(owner, replace(self.record, status="recovery_required", reason="resource_found_review_required",
+                                              observed_resource_id=matched_id))
+-        if (matched_id != self.record.response_resource_id
+-                or api.resource_sha256(matched) != self.record.response_resource_sha256):
++        if not self._response_matches(matched):
+             return self._save(owner, replace(self.record, status="unknown", reason="response_readback_disagrees"))
+         status = "cancelled" if self.record.cancel_requested else "succeeded"
+         return self._save(owner, replace(self.record, status=status,
+                                          reason="cancelled_after_settlement" if self.record.cancel_requested else "provider_resource_confirmed",
+                                          observed_resource_id=matched_id))
++
++    def _response_matches(self, resource) -> bool:
++        # Default full-resource comparison stays unchanged. The profile-only
++        # subclass compares its retained sparse 201 receipt to the exact GET.
++        return (resource.resource_id == self.record.response_resource_id
++                and api.resource_sha256(resource) == self.record.response_resource_sha256)
+
+     def _matching_resources(self, observation: Observation, bindings: tuple[CertificateBinding, ...],
+                             now: datetime) -> list[api.BundleId | api.Certificate | api.Profile]:

@@ -1,0 +1,25 @@
+[package]
+name = "mrk-github-seal"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+# This graph must not be unified with Desktop. No dependency or build script
+# selects, downloads, compiles or discovers the canonical static library.
+[workspace]
+
+[[bin]]
+name = "mrk-github-seal"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

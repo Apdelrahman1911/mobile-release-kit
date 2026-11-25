@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "aarch64-apple-darwin": {
+    "machine": "arm64",
+    "machoCpu": 16777228,
+    "machoSubtype": 0,
+    "runnerArch": "ARM64",
+    "runnerLabel": "macos-26",
+    "releaseInput": "build-release.json",
+    "releasePrefix": "macos26-arm64-"
+  },
+  "x86_64-apple-darwin": {
+    "machine": "x86_64",
+    "machoCpu": 16777223,
+    "machoSubtype": 3,
+    "runnerArch": "X64",
+    "runnerLabel": "macos-26-intel",
+    "releaseInput": "build-release-intel.json",
+    "releasePrefix": "macos26-x86_64-"
+  }
+}

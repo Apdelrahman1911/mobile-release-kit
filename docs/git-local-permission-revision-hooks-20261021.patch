@@ -1,0 +1,1438 @@
+diff --git a/desktop/src-tauri/src/service_git_document.rs b/desktop/src-tauri/src/service_git_document.rs
+--- a/desktop/src-tauri/src/service_git_document.rs
++++ b/desktop/src-tauri/src/service_git_document.rs
+@@ -8,6 +8,9 @@
+ };
+ use crate::service_git_commit_protocol::{Draft, Family};
+ use serde::Deserialize;
++#[path = "service_git_permission_revision.rs"]
++mod permission_revision;
++use permission_revision::{MainAccess, PermissionRevision};
+ 
+ #[path = "service_git_commit_document.rs"]
+ mod commit;
+@@ -27,6 +30,7 @@
+ pub(crate) struct Allow {
+     project_id: String,
+     expected_document_revision: u32,
++    expected_permission_revision: PermissionRevision,
+     read_operation_id: String,
+     action: wire::Action,
+     paths: Vec<String>,
+@@ -83,6 +87,9 @@
+ // Two original Observe/Grant comparison witnesses plus temporary rematch/GUI
+ // decode, not a new native source owner. Paths themselves are charged once in
+ // the inbox; the actual native Git action/review charges remain unchanged.
++// MAIN revisions add one u64 to each of the same two bounded requests and
++// one <=20-digit field to their projection, inside the unchanged 96-byte
++// envelope reserve. No new per-row or eight-worker backing is introduced.
+ pub(super) const fn document_backing() -> usize {
+     4 * (8192 + std::mem::size_of::<Observation>())
+         + std::mem::size_of::<NativeState>()
+@@ -221,6 +228,12 @@
+             .map(|s| s.upgrade().ok_or_else(|| public(Error::Unavailable)))
+             .transpose()
+     }
++    /// Every caller already holds the original Doc. Failure never skips the
++    /// independently performed original Inbox revoke/close.
++    fn revoke_git_permission_revision_locked(&self) -> Result<PermissionRevision, BridgeError> {
++        self.inner.agent_git_index.book.lock()
++            .map_err(|_| public(Error::StateUnknown))?.revoke_permission()
++    }
+     fn git_index_observation_current(
+         &self,
+         state: &DocumentState,
+@@ -259,30 +272,39 @@
+                 })
+             })
+     }
+-    pub(crate) fn agent_git_index_access(&self, window: &str) -> Result<wire::Access, BridgeError> {
++    pub(crate) fn agent_git_index_access(&self, window: &str) -> Result<MainAccess<wire::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.git_index_service()? {
+-            Some(s) => s.git_index_requests().access().map_err(public),
+-            None => Ok(wire::Access::empty()),
+-        }
++        let _state = self.lock();
++        let book = self.inner.agent_git_index.book.lock()
++            .map_err(|_| public(Error::StateUnknown))?;
++        let access = match self.git_index_service()? {
++            Some(s) => s.git_index_requests().access().map_err(public)?,
++            None => wire::Access::empty(),
++        };
++        Ok(MainAccess::new(access, book.permission_revision()))
+     }
+     pub(crate) fn allow_agent_git_index(
+         &self,
+         window: &str,
+         args: Allow,
+-    ) -> Result<wire::Access, BridgeError> {
++    ) -> Result<MainAccess<wire::Access>, BridgeError> {
+         self.allow_agent_git_files(window, args, None)
+     }
+-    fn allow_agent_git_files(&self, window: &str, args: Allow, commit: Option<Draft>) -> Result<wire::Access, BridgeError> {
++    fn allow_agent_git_files(&self, window: &str, args: Allow, commit: Option<Draft>) -> Result<MainAccess<wire::Access>, BridgeError> {
+         let family = if commit.is_some() { Family::Commit } else { Family::Index };
+         let consent = if family == Family::Commit { crate::service_git_commit_protocol::CONSENT } else { wire::CONSENT };
+         if window != MAIN || args.consent_version != consent || !family.matches(args.action) {
+             return Err(BridgeError::invalid());
+         }
+-        let (original, selected, revoke_epoch) = {
++        let (original, selected, successor) = {
+             let mut state = self.lock();
++            let successor = {
++                let book = self.inner.agent_git_index.book.lock()
++                    .map_err(|_| public(Error::StateUnknown))?;
++                book.next_permission(args.expected_permission_revision)?
++            };
+             git_read::reconcile(&mut state);
+             git_local::reconcile(&self.inner, &mut state);
+             self.git_local_new_gate(&state)?;
+@@ -328,7 +350,7 @@
+                 observed.original.clone(),
+                 if family == Family::Commit { commit::whole_selection(value)? }
+                 else { selection(value, args.action, args.paths)? },
+-                book.revoke_epoch,
++                successor,
+             )
+         };
+         // These existing calls can do Store IO. No Doc/Edit/native-book guard.
+@@ -387,7 +409,7 @@
+             .book
+             .lock()
+             .map_err(|_| public(Error::StateUnknown))?;
+-        if book.revoke_epoch != revoke_epoch
++        if book.next_permission(args.expected_permission_revision)? != successor
+             || !repository::basis_current(&book, &state, &scope, &original)
+         {
+             return Err(public(Error::Conflict));
+@@ -403,6 +425,8 @@
+                 .set(Arc::downgrade(&service))
+                 .map_err(|_| public(Error::StateUnknown))?;
+         }
++        // Spend the supplied generation before any fallible installer return.
++        book.consume_permission(args.expected_permission_revision, successor)?;
+         let access = if family == Family::Commit {
+             service.git_index_requests().allow_commit(scope.clone()).map(|a| a.0)
+         } else { service.git_index_requests().allow(scope.clone()) }.map_err(public)?;
+@@ -411,35 +435,23 @@
+             observation: original,
+             remote: None,
+         }));
+-        Ok(access)
+-    }
+-    pub(crate) fn revoke_agent_git_index(&self, window: &str) -> Result<wire::Access, BridgeError> {
++        Ok(MainAccess::new(access, successor))
++    }
++    pub(crate) fn revoke_agent_git_index(&self, window: &str) -> Result<MainAccess<wire::Access>, BridgeError> {
+         self.revoke_agent_git_files(window, Family::Index)
+     }
+-    fn revoke_agent_git_files(&self, window: &str, family: Family) -> Result<wire::Access, BridgeError> {
++    fn revoke_agent_git_files(&self, window: &str, family: Family) -> Result<MainAccess<wire::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+         let _state = self.lock();
+-        let advance = (|| {
+-            let mut book = self
+-                .inner
+-                .agent_git_index
+-                .book
+-                .lock()
+-                .map_err(|_| public(Error::StateUnknown))?;
+-            book.revoke_epoch = book
+-                .revoke_epoch
+-                .checked_add(1)
+-                .ok_or_else(|| public(Error::StateUnknown))?;
+-            Ok(())
+-        })();
++        let advance = self.revoke_git_permission_revision_locked();
+         let stop = match self.git_index_service() {
+             Ok(Some(s)) => if family == Family::Commit { s.git_index_requests().revoke_commit().map(|a| a.0).map_err(public) } else { s.git_index_requests().revoke().map_err(public) },
+             Ok(None) => Ok(wire::Access::empty()),
+             Err(e) => Err(e),
+         };
+-        advance.and(stop)
++        advance.and_then(|revision| stop.map(|access| MainAccess::new(access, revision)))
+     }
+     /// Shared Prepare/Apply boundary, inside the original Doc/Edit guards.
+     /// The caller supplies the real publisher epoch for Apply (not epoch()).
+@@ -622,19 +634,25 @@
+         let _ = flush(&service);
+     }
+     pub(crate) fn git_index_relay_lost(&self) {
++        let _state = self.lock();
++        let _ = self.revoke_git_permission_revision_locked();
+         if let Ok(Some(s)) = self.git_index_service() {
+             let _ = s.git_index_requests().revoke();
+         }
+     }
+     pub(crate) fn drain_git_index_for_exit(&self) {
+-        if let Ok(Some(s)) = self.git_index_service() {
+-            s.git_index_requests().close();
+-            {
+-                let mut state = self.lock();
++        let service = {
++            let mut state = self.lock();
++            let _ = self.revoke_git_permission_revision_locked();
++            let service = self.git_index_service().ok().flatten();
++            if let Some(s) = &service {
++                s.git_index_requests().close();
+                 git_local::agent_tick(&self.inner, &mut state);
+             }
+-            let _ = flush(&s);
+-        }
++            service
++        };
++        // Existing service history IO remains outside Doc/Edit/Book.
++        if let Some(s) = service { let _ = flush(&s); }
+     }
+ }
+ fn same_action(action: &local::Action, selection: &wire::Selection) -> bool {
+diff --git a/desktop/src-tauri/src/service_git_commit_document.rs b/desktop/src-tauri/src/service_git_commit_document.rs
+--- a/desktop/src-tauri/src/service_git_commit_document.rs
++++ b/desktop/src-tauri/src/service_git_commit_document.rs
+@@ -8,6 +8,7 @@
+ pub(crate) struct CommitAllow {
+     project_id: String,
+     expected_document_revision: u32,
++    expected_permission_revision: PermissionRevision,
+     read_operation_id: String,
+     message: String,
+     author_name: String,
+@@ -37,20 +38,24 @@
+     pub(crate) fn agent_git_commit_access(
+         &self,
+         window: &str,
+-    ) -> Result<commit::Access, BridgeError> {
++    ) -> Result<MainAccess<commit::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.git_index_service()? {
+-            Some(s) => s.git_index_requests().commit_access().map_err(public),
+-            None => Ok(commit::Access::empty()),
+-        }
++        let _state = self.lock();
++        let book = self.inner.agent_git_index.book.lock()
++            .map_err(|_| public(Error::StateUnknown))?;
++        let access = match self.git_index_service()? {
++            Some(s) => s.git_index_requests().commit_access().map_err(public)?,
++            None => commit::Access::empty(),
++        };
++        Ok(MainAccess::new(access, book.permission_revision()))
+     }
+     pub(crate) fn allow_agent_git_commit(
+         &self,
+         window: &str,
+         args: CommitAllow,
+-    ) -> Result<commit::Access, BridgeError> {
++    ) -> Result<MainAccess<commit::Access>, BridgeError> {
+         let draft =
+             Draft::new(args.message, args.author_name, args.author_email).map_err(public)?;
+         let value = self.allow_agent_git_files(
+@@ -58,6 +63,7 @@
+             Allow {
+                 project_id: args.project_id,
+                 expected_document_revision: args.expected_document_revision,
++                expected_permission_revision: args.expected_permission_revision,
+                 read_operation_id: args.read_operation_id,
+                 action: wire::Action::Commit,
+                 paths: Vec::new(),
+@@ -65,16 +71,16 @@
+             },
+             Some(draft),
+         )?;
+-        let value = commit::Access(value);
+-        value.validate().map_err(public)?;
++        let value = value.map_access(commit::Access);
++        value.access.validate().map_err(public)?;
+         Ok(value)
+     }
+     pub(crate) fn revoke_agent_git_commit(
+         &self,
+         window: &str,
+-    ) -> Result<commit::Access, BridgeError> {
++    ) -> Result<MainAccess<commit::Access>, BridgeError> {
+         self.revoke_agent_git_files(window, Family::Commit)
+-            .map(commit::Access)
++            .map(|value| value.map_access(commit::Access))
+     }
+ }
+ 
+diff --git a/desktop/src-tauri/src/service_git_repository_document.rs b/desktop/src-tauri/src/service_git_repository_document.rs
+--- a/desktop/src-tauri/src/service_git_repository_document.rs
++++ b/desktop/src-tauri/src/service_git_repository_document.rs
+@@ -13,6 +13,7 @@
+ pub(crate) struct RepositoryAllow {
+     project_id: String,
+     expected_document_revision: u32,
++    expected_permission_revision: PermissionRevision,
+     #[serde(deserialize_with = "required_read")]
+     read_operation_id: Option<String>,
+     action: repository::Action,
+@@ -145,26 +146,35 @@
+     pub(crate) fn agent_git_repository_access(
+         &self,
+         window: &str,
+-    ) -> Result<repository::Access, BridgeError> {
++    ) -> Result<MainAccess<repository::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.git_index_service()? {
+-            Some(s) => s.git_index_requests().repository_access().map_err(public),
+-            None => Ok(repository::Access::empty()),
+-        }
++        let _state = self.lock();
++        let book = self.inner.agent_git_index.book.lock()
++            .map_err(|_| public(Error::StateUnknown))?;
++        let access = match self.git_index_service()? {
++            Some(s) => s.git_index_requests().repository_access().map_err(public)?,
++            None => repository::Access::empty(),
++        };
++        Ok(MainAccess::new(access, book.permission_revision()))
+     }
+     pub(crate) fn allow_agent_git_repository(
+         &self,
+         window: &str,
+         args: RepositoryAllow,
+-    ) -> Result<repository::Access, BridgeError> {
++    ) -> Result<MainAccess<repository::Access>, BridgeError> {
+         if window != MAIN || args.consent_version != repository::CONSENT {
+             return Err(BridgeError::invalid());
+         }
+         let selection = repository::Selection::new(args.action).map_err(public)?;
+-        let (original, revoke_epoch) = {
++        let (original, successor) = {
+             let mut state = self.lock();
++            let successor = {
++                let book = self.inner.agent_git_index.book.lock()
++                    .map_err(|_| public(Error::StateUnknown))?;
++                book.next_permission(args.expected_permission_revision)?
++            };
+             git_read::reconcile(&mut state);
+             git_local::reconcile(&self.inner, &mut state);
+             self.git_local_new_gate(&state)?;
+@@ -230,7 +240,7 @@
+                 }
+             };
+             self.git_index_observation_current(&state, &original, &root, generation, epoch, &edit)?;
+-            (original, book.revoke_epoch)
++            (original, successor)
+         };
+         // SAME Host and authenticated read grant, entirely outside Doc/Edit.
+         let service = self
+@@ -288,7 +298,7 @@
+             .book
+             .lock()
+             .map_err(|_| public(Error::StateUnknown))?;
+-        if book.revoke_epoch != revoke_epoch || !basis_current(&book, &state, &scope, &original) {
++        if book.next_permission(args.expected_permission_revision)? != successor || !basis_current(&book, &state, &scope, &original) {
+             return Err(public(Error::Conflict));
+         }
+         if let Some(old) = self.inner.agent_git_index.service.get() {
+@@ -302,6 +312,8 @@
+                 .set(Arc::downgrade(&service))
+                 .map_err(|_| public(Error::StateUnknown))?;
+         }
++        // Spend before entering the original fallible lease installer.
++        book.consume_permission(args.expected_permission_revision, successor)?;
+         let access = service
+             .git_index_requests()
+             .allow_repository(scope.clone())
+@@ -311,35 +323,23 @@
+             observation: original,
+             remote: None,
+         }));
+-        Ok(access)
++        Ok(MainAccess::new(access, successor))
+     }
+     pub(crate) fn revoke_agent_git_repository(
+         &self,
+         window: &str,
+-    ) -> Result<repository::Access, BridgeError> {
++    ) -> Result<MainAccess<repository::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+         let _state = self.lock();
+-        let advance = (|| {
+-            let mut book = self
+-                .inner
+-                .agent_git_index
+-                .book
+-                .lock()
+-                .map_err(|_| public(Error::StateUnknown))?;
+-            book.revoke_epoch = book
+-                .revoke_epoch
+-                .checked_add(1)
+-                .ok_or_else(|| public(Error::StateUnknown))?;
+-            Ok(())
+-        })();
++        let advance = self.revoke_git_permission_revision_locked();
+         let stop = match self.git_index_service() {
+             Ok(Some(s)) => s.git_index_requests().revoke_repository().map_err(public),
+             Ok(None) => Ok(repository::Access::empty()),
+             Err(e) => Err(e),
+         };
+-        advance.and(stop)
++        advance.and_then(|revision| stop.map(|access| MainAccess::new(access, revision)))
+     }
+ }
+ 
+diff --git a/desktop/src-tauri/src/service_git_remote_document.rs b/desktop/src-tauri/src/service_git_remote_document.rs
+--- a/desktop/src-tauri/src/service_git_remote_document.rs
++++ b/desktop/src-tauri/src/service_git_remote_document.rs
+@@ -14,6 +14,7 @@
+ pub(crate) struct RemoteAllow {
+     project_id: String,
+     expected_document_revision: u32,
++    expected_permission_revision: PermissionRevision,
+     read_operation_id: String,
+     action: remote::Action,
+     consent_version: String,
+@@ -131,26 +132,35 @@
+     pub(crate) fn agent_git_remote_access(
+         &self,
+         window: &str,
+-    ) -> Result<remote::Access, BridgeError> {
++    ) -> Result<MainAccess<remote::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.git_index_service()? {
+-            Some(s) => s.git_index_requests().remote_access().map_err(public),
+-            None => Ok(remote::Access::empty()),
+-        }
++        let _state = self.lock();
++        let book = self.inner.agent_git_index.book.lock()
++            .map_err(|_| public(Error::StateUnknown))?;
++        let access = match self.git_index_service()? {
++            Some(s) => s.git_index_requests().remote_access().map_err(public)?,
++            None => remote::Access::empty(),
++        };
++        Ok(MainAccess::new(access, book.permission_revision()))
+     }
+     pub(crate) fn allow_agent_git_remote(
+         &self,
+         window: &str,
+         args: RemoteAllow,
+-    ) -> Result<remote::Access, BridgeError> {
++    ) -> Result<MainAccess<remote::Access>, BridgeError> {
+         if window != MAIN || args.consent_version != args.action.kind().consent() {
+             return Err(BridgeError::invalid());
+         }
+         let action = native::action(&args.action)?;
+-        let (original, approval, revoke_epoch) = {
++        let (original, approval, successor) = {
+             let mut state = self.lock();
++            let successor = {
++                let book = self.inner.agent_git_index.book.lock()
++                    .map_err(|_| public(Error::StateUnknown))?;
++                book.next_permission(args.expected_permission_revision)?
++            };
+             git_read::reconcile(&mut state);
+             git_local::reconcile(&self.inner, &mut state);
+             self.git_local_new_gate_for(&state, action.kind())?;
+@@ -200,7 +210,7 @@
+                 &args.action,
+                 Instant::now(),
+             )?;
+-            (observed.original.clone(), approval, book.revoke_epoch)
++            (observed.original.clone(), approval, successor)
+         };
+         // Existing Host/service checks may do IO: no Doc/Edit/Book is held.
+         let service = self
+@@ -269,7 +279,7 @@
+             .book
+             .lock()
+             .map_err(|_| public(Error::StateUnknown))?;
+-        if book.revoke_epoch != revoke_epoch
++        if book.next_permission(args.expected_permission_revision)? != successor
+             || !repository::basis_current(&book, &state, &scope, &original)
+         {
+             return Err(public(Error::Conflict));
+@@ -285,6 +295,8 @@
+                 .set(Arc::downgrade(&service))
+                 .map_err(|_| public(Error::StateUnknown))?;
+         }
++        // Spend before entering the original fallible lease installer.
++        book.consume_permission(args.expected_permission_revision, successor)?;
+         let access = service
+             .git_index_requests()
+             .allow_remote(scope.clone())
+@@ -294,35 +306,23 @@
+             observation: original,
+             remote: Some(approval),
+         }));
+-        Ok(access)
++        Ok(MainAccess::new(access, successor))
+     }
+     pub(crate) fn revoke_agent_git_remote(
+         &self,
+         window: &str,
+-    ) -> Result<remote::Access, BridgeError> {
++    ) -> Result<MainAccess<remote::Access>, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+         let _state = self.lock();
+-        let advance = (|| {
+-            let mut book = self
+-                .inner
+-                .agent_git_index
+-                .book
+-                .lock()
+-                .map_err(|_| public(Error::StateUnknown))?;
+-            book.revoke_epoch = book
+-                .revoke_epoch
+-                .checked_add(1)
+-                .ok_or_else(|| public(Error::StateUnknown))?;
+-            Ok(())
+-        })();
++        let advance = self.revoke_git_permission_revision_locked();
+         let stop = match self.git_index_service() {
+             Ok(Some(s)) => s.git_index_requests().revoke_remote().map_err(public),
+             Ok(None) => Ok(remote::Access::empty()),
+             Err(e) => Err(e),
+         };
+-        advance.and(stop)
++        advance.and_then(|revision| stop.map(|access| MainAccess::new(access, revision)))
+     }
+ }
+ 
+@@ -375,7 +375,7 @@
+     fn desktop_consent_is_kind_specific_and_cli_fields_cannot_select_credentials() {
+         for push in [false, true] {
+             let a = remote::tests::selection(push).action;
+-            let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
++            let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
+             assert!(decode_remote_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
+             for extra in ["token", "url", "reviewId", "root", "accountId", "window"] {
+                 let mut bad = value.clone();
+@@ -434,7 +434,7 @@
+     #[test]
+     fn new_branch_allow_cannot_borrow_old_consent_or_missing_remote_field() {
+         let a = remote::tests::new_branch_selection().action;
+-        let good = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,
++        let good = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0",
+             "readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
+         assert!(decode_remote_allow(&serde_json::to_vec(&good).unwrap()).is_ok());
+         for old in [false, true] {
+diff --git a/desktop/src-tauri/src/service_git_document_tests.rs b/desktop/src-tauri/src/service_git_document_tests.rs
+--- a/desktop/src-tauri/src/service_git_document_tests.rs
++++ b/desktop/src-tauri/src/service_git_document_tests.rs
+@@ -45,7 +45,7 @@
+ }
+ #[test]
+ fn native_consent_codec_rejects_paths_outside_exact_selected_roster() {
+-    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":"git-read-1","action":"stage","paths":["app/a"],"consentVersion":wire::CONSENT});
++    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":"git-read-1","action":"stage","paths":["app/a"],"consentVersion":wire::CONSENT});
+     assert!(decode_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
+     for key in ["window", "root", "nativeReceipt", "command", "reviewId"] {
+         let mut bad = value.clone();
+@@ -111,9 +111,9 @@
+         "/inert/git-index-never-opened",
+     )));
+     let doc = DocumentBinding::new(bridge.clone());
+-    assert!(!doc.agent_git_index_access(MAIN).unwrap().enabled);
++    assert!(!doc.agent_git_index_access(MAIN).unwrap().access.enabled);
+     assert!(doc.agent_git_index_access("foreign").is_err());
+-    assert!(!doc.revoke_agent_git_index(MAIN).unwrap().enabled);
++    assert!(!doc.revoke_agent_git_index(MAIN).unwrap().access.enabled);
+     doc.service_git_index_tick(Path::new("/inert/no-io"));
+     doc.drain_git_index_for_exit();
+     assert!(!bridge.application_service.status().unwrap().enabled);
+diff --git a/desktop/src-tauri/src/service_git_commit_document_tests.rs b/desktop/src-tauri/src/service_git_commit_document_tests.rs
+--- a/desktop/src-tauri/src/service_git_commit_document_tests.rs
++++ b/desktop/src-tauri/src/service_git_commit_document_tests.rs
+@@ -101,7 +101,7 @@
+ }
+ #[test]
+ fn commit_gui_codec_accepts_only_private_draft_and_original_ids_not_a_native_plan() {
+-    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":"git-read-1",
++    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":"git-read-1",
+         "message":"approved", "authorName":"Example", "authorEmail":"a@example.invalid", "consentVersion":commit::CONSENT});
+     assert!(decode_commit_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
+     for field in [
+diff --git a/desktop/src-tauri/src/service_git_repository_document_tests.rs b/desktop/src-tauri/src/service_git_repository_document_tests.rs
+--- a/desktop/src-tauri/src/service_git_repository_document_tests.rs
++++ b/desktop/src-tauri/src/service_git_repository_document_tests.rs
+@@ -50,7 +50,7 @@
+     assert!(decode_repository_empty(b"{\"root\":\"forged\"}").is_err());
+     assert!(decode_repository_empty(&vec![b' '; 1024]).is_err());
+     assert!(decode_repository_empty(b"").is_err());
+-    let value = json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":null,
++    let value = json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":null,
+         "action":{"kind":"initialize"},"consentVersion":repository::CONSENT});
+     assert!(decode_repository_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
+     for field in ["readOperationId", "action", "consentVersion"] {
+@@ -199,10 +199,10 @@
+         "/inert/git-repository-never-opened",
+     )));
+     let doc = DocumentBinding::new(bridge.clone());
+-    assert!(!doc.agent_git_repository_access(MAIN).unwrap().enabled);
++    assert!(!doc.agent_git_repository_access(MAIN).unwrap().access.enabled);
+     assert!(doc.agent_git_repository_access("foreign").is_err());
+-    assert!(!doc.revoke_agent_git_repository(MAIN).unwrap().enabled);
+-    let args = decode_repository_allow(&serde_json::to_vec(&json!({"projectId":"project-1", "expectedDocumentRevision":1,
++    assert!(!doc.revoke_agent_git_repository(MAIN).unwrap().access.enabled);
++    let args = decode_repository_allow(&serde_json::to_vec(&json!({"projectId":"project-1", "expectedDocumentRevision":1,"expectedPermissionRevision":"0",
+         "readOperationId":null,"action":{"kind":"initialize"},"consentVersion":repository::CONSENT})).unwrap()).unwrap();
+     assert!(doc.allow_agent_git_repository("foreign", args).is_err());
+     doc.service_git_index_tick(Path::new("/inert/no-io"));
+diff --git a/desktop/src/service_git_permission.ts b/desktop/src/service_git_permission.ts
+--- a/desktop/src/service_git_permission.ts
++++ b/desktop/src/service_git_permission.ts
+@@ -1,11 +1,15 @@
+ // Fixed native permission DATA. No renderer observation is native authority.
+ import { gitReadPathOrder } from './gitReadProtocol.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
++// MAIN-only comparison on the existing shared Git Book, not CLI authority.
++export function gitPermissionRevision(v: unknown): v is string {
++ return typeof v === 'string' && /^(?:0|[1-9][0-9]{0,19})$/.test(v) && BigInt(v) <= 18446744073709551615n;
++}
+ export const GIT_INDEX_CONSENT='agent-local-git-index-once-v1';
+ export type GitIndexAction='stage'|'unstage';
+ export interface GitIndexApproval {readonly projectId:string;readonly expectedDocumentRevision:number;readonly readOperationId:string;readonly action:GitIndexAction;readonly paths:readonly string[]}
+ export interface GitIndexSelection {readonly summary:{readonly action:GitIndexAction;readonly repositoryRevision:string;readonly pathCount:number;readonly selectionSha256:string};readonly paths:readonly string[]}
+-export interface GitIndexAccess {readonly enabled:boolean;readonly remainingMs:number;readonly consumed:boolean;readonly projectId:string|null;readonly grantId:string|null;readonly selection:GitIndexSelection|null}
++export interface GitIndexAccess {readonly permissionRevision:string;readonly enabled:boolean;readonly remainingMs:number;readonly consumed:boolean;readonly projectId:string|null;readonly grantId:string|null;readonly selection:GitIndexSelection|null}
+ const keys=(v:unknown,k:string[]):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===k.length&&k.every(n=>Object.hasOwn(v,n));
+ const hex=(v:unknown,n:number):v is string=>typeof v==='string'&&v.length===n&&/^[0-9a-f]+$/.test(v)&&(n!==32||!/^0+$/.test(v));
+ const id=(v:unknown):v is string=>typeof v==='string'&&/^[a-zA-Z0-9_-]{1,96}$/.test(v);
+@@ -18,29 +22,30 @@
+  return Object.freeze({projectId:v.projectId,expectedDocumentRevision:v.expectedDocumentRevision,readOperationId:v.readOperationId,action:v.action as GitIndexAction,paths:Object.freeze([...v.paths])});}catch{return null;}
+ }
+ export function parseGitIndexAccess(value:unknown):GitIndexAccess|null {
+- try{const v=copyBoundedComparisonData(value,128*1024,220);if(!keys(v,['enabled','remainingMs','consumed','projectId','grantId','selection'])||typeof v.enabled!=='boolean'||typeof v.consumed!=='boolean'||typeof v.remainingMs!=='number'||
++ try{const v=copyBoundedComparisonData(value,128*1024,220);if(!keys(v,['enabled','remainingMs','consumed','projectId','grantId','selection','permissionRevision'])||!gitPermissionRevision(v.permissionRevision)||typeof v.enabled!=='boolean'||typeof v.consumed!=='boolean'||typeof v.remainingMs!=='number'||
+  !Number.isSafeInteger(v.remainingMs)||v.remainingMs<0||v.remainingMs>900000||v.enabled&&(v.consumed||!v.remainingMs)||!v.enabled&&v.remainingMs!==0)return null;
+- if(v.projectId===null||v.grantId===null||v.selection===null){return v.projectId===null&&v.grantId===null&&v.selection===null&&!v.enabled&&!v.consumed?Object.freeze({enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null}):null;}
++ if(v.projectId===null||v.grantId===null||v.selection===null){return v.projectId===null&&v.grantId===null&&v.selection===null&&!v.enabled&&!v.consumed?Object.freeze({permissionRevision:v.permissionRevision,enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null}):null;}
+  if(!hex(v.projectId,32)||!hex(v.grantId,32)||!keys(v.selection,['summary','paths'])||!paths(v.selection.paths)||!keys(v.selection.summary,['action','repositoryRevision','pathCount','selectionSha256']))return null;
+  const s=v.selection.summary;if(!['stage','unstage'].includes(String(s.action))||!hex(s.repositoryRevision,64)||!hex(s.selectionSha256,64)||s.pathCount!==v.selection.paths.length)return null;
+- return Object.freeze({enabled:v.enabled,remainingMs:v.remainingMs,consumed:v.consumed,projectId:v.projectId,grantId:v.grantId,selection:Object.freeze({summary:Object.freeze({action:s.action as GitIndexAction,repositoryRevision:s.repositoryRevision,pathCount:v.selection.paths.length,selectionSha256:s.selectionSha256}),paths:Object.freeze([...v.selection.paths])})});}catch{return null;}
++ return Object.freeze({permissionRevision:v.permissionRevision,enabled:v.enabled,remainingMs:v.remainingMs,consumed:v.consumed,projectId:v.projectId,grantId:v.grantId,selection:Object.freeze({summary:Object.freeze({action:s.action as GitIndexAction,repositoryRevision:s.repositoryRevision,pathCount:v.selection.paths.length,selectionSha256:s.selectionSha256}),paths:Object.freeze([...v.selection.paths])})});}catch{return null;}
+ }
+-export interface GitIndexApi {status():Promise<GitIndexAccess>;allow(input:GitIndexApproval):Promise<GitIndexAccess>;revoke():Promise<GitIndexAccess>}
++export interface GitIndexApi {status():Promise<GitIndexAccess>;allow(input:GitIndexApproval,expectedPermissionRevision:string):Promise<GitIndexAccess>;revoke():Promise<GitIndexAccess>}
+ type Invoke=<T>(command:string,input?:Record<string,unknown>|Uint8Array)=>Promise<T>;
+ export function createGitIndexApi(mode:string,invoke:Invoke):GitIndexApi|null {
+  if(mode!=='native')return null;
+  const failure=()=>({code:'agent_git_index_unconfirmed',message:'Permission was not confirmed. Inspect or stop it in the original Desktop; do not repeat the change.',retryable:false});
+  const call=async(command:'agent_git_index_access'|'allow_agent_git_index'|'revoke_agent_git_index',input:unknown):Promise<GitIndexAccess>=>{
+   try{const raw=new TextEncoder().encode(JSON.stringify(input));if(raw.length+96>96*1024)throw failure();const result=parseGitIndexAccess(await invoke<unknown>(command,raw));if(!result)throw failure();return result;}catch{throw failure();}};
+- return Object.freeze({status:()=>call('agent_git_index_access',{}),revoke:()=>call('revoke_agent_git_index',{}),allow:(input:GitIndexApproval)=>{const safe=copyGitIndexApproval(input);return safe?call('allow_agent_git_index',{...safe,consentVersion:GIT_INDEX_CONSENT}):Promise.reject(failure());}});
++ return Object.freeze({status:()=>call('agent_git_index_access',{}),revoke:()=>call('revoke_agent_git_index',{}),allow:(input:GitIndexApproval,expectedPermissionRevision:string)=>{const safe=copyGitIndexApproval(input);return safe&&gitPermissionRevision(expectedPermissionRevision)?call('allow_agent_git_index',{...safe,expectedPermissionRevision,consentVersion:GIT_INDEX_CONSENT}):Promise.reject(failure());}});
+ }
+-export interface PermissionApi<A, R = GitIndexAccess> {status():Promise<R>;allow(input:A):Promise<R>;revoke():Promise<R>}
++export interface PermissionApi<A, R = GitIndexAccess> {status():Promise<R>;allow(input:A,expectedPermissionRevision:string):Promise<R>;revoke():Promise<R>}
+ export interface PermissionState<R = GitIndexAccess> { access: R | null; acknowledged: boolean; pending: 'allow' | 'status' | null; revokePending: boolean; uncertain: boolean; message: string | null }
+ export interface PermissionContext<A, R = GitIndexAccess> { api: PermissionApi<A, R> | null; project: A | null; blocked: boolean }
+-interface Work<A, R> { api: PermissionApi<A, R>; epoch: number; context: A | null; superseded: boolean }
++interface Work<A, R> { api: PermissionApi<A, R>; epoch: number; context: A | null; permissionRevision: string | null; superseded: boolean }
++interface Checked<A, R> { readonly api: PermissionApi<A, R>; readonly epoch: number; readonly context: A; readonly permissionRevision: string }
+ /** App-owned finite UI requests: one read/allow and one independent revoke.
+  * Native consent/epoch and original native owner remain authoritative. */
+-export class Permission<A, R extends { readonly enabled: boolean } = GitIndexAccess> {
++export class Permission<A, R extends { readonly enabled: boolean; readonly permissionRevision: string } = GitIndexAccess> {
+   private readonly copy:(value:unknown)=>A|null;
+   private api: PermissionApi<A, R> | null = null;
+   private original: PermissionApi<A, R> | null = null;
+@@ -50,6 +55,7 @@
+   private readonly current: (() => PermissionContext<A, R>) | null;
+   private work: Work<A, R> | null = null;
+   private revokeWork: Work<A, R> | null = null;
++  private checked: Checked<A, R> | null = null;
+   private listeners = new Set<(state: PermissionState<R>) => void>();
+   private state: PermissionState<R> = { access: null, acknowledged: false, pending: null, revokePending: false, uncertain: false, message: null };
+   constructor(copy: (value:unknown)=>A|null,current?:()=>PermissionContext<A, R>) {this.copy=copy;this.current=current??null;}
+@@ -59,7 +65,7 @@
+   bind(api: PermissionApi<A, R> | null, input: A | null): void {
+     const context = input ? this.copy(input) : null;
+     if (this.api === api && JSON.stringify(this.context) === JSON.stringify(context)) return;
+-    this.api = api; this.context = context;
++    this.api = api; this.context = context; this.checked = null;
+     // Do not lose an in-flight original on service/selection change. It can
+     // still be explicitly revoked, never adopted as a new permission.
+     this.update({ acknowledged: false, message: this.original && this.original !== api ? 'Revoke the original Desktop permission before using a different connection.' : null });
+@@ -70,13 +76,22 @@
+     this.blocked = current.blocked;
+     this.bind(current.api, current.project);
+   }
+-  acknowledge(value: boolean): void { this.update({ acknowledged: value === true }); }
+-  canAllow(): boolean { return !this.blocked && !!this.api && !!this.context && (!this.original || this.original === this.api) && !this.work && !this.revokeWork &&
+-    !this.state.uncertain && this.state.acknowledged && this.epoch < Number.MAX_SAFE_INTEGER; }
++  acknowledge(value: boolean): void {
++    this.update({ acknowledged: value === true && !!this.checked && !this.work && !this.revokeWork && !this.state.uncertain });
++  }
++  canAllow(): boolean {
++    const checked = this.checked;
++    return !this.blocked && !!this.api && !!this.context && !!checked && checked.api === this.api && checked.context === this.context && checked.epoch === this.epoch &&
++      gitPermissionRevision(checked.permissionRevision) && checked.permissionRevision !== '18446744073709551615' &&
++      (!this.original || this.original === this.api) && !this.work && !this.revokeWork && !this.state.uncertain && this.state.acknowledged && this.epoch < Number.MAX_SAFE_INTEGER;
++  }
+   async allow(): Promise<void> {
+     this.syncContext(); // Native invocation uses current event-time selection, not an earlier render/effect.
+     if (!this.canAllow()) return;
+-    const api = this.api!, context = this.context!, work: Work<A, R> = { api, context, epoch: this.epoch, superseded: false };
++    const api = this.api!, context = this.context!, work: Work<A, R> = { api, context, epoch: this.epoch, permissionRevision: this.checked!.permissionRevision, superseded: false };
++    // Consume the checked origin before notifying synchronous listeners. Even
++    // a pre-send veto needs a fresh joined Check and a new explicit checkbox.
++    this.checked = null;
+     this.original = api; this.work = work; this.update({ pending: 'allow', acknowledged: false, message: null });
+     try {
+       // Notification is synchronous: a subscriber can revoke or change the
+@@ -85,7 +100,7 @@
+       this.syncContext();
+       if (this.work !== work || work.superseded || work.epoch !== this.epoch || this.revokeWork ||
+           this.api !== api || this.context !== context || this.blocked) return;
+-      const result = await api.allow(context);
++      const result = await api.allow(context, work.permissionRevision!);
+       if (this.work === work && !work.superseded && work.epoch === this.epoch && this.api === api && this.context === context) this.update({ access: result, uncertain: false });
+       else if (!work.superseded && work.epoch === this.epoch) this.update({ uncertain: true, message: 'Selection changed while permission was pending. Revoke the original permission before allowing again.' });
+     } catch { if (!work.superseded && work.epoch === this.epoch) this.update({ uncertain: true, message: 'Permission was not confirmed. Refresh or stop it in the original Desktop; do not repeat the Git change.' }); }
+@@ -97,8 +112,20 @@
+     // A status-only reconnect can observe a previously enabled permission.
+     // Keep that exact connection until original Revoke, even after rebinding.
+     this.original = api;
+-    const work: Work<A, R> = { api, context: this.context, epoch: this.epoch, superseded: false }; this.work = work; this.update({ pending: 'status' });
+-    try { const result = await api.status(); if (!work.superseded && work.epoch === this.epoch) this.update({ access: result, message: null }); }
++    const work: Work<A, R> = { api, context: this.context, epoch: this.epoch, permissionRevision: null, superseded: false };
++    this.checked = null; this.work = work; this.update({ pending: 'status', acknowledged: false });
++    try {
++      const result = await api.status();
++      this.syncContext();
++      if (this.work === work && !work.superseded && work.epoch === this.epoch) {
++        // Native Access and its counter returned together. Historical status
++        // from a changed context/host is display-only, and never clears Unknown.
++        if (!this.state.uncertain && this.api === api && this.context === work.context && work.context && gitPermissionRevision(result.permissionRevision)) {
++          this.checked = Object.freeze({ api, context: work.context, epoch: work.epoch, permissionRevision: result.permissionRevision });
++        }
++        this.update({ access: result, acknowledged: false, message: null });
++      }
++    }
+     catch { if (!work.superseded && work.epoch === this.epoch) this.update({ message: 'Permission was not confirmed. Refresh or stop it in the original Desktop; do not repeat the Git change.' }); }
+     finally { if (this.work === work) { this.work = null; this.update({ pending: null }); } }
+   }
+@@ -107,9 +134,10 @@
+     const api = this.work?.api ?? this.original ?? this.api; if (!api || this.revokeWork) return;
+     // Even counter saturation still invokes original Revoke. There is no
+     // late Allow display after it and never a new action on an old ACK.
++    this.checked = null;
+     this.epoch = Math.min(this.epoch + 1, Number.MAX_SAFE_INTEGER);
+     if (this.work) this.work.superseded = true;
+-    const work: Work<A, R> = { api, context: null, epoch: this.epoch, superseded: false }; this.revokeWork = work;
++    const work: Work<A, R> = { api, context: null, epoch: this.epoch, permissionRevision: null, superseded: false }; this.revokeWork = work;
+     this.update({ revokePending: true, access: null, acknowledged: false });
+     try {
+       const result = await api.revoke();
+diff --git a/desktop/src/service_git_commit_permission.ts b/desktop/src/service_git_commit_permission.ts
+--- a/desktop/src/service_git_commit_permission.ts
++++ b/desktop/src/service_git_commit_permission.ts
+@@ -1,5 +1,5 @@
+ // Fixed Desktop Commit approval. The private draft is never sent to the CLI.
+-import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
++import { Permission, gitPermissionRevision, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { gitReadPathOrder } from './gitReadProtocol.ts';
+ export const GIT_COMMIT_CONSENT = 'agent-local-git-commit-once-v1';
+@@ -12,6 +12,7 @@
+   readonly paths: readonly string[];
+ }
+ export interface GitCommitAccess {
++  readonly permissionRevision: string;
+   readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
+   readonly projectId: string | null; readonly grantId: string | null; readonly selection: GitCommitSelection | null;
+ }
+@@ -38,12 +39,12 @@
+ export function parseGitCommitAccess(value: unknown): GitCommitAccess | null {
+   try {
+     const v = copyBoundedComparisonData(value, 128 * 1024, 220);
+-    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection'])
+-      || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean' || typeof v.remainingMs !== 'number'
++    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection', 'permissionRevision'])
++      || !gitPermissionRevision(v.permissionRevision) || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean' || typeof v.remainingMs !== 'number'
+       || !Number.isSafeInteger(v.remainingMs) || v.remainingMs < 0 || v.remainingMs > 900000
+       || v.enabled && (v.consumed || !v.remainingMs) || !v.enabled && v.remainingMs !== 0) return null;
+     if (v.projectId === null || v.grantId === null || v.selection === null) return v.projectId === null && v.grantId === null && v.selection === null && !v.enabled && !v.consumed
+-      ? Object.freeze({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
++      ? Object.freeze({ permissionRevision: v.permissionRevision, enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
+     if (!hex(v.projectId, 32) || !hex(v.grantId, 32) || !keys(v.selection, ['summary', 'paths'])
+       || !keys(v.selection.summary, ['action', 'repositoryRevision', 'pathCount', 'selectionSha256']) || !Array.isArray(v.selection.paths)) return null;
+     const s = v.selection.summary, paths: unknown[] = v.selection.paths;
+@@ -52,7 +53,7 @@
+       && (i === 0 || typeof paths[i - 1] === 'string' && gitReadPathOrder(paths[i - 1] as string, p) < 0);
+     if (s.action !== 'commit' || !hex(s.repositoryRevision, 64) || !hex(s.selectionSha256, 64)
+       || !paths.length || paths.length > 64 || s.pathCount !== paths.length || !paths.every(validPaths)) return null;
+-    return Object.freeze({ enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
++    return Object.freeze({ permissionRevision: v.permissionRevision, enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
+       selection: Object.freeze({ summary: Object.freeze({ action: 'commit', repositoryRevision: s.repositoryRevision, pathCount: paths.length, selectionSha256: s.selectionSha256 }), paths: Object.freeze([...paths]) }) });
+   } catch { return null; }
+ }
+@@ -68,7 +69,7 @@
+     } catch { throw failure(); }
+   };
+   return Object.freeze({ status: () => call('agent_git_commit_access', {}), revoke: () => call('revoke_agent_git_commit', {}),
+-    allow: (input: GitCommitApproval) => { const safe = copyGitCommitApproval(input); return safe ? call('allow_agent_git_commit', { ...safe, consentVersion: GIT_COMMIT_CONSENT }) : Promise.reject(failure()); } });
++    allow: (input: GitCommitApproval, expectedPermissionRevision: string) => { const safe = copyGitCommitApproval(input); return safe && gitPermissionRevision(expectedPermissionRevision) ? call('allow_agent_git_commit', { ...safe, expectedPermissionRevision, consentVersion: GIT_COMMIT_CONSENT }) : Promise.reject(failure()); } });
+ }
+ export class GitCommitPermission extends Permission<GitCommitApproval, GitCommitAccess> {
+   constructor(current: () => PermissionContext<GitCommitApproval, GitCommitAccess>) { super(copyGitCommitApproval, current); }
+diff --git a/desktop/src/service_git_repository_permission.ts b/desktop/src/service_git_repository_permission.ts
+--- a/desktop/src/service_git_repository_permission.ts
++++ b/desktop/src/service_git_repository_permission.ts
+@@ -1,7 +1,7 @@
+ // Closed permission DATA for the existing GitLocal owner. This does not
+ // inspect a repository, mint a review, start Git or establish native finality.
+ import { isGitUpstreamAction, sameUpstreamAction, type GitUpstreamAction } from './gitUpstreamProtocol.ts';
+-import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
++import { Permission, gitPermissionRevision, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { isGitInitAction, type GitInitAction } from './gitInitProtocol.ts';
+ import { isGitBranchAction, type GitBranchAction } from './gitBranchesProtocol.ts';
+@@ -17,6 +17,7 @@
+   readonly action: GitRepositoryPermissionAction;
+ }
+ export interface GitRepositoryAccess {
++  readonly permissionRevision: string;
+   readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
+   readonly projectId: string | null; readonly grantId: string | null;
+   readonly selection: { readonly action: GitRepositoryPermissionAction; readonly selectionSha256: string } | null;
+@@ -54,15 +55,15 @@
+ export function parseGitRepositoryAccess(value: unknown): GitRepositoryAccess | null {
+   try {
+     const v = copyBoundedComparisonData(value, 8192, 80);
+-    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection']) || typeof v.enabled !== 'boolean'
++    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection', 'permissionRevision']) || !gitPermissionRevision(v.permissionRevision) || typeof v.enabled !== 'boolean'
+       || typeof v.consumed !== 'boolean' || typeof v.remainingMs !== 'number' || !Number.isSafeInteger(v.remainingMs)
+       || v.remainingMs < 0 || v.remainingMs > 900000 || v.enabled && (v.consumed || v.remainingMs === 0)
+       || !v.enabled && v.remainingMs !== 0) return null;
+     if (v.projectId === null || v.grantId === null || v.selection === null) return v.projectId === null && v.grantId === null && v.selection === null && !v.enabled && !v.consumed
+-      ? Object.freeze({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
++      ? Object.freeze({ permissionRevision: v.permissionRevision, enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
+     if (!hex(v.projectId, 32) || !hex(v.grantId, 32) || !keys(v.selection, ['action', 'selectionSha256']) || !hex(v.selection.selectionSha256, 64)) return null;
+     const a = action(v.selection.action); if (!a) return null;
+-    return Object.freeze({ enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
++    return Object.freeze({ permissionRevision: v.permissionRevision, enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
+       selection: Object.freeze({ action: a, selectionSha256: v.selection.selectionSha256 }) });
+   } catch { return null; }
+ }
+@@ -86,9 +87,9 @@
+     } catch { throw failure(); }
+   };
+   return Object.freeze({ status: () => call('agent_git_repository_access', {}), revoke: () => call('revoke_agent_git_repository', {}),
+-    allow: async (input: GitRepositoryApproval) => {
+-      const safe = copyGitRepositoryApproval(input); if (!safe) throw failure();
+-      const result = await call('allow_agent_git_repository', { ...safe, consentVersion: GIT_REPOSITORY_CONSENT });
++    allow: async (input: GitRepositoryApproval, expectedPermissionRevision: string) => {
++      const safe = copyGitRepositoryApproval(input); if (!safe || !gitPermissionRevision(expectedPermissionRevision)) throw failure();
++      const result = await call('allow_agent_git_repository', { ...safe, expectedPermissionRevision, consentVersion: GIT_REPOSITORY_CONSENT });
+       if (!result.selection || !sameGitRepositoryPermissionAction(safe.action, result.selection.action)) throw failure();
+       return result; // The native digest stays paired with its action; it is not renderer authority.
+     } });
+diff --git a/desktop/src/service_git_remote_permission.ts b/desktop/src/service_git_remote_permission.ts
+--- a/desktop/src/service_git_remote_permission.ts
++++ b/desktop/src/service_git_remote_permission.ts
+@@ -1,6 +1,6 @@
+ // One closed Remote permission on the existing finite Permission controller.
+ // All values are comparison DATA; no token, native review or send is made here.
+-import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
++import { Permission, gitPermissionRevision, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { isGitFetchAction, type GitFetchAction } from './gitFetchProtocol.ts';
+ import { isGitPushAction, type GitPushAction } from './gitPushProtocol.ts';
+@@ -18,6 +18,7 @@
+ export interface GitRemoteApproval { readonly projectId: string; readonly expectedDocumentRevision: number; readonly readOperationId: string; readonly action: GitRemoteAction }
+ export interface GitRemoteAccount { readonly accountId: string; readonly login: string; readonly repositoryId: string; readonly repository: string }
+ export interface GitRemoteAccess {
++  readonly permissionRevision: string;
+   readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean; readonly projectId: string | null; readonly grantId: string | null;
+   readonly selection: { readonly action: GitRemoteAction; readonly account: GitRemoteAccount; readonly selectionSha256: string } | null;
+ }
+@@ -60,14 +61,14 @@
+ export function parseGitRemoteAccess(value: unknown): GitRemoteAccess | null {
+   try {
+     const v = copyBoundedComparisonData(value, 8192, 100);
+-    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection']) || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean'
++    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection', 'permissionRevision']) || !gitPermissionRevision(v.permissionRevision) || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean'
+       || typeof v.remainingMs !== 'number' || !Number.isSafeInteger(v.remainingMs) || Object.is(v.remainingMs, -0) || v.remainingMs < 0 || v.remainingMs > 900000
+       || v.enabled && (v.consumed || v.remainingMs === 0) || !v.enabled && v.remainingMs !== 0) return null;
+     if (v.projectId === null || v.grantId === null || v.selection === null) return v.projectId === null && v.grantId === null && v.selection === null && !v.enabled && !v.consumed
+-      ? Object.freeze({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
++      ? Object.freeze({ permissionRevision: v.permissionRevision, enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
+     if (!hex(v.projectId, 32) || !hex(v.grantId, 32) || !keys(v.selection, ['action', 'account', 'selectionSha256']) || !hex(v.selection.selectionSha256, 64)) return null;
+     const a = action(v.selection.action), who = account(v.selection.account); if (!a || !who) return null;
+-    return Object.freeze({ enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
++    return Object.freeze({ permissionRevision: v.permissionRevision, enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
+       selection: Object.freeze({ action: a, account: who, selectionSha256: v.selection.selectionSha256 }) });
+   } catch { return null; }
+ }
+@@ -85,9 +86,9 @@
+       const result = parseGitRemoteAccess(await invoke<unknown>(command, raw)); if (!result) throw failure(); return result;
+     } catch { throw failure(); }
+   };
+-  return Object.freeze({ status: () => call('agent_git_remote_access', {}), revoke: () => call('revoke_agent_git_remote', {}), allow: async (input: GitRemoteApproval) => {
+-    const safe = copyGitRemoteApproval(input); if (!safe) throw failure();
+-    const result = await call('allow_agent_git_remote', { ...safe, consentVersion: GIT_REMOTE_CONSENT[safe.action.kind] });
++  return Object.freeze({ status: () => call('agent_git_remote_access', {}), revoke: () => call('revoke_agent_git_remote', {}), allow: async (input: GitRemoteApproval, expectedPermissionRevision: string) => {
++    const safe = copyGitRemoteApproval(input); if (!safe || !gitPermissionRevision(expectedPermissionRevision)) throw failure();
++    const result = await call('allow_agent_git_remote', { ...safe, expectedPermissionRevision, consentVersion: GIT_REMOTE_CONSENT[safe.action.kind] });
+     if (!result.selection || !sameGitRemoteAction(safe.action, result.selection.action)) throw failure(); return result;
+   } });
+ }
+diff --git a/desktop/src/components/ServiceGitIndexAccess.tsx b/desktop/src/components/ServiceGitIndexAccess.tsx
+--- a/desktop/src/components/ServiceGitIndexAccess.tsx
++++ b/desktop/src/components/ServiceGitIndexAccess.tsx
+@@ -9,6 +9,7 @@
+   <p className="review-caution">This changes the local Git index. It does not grant commit, branch switching, push, credentials, or arbitrary commands. This shares one permission with agent Commit and local repository actions; an explicit Allow replaces only an unused permission. Git may run configured clean filters; they can run project code or have file and network effects.</p>
+   <label>Action <select value={controller.getAction()} disabled={!!state.pending||state.revokePending} onChange={e=>controller.chooseAction(e.target.value==='unstage'?'unstage':'stage')}>
+    <option value="stage">Stage selected files</option><option value="unstage">Unstage selected files</option></select></label>
++  <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
+   <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending||state.revokePending} onChange={e=>controller.acknowledge(e.target.checked)}/>I approve this one local Git change to the selected files, with these risks.</label>
+   <div className="button-row"><button className="button secondary" disabled={!controller.canAllow()} onClick={()=>void controller.allow()}>Allow</button>
+    <button className="button secondary" disabled={state.revokePending} onClick={()=>void controller.revoke()}>Stop</button>
+diff --git a/desktop/src/components/ServiceGitCommitAccess.tsx b/desktop/src/components/ServiceGitCommitAccess.tsx
+--- a/desktop/src/components/ServiceGitCommitAccess.tsx
++++ b/desktop/src/components/ServiceGitCommitAccess.tsx
+@@ -12,6 +12,7 @@
+     <p>Check Git changes, then review the commit message and author entered above. Allow gives the agent 15 minutes to prepare and start one local commit using exactly that draft.</p>
+     <p>Editing those fields after Allow does not change the approved draft. Use Stop or explicitly Allow a replacement.</p>
+     <p className="review-caution">This commits every staged change, including files staged by another Git client—not just selected rows. No hooks, signing, branch switching, push, credentials, or arbitrary command permission is granted. The existing native Git safety checks still apply.</p>
++    <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
+     <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending || state.revokePending}
+       onChange={e => controller.acknowledge(e.target.checked)} />I approve the whole staged index and the exact message and author above.</label>
+     <div className="button-row">
+diff --git a/desktop/src/components/ServiceGitRepositoryAccess.tsx b/desktop/src/components/ServiceGitRepositoryAccess.tsx
+--- a/desktop/src/components/ServiceGitRepositoryAccess.tsx
++++ b/desktop/src/components/ServiceGitRepositoryAccess.tsx
+@@ -30,6 +30,7 @@
+       {current.reason && <p className="save-note" role="status">{current.reason}</p>}
+       <p>Allow lasts at most 15 minutes. The agent must then prepare the native review and explicitly start it once. Nothing runs when you open this panel or choose an action.</p>
+       <p className="save-note">No fetch, push, GitHub repository creation, commit, credentials or arbitrary commands. Unsupported layouts are refused by the original Git safety checks.</p>
++      <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
+       <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={pending || !action || current.blocked}
+         onChange={e => controller.acknowledge(e.target.checked)} />I approve exactly this one local action, with the names and target shown here.</label>
+       <div className="button-row">
+diff --git a/desktop/src/components/ServiceGitRemoteAccess.tsx b/desktop/src/components/ServiceGitRemoteAccess.tsx
+--- a/desktop/src/components/ServiceGitRemoteAccess.tsx
++++ b/desktop/src/components/ServiceGitRemoteAccess.tsx
+@@ -32,6 +32,7 @@
+       {selected?.kind === 'push-new-branch' && <p className="review-caution">Create {selected.remoteRef} at {selected.newOid.slice(0, 12)} in the selected GitHub repository, only if that branch is absent. All reachable committed history may be uploaded; committed secrets could be included. Any occupied target refuses, even with an identical tip. This does not configure a remote or upstream.</p>}
+       {current.reason && <p role="status" className="save-note">{current.reason}</p>}
+       <p>The agent must prepare a fresh native review, then explicitly start it once. Allow lasts at most 15 minutes; the original review expires within five minutes. Opening this panel never starts Git or grants access.</p>
++      <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
+       <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={busy || current.blocked || !selected}
+         onChange={e => controller.acknowledge(e.target.checked)} />I approve this one {controller.getKind() === 'push-new-branch' ? 'create-only branch publication' : controller.getKind() === 'push' ? 'remote upload' : 'branch fetch'}, for the exact account, repository and references shown.</label>
+       <div className="button-row">
+diff --git a/desktop/tests/service-git-permission.test.mjs b/desktop/tests/service-git-permission.test.mjs
+--- a/desktop/tests/service-git-permission.test.mjs
++++ b/desktop/tests/service-git-permission.test.mjs
+@@ -5,11 +5,19 @@
+ import { GIT_INDEX_CONSENT, GitIndexPermission, copyGitIndexApproval, createGitIndexApi, parseGitIndexAccess } from '../src/service_git_permission.ts';
+ const id=c=>c.repeat(32);
+ const approval=()=>({projectId:'project-1',expectedDocumentRevision:1,readOperationId:'git-read-1',action:'stage',paths:['app/a','app/b']});
+-const empty=()=>({enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null});
+-const enabled=()=>({enabled:true,remainingMs:900000,consumed:false,projectId:id('a'),grantId:id('b'),selection:{summary:{action:'stage',repositoryRevision:'c'.repeat(64),pathCount:2,selectionSha256:'d'.repeat(64)},paths:['app/a','app/b']}});
++const empty=()=>({permissionRevision:'0',enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null});
++const enabled=()=>({permissionRevision:'0',enabled:true,remainingMs:900000,consumed:false,projectId:id('a'),grantId:id('b'),selection:{summary:{action:'stage',repositoryRevision:'c'.repeat(64),pathCount:2,selectionSha256:'d'.repeat(64)},paths:['app/a','app/b']}});
+ function defer(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};}
+-function port(){const calls=[];const api=Object.fromEntries(['allow','status','revoke'].map(kind=>[kind,input=>{const v={kind,input,...defer()};calls.push(v);return v.promise;}]));return{api,calls};}
++function port(){const calls=[];const api=Object.fromEntries(['allow','status','revoke'].map(kind=>[kind,(input,expectedPermissionRevision)=>{const v={kind,input,expectedPermissionRevision,...defer()};calls.push(v);return v.promise;}]));return{api,calls};}
+ function controller(p=port()){let context={api:p.api,project:approval(),blocked:false};const c=new GitIndexPermission(action=>({...context,project:context.project&&{...context.project,action}}));c.syncContext();return{...p,c,set:v=>{context=v;}};}
++async function checked(c, calls, revision = '0') {
++  const before = calls.length, pending = c.status();
++  assert.equal(calls.length, before + 1); assert.equal(calls[before].kind, 'status');
++  c.acknowledge(true); assert.equal(c.getState().acknowledged, false);
++  calls[before].resolve({ ...empty(), permissionRevision: revision }); await pending;
++  assert.equal(c.getState().pending, null); assert.equal(c.getState().acknowledged, false);
++}
++
+ test('closed action/path consent preserves exact selection and rejects authority fields/getters',()=>{
+  const a=approval();assert.deepEqual(copyGitIndexApproval(a),a);assert.equal(copyGitIndexApproval({...a,command:'commit'}),null);
+  for(const paths of [[],['b','a'],['a','a'],['../secret'],['a/.git/index'],['a\\b'],['a\nb'],['a\ud800']])assert.equal(copyGitIndexApproval({...a,paths}),null);
+@@ -26,24 +34,116 @@
+ });
+ test('only native mode and the three exact raw permission commands are invoked',async()=>{
+  const calls=[];const api=createGitIndexApi('native',async(command,raw)=>{calls.push({command,value:JSON.parse(new TextDecoder().decode(raw))});return command==='revoke_agent_git_index'?empty():enabled();});
+- assert.equal(createGitIndexApi('preview',()=>{throw Error('called');}),null);await api.allow(approval());assert.equal(calls[0].command,'allow_agent_git_index');assert.equal(calls[0].value.consentVersion,GIT_INDEX_CONSENT);
++ assert.equal(createGitIndexApi('preview',()=>{throw Error('called');}),null);await api.allow(approval(), '0');assert.equal(calls[0].command,'allow_agent_git_index');assert.equal(calls[0].value.consentVersion,GIT_INDEX_CONSENT);
+  await api.status();await api.revoke();assert.deepEqual(calls.slice(1).map(v=>v.command),['agent_git_index_access','revoke_agent_git_index']);
+- await assert.rejects(api.allow({...approval(),paths:['..']}));assert.equal(calls.length,3);
++ await assert.rejects(api.allow({...approval(),paths:['..']}, '0'));assert.equal(calls.length,3);
+ });
+ test('no acknowledgement/read grant substitutes for explicit one-use Allow',async()=>{
+- const {c,calls}=controller();await c.allow();assert.equal(calls.length,0);c.acknowledge(true);const p=c.allow();assert.equal(calls[0].kind,'allow');calls[0].resolve(enabled());await p;assert.equal(c.getState().access.enabled,true);assert.equal(c.getState().acknowledged,false);
++ const {c,calls}=controller();await c.allow();assert.equal(calls.length,0);await checked(c, calls); c.acknowledge(true);const p=c.allow();assert.equal(calls[1].kind,'allow');calls[1].resolve(enabled());await p;assert.equal(c.getState().access.enabled,true);assert.equal(c.getState().acknowledged,false);
+ });
+ test('reentrant Revoke notification prevents fresh Allow after the original STOP',async()=>{
+- const {c,calls}=controller();let stop;const unsubscribe=c.subscribe(s=>{if(s.pending==='allow'&&!stop){stop=c.revoke();}});c.acknowledge(true);const run=c.allow();assert.deepEqual(calls.map(v=>v.kind),['revoke']);calls[0].resolve(empty());await stop;await run;unsubscribe();assert.equal(c.getState().access.enabled,false);
++ const {c,calls}=controller();let stop;const unsubscribe=c.subscribe(s=>{if(s.pending==='allow'&&!stop){stop=c.revoke();}});await checked(c, calls); c.acknowledge(true);const run=c.allow();assert.deepEqual(calls.map(v=>v.kind),['status','revoke']);calls[1].resolve(empty());await stop;await run;unsubscribe();assert.equal(c.getState().access.enabled,false);
+ });
+ test('status-only original survives rebinding and Revoke targets that old connection',async()=>{
+  const old=port(),fresh=port();const {c,set}=controller(old);const pending=c.status();set({api:fresh.api,project:approval(),blocked:false});c.syncContext();old.calls[0].resolve(enabled());await pending;
+  c.acknowledge(true);await c.allow();assert.equal(fresh.calls.length,0);const stop=c.revoke();assert.equal(old.calls[1].kind,'revoke');assert.equal(fresh.calls.length,0);old.calls[1].resolve(empty());await stop;
+ });
+ test('same original late Allow after Revoke cannot resurrect permission',async()=>{
+- const {c,calls}=controller();c.acknowledge(true);const allow=c.allow();const stop=c.revoke();assert.equal(calls.length,2);calls[1].resolve(empty());await stop;calls[0].resolve(enabled());await allow;assert.equal(c.getState().access.enabled,false);
++ const {c,calls}=controller();await checked(c, calls); c.acknowledge(true);const allow=c.allow();const stop=c.revoke();assert.equal(calls.length,3);calls[2].resolve(empty());await stop;calls[1].resolve(enabled());await allow;assert.equal(c.getState().access.enabled,false);
+ });
+ test('selection changes or unknown reply do not silently issue another permission',async()=>{
+- const {c,calls,set,api}=controller();c.acknowledge(true);const pending=c.allow();set({api,project:{...approval(),paths:['different']},blocked:false});c.syncContext();calls[0].resolve(enabled());await pending;assert.equal(c.getState().uncertain,true);
+- c.acknowledge(true);await c.allow();assert.equal(calls.length,1);const stop=c.revoke();calls[1].reject(Error('unknown close'));await stop;assert.equal(c.getState().uncertain,true);
++ const {c,calls,set,api}=controller();await checked(c, calls); c.acknowledge(true);const pending=c.allow();set({api,project:{...approval(),paths:['different']},blocked:false});c.syncContext();calls[1].resolve(enabled());await pending;assert.equal(c.getState().uncertain,true);
++ c.acknowledge(true);await c.allow();assert.equal(calls.length,2);const stop=c.revoke();calls[2].reject(Error('unknown close'));await stop;assert.equal(c.getState().uncertain,true);
+ });
++
++test('MAIN revision is canonical in all four exact API codecs without changing approval or CLI shapes', async () => {
++ const {createGitCommitApi,parseGitCommitAccess}=await import('../src/service_git_commit_permission.ts');
++ const {createGitRepositoryPermissionApi,parseGitRepositoryAccess}=await import('../src/service_git_repository_permission.ts');
++ const {createGitRemotePermissionApi,parseGitRemoteAccess}=await import('../src/service_git_remote_permission.ts');
++ const init={projectId:'project-1',expectedDocumentRevision:1,readOperationId:null,action:{kind:'initialize'}};
++ const fetch={...init,readOperationId:'git-read-1',action:{kind:'fetch',expectedRevision:'a'.repeat(64),expectedReferenceRevision:'b'.repeat(64),remote:'origin',reference:'refs/heads/main',connectionSessionId:'session-1',expectedConnectionRevision:1}};
++ const commit={projectId:'project-1',expectedDocumentRevision:1,readOperationId:'git-read-1',message:'Reviewed',authorName:'Fixture',authorEmail:'a@example.invalid'};
++ const c=enabled();c.selection.summary.action='commit';
++ const common={enabled:true,remainingMs:1,consumed:false,projectId:id('a'),grantId:id('b'),permissionRevision:'9007199254740994'};
++ const cases=[
++  [parseGitIndexAccess,createGitIndexApi,approval(),enabled()],
++  [parseGitCommitAccess,createGitCommitApi,commit,c],
++  [parseGitRepositoryAccess,createGitRepositoryPermissionApi,init,{...common,selection:{action:init.action,selectionSha256:'c'.repeat(64)}}],
++  [parseGitRemoteAccess,createGitRemotePermissionApi,fetch,{...common,selection:{action:fetch.action,account:{accountId:'1',login:'Example',repositoryId:'2',repository:'Example/App'},selectionSha256:'c'.repeat(64)}}],
++ ];
++ const invalid=[undefined,null,0,1,1.5,'','00','01','-0','+1','1e2',' 1','1 ','0\n','12\r','12\u2028','12\u2029','18446744073709551616',[],{}];
++ for(const [parse,make,request,reply] of cases){
++  for(const revision of ['0','9007199254740993','18446744073709551615'])assert.equal(parse({...empty(),permissionRevision:revision})?.permissionRevision,revision);
++  const old=empty();delete old.permissionRevision;assert.equal(parse(old),null);
++  for(const permissionRevision of invalid)assert.equal(parse({...empty(),permissionRevision}),null);
++  const calls=[];const api=make('native',async(command,raw)=>{calls.push({command,body:JSON.parse(new TextDecoder().decode(raw))});return reply;});
++  await api.allow(request,'9007199254740993');assert.equal(calls[0].body.expectedPermissionRevision,'9007199254740993');
++  assert.equal(Object.hasOwn(request,'expectedPermissionRevision'),false);
++  for(const invalidStamp of invalid)await assert.rejects(api.allow(request,invalidStamp));
++  await assert.rejects(api.allow({...request,expectedPermissionRevision:'0'},'9007199254740993'));
++  assert.equal(calls.length,1);
++ }
++});
++
++test('joined Check clears old and in-flight acknowledgement; only a fresh explicit checkbox may Allow',async()=>{
++ const {c,calls}=controller();c.acknowledge(true);assert.equal(c.canAllow(),false);await c.allow();assert.equal(calls.length,0);
++ await checked(c,calls,'0');c.acknowledge(true);assert.equal(c.canAllow(),true);
++ const refresh=c.status();assert.equal(c.getState().acknowledged,false);c.acknowledge(true);assert.equal(c.getState().acknowledged,false);
++ let attempted=false;const off=c.subscribe(s=>{if(s.pending==='status'&&s.access?.permissionRevision==='1'&&!attempted){attempted=true;c.acknowledge(true);}});
++ // An external Off is represented only as returned comparison DATA here. The
++ // real native counter transition is separately exercised by Book/Doc tests.
++ calls[1].resolve({...empty(),permissionRevision:'1'});await refresh;off();assert.equal(attempted,true);
++ assert.equal(c.getState().acknowledged,false);assert.equal(c.canAllow(),false);await c.allow();assert.equal(calls.length,2);
++ c.acknowledge(true);const allowing=c.allow();assert.equal(calls[2].expectedPermissionRevision,'1');calls[2].resolve({...enabled(),permissionRevision:'2'});await allowing;
++ assert.equal(c.getState().access.enabled,true);c.acknowledge(true);await c.allow();assert.equal(calls.length,3,'Allow response is never a new checked origin');
++});
++
++test('original full-u64 checked pin is consumed before listeners and cannot be replaced by a reentrant Check',async()=>{
++ const {c,calls}=controller();await checked(c,calls,'9007199254740993');c.acknowledge(true);
++ let checkedAgain,notified=false;const off=c.subscribe(s=>{if(s.pending==='allow'&&!notified){notified=true;checkedAgain=c.status();c.acknowledge(true);}});
++ const allowing=c.allow();assert.equal(calls.length,2);assert.equal(calls[1].kind,'allow');assert.equal(calls[1].expectedPermissionRevision,'9007199254740993');
++ assert.equal(c.getState().acknowledged,false);await checkedAgain;calls[1].reject(Error('inert lost original Allow'));await allowing;off();
++ assert.equal(c.getState().uncertain,true);await checked(c,calls,'9007199254740994');assert.equal(c.getState().uncertain,true);
++ c.acknowledge(true);await c.allow();assert.equal(calls.length,3,'status neither clears Unknown nor retries the original');
++});
++
++test('same-byte context ABA withdraws a checked origin even when its counter remains equal',async()=>{
++ const {c,calls,api,set}=controller();await checked(c,calls,'0');c.acknowledge(true);
++ set({api,project:{...approval(),paths:['different']},blocked:false});c.syncContext();
++ set({api,project:approval(),blocked:false});c.syncContext();c.acknowledge(true);await c.allow();assert.equal(calls.length,1);
++ await checked(c,calls,'0');c.acknowledge(true);const allowing=c.allow();assert.equal(calls[2].expectedPermissionRevision,'0');
++ calls[2].resolve({...enabled(),permissionRevision:'1'});await allowing;
++});
++
++test('both original promise return orders keep a stopped Allow fenced and cannot rearm from its reply',async()=>{
++ for(const first of ['allow','revoke']){
++  const {c,calls}=controller();await checked(c,calls,'0');c.acknowledge(true);const allowing=c.allow(),stopping=c.revoke();
++  if(first==='allow'){calls[1].resolve({...enabled(),permissionRevision:'1'});await allowing;assert.equal(c.getState().revokePending,true);}
++  else{calls[2].resolve({...empty(),permissionRevision:'2'});await stopping;assert.equal(c.getState().pending,'allow');}
++  c.acknowledge(true);await c.allow();assert.equal(calls.length,3);
++  if(first==='allow'){calls[2].resolve({...empty(),permissionRevision:'2'});await stopping;}
++  else{calls[1].resolve({...enabled(),permissionRevision:'1'});await allowing;}
++  assert.equal(c.getState().access.enabled,false);assert.equal(c.getState().pending,null);assert.equal(c.getState().revokePending,false);
++  c.acknowledge(true);await c.allow();assert.equal(calls.length,3,'Stop result also requires another explicit Check');
++ }
++});
++
++test('MAX or malformed returned revision never permits Allow but never disables original Stop',async()=>{
++ for(const revision of ['18446744073709551615',undefined,'0\n']){
++  const {c,calls}=controller();const read=c.status();calls[0].resolve({...empty(),permissionRevision:revision});await read;c.acknowledge(true);await c.allow();assert.equal(calls.length,1);
++  const stopping=c.revoke();assert.equal(calls[1].kind,'revoke');calls[1].reject(Error('inert exhausted or unknown native result'));await stopping;
++  assert.equal(c.getState().uncertain,true);assert.equal(c.getState().revokePending,false);
++ }
++});
++
++test('maximum supported path/draft and fixed Remote request keep existing raw envelope limits',async()=>{
++ const paths=Array.from({length:64},(_,i)=>`${String(i).padStart(2,'0')}/${'a'.repeat(255)}/${'b'.repeat(255)}/${'c'.repeat(255)}/${'d'.repeat(252)}`);
++ assert.ok(paths.every(p=>p.length===1023));
++ let raw;const api=createGitIndexApi('native',async(_,bytes)=>{raw=bytes;return enabled();});
++ await api.allow({...approval(),projectId:'p'.repeat(64),readOperationId:'r'.repeat(96),expectedDocumentRevision:0xfffffffe,paths},'18446744073709551615');
++ assert.ok(raw.length+96<=96*1024);assert.equal(JSON.parse(new TextDecoder().decode(raw)).paths.length,64);
++ const {createGitCommitApi}=await import('../src/service_git_commit_permission.ts');
++ const commit=createGitCommitApi('native',async(_,bytes)=>{raw=bytes;const r=enabled();r.selection.summary.action='commit';return r;});
++ await commit.allow({projectId:'p'.repeat(64),expectedDocumentRevision:0xfffffffe,readOperationId:'r'.repeat(96),message:'x'.repeat(4096),authorName:'a'.repeat(128),authorEmail:`${'a'.repeat(127)}@${'b'.repeat(126)}`},'18446744073709551615');
++ assert.ok(raw.length+96<=96*1024);
++});
+diff --git a/desktop/tests/service-git-commit-permission.test.mjs b/desktop/tests/service-git-commit-permission.test.mjs
+--- a/desktop/tests/service-git-commit-permission.test.mjs
++++ b/desktop/tests/service-git-commit-permission.test.mjs
+@@ -5,11 +5,19 @@
+ import { copyGitIndexApproval, parseGitIndexAccess } from '../src/service_git_permission.ts';
+ const id = c => c.repeat(32);
+ const approval = () => ({ projectId: 'project-1', expectedDocumentRevision: 1, readOperationId: 'git-read-1', message: 'Reviewed local commit\n\nBody', authorName: 'Example Author', authorEmail: 'a@example.invalid' });
+-const empty = () => ({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null });
+-const enabled = () => ({ enabled: true, remainingMs: 900000, consumed: false, projectId: id('a'), grantId: id('b'), selection: { summary: { action: 'commit', repositoryRevision: 'c'.repeat(64), pathCount: 2, selectionSha256: 'd'.repeat(64) }, paths: ['app/a', 'other/b'] } });
++const empty = () => ({ permissionRevision: '0', enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null });
++const enabled = () => ({ permissionRevision: '0', enabled: true, remainingMs: 900000, consumed: false, projectId: id('a'), grantId: id('b'), selection: { summary: { action: 'commit', repositoryRevision: 'c'.repeat(64), pathCount: 2, selectionSha256: 'd'.repeat(64) }, paths: ['app/a', 'other/b'] } });
+ function defer() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
+-function port() { const calls = []; return { calls, api: Object.fromEntries(['allow', 'status', 'revoke'].map(kind => [kind, input => { const call = { kind, input, ...defer() }; calls.push(call); return call.promise; }])) }; }
++function port() { const calls = []; return { calls, api: Object.fromEntries(['allow', 'status', 'revoke'].map(kind => [kind, (input, expectedPermissionRevision) => { const call = { kind, input, expectedPermissionRevision, ...defer() }; calls.push(call); return call.promise; }])) }; }
+ function controller(p = port()) { let context = { api: p.api, project: approval(), blocked: false }; const c = new GitCommitPermission(() => context); c.syncContext(); return { ...p, c, set: v => { context = v; } }; }
++
++async function checked(c, calls, revision = '0') {
++  const before = calls.length, pending = c.status();
++  assert.equal(calls.length, before + 1); assert.equal(calls[before].kind, 'status');
++  c.acknowledge(true); assert.equal(c.getState().acknowledged, false);
++  calls[before].resolve({ ...empty(), permissionRevision: revision }); await pending;
++  assert.equal(c.getState().pending, null); assert.equal(c.getState().acknowledged, false);
++}
+ 
+ test('exact private draft uses UTF8 native limits without selecting paths or a command', () => {
+   const a = approval(); assert.deepEqual(copyGitCommitApproval(a), a); assert.ok(Object.isFrozen(copyGitCommitApproval(a)));
+@@ -31,34 +39,34 @@
+ test('only native three-command private approval route is exposed and result with draft is refused', async () => {
+   const calls = []; const api = createGitCommitApi('native', async (command, raw) => { calls.push({ command, input: JSON.parse(new TextDecoder().decode(raw)) }); return command === 'revoke_agent_git_commit' ? empty() : enabled(); });
+   assert.equal(createGitCommitApi('preview', () => { throw Error('must not call'); }), null);
+-  await api.allow(approval()); await api.status(); await api.revoke();
++  await api.allow(approval(), '0'); await api.status(); await api.revoke();
+   assert.deepEqual(calls.map(c => c.command), ['allow_agent_git_commit', 'agent_git_commit_access', 'revoke_agent_git_commit']);
+-  assert.deepEqual(calls[0].input, { ...approval(), consentVersion: GIT_COMMIT_CONSENT });
++  assert.deepEqual(calls[0].input, { ...approval(), expectedPermissionRevision:'0',consentVersion: GIT_COMMIT_CONSENT });
+   const bad = createGitCommitApi('native', async () => ({ ...enabled(), message: 'do not forward' }));
+   await assert.rejects(bad.status(), e => e.code === 'agent_git_commit_unconfirmed' && !JSON.stringify(e).includes('do not forward'));
+ });
+ test('read access or draft entry alone never invokes Allow', async () => {
+   const { c, calls } = controller(); await c.allow(); assert.equal(calls.length, 0);
+-  c.acknowledge(true); const p = c.allow(); assert.equal(calls[0].kind, 'allow');
+-  assert.deepEqual(calls[0].input, approval()); calls[0].resolve(enabled()); await p;
++  await checked(c, calls); c.acknowledge(true); const p = c.allow(); assert.equal(calls[1].kind, 'allow');
++  assert.deepEqual(calls[1].input, approval()); calls[1].resolve(enabled()); await p;
+   assert.equal(c.getState().acknowledged, false);
+ });
+ test('same retained finite controller blocks reentrant revoke then fresh Allow', async () => {
+   const { c, calls } = controller(); let stop; const unsub = c.subscribe(s => { if (s.pending === 'allow' && !stop) stop = c.revoke(); });
+-  c.acknowledge(true); const pending = c.allow(); assert.deepEqual(calls.map(c => c.kind), ['revoke']);
+-  calls[0].resolve(empty()); await stop; await pending; unsub(); assert.equal(c.getState().access.enabled, false);
++  await checked(c, calls); c.acknowledge(true); const pending = c.allow(); assert.deepEqual(calls.map(c => c.kind), ['status','revoke']);
++  calls[1].resolve(empty()); await stop; await pending; unsub(); assert.equal(c.getState().access.enabled, false);
+ });
+ test('event-time private message or author change invalidates approval before invocation', async () => {
+   for (const changed of [{ message: 'changed' }, { authorEmail: 'other@example.invalid' }]) {
+-    const { c, calls, set, api } = controller(); c.acknowledge(true); set({ api, project: { ...approval(), ...changed }, blocked: false });
+-    await c.allow(); assert.equal(calls.length, 0); assert.equal(c.getState().acknowledged, false);
++    const { c, calls, set, api } = controller(); await checked(c, calls); c.acknowledge(true); set({ api, project: { ...approval(), ...changed }, blocked: false });
++    await c.allow(); assert.equal(calls.length, 1); assert.equal(c.getState().acknowledged, false);
+   }
+ });
+ test('late private-draft change cannot adopt acknowledged grant or silently retry', async () => {
+-  const { c, calls, set, api } = controller(); c.acknowledge(true); const pending = c.allow();
+-  set({ api, project: { ...approval(), message: 'not approved' }, blocked: false }); c.syncContext(); calls[0].resolve(enabled()); await pending;
+-  assert.equal(c.getState().uncertain, true); c.acknowledge(true); await c.allow(); assert.equal(calls.length, 1);
+-  const stop = c.revoke(); calls[1].resolve(empty()); await stop; assert.equal(c.getState().uncertain, false);
++  const { c, calls, set, api } = controller(); await checked(c, calls); c.acknowledge(true); const pending = c.allow();
++  set({ api, project: { ...approval(), message: 'not approved' }, blocked: false }); c.syncContext(); calls[1].resolve(enabled()); await pending;
++  assert.equal(c.getState().uncertain, true); c.acknowledge(true); await c.allow(); assert.equal(calls.length, 2);
++  const stop = c.revoke(); calls[2].resolve(empty()); await stop; assert.equal(c.getState().uncertain, false);
+ });
+ test('rebind after status retains original connection for STOP and cannot grant on another host', async () => {
+   const old = port(), fresh = port(), { c, set } = controller(old); const pending = c.status();
+@@ -67,8 +75,8 @@
+   const stop = c.revoke(); assert.equal(old.calls[1].kind, 'revoke'); old.calls[1].resolve(empty()); await stop;
+ });
+ test('unknown or late Allow after acknowledged STOP never resurrects or infers native cleanup', async () => {
+-  const { c, calls } = controller(); c.acknowledge(true); const allow = c.allow(); const stop = c.revoke();
+-  calls[1].resolve(empty()); await stop; calls[0].resolve(enabled()); await allow; assert.equal(c.getState().access.enabled, false);
+-  const observed = c.status(); calls[2].reject(Error('private native diagnostic')); await observed;
++  const { c, calls } = controller(); await checked(c, calls); c.acknowledge(true); const allow = c.allow(); const stop = c.revoke();
++  calls[2].resolve(empty()); await stop; calls[1].resolve(enabled()); await allow; assert.equal(c.getState().access.enabled, false);
++  const observed = c.status(); calls[3].reject(Error('private native diagnostic')); await observed;
+   assert.ok(!JSON.stringify(c.getState()).includes('private native diagnostic'));
+ });
+diff --git a/desktop/tests/service-git-repository-permission.test.mjs b/desktop/tests/service-git-repository-permission.test.mjs
+--- a/desktop/tests/service-git-repository-permission.test.mjs
++++ b/desktop/tests/service-git-repository-permission.test.mjs
+@@ -16,8 +16,8 @@
+   kind, expectedRevision: revision, expectedReferenceRevision: references, name: 'next-release',
+ })), { kind: 'fast-forward', expectedRevision: revision, expectedReferenceRevision: references, targetRef: 'refs/remotes/origin/main', targetOid: target }];
+ const approval = (action = actions()[1]) => ({ projectId: 'project-1', expectedDocumentRevision: 1, readOperationId: action.kind === 'initialize' ? null : 'read-original', action });
+-const empty = () => ({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null });
+-const allowed = (action = actions()[1]) => ({ enabled: true, remainingMs: 900000, consumed: false, projectId: '1'.repeat(32), grantId: '2'.repeat(32),
++const empty = () => ({ permissionRevision: '0', enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null });
++const allowed = (action = actions()[1]) => ({ permissionRevision: '0', enabled: true, remainingMs: 900000, consumed: false, projectId: '1'.repeat(32), grantId: '2'.repeat(32),
+   selection: { action, selectionSha256: '3'.repeat(64) } });
+ const observation = (changes = []) => ({ revision, head, branch: 'refs/heads/main', unborn: false, detached: false, changes, remotes: [], restrictions: [] });
+ const tracking = (updates = {}) => ({ state: 'complete', remote: 'origin', mergeRef: 'refs/heads/main', localRef: 'refs/remotes/origin/main', head: target, ahead: 0, behind: 1, ...updates });
+@@ -44,8 +44,8 @@
+ }
+ function permissionPort() {
+   const calls = [];
+-  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, input => {
+-    const call = { kind, input, ...deferred() }; calls.push(call); return call.promise;
++  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, (input, expectedPermissionRevision) => {
++    const call = { kind, input, expectedPermissionRevision, ...deferred() }; calls.push(call); return call.promise;
+   }])) };
+ }
+ async function fixture({ observe = true, checked = true, value = observed() } = {}) {
+@@ -74,6 +74,14 @@
+   };
+ }
+ 
++async function checked(c, calls, revision = '0') {
++  const before = calls.length, pending = c.status();
++  assert.equal(calls.length, before + 1); assert.equal(calls[before].kind, 'status');
++  c.acknowledge(true); assert.equal(c.getState().acknowledged, false);
++  calls[before].resolve({ ...empty(), permissionRevision: revision }); await pending;
++  assert.equal(c.getState().pending, null); assert.equal(c.getState().acknowledged, false);
++}
++
+ test('five existing actions use exact bounded RAW approval fields, with null read only for initialization', () => {
+   for (const a of actions()) {
+     assert.deepEqual(copyGitRepositoryApproval(approval(a)), approval(a));
+@@ -109,14 +117,14 @@
+     return name === 'allow_agent_git_repository' ? allowed(body.action) : empty();
+   });
+   assert.equal(createGitRepositoryPermissionApi('preview', () => assert.fail('no preview invoke')), null);
+-  for (const a of actions()) await api.allow(approval(a));
++  for (const a of actions()) await api.allow(approval(a), '0');
+   await api.status(); await api.revoke();
+   assert.deepEqual(calls.map(c => c.name), [...actions().map(() => 'allow_agent_git_repository'), 'agent_git_repository_access', 'revoke_agent_git_repository']);
+-  assert.deepEqual(calls[0].body, { ...approval(actions()[0]), consentVersion: GIT_REPOSITORY_CONSENT });
++  assert.deepEqual(calls[0].body, { ...approval(actions()[0]), expectedPermissionRevision:'0',consentVersion: GIT_REPOSITORY_CONSENT });
+   assert.ok(calls.every(c => c.size + 96 <= (c.name === 'allow_agent_git_repository' ? 8192 : 1024)));
+-  const count = calls.length; await assert.rejects(api.allow({ ...approval(), root: '/not-an-input' })); assert.equal(calls.length, count);
++  const count = calls.length; await assert.rejects(api.allow({ ...approval(), root: '/not-an-input' }, '0')); assert.equal(calls.length, count);
+   const mismatched = createGitRepositoryPermissionApi('native', async () => allowed(actions()[0]));
+-  await assert.rejects(mismatched.allow(approval()), e => e.code === 'agent_git_repository_unconfirmed' && e.retryable === false);
++  await assert.rejects(mismatched.allow(approval(), '0'), e => e.code === 'agent_git_repository_unconfirmed' && e.retryable === false);
+   const bad = createGitRepositoryPermissionApi('native', async () => { throw new Error('private untrusted diagnostic'); });
+   await assert.rejects(bad.status(), e => !JSON.stringify(e).includes('private untrusted'));
+ });
+@@ -128,8 +136,8 @@
+   assert.equal(h.reads.calls.length, 0); assert.equal(h.writes.calls.some(c => c.name === 'prepare'), false);
+   assert.match(gitRepositoryPermissionEffect(actions()[0]), /only if the native review confirms/);
+   await h.controller.allow(); assert.equal(h.grant.calls.length, 0);
+-  h.controller.acknowledge(true); const allow = h.controller.allow(); assert.equal(h.grant.calls[0].input.readOperationId, null);
+-  h.grant.calls[0].resolve(allowed(actions()[0])); await allow;
++  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); const allow = h.controller.allow(); assert.equal(h.grant.calls[1].input.readOperationId, null);
++  h.grant.calls[1].resolve(allowed(actions()[0])); await allow;
+   assert.equal(h.controller.getState().acknowledged, false);
+   const existing = await fixture(); assert.equal(existing.controller.getContext().project, null);
+ });
+@@ -170,41 +178,41 @@
+   h.controller.subscribe(s => { if (s.pending === 'allow' && !changed) {
+     changed = true; h.repository.editBranchName('different'); h.repository.editBranchName('next-release');
+   } });
+-  h.controller.acknowledge(true); await h.controller.allow();
+-  assert.equal(h.grant.calls.length, 0); assert.equal(h.controller.getState().pending, null);
++  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); await h.controller.allow();
++  assert.equal(h.grant.calls.length, 1); assert.equal(h.controller.getState().pending, null);
+   assert.equal(h.repository.getSnapshot().branchDraft.name, 'next-release'); assert.equal(h.controller.getState().acknowledged, false);
+ });
+ test('action changes, peers, and a new service epoch refuse stale checkbox approval without an implicit operation', async () => {
+   for (const change of [{ epoch: 1 }, { session: {} }, { blocked: 'An original task needs recovery.' }]) {
+-    const h = await fixture(); h.controller.chooseKind('branch-create'); h.controller.acknowledge(true); h.change(change, false);
+-    await h.controller.allow(); assert.equal(h.grant.calls.length, 0); assert.equal(h.controller.getState().acknowledged, false);
++    const h = await fixture(); h.controller.chooseKind('branch-create'); await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); h.change(change, false);
++    await h.controller.allow(); assert.equal(h.grant.calls.length, 1); assert.equal(h.controller.getState().acknowledged, false);
+   }
+   const h = await fixture(); h.controller.chooseKind('branch-create'); let changed = false;
+   h.controller.subscribe(s => { if (s.pending === 'allow' && !changed) { changed = true; h.controller.chooseKind('branch-rename'); } });
+-  h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 0);
++  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 1);
+ });
+ test('reentrant Stop runs immediately before Allow dispatch and keeps the original finite controller', async () => {
+   const h = await fixture(); h.controller.chooseKind('branch-create'); let stop;
+   h.controller.subscribe(s => { if (s.pending === 'allow' && !stop) stop = h.controller.revoke(); });
+-  h.controller.acknowledge(true); const allow = h.controller.allow(); assert.deepEqual(h.grant.calls.map(c => c.kind), ['revoke']);
+-  h.grant.calls[0].resolve(empty()); await stop; await allow; assert.equal(h.controller.getState().access.enabled, false);
++  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); const allow = h.controller.allow(); assert.deepEqual(h.grant.calls.map(c => c.kind), ['status','revoke']);
++  h.grant.calls[1].resolve(empty()); await stop; await allow; assert.equal(h.controller.getState().access.enabled, false);
+ });
+ test('Allow and independent Stop retain both promises across a service/project change and late acknowledgement', async () => {
+-  const h = await fixture(), fresh = permissionPort(); h.controller.chooseKind('branch-create'); h.controller.acknowledge(true);
++  const h = await fixture(), fresh = permissionPort(); h.controller.chooseKind('branch-create'); await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
+   const allow = h.controller.allow(); h.change({ api: fresh.api, session: {}, projectId: 'project-2', epoch: 2 });
+-  const stop = h.controller.revoke(); assert.equal(h.grant.calls[1].kind, 'revoke'); assert.equal(fresh.calls.length, 0);
+-  h.grant.calls[1].resolve(empty()); await stop;
++  const stop = h.controller.revoke(); assert.equal(h.grant.calls[2].kind, 'revoke'); assert.equal(fresh.calls.length, 0);
++  h.grant.calls[2].resolve(empty()); await stop;
+   assert.equal(h.controller.getState().pending, 'allow'); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(fresh.calls.length, 0);
+-  h.grant.calls[0].resolve(allowed()); await allow;
++  h.grant.calls[1].resolve(allowed()); await allow;
+   assert.equal(h.controller.getState().access.enabled, false); assert.equal(h.controller.getState().pending, null);
+ });
+ test('lost acknowledgement is not a no-grant receipt; consumed Access is not Git completion or Apply permission', async () => {
+-  const h = await fixture(); h.controller.chooseKind('branch-create'); h.controller.acknowledge(true);
+-  const allow = h.controller.allow(); h.grant.calls[0].reject(new Error('inert lost acknowledgement')); await allow;
+-  assert.equal(h.controller.getState().uncertain, true); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 1);
+-  const status = h.controller.status(); h.grant.calls[1].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await status;
++  const h = await fixture(); h.controller.chooseKind('branch-create'); await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
++  const allow = h.controller.allow(); h.grant.calls[1].reject(new Error('inert lost acknowledgement')); await allow;
++  assert.equal(h.controller.getState().uncertain, true); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 2);
++  const status = h.controller.status(); h.grant.calls[2].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await status;
+   assert.equal(h.controller.getState().uncertain, true); assert.equal(h.local.getSnapshot().original, null);
+   assert.equal(h.writes.calls.some(c => c.name === 'prepare' || c.name === 'apply'), false);
+-  const stop = h.controller.revoke(); h.grant.calls[2].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await stop;
++  const stop = h.controller.revoke(); h.grant.calls[3].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await stop;
+   assert.equal(h.controller.getState().access.consumed, true); assert.equal(h.local.getSnapshot().original, null);
+ });
+diff --git a/desktop/tests/service-git-remote-permission.test.mjs b/desktop/tests/service-git-remote-permission.test.mjs
+--- a/desktop/tests/service-git-remote-permission.test.mjs
++++ b/desktop/tests/service-git-remote-permission.test.mjs
+@@ -14,8 +14,8 @@
+ const actions=()=>[{kind:'fetch',expectedRevision:revision,expectedReferenceRevision:references,remote:'origin',reference:'refs/heads/main',connectionSessionId:'session-1',expectedConnectionRevision:12},
+  {kind:'push',expectedRevision:revision,expectedReferenceRevision:references,remote:'origin',localRef:'refs/heads/work',remoteRef:'refs/heads/main',oldOid:old,newOid:head,connectionSessionId:'session-1',expectedConnectionRevision:12}];
+ const approval=(a=actions()[0])=>({projectId:'project-1',expectedDocumentRevision:1,readOperationId:'read-1',action:a});
+-const empty=()=>({enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null});
+-const allowed=(a=actions()[0])=>({enabled:true,remainingMs:900000,consumed:false,projectId:'1'.repeat(32),grantId:'2'.repeat(32),selection:{action:a,account:{accountId:'7',login:'Example',repositoryId:'9',repository:'Example/App'},selectionSha256:'3'.repeat(64)}});
++const empty=()=>({permissionRevision:'0',enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null});
++const allowed=(a=actions()[0])=>({permissionRevision:'0',enabled:true,remainingMs:900000,consumed:false,projectId:'1'.repeat(32),grantId:'2'.repeat(32),selection:{action:a,account:{accountId:'7',login:'Example',repositoryId:'9',repository:'Example/App'},selectionSha256:'3'.repeat(64)}});
+ const observation=()=>({revision,head,branch:'refs/heads/work',unborn:false,detached:false,changes:[],remotes:['origin'],restrictions:[]});
+ const observed=()=>({observation:observation(),referenceRevision:references,basis:'local-refs-no-fetch',tracking:{state:'complete',remote:'origin',mergeRef:'refs/heads/main',localRef:'refs/remotes/origin/main',head:old,ahead:1,behind:0}});
+ const newBranch=()=>({...actions()[1],kind:'push-new-branch',remote:null,remoteRef:'refs/heads/work',oldOid:'0'.repeat(40)});
+@@ -48,8 +48,8 @@
+ }
+ function permissionPort() {
+   const calls = [];
+-  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, input => {
+-    const call = { kind, input, ...deferred() }; calls.push(call); return call.promise;
++  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, (input, expectedPermissionRevision) => {
++    const call = { kind, input, expectedPermissionRevision, ...deferred() }; calls.push(call); return call.promise;
+   }])) };
+ }
+ async function fixture({ value=observed(), connected=connection() }={}) {
+@@ -63,6 +63,14 @@
+  const controller=new GitRemotePermission(kind=>gitRemotePermissionContext(kind,source));for(const c of [repository,reader,local])c.subscribe(()=>controller.syncContext());controller.syncContext();
+  return {controller,grant,reads,writes,reader,repository,local,source:()=>source,change(update,sync=true){source={...source,...update};if(sync)controller.syncContext();}};
+ }
++async function checked(c, calls, revision = '0') {
++  const before = calls.length, pending = c.status();
++  assert.equal(calls.length, before + 1); assert.equal(calls[before].kind, 'status');
++  c.acknowledge(true); assert.equal(c.getState().acknowledged, false);
++  calls[before].resolve({ ...empty(), permissionRevision: revision }); await pending;
++  assert.equal(c.getState().pending, null); assert.equal(c.getState().acknowledged, false);
++}
++
+ test('Remote approval and Access are closed, bounded and never local permission or authority',()=>{
+  for(const a of actions()){assert.deepEqual(copyGitRemoteApproval(approval(a)),approval(a));assert.deepEqual(parseGitRemoteAccess(allowed(a)),allowed(a));assert.equal(parseGitIndexAccess(allowed(a)),null);assert.equal(parseGitRepositoryAccess(allowed(a)),null);
+   for(const field of ['force','token','url','argv','absent','setUpstream'])assert.equal(copyGitRemoteApproval(approval({...a,[field]:true})),null);
+@@ -75,14 +83,14 @@
+ test('exact RAW calls use separate Fetch/Push consent and mismatched replies stay unconfirmed',async()=>{
+  const calls=[];let reply=empty();const api=createGitRemotePermissionApi('native',async(command,raw)=>{assert.ok(raw instanceof Uint8Array);calls.push({command,body:JSON.parse(new TextDecoder().decode(raw))});return reply;});
+  assert.equal(createGitRemotePermissionApi('preview',()=>assert.fail()),null);
+- for(const a of actions()){reply=allowed(a);assert.deepEqual(await api.allow(approval(a)),reply);assert.deepEqual(calls.at(-1),{command:'allow_agent_git_remote',body:{...approval(a),consentVersion:GIT_REMOTE_CONSENT[a.kind]}});}
+- reply=allowed(actions()[1]);await assert.rejects(api.allow(approval(actions()[0])));reply=empty();await api.status();await api.revoke();assert.deepEqual(calls.slice(-2).map(v=>v.command),['agent_git_remote_access','revoke_agent_git_remote']);
++ for(const a of actions()){reply=allowed(a);assert.deepEqual(await api.allow(approval(a), '0'),reply);assert.deepEqual(calls.at(-1),{command:'allow_agent_git_remote',body:{...approval(a),expectedPermissionRevision:'0',consentVersion:GIT_REMOTE_CONSENT[a.kind]}});}
++ reply=allowed(actions()[1]);await assert.rejects(api.allow(approval(actions()[0]), '0'));reply=empty();await api.status();await api.revoke();assert.deepEqual(calls.slice(-2).map(v=>v.command),['agent_git_remote_access','revoke_agent_git_remote']);
+  assert.deepEqual(calls.slice(-2).map(v=>v.body),[{},{}]);
+ });
+ test('existing source controllers select Fetch draft and current committed Push without auto calls',async()=>{
+  const h=await fixture();assert.deepEqual(h.controller.getContext().project,approval());assert.equal(h.grant.calls.length,0);h.controller.chooseKind('push');assert.deepEqual(h.controller.getContext().project,approval(actions()[1]));
+  assert.equal(h.writes.calls.filter(c=>c.name==='prepare'||c.name==='apply').length,0);await h.controller.allow();assert.equal(h.grant.calls.length,0);
+- h.controller.acknowledge(true);const pending=h.controller.allow();assert.equal(h.grant.calls.length,1);assert.equal(h.grant.calls[0].input.action.kind,'push');h.grant.calls[0].resolve(allowed(actions()[1]));await pending;
++ await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const pending=h.controller.allow();assert.equal(h.grant.calls.length,2);assert.equal(h.grant.calls[1].input.action.kind,'push');h.grant.calls[1].resolve(allowed(actions()[1]));await pending;
+  assert.equal(h.controller.getState().acknowledged,false);assert.equal(h.local.getSnapshot().original,null);
+ });
+ test('stale or incomplete account, source, tracking, peer or context cannot substitute for current review',async()=>{
+@@ -105,17 +113,17 @@
+   else if(kind==='account'){const old=h.source().connection;h.change({connection:connection()});h.change({connection:old});}
+   else if(kind==='mode'){h.controller.chooseKind('push');h.controller.chooseKind('fetch');}
+   else if(kind==='peer')h.change({blocked:'Original owner still running.'});else h.change({epoch:1});
+- }});h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,0,kind);assert.equal(h.controller.getState().pending,null);assert.equal(h.controller.getState().acknowledged,false);}
++ }});await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,1,kind);assert.equal(h.controller.getState().pending,null);assert.equal(h.controller.getState().acknowledged,false);}
+ });
+ test('independent Stop retains its original API and both promises across a service change',async()=>{
+- const h=await fixture(),fresh=permissionPort();h.controller.acknowledge(true);const allow=h.controller.allow();h.change({api:fresh.api,session:{},epoch:1});const stop=h.controller.revoke();assert.deepEqual(h.grant.calls.map(c=>c.kind),['allow','revoke']);assert.equal(fresh.calls.length,0);
+- h.grant.calls[1].resolve(empty());await stop;assert.equal(h.controller.getState().pending,'allow');h.controller.acknowledge(true);await h.controller.allow();assert.equal(fresh.calls.length,0);
+- h.grant.calls[0].resolve(allowed());await allow;assert.equal(h.controller.getState().access.enabled,false);assert.equal(h.controller.getState().pending,null);
++ const h=await fixture(),fresh=permissionPort();await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const allow=h.controller.allow();h.change({api:fresh.api,session:{},epoch:1});const stop=h.controller.revoke();assert.deepEqual(h.grant.calls.map(c=>c.kind),['status','allow','revoke']);assert.equal(fresh.calls.length,0);
++ h.grant.calls[2].resolve(empty());await stop;assert.equal(h.controller.getState().pending,'allow');h.controller.acknowledge(true);await h.controller.allow();assert.equal(fresh.calls.length,0);
++ h.grant.calls[1].resolve(allowed());await allow;assert.equal(h.controller.getState().access.enabled,false);assert.equal(h.controller.getState().pending,null);
+ });
+ test('reentrant revoke happens before new Allow and lost ACK stays sticky after status',async()=>{
+- const a=await fixture();let stopping;a.controller.subscribe(s=>{if(s.pending==='allow'&&!stopping)stopping=a.controller.revoke();});a.controller.acknowledge(true);const allow=a.controller.allow();assert.deepEqual(a.grant.calls.map(c=>c.kind),['revoke']);a.grant.calls[0].resolve(empty());await stopping;await allow;
+- const h=await fixture();h.controller.acknowledge(true);const lost=h.controller.allow();h.grant.calls[0].reject(new Error('inert lost ACK'));await lost;assert.equal(h.controller.getState().uncertain,true);
+- const read=h.controller.status();h.grant.calls[1].resolve({...allowed(),enabled:false,remainingMs:0,consumed:true});await read;assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,2);
++ const a=await fixture();let stopping;a.controller.subscribe(s=>{if(s.pending==='allow'&&!stopping)stopping=a.controller.revoke();});await checked(a.controller, a.grant.calls); a.controller.acknowledge(true);const allow=a.controller.allow();assert.deepEqual(a.grant.calls.map(c=>c.kind),['status','revoke']);a.grant.calls[1].resolve(empty());await stopping;await allow;
++ const h=await fixture();await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const lost=h.controller.allow();h.grant.calls[1].reject(new Error('inert lost ACK'));await lost;assert.equal(h.controller.getState().uncertain,true);
++ const read=h.controller.status();h.grant.calls[2].resolve({...allowed(),enabled:false,remainingMs:0,consumed:true});await read;assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,3);
+  assert.equal(h.local.getSnapshot().original,null);assert.equal(h.writes.calls.filter(c=>c.name==='apply'||c.name==='prepare').length,0);
+ });
+ 
+@@ -134,11 +142,11 @@
+  const calls=[];let reply=allowed(newBranch());const api=createGitRemotePermissionApi('native',async(command,raw)=>{
+   calls.push({command,body:JSON.parse(new TextDecoder().decode(raw))});return reply;
+  });
+- await api.allow(approval(newBranch()));assert.deepEqual(calls,[{command:'allow_agent_git_remote',body:{...approval(newBranch()),consentVersion:'agent-git-push-new-branch-once-v1'}}]);
+- for(const a of actions()){reply=allowed(a);await assert.rejects(api.allow(approval(newBranch())));}
+- reply=allowed(newBranch());for(const a of actions())await assert.rejects(api.allow(approval(a)));
++ await api.allow(approval(newBranch()), '0');assert.deepEqual(calls,[{command:'allow_agent_git_remote',body:{...approval(newBranch()),expectedPermissionRevision:'0',consentVersion:'agent-git-push-new-branch-once-v1'}}]);
++ for(const a of actions()){reply=allowed(a);await assert.rejects(api.allow(approval(newBranch()), '0'));}
++ reply=allowed(newBranch());for(const a of actions())await assert.rejects(api.allow(approval(a), '0'));
+  const before=calls.length;const missing={...newBranch()};delete missing.remote;
+- await assert.rejects(api.allow(approval(missing)));assert.equal(calls.length,before);
++ await assert.rejects(api.allow(approval(missing), '0'));assert.equal(calls.length,before);
+ });
+ test('actual unconfigured source needs explicit create-kind and unchecked separate consent without starting Git',async()=>{
+  const h=await fixture({value:unconfigured()});assert.equal(h.controller.getContext().project,null);
+@@ -146,8 +154,8 @@
+  h.controller.acknowledge(true);h.controller.chooseKind('push-new-branch');assert.equal(h.controller.getState().acknowledged,false);
+  assert.deepEqual(h.controller.getContext().project,approval(newBranch()));assert.equal(h.controller.getContext().account.repository,'Example/App');
+  const before=h.repository.getSnapshot();await h.controller.allow();assert.equal(h.grant.calls.length,0);
+- h.controller.acknowledge(true);const allowing=h.controller.allow();assert.equal(h.grant.calls.length,1);
+- assert.deepEqual(h.grant.calls[0].input,approval(newBranch()));h.grant.calls[0].resolve(allowed(newBranch()));await allowing;
++ await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const allowing=h.controller.allow();assert.equal(h.grant.calls.length,2);
++ assert.deepEqual(h.grant.calls[1].input,approval(newBranch()));h.grant.calls[1].resolve(allowed(newBranch()));await allowing;
+  assert.equal(h.controller.getState().acknowledged,false);assert.equal(h.repository.getSnapshot(),before);
+  assert.equal(h.local.getSnapshot().original,null);assert.deepEqual(h.writes.calls.map(c=>c.name),['status']);
+  assert.deepEqual(h.reads.calls.map(c=>c.name),['status','start']);
+@@ -180,24 +188,24 @@
+    else if(changedKind==='account'){const old=h.source().connection;h.change({connection:connection()});h.change({connection:old});}
+    else if(changedKind==='peer')h.change({blocked:'Peer still running.'});else h.change({epoch:1});
+   }});
+-  h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,0,changedKind);
++  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,1,changedKind);
+   assert.equal(h.controller.getState().pending,null);assert.equal(h.controller.getState().acknowledged,false);
+  }
+ });
+ test('new-kind lost Allow remains original and consumed Status cannot mint a repeat or Apply',async()=>{
+- const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');h.controller.acknowledge(true);
+- const original=h.controller.allow();h.grant.calls[0].reject(new Error('inert lost create-only ACK'));await original;
++ const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
++ const original=h.controller.allow();h.grant.calls[1].reject(new Error('inert lost create-only ACK'));await original;
+  assert.equal(h.controller.getState().uncertain,true);const checking=h.controller.status();
+- h.grant.calls[1].resolve({...allowed(newBranch()),enabled:false,remainingMs:0,consumed:true});await checking;
+- assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,2);
++ h.grant.calls[2].resolve({...allowed(newBranch()),enabled:false,remainingMs:0,consumed:true});await checking;
++ assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,3);
+  assert.equal(h.local.getSnapshot().original,null);assert.deepEqual(h.writes.calls.map(c=>c.name),['status']);
+ });
+ test('new-kind Stop keeps original Allow API and promise across replacement and never upgrades its reply',async()=>{
+- const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');h.controller.acknowledge(true);
++ const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
+  const original=h.controller.allow(),fresh=permissionPort();h.change({api:fresh.api,session:{},epoch:1});const stopping=h.controller.revoke();
+- assert.deepEqual(h.grant.calls.map(c=>c.kind),['allow','revoke']);assert.equal(fresh.calls.length,0);
+- h.grant.calls[1].resolve(empty());await stopping;assert.equal(h.controller.getState().pending,'allow');
++ assert.deepEqual(h.grant.calls.map(c=>c.kind),['status','allow','revoke']);assert.equal(fresh.calls.length,0);
++ h.grant.calls[2].resolve(empty());await stopping;assert.equal(h.controller.getState().pending,'allow');
+  h.controller.chooseKind('push');h.controller.chooseKind('push-new-branch');h.controller.acknowledge(true);await h.controller.allow();assert.equal(fresh.calls.length,0);
+- h.grant.calls[0].resolve(allowed(newBranch()));await original;assert.equal(h.controller.getState().pending,null);
++ h.grant.calls[1].resolve(allowed(newBranch()));await original;assert.equal(h.controller.getState().pending,null);
+  assert.equal(h.controller.getState().access.enabled,false);assert.equal(fresh.calls.length,0);
+ });

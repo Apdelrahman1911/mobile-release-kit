@@ -1,0 +1,26 @@
+"""Fixed macOS Desktop History entry; no CLI actions or caller-selected API."""
+import os
+import sys
+import time
+
+
+def main() -> int:
+    started = time.monotonic()
+    if (len(sys.argv) != 2 or not sys.flags.isolated or not sys.flags.no_site
+            or not sys.dont_write_bytecode or sys.version_info < (3, 11)
+            or sys.platform != "darwin" or not os.path.isabs(sys.argv[1])
+            or not os.path.isabs(__file__)):
+        return 78
+    runtime_dir = os.path.dirname(__file__)
+    sys.path.insert(0, sys.argv[1])
+    from mobile_release.github_history_engine import main as run_engine
+
+    return run_engine(started=started, runtime_dir=runtime_dir)
+
+
+if __name__ == "__main__":
+    try:
+        code = main()
+    except BaseException:
+        code = 78
+    raise SystemExit(code)

@@ -1,0 +1,606 @@
+diff --git a/src/mobile_release/version_hosted.py b/src/mobile_release/version_hosted.py
+index 6d01ecc7..70300f97 100644
+--- a/src/mobile_release/version_hosted.py
++++ b/src/mobile_release/version_hosted.py
+@@ -67,6 +67,7 @@ _DIAGNOSTICS = {
+     "store": "Current Store inventory or its original private input is unavailable. No manual/counter-only or single-platform fallback is selected.",
+     "google": "Hosted Android/shared reservation requires the selected protected MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 service-account key (at most 16 KiB). This fixed reader does not accept WIF/ambient ADC. Normal candidate WIF is unchanged.",
+     "play-pending": "A temporary Play edit has an unconfirmed outcome in the hosted journal. Preserve the journal and original operation. Do not retry, recreate an edit, reset or clear the fence; automatic remote cleanup recovery is not available here.",
++    "play-recovery": "Known Play edit cleanup is not confirmed. Preserve the exact journal, capsule and original key version. Configure the dedicated protected recovery key before use. A spent/unknown attempt cannot retry or clear the fence; no counter was allocated.",
+     "read": "The original bounded hosted operation did not finish. Preserve its journal and candidate; do not replay an uncertain write.",
+ }
+
+@@ -92,20 +93,30 @@ class PlayQuery:
+     candidate_id: str
+     request_sha256: str
+     attempt_id: str
++    recovery: object | None = None
+
+     def __post_init__(self):
+         a._uuid(self.candidate_id)
+         p._match(self.request_sha256, p._DIGEST)
+         a._uuid(self.attempt_id)
++        from .version_hosted_play_recovery import Record
++        need(self.recovery is None or type(self.recovery) is Record, "journal")
+
+-    def value(self):
+-        return {"candidateId": self.candidate_id, "requestSha256": self.request_sha256,
+-                "attemptId": self.attempt_id}
++    def value(self, schema_version=2):
++        need(schema_version in (2, 3) and (schema_version == 3 or self.recovery is None), "journal")
++        value = {"candidateId": self.candidate_id, "requestSha256": self.request_sha256, "attemptId": self.attempt_id}
++        if schema_version == 3:
++            value["recovery"] = None if self.recovery is None else self.recovery.value()
++        return value
+
+     @classmethod
+-    def parse(cls, value):
+-        row = p._object(value, {"candidateId", "requestSha256", "attemptId"})
+-        return cls(row["candidateId"], row["requestSha256"], row["attemptId"])
++    def parse(cls, value, schema_version=2):
++        from .version_hosted_play_recovery import Record
++        need(schema_version in (2, 3), "journal")
++        row = p._object(value, {"candidateId", "requestSha256", "attemptId"}
++                        | ({"recovery"} if schema_version == 3 else set()))
++        return cls(row["candidateId"], row["requestSha256"], row["attemptId"],
++                   None if row.get("recovery") is None else Record.parse(row["recovery"]))
+
+     def require_state(self, original):
+         matches = [row.request for row in original.candidates if row.request.candidate_id == self.candidate_id]
+@@ -123,7 +134,7 @@ class Envelope:
+     def to_bytes(self) -> bytes:
+         p._integer(self.revision, state.MAX_REVISION, 1)
+         need(type(self.state) is state.AllocationState and len(self.state.authorities) == 1, "journal")
+-        need(type(self.schema_version) is int and self.schema_version in (1, 2), "journal")
++        need(type(self.schema_version) is int and self.schema_version in (1, 2, 3), "journal")
+         need(self.play_query is None or type(self.play_query) is PlayQuery, "journal")
+         if self.play_query is not None:
+             self.play_query.require_state(self.state)
+@@ -131,7 +142,7 @@ class Envelope:
+         if self.schema_version == 1:
+             need(self.play_query is None, "journal")
+         else:
+-            value.update(schemaVersion=2, playQuery=None if self.play_query is None else self.play_query.value())
++            value.update(schemaVersion=self.schema_version, playQuery=None if self.play_query is None else self.play_query.value(self.schema_version))
+         raw = p.canonical(value) + b"\n"
+         # Bound BOTH incoming and prospective outgoing bytes/nodes before the
+         # existing state codec/canonical copies. Never write a too-large row.
+@@ -149,7 +160,7 @@ class Envelope:
+             raise Refused("size") from None
+         need(type(value) is dict, "journal")
+         if "schemaVersion" in value:
+-            need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2, "journal")
++            need(type(value["schemaVersion"]) is int and value["schemaVersion"] in (2, 3), "journal")
+             return p._object(value, {"schemaVersion", "revision", "state", "playQuery"})
+         return p._object(value, {"revision", "state"})
+
+@@ -160,7 +171,7 @@ class Envelope:
+             p._integer(row["revision"], state.MAX_REVISION, 1)
+             need(type(row["state"]) is dict and row["state"].get("schemaVersion") == 3, "journal")
+             result = cls(row["revision"], state.AllocationState.parse(p.canonical(row["state"]) + b"\n"),
+-                None if row.get("playQuery") is None else PlayQuery.parse(row["playQuery"]), row.get("schemaVersion", 1))
++                None if row.get("playQuery") is None else PlayQuery.parse(row["playQuery"], row["schemaVersion"]), row.get("schemaVersion", 1))
+             need(result.to_bytes() == raw, "journal")
+             return result
+         except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
+@@ -220,6 +231,7 @@ class _Remote:
+         self.authority, self.source, self.send = authority, source, send
+         self.prefix = "/repos/" + authority.repository
+         self.calls = 0
++        self.max_calls = MAX_REQUESTS
+         self.stopped = False
+
+     def exchange(self, role, request):
+@@ -229,7 +241,7 @@ class _Remote:
+         validate_body(role, request.body, path=request.path)
+         self.source.remaining()
+         self.calls += 1
+-        need(self.calls <= MAX_REQUESTS)
++        need(self.calls <= self.max_calls <= MAX_REQUESTS)
+         try:
+             result = self.send(role, request)
+             self.source.remaining()  # includes actual TLS close, not receipt time
+@@ -295,6 +307,7 @@ class _Journal(state._AllocationTransitions):
+         self._loaded = False
+         self._schema_version = 1
+         self.play_query = self._play_original = None
++        self._cleanup_original = None
+
+     def load(self):
+         self._usable()
+@@ -358,7 +371,7 @@ class _Journal(state._AllocationTransitions):
+         if self.play_query is None:
+             return
+         source = self.remote.source
+-        need(self._schema_version == 2 and type(request) is a.AllocationRequest
++        need(self._schema_version in (2, 3) and type(request) is a.AllocationRequest
+              and request.version_policy.schema_version == 2
+              and request.enabled_platforms == source.enabled == ("ios",)
+              and request.source == source.binding and request.identity_revision == source.identity
+@@ -412,7 +425,48 @@ class _Journal(state._AllocationTransitions):
+                  and ((self.play_query is None and play_query is self._play_original)
+                       or (self.play_query is self._play_original and play_query is None)), "play-pending")
+         selected_play = self.play_query if play_query is _KEEP else play_query
+-        schema = 2 if self._schema_version == 2 or play_query is not _KEEP else 1
++        schema = max(self._schema_version, 2) if play_query is not _KEEP else self._schema_version
++        candidate = after.candidate(self._local_project_id)
++        need(candidate is not None and candidate.request == self._bound_request, "journal")
++        self._commit(after, selected_play, schema, candidate)
++
++    def _commit_play_recovery(self, predecessor, successor, candidate):
++        # Only three closed transitions reuse CAS. Loaded DATA never becomes a
++        # live inventory original; no choose/remint or generic KEEP exception.
++        from .version_hosted_play_recovery import Capture, Cleanup, Record, _selected
++        self._usable()
++        need(self.play_query == predecessor and _selected(self, predecessor) == candidate, "play-recovery")
++        source = self.remote.source
++        material = source.material
++        capture = material.recovery
++        held = self._cleanup_original
++        same = (successor is not None and
++            (successor.candidate_id, successor.request_sha256, successor.attempt_id) ==
++            (predecessor.candidate_id, predecessor.request_sha256, predecessor.attempt_id))
++        if predecessor is self._play_original:
++            need(type(capture) is Capture and capture.journal is self and capture.original is predecessor
++                 and capture.consumed and material._play_closed and material._play_consumed
++                 and material._play_cleanup == "unconfirmed" and capture.returned is material._play_return
++                 and predecessor.recovery is None and same
++                 and successor.recovery == Record(capture.capsule), "play-recovery")
++        else:
++            need(type(held) is Cleanup and held.journal is self and held.row == candidate
++                 and held.material is material and held.source is source and self.writes < 2, "play-recovery")
++            held.current()
++            if predecessor == held.original:
++                need(held.verified is not None and held.claim_entered and held.claim is None
++                     and predecessor.recovery.claim is None and same
++                     and successor.recovery.capsule == held.capsule and successor.recovery.claim is not None,
++                     "play-recovery")
++            else:
++                need(predecessor is held.claim and held.deleted is not None and held.clear_entered
++                     and successor is None, "play-recovery")
++        source.remaining()
++        self._commit(self._state, successor, 3, candidate)
++
++    def _commit(self, after, selected_play, schema, candidate):
++        self._usable()
++        need(self.revision < state.MAX_REVISION and self.writes < MAX_WRITES, "journal")
+         raw = Envelope(self.revision + 1, after, selected_play, schema).to_bytes()
+         body = {"branch": a.LEDGER_BRANCH, "message": _MESSAGE, "content": base64.b64encode(raw).decode("ascii")}
+         if self.blob is not None:
+@@ -432,8 +486,7 @@ class _Journal(state._AllocationTransitions):
+             need(_journal_content(readback) == raw, "journal")
+             self.revision, self.blob, self.commit, self._state = self.revision + 1, _blob(raw), commit, after
+             self._schema_version, self.play_query = schema, selected_play
+-            candidate = after.candidate(self._local_project_id)
+-            need(candidate is not None and candidate.request == self._bound_request, "journal")
++            need(after.candidate(candidate.local_project_id) == candidate, "journal")
+         except Exception:
+             raise Refused("journal") from None
+         self._poisoned = False
+@@ -585,7 +638,12 @@ def _reserve(source, settings, selected_policy, remote, material):
+         source.check()
+         remote.source_current()
+         remote.journal_current(journal.commit)
++        material.recovery.bind(journal, request, source, original)
+         summary = material.observe_android(source, context_revision, original)
++        if summary["temporaryEdit"] == "unconfirmed" and material.recovery.enabled:
++            from .version_hosted_play_recovery import retain_play_recovery
++            retain_play_recovery(journal, request, source, original)
++            raise Refused("play-recovery")
+         journal.finish_play(request, source, original)
+         need(summary["observation"] == "observed", "store")
+         current = android.CurrentInventory(source.identity, context_revision, summary["revision"],
+diff --git a/src/mobile_release/version_hosted_store.py b/src/mobile_release/version_hosted_store.py
+index 12dd2f37..7a8ff690 100644
+--- a/src/mobile_release/version_hosted_store.py
++++ b/src/mobile_release/version_hosted_store.py
+@@ -87,6 +87,8 @@ class Material:
+             self.google_identity = _google_identity(self.google)
+         else:
+             need(not self.selected[_GOOGLE], "google")
++        from .version_hosted_play_recovery import Capture
++        self.recovery = Capture(enabled="android" in self.enabled)
+         self.runtime = _runtime_environment(os.environ)
+         # No GitHub credential, proxy, Ruby loader injection or ambient CA path.
+         self.runtime.pop("SSL_CERT_DIR", None)
+@@ -98,6 +100,7 @@ class Material:
+     def check(self):
+         from .version_hosted import need
+         need(all(os.environ.get(name, "") == value for name, value in self.selected.items()), "store")
++        self.recovery.check()
+
+     def context(self, source):
+         from .version_hosted import need
+@@ -180,11 +183,13 @@ class Material:
+                 self._play_runner = runner
+                 source.remaining()
+                 need(context_revision == self.context(source), "store")
+-                hard_end = min(source.end, source.last + android.QUERY_SECONDS)
++                # Opt-in retention leaves 8s before the parent's original end,
++                # inclusive of the owned child's up-to-3s cleanup tail.
++                hard_end = min(source.end - (8 if self.recovery.enabled else 0), source.last + android.QUERY_SECONDS)
+                 read_end = min(source.last + android.READ_SECONDS, hard_end - 10)
+                 need(source.last < read_end, "store")
+                 selected.require(self._play_snapshot)
+-                env = {**self._environment(), _GAC: str(path),
++                env = {**self._environment(), **self.recovery.environment(), _GAC: str(path),
+                     "MOBILE_RELEASE_PLAY_PACKAGE": source.package, "MOBILE_RELEASE_PLAY_CONTEXT": context_revision,
+                     "MOBILE_RELEASE_PLAY_READ_END_NS": str(math.floor(read_end * 1_000_000_000)),
+                     "MOBILE_RELEASE_PLAY_HARD_END_NS": str(math.floor(hard_end * 1_000_000_000))}
+@@ -199,7 +204,7 @@ class Material:
+                 need(type(completed.returncode) is int and completed.returncode == 0
+                      and type(completed.stdout) is bytes and 0 < len(completed.stdout) <= android.FRAME_LIMIT
+                      and completed.stderr == b"", "play-pending")
+-                summary = android.summary_from_frame(completed.stdout,
++                summary = android.summary_from_frame(self.recovery.frame(completed, source.package, context_revision),
+                     context_sha256=context_revision, package_name=source.package)
+                 need(android.valid_summary(summary), "play-pending")
+                 selected.require(self._play_snapshot)
+diff --git a/fastlane/android_store_versions.rb b/fastlane/android_store_versions.rb
+index 94b888ad..71ba69b8 100644
+--- a/fastlane/android_store_versions.rb
++++ b/fastlane/android_store_versions.rb
+@@ -53,6 +53,10 @@ module MobileReleaseKit
+           GOOGLE_CLOUD_UNIVERSE_DOMAIN GOOGLE_AUTH_TOKEN_URL GCE_METADATA_HOST RUBYOPT RUBYLIB
+           http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY]
+         AndroidStoreVersions.need(forbidden.none? { |key| environment.key?(key) })
++        @recovery_environment = %w[MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64 MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION
++          MOBILE_RELEASE_PLAY_EDIT_RECOVERY_AAD MOBILE_RELEASE_PLAY_EDIT_RECOVERY_CAPSULE].to_h do |name|
++          [name, environment[name]&.dup&.freeze]
++        end.freeze
+         @package = text(environment, 'MOBILE_RELEASE_PLAY_PACKAGE', 255)
+         @context = text(environment, 'MOBILE_RELEASE_PLAY_CONTEXT', 64)
+         AndroidStoreVersions.need(@package.match?(/\A[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\z/) &&
+@@ -91,6 +95,11 @@ module MobileReleaseKit
+         end
+       end
+       def inspect = '#<AndroidStoreVersions::Input private>'
++      def recovery_environment = (@recovery_environment || {})
++      def recovery_identity
++        key = AndroidStoreVersions.object(@json, SMALL_LIMIT)
++        %w[project_id client_email client_id private_key_id].to_h { |name| [name, key.fetch(name)] }
++      end
+       def credentials
+         Google::Auth::ServiceAccountCredentials.make_creds(json_key_io: StringIO.new(@json), scope: PLAY_SCOPE,
+           token_credential_uri: TOKEN, audience: TOKEN, enable_self_signed_jwt: false)
+@@ -182,9 +191,24 @@ module MobileReleaseKit
+       end
+       def inspect = '#<AndroidStoreVersions::Operation private>'
+
++      def execute_cleanup(verified)
++        AndroidStoreVersions.need(!@used && defined?(PlayEditRecovery::Verified) && verified.instance_of?(PlayEditRecovery::Verified))
++        @cleanup_verified = verified
++        @edit = verified.take(@input)
++        execute
++      end
++
+       def execute
+         AndroidStoreVersions.need(!@used)
+         @used = true
++        unless @cleanup_verified
++          # No environment widening for ordinary/native readers; this path is
++          # present only for explicitly opted-in hosted private input.
++          if @input.recovery_environment.values.any? { |value| value && !value.empty? }
++            require_relative 'play_edit_recovery'
++            @recovery_capture = PlayEditRecovery.capture(@input)
++          end
++        end
+         begin
+           AndroidStoreVersions.load_sdk!
+           check
+@@ -217,15 +241,19 @@ module MobileReleaseKit
+             token['token_type'] == 'Bearer' && token['expires_in'].instance_of?(Integer) && token['expires_in'] >= 60)
+           @token = token['access_token'].dup.freeze
+           @service.authorization = @token # String: no apply!, refresh or ambient credentials.
+-          api('insert')
+-          AndroidStoreVersions.need(!@edit.nil?)
+-          %w[tracks bundles apks].each { |step| api(step) }
++          if @cleanup_verified
++            api('delete') # Real token(0) -> DELETE; never simulate an INSERT.
++          else
++            api('insert')
++            AndroidStoreVersions.need(!@edit.nil?)
++            %w[tracks bundles apks].each { |step| api(step) }
++          end
+           @finished = true
+         rescue StandardError
+           failed
+         ensure
+           failed unless @finished
+-          if @edit && !@delete_entered
++          if !@cleanup_verified && @edit && !@delete_entered
+             begin
+               api('delete')
+             rescue StandardError
+@@ -233,7 +261,11 @@ module MobileReleaseKit
+             end
+           end
+         end
+-        frame
++        if @cleanup_verified
++          @cleanup_verified.output('delete', deleteAttempted: @delete_entered, deleteConfirmed: @delete_confirmed)
++        else
++          frame
++        end
+       end
+
+       def require_client(client)
+@@ -337,7 +369,8 @@ module MobileReleaseKit
+       def api(step)
+         index = STEPS.index(step)
+         AndroidStoreVersions.need(index && @token && !@delete_entered &&
+-          (step == 'delete' ? @edit && @sequence.between?(1, 4) : @sequence == index))
++          (@cleanup_verified ? step == 'delete' && @edit && @sequence == 0 :
++            (step == 'delete' ? @edit && @sequence.between?(1, 4) : @sequence == index)))
+         @sequence = index + 1 # Never reset a failed command into another insert/list.
+         wire = @input.request(step, step == 'insert' ? nil : @edit)
+         slot(step, wire['method'], ORIGIN + wire['path'], step == 'insert' ? '{}' : '',
+@@ -375,6 +408,9 @@ module MobileReleaseKit
+           'packageName' => @input.package, 'pages' => @pages, 'queryFinished' => @finished,
+           'temporaryEdit' => { 'insertAttempted' => @insert_entered, 'editId' => @edit,
+             'deleteAttempted' => @delete_entered, 'deleteConfirmed' => @delete_confirmed } }
++        if @recovery_capture
++          value['hostedRecovery'] = @edit && !@delete_confirmed ? @recovery_capture.seal(@edit) : nil
++        end
+         raw = JSON.generate(value, ascii_only: true) + "\n"
+         AndroidStoreVersions.need(raw.bytesize <= FRAME_LIMIT)
+         raw
+diff --git a/src/mobile_release/workflow.py b/src/mobile_release/workflow.py
+index 9c752b70..d8baa2d6 100644
+--- a/src/mobile_release/workflow.py
++++ b/src/mobile_release/workflow.py
+@@ -977,9 +977,12 @@ class Context:
+     def current(cls, stage: str, platform: str) -> "Context":
+         paired_reserve = (stage == "candidate" and platform == "both"
+             and os.environ.get("GITHUB_JOB") == "version_reserve"
+-            and os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version"
+             and os.environ.get("MOBILE_RELEASE_SELECTED_PLATFORM") == "both"
+-            and os.environ.get("MOBILE_RELEASE_CONFIRMATION") == "reserve-version:both:temporary-play-edit")
++            and ((os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version"
++                  and os.environ.get("MOBILE_RELEASE_CONFIRMATION") == "reserve-version:both:temporary-play-edit")
++                 or (os.environ.get("MOBILE_RELEASE_OPERATION") == "recover-play-edit"
++                     and re.fullmatch(r"recover-play-edit:[0-9a-f-]{36}:[0-9a-f-]{36}",
++                                      os.environ.get("MOBILE_RELEASE_CONFIRMATION", "")) is not None)))
+         _require(stage in STAGES and (platform in PLATFORMS or paired_reserve), "workflow stage/platform is invalid")
+         _require(os.environ.get("GITHUB_ACTIONS") == "true", "workflow orchestration is restricted to GitHub Actions")
+         _require(os.environ.get("GITHUB_SERVER_URL", "https://github.com") == "https://github.com" and os.environ.get("GITHUB_API_URL", "https://api.github.com") == "https://api.github.com", "workflow recovery currently supports github.com only")
+diff --git a/.github/workflows/reusable-candidate.yml b/.github/workflows/reusable-candidate.yml
+index 62102681..be869f1e 100644
+--- a/.github/workflows/reusable-candidate.yml
++++ b/.github/workflows/reusable-candidate.yml
+@@ -3,7 +3,7 @@ on:
+   workflow_call:
+     inputs:
+       operation:
+-        description: candidate (default), or reserve-version (no build/upload; Android opens and deletes a temporary Play edit).
++        description: candidate (default), reserve-version, or recover-play-edit (one encrypted known edit; no build/upload/allocation).
+         required: false
+         default: candidate
+         type: string
+@@ -20,7 +20,7 @@ on:
+         required: true
+         type: string
+       confirmation:
+-        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit. Reserve rejects recovery/Desktop inputs.
++        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit. Or recover-play-edit:<candidateUUID>:<attemptUUID>. Both version actions reject recovery/Desktop inputs.
+         required: true
+         type: string
+       recovery_run_id:
+@@ -50,7 +50,7 @@ on:
+         type: string
+     secrets:
+       version_allocation_app_id:
+-        description: Dedicated repository-scoped GitHub App ID, required only for reserve-version.
++        description: Dedicated repository-scoped GitHub App ID, required only for reserve-version/recover-play-edit.
+         required: false
+       version_allocation_app_private_key:
+         description: Dedicated App private key; used only by the protected reserve job's pinned token step.
+@@ -100,7 +100,7 @@ jobs:
+         MOBILE_RELEASE_CALLER_REF: ${{ github.ref }}
+       run: |
+         set -euo pipefail
+-        [[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version)$ ]]
++        [[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version|recover-play-edit)$ ]]
+         [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios|both)$ ]]
+         if [[ "$MOBILE_RELEASE_OPERATION" == "reserve-version" ]]; then
+           if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then
+@@ -109,6 +109,11 @@ jobs:
+             [[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]
+           fi
+           [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
++        elif [[ "$MOBILE_RELEASE_OPERATION" == "recover-play-edit" ]]; then
++          [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|both)$ ]]
++          uuid='[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
++          [[ "$MOBILE_RELEASE_CONFIRMATION" =~ ^recover-play-edit:$uuid:$uuid$ ]]
++          [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
+         fi
+         [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+         if [[ -n "$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]; then
+@@ -1459,7 +1464,7 @@ jobs:
+       evidence_artifact_id: ${{ steps.resolve.outputs.evidence_artifact_id || steps.upload_final.outputs['artifact-id'] }}
+   version_reserve:
+     needs: validate-platform
+-    if: inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')
++    if: (inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')) || (inputs.operation == 'recover-play-edit' && (inputs.platform == 'android' || inputs.platform == 'both'))
+     runs-on: macos-26
+     timeout-minutes: 15
+     environment: mobile-candidate
+@@ -1530,6 +1535,7 @@ jobs:
+         permission-actions: read
+         github-api-url: https://api.github.com
+     - name: Reserve a version only; retain candidate and reviewed change data
++      if: inputs.operation == 'reserve-version'
+       env:
+         MOBILE_RELEASE_VERSION_GITHUB_TOKEN: ${{ steps.version-token.outputs.token }}
+         MOBILE_RELEASE_OPERATION: ${{ inputs.operation }}
+@@ -1550,4 +1556,27 @@ jobs:
+         MOBILE_RELEASE_ASC_ISSUER_ID: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && vars.MOBILE_RELEASE_ASC_ISSUER_ID || '' }}
+         MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 || '' }}
+         MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 || '' }}
++        MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64 || '' }}
++        MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && vars.MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION || '' }}
+       run: python -P -m mobile_release.version_hosted reserve
++    - name: Clean one known encrypted Play edit only; never allocate or retry
++      if: inputs.operation == 'recover-play-edit'
++      env:
++        MOBILE_RELEASE_VERSION_GITHUB_TOKEN: ${{ steps.version-token.outputs.token }}
++        MOBILE_RELEASE_OPERATION: ${{ inputs.operation }}
++        MOBILE_RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
++        MOBILE_RELEASE_SELECTED_PLATFORM: ${{ inputs.platform }}
++        MOBILE_RELEASE_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
++        MOBILE_RELEASE_RECOVERY_CONFIRMATION: ${{ inputs.recovery_confirmation }}
++        MOBILE_RELEASE_DESKTOP_REQUEST: ${{ inputs.desktop_request }}
++        MOBILE_RELEASE_DESKTOP_SOURCE_SHA: ${{ inputs.desktop_source_sha }}
++        MOBILE_RELEASE_DESKTOP_EXPECTED_REF: ${{ inputs.desktop_expected_ref }}
++        MOBILE_RELEASE_DISPATCH_SHA: ${{ github.sha }}
++        MOBILE_RELEASE_DISPATCH_REF: ${{ github.ref }}
++        MOBILE_RELEASE_APP_ROOT: ${{ github.workspace }}/app
++        MOBILE_RELEASE_TOOLING_ROOT: ${{ github.workspace }}/tooling
++        MOBILE_RELEASE_VERSION_AUTHORITY: ${{ vars.MOBILE_RELEASE_VERSION_AUTHORITY }}
++        MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
++        MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64: ${{ secrets.MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64 }}
++        MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION: ${{ vars.MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION }}
++      run: python -P -m mobile_release.version_hosted_play_recovery cleanup
+diff --git a/templates/workflows/mobile-candidate.yml b/templates/workflows/mobile-candidate.yml
+index 8a0b4937..520a8526 100644
+--- a/templates/workflows/mobile-candidate.yml
++++ b/templates/workflows/mobile-candidate.yml
+@@ -4,13 +4,14 @@ on:
+   workflow_dispatch:
+     inputs:
+       operation:
+-        description: Build an internal candidate, or reserve a version only (Android creates/deletes a temporary Play edit)
++        description: Build, reserve only, or explicitly clean one encrypted known Play edit (no allocation)
+         required: false
+         default: candidate
+         type: choice
+         options:
+         - candidate
+         - reserve-version
++        - recover-play-edit
+       platform:
+         description: Platforms enabled in the saved configuration
+         required: true
+@@ -20,7 +21,7 @@ on:
+         - ios
+         - both
+       confirmation:
+-        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit)
++        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit); recover-play-edit:<candidateUUID>:<attemptUUID>
+         required: true
+         type: string
+       recovery_run_id:
+@@ -71,13 +72,13 @@ jobs:
+       desktop_source_sha: ${{ inputs.desktop_source_sha }}
+       desktop_expected_ref: ${{ inputs.desktop_expected_ref }}
+   reserve_version:
+-    if: inputs.operation == 'reserve-version'
++    if: inputs.operation == 'reserve-version' || inputs.operation == 'recover-play-edit'
+     permissions:
+       actions: read
+       contents: read
+     uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-candidate.yml@__MOBILE_RELEASE_KIT_SHA__
+     with:
+-      operation: reserve-version
++      operation: ${{ inputs.operation }}
+       tooling_sha: __MOBILE_RELEASE_KIT_SHA__
+       source_sha: ${{ github.sha }}
+       platform: ${{ inputs.platform }}
+diff --git a/pyproject.toml b/pyproject.toml
+index 44bc3084..1c2963e9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -53,7 +53,7 @@ mobile_release = ["data/apple-profile-roots.pem", "api/data/*.json"]
+   "fastlane/apple_distribution_certificate_policy.rb",
+   "fastlane/apple_distribution_certificate_prepare.rb",
+   "fastlane/apple_distribution_certificate_verify.rb",
+-  "fastlane/apple_provisioning_certificate_issuance.rb",
++  "fastlane/apple_provisioning_certificate_issuance.rb", "fastlane/android_store_versions.rb", "fastlane/play_edit_recovery.rb",
+   "fastlane/apple_production.rb",
+   "fastlane/apple_asset_upload.rb",
+   "fastlane/apple_create_retry.rb",
+diff --git a/tests/workflow/test_version_hosted_yaml.rb b/tests/workflow/test_version_hosted_yaml.rb
+index 5b3ef6cc..9264c892 100644
+--- a/tests/workflow/test_version_hosted_yaml.rb
++++ b/tests/workflow/test_version_hosted_yaml.rb
+@@ -20,17 +20,17 @@ class HostedVersionWorkflowTest < Minitest::Test
+   def test_existing_candidate_is_default_and_reserve_has_no_ambient_write_token
+     public_input = inputs(@caller, "workflow_dispatch")
+     assert_equal "candidate", public_input.fetch("operation").fetch("default")
+-    assert_equal %w[candidate reserve-version], public_input.fetch("operation").fetch("options")
++    assert_equal %w[candidate reserve-version recover-play-edit], public_input.fetch("operation").fetch("options")
+     assert_equal "candidate", inputs(@reusable, "workflow_call").fetch("operation").fetch("default")
+     jobs = @caller.fetch("jobs")
+     assert_equal %w[candidate reserve_version], jobs.keys
+     candidate, reserve = jobs.values_at("candidate", "reserve_version")
+     assert_equal "inputs.operation == 'candidate'", candidate.fetch("if")
+-    assert_equal "inputs.operation == 'reserve-version'", reserve.fetch("if")
++    assert_equal "inputs.operation == 'reserve-version' || inputs.operation == 'recover-play-edit'", reserve.fetch("if")
+     assert_equal "read", candidate.fetch("permissions").fetch("contents")
+     assert_equal({ "actions" => "read", "contents" => "read" }, reserve.fetch("permissions"))
+     assert_equal candidate.fetch("uses"), reserve.fetch("uses")
+-    assert_equal "reserve-version", reserve.fetch("with").fetch("operation")
++    assert_equal "${{ inputs.operation }}", reserve.fetch("with").fetch("operation")
+     %w[recovery_run_id recovery_confirmation desktop_request desktop_source_sha desktop_expected_ref].each do |name|
+       assert_equal "${{ inputs.#{name} }}", reserve.fetch("with").fetch(name) # validated, not silently dropped
+     end
+@@ -58,7 +58,7 @@ class HostedVersionWorkflowTest < Minitest::Test
+       end
+     end
+     validation = jobs.fetch("validate-platform").fetch("steps").first
+-    assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version)$ ]]'
++    assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version|recover-play-edit)$ ]]'
+     assert_includes validation.fetch("run"), 'if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then'
+     assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]'
+     assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]'
+@@ -70,7 +70,7 @@ class HostedVersionWorkflowTest < Minitest::Test
+
+   def test_single_protected_read_and_reserve_job_has_no_build_upload_source_write_or_other_secret
+     reserve = @reusable.fetch("jobs").fetch("version_reserve")
+-    assert_equal "inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')", reserve.fetch("if")
++    assert_equal "(inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')) || (inputs.operation == 'recover-play-edit' && (inputs.platform == 'android' || inputs.platform == 'both'))", reserve.fetch("if")
+     assert_equal "validate-platform", reserve.fetch("needs")
+     assert_equal "mobile-candidate", reserve.fetch("environment")
+     assert_equal({ "actions" => "read", "contents" => "read" }, reserve.fetch("permissions"))
+@@ -83,10 +83,11 @@ class HostedVersionWorkflowTest < Minitest::Test
+     assert checkouts.all? { |s| s.fetch("with").fetch("persist-credentials") == false }
+     assert_equal "${{ inputs.source_sha }}", checkouts.first.fetch("with").fetch("ref")
+     assert_equal "${{ job.workflow_sha }}", checkouts.last.fetch("with").fetch("ref")
+-    assert_equal 2, steps.count { |step| step.key?("run") } # original pin validation, one closed entry
+-    invoke = steps.last
++    assert_equal 3, steps.count { |step| step.key?("run") } # pin validation and mutually exclusive fixed entries
++    invoke = steps[-2]
++    assert_equal "inputs.operation == 'reserve-version'", invoke.fetch("if")
+     assert_equal "python -P -m mobile_release.version_hosted reserve", invoke.fetch("run")
+-    assert_equal %w[MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64], invoke.fetch("env").select { |_, v| v.include?("secrets.") }.keys
++    assert_equal %w[MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64], invoke.fetch("env").select { |_, v| v.include?("secrets.") }.keys
+     refute invoke.fetch("env").key?("GH_TOKEN")
+     assert_equal "${{ steps.version-token.outputs.token }}", invoke.fetch("env").fetch("MOBILE_RELEASE_VERSION_GITHUB_TOKEN")
+     %w[AUTHORITY POLICY].each do |name|
+@@ -108,7 +109,7 @@ class HostedVersionWorkflowTest < Minitest::Test
+     assert call.fetch("secrets").values.all? { |input| input.fetch("required") == false }
+     jobs = @reusable.fetch("jobs")
+     steps = jobs.fetch("version_reserve").fetch("steps")
+-    mint = steps[-2]
++    mint = steps[-3]
+     assert_equal "version-token", mint.fetch("id")
+     assert_equal({
+       "app-id" => "${{ secrets.version_allocation_app_id }}",
+@@ -122,7 +123,7 @@ class HostedVersionWorkflowTest < Minitest::Test
+     %w[version_allocation_app MOBILE_RELEASE_VERSION_GITHUB_TOKEN create-github-app-token MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64].each do |private_input|
+       refute_includes ordinary, private_input
+     end
+-    steps[0...-2].each { |step| refute_includes Psych.dump(step), "version_allocation_app" }
++    steps[0...-3].each { |step| refute_includes Psych.dump(step), "version_allocation_app" }
+     refute_includes Psych.dump(steps.last), "version_allocation_app"
+     refute_includes Psych.dump(jobs.fetch("version_reserve")), "GITHUB_OUTPUT"
+   end
+@@ -131,7 +132,7 @@ class HostedVersionWorkflowTest < Minitest::Test
+     jobs = @reusable.fetch("jobs")
+     reserve = jobs.fetch("version_reserve")
+     refute jobs.key?("ios_version_reserve")
+-    environment = reserve.fetch("steps").last.fetch("env")
++    environment = reserve.fetch("steps")[-2].fetch("env")
+     %w[KEY_ID ISSUER_ID PRIVATE_KEY_P8_BASE64].each do |suffix|
+       name = "MOBILE_RELEASE_ASC_#{suffix}"
+       source = suffix == "PRIVATE_KEY_P8_BASE64" ? "secrets" : "vars"

@@ -637,8 +637,11 @@ class CommandCallEvidence:
         self._reservation: tuple[object, str, str] | None = None
         self._lane_reservation: tuple[object, str, str, bytes] | None = None
         self._expected: tuple[Any, ...] | None = None
+        self._current_android: object | None = None
+        self._current_ios: object | None = None
         self._lane_timing: store_wire.Timing | None = None
         self._timing_consumed = False
+        self._desktop_readback_capped = False
         self._used = self._matched = False
         self._engine: _Outer | None = None
         self._slot: CommandOutcomeSlot | None = None
@@ -652,10 +655,44 @@ class CommandCallEvidence:
         _require(guard is self._guard and guard.pid == self._pid
                  and guard.owner_thread is self._thread)
 
+    def _reserve_current_ios(self, owner: object, role: str) -> None:
+        from .ios_current_tools_macos import CurrentIPATools, OUTPUT_LIMIT
+        self._owner(self._guard)
+        _require(type(owner) is CurrentIPATools and owner.guard is self._guard
+                 and self._current_ios is None and self._current_android is None
+                 and self._reservation is None and self._lane_reservation is None and self._expected is None and not self._used)
+        argv,cwd,environment,timing,nominal=owner._command_seal(self,role)
+        _require(type(timing) is store_wire.Timing and timing.hard-timing.run==CLEANUP_NS
+                 and timing.hard<=owner.run_end and time.monotonic_ns()<timing.run)
+        request={"argv":list(argv),"cwd":str(cwd),"capture":True,"limit":OUTPUT_LIMIT}
+        _valid_request(request);_require(len(_json(request))<=REQUEST_LIMIT)
+        self._current_ios,self._lane_timing=owner,timing
+        self._expected=(argv,os.fsencode(cwd),tuple(sorted((os.fsencode(k),os.fsencode(v)) for k,v in environment.items())),
+                        True,OUTPUT_LIMIT,nominal)
+
+    def _reserve_current_android(self, owner: object, role: str) -> None:
+        """Exactly three registered local validators; no generic argv/timer grant."""
+        from .android_current_tools_macos import RegisteredCurrentTools, ROLES
+        self._owner(self._guard)
+        _require(type(owner) is RegisteredCurrentTools and owner.guard is self._guard
+                 and type(role) is str and role in ROLES and self._current_android is None and self._current_ios is None
+                 and self._reservation is None and self._lane_reservation is None
+                 and self._expected is None and not self._used)
+        argv, cwd, environment, timing, nominal = owner._command_seal(self, role)
+        _require(type(timing) is store_wire.Timing and timing.hard - timing.run == CLEANUP_NS
+                 and timing.hard <= owner.run_end and time.monotonic_ns() < timing.run)
+        request = {"argv": list(argv), "cwd": str(cwd), "capture": True, "limit": 2 * 1024**2}
+        _valid_request(request)
+        _require(len(_json(request)) <= REQUEST_LIMIT)
+        self._current_android, self._lane_timing = owner, timing
+        self._expected = (argv, os.fsencode(cwd),
+            tuple(sorted((os.fsencode(k), os.fsencode(v)) for k, v in environment.items())),
+            True, 2 * 1024**2, nominal)
+
     def _reserve_readback(self, owner: object, role: str, path: Path,
                           guard: DefaultCancellation) -> None:
         self._owner(guard)
-        _require(self._reservation is None and self._lane_reservation is None
+        _require(self._reservation is None and self._lane_reservation is None and self._current_android is None and self._current_ios is None
                  and self._expected is None and not self._used
                  and role in ("android", "ios") and path.is_absolute()
                  and path.name == role + ".json")
@@ -669,7 +706,7 @@ class CommandCallEvidence:
         _require(type(owner) is StoreLaneCallEvidence and owner._command is self
                  and owner._guard is guard and owner._lane == lane
                  and owner._output == str(path) and owner._nonce == nonce
-                 and self._reservation is None and self._lane_reservation is None
+                 and self._reservation is None and self._lane_reservation is None and self._current_android is None and self._current_ios is None
                  and self._expected is None and not self._used
                  and type(lane) is str and lane in _STORE_LANES and _nonce(nonce)
                  and path.is_absolute() and ".." not in path.parts and "\0" not in str(path))
@@ -739,6 +776,32 @@ class CommandCallEvidence:
                           False, PRIVATE_OUTPUT_LIMIT, 15 * 60)
         return argv
 
+    def _cap_local_store(self, source, *, timeout: int) -> None:
+        from ._desktop_store_prepare_control import StorePrepareInput
+        from ._desktop_store_execute_control import StoreExecuteInput
+        from ._desktop_store_reconcile_control import StoreReconcileInput
+        self._owner(source.guard)
+        _require(type(source) in (StorePrepareInput,StoreExecuteInput,StoreReconcileInput) and source.guard._saved_command_input() is source
+                 and self._engine is None and not self._desktop_readback_capped
+                 and not self._used and self._expected is not None and self._expected[5]==3600 and self._lane_reservation is not None
+                 and self._reservation is None and self._lane_timing is not None
+                 and source.require_operation().require_lane_evidence(self,timeout))
+        self._desktop_readback_capped=True
+        self._expected=(*self._expected[:-1],timeout)
+
+    def _cap_store_preflight(self, source, *, timeout: int) -> None:
+        """Tighten this original readback once, never alter its command seal."""
+        from ._desktop_store_preflight_control import StorePreflightInput
+        self._owner(source.guard)
+        _require(type(source) is StorePreflightInput and source.guard._saved_command_input() is source
+                 and not self._used and self._engine is None and not self._desktop_readback_capped
+                 and self._reservation is not None and self._reservation[1] == source.require_operation().request.context["platform"]
+                 and self._lane_reservation is None and self._expected is not None
+                 and self._expected[5] == 900 and type(timeout) is int and 1 <= timeout <= 900)
+        source.require_operation().require_query_timing(timeout)
+        self._desktop_readback_capped = True
+        self._expected = (*self._expected[:5], timeout)
+
     def _attempt(self, guard: DefaultCancellation | None, *, timeout: int,
                  ordinary: bool) -> None:
         self._owner(guard)  # type: ignore[arg-type]
@@ -756,7 +819,7 @@ class CommandCallEvidence:
                  and engine.scope is None and engine.binding is None and not engine.owns
                  and engine.slot._engine is engine and engine.slot._scope is None
                  and engine.slot.read() is None)
-        if self._lane_reservation is not None:
+        if self._lane_reservation is not None or self._current_android is not None or self._current_ios is not None:
             _require(engine.evidence is None and self._timing_consumed
                      and engine._store_timing is self._lane_timing
                      and engine.ctx.run == self._lane_timing.run
@@ -768,6 +831,20 @@ class CommandCallEvidence:
         self._owner(guard)
         _require(self._used and self._expected is not None and timeout == self._expected[5]
                  and not owns and scope is None and binding is None and self._engine is None)
+        if self._current_ios is not None:
+            from .ios_current_tools_macos import CurrentIPATools
+            _require(type(self._current_ios) is CurrentIPATools and not self._timing_consumed
+                     and self._reservation is None and self._lane_reservation is None)
+            self._timing_consumed=True
+            _require(self._current_ios._command_timing(self) is self._lane_timing)
+            return self._lane_timing
+        if self._current_android is not None:
+            from .android_current_tools_macos import RegisteredCurrentTools
+            _require(type(self._current_android) is RegisteredCurrentTools and not self._timing_consumed
+                     and self._reservation is None and self._lane_reservation is None)
+            self._timing_consumed = True
+            _require(self._current_android._command_timing(self) is self._lane_timing)
+            return self._lane_timing
         if self._lane_reservation is None:
             _require(self._lane_timing is None)
             return None  # Ordinary online-readback timing remains unchanged.
@@ -788,7 +865,7 @@ class CommandCallEvidence:
         actual = (frozen.args, frozen.cwd, tuple(sorted(frozen.environment)),
                   frozen.manifest.capture, frozen.manifest.limit, self._expected[5])
         _require(actual == self._expected)
-        if self._lane_reservation is not None:
+        if self._lane_reservation is not None or self._current_android is not None or self._current_ios is not None:
             _require(engine._store_timing is self._lane_timing
                      and engine.ctx.run == self._lane_timing.run
                      and engine.ctx.hard == self._lane_timing.hard)
@@ -966,6 +1043,11 @@ def _fence_fields(content: bytes) -> dict[str, Any]:
 # Command-local lifecycle.  These roles deliberately do not depend on the
 # profile executor's private state machine or its scratch/validator policy.
 POLL = 0.01
+# Bounded early polling for waits that normally settle within milliseconds
+# (a child that already closed its pipes, a killed group). After QUICK_SPINS
+# blind passes the original POLL applies, so a stuck peer never spins (#17).
+QUICK_POLL = 0.001
+QUICK_SPINS = 50
 HELPER_OK, HELPER_FAILED, HELPER_UNKNOWN = 0, 2, 70
 
 
@@ -1038,6 +1120,7 @@ class _Context:
         self.role, self.nonce, self.run, self.hard = role, nonce, run, hard
         self.pid, self.owner = os.getpid(), threading.current_thread()
         self.guard, self.parent, self.suppress_cancel = guard, parent, suppress_cancel
+        self.git_remote_binding = None  # Only the fixed GitRemote map-v2 source.
         self.lock = threading.Lock()
         self.primary: BaseException | None = None
         self.secondary: list[BaseException] = []
@@ -1358,12 +1441,12 @@ class _TaskSlot:
 
 
 def _pause(cutoff: int, *, readers: tuple[native.FDLease, ...] = (),
-           writers: tuple[native.FDLease, ...] = ()) -> None:
+           writers: tuple[native.FDLease, ...] = (), quick: bool = False) -> None:
     left = (cutoff - time.monotonic_ns()) / NANOSECOND
     if left <= 0:
         return
     if not readers and not writers:
-        time.sleep(min(POLL, left))
+        time.sleep(min(QUICK_POLL if quick else POLL, left))
         return
     # Readiness is only a hint to repeat the original checked nonblocking IO.
     # poll owns no descriptor and, unlike select, has no FD_SETSIZE boundary.
@@ -1379,6 +1462,11 @@ def _pause(cutoff: int, *, readers: tuple[native.FDLease, ...] = (),
     left = (cutoff - time.monotonic_ns()) / NANOSECOND
     if left > 0:
         readiness.poll(int(min(POLL, left) * 1000))
+
+
+def _live_readers(*pairs: tuple[native.FDLease, bool]) -> tuple[native.FDLease, ...]:
+    """Readiness hints only: still-open readers whose EOF is not yet observed."""
+    return tuple(reader for reader, eof in pairs if not eof and reader.state == "OPEN")
 
 
 class _Wire:
@@ -1670,21 +1758,37 @@ else:
 
 def _command_spec(context: _Context, role: str,
                   sources: tuple[native.FDLease, ...]) -> native.SpawnSpec:
+    # This one setting is launch policy DATA, never authority over its directory.
+    # In particular, do not forward arbitrary -X options or Python environment.
+    cache_prefix = sys.pycache_prefix
+    _require(cache_prefix is None or type(cache_prefix) is str
+             and cache_prefix == "/run/mrk-gnome-python-empty-pycache-v1")
+    cache_args = (() if cache_prefix is None else
+                  ("-X", "pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1"))
     context.check()
     _require(role in ("C", "A", "W") and {"O": "C", "C": "A", "A": "W"}.get(context.role) == role
-             and len(sources) == 8)
+             and len(sources) == (8 if context.git_remote_binding is None else 9))
+    remote = context.git_remote_binding
+    if remote is not None:
+        from ._git_remote_command_channel import binding_of
+        _require(binding_of(sources[8], context.nonce) is remote
+                 and sources[5].account_binding is None)
     executable = os.path.abspath(sys.executable)
     module_root = str(Path(__file__).resolve().parent.parent)
     hold = sources[5].account_binding
     account = "-" if hold is None else ",".join(str(value) for value in (hold.uid, *hold.identity))
     _require(role != "W" or account == "-")
-    argv = (executable, "-I", "-S", "-B", "-c", _BOOTSTRAP, module_root, role,
+    argv = (executable, "-I", "-S", "-B", *cache_args, "-c", _BOOTSTRAP, module_root, role,
             str(context.pid), str(os.getsid(0)), str(os.getpgrp()),
-            str(context.run), str(context.hard), context.nonce.hex(), account, "1")
+            str(context.run), str(context.hard), context.nonce.hex(), account,
+            "1" if remote is None else "2")
+    if remote is not None:
+        argv += (remote._wire(),)
     environment = (("PATH", os.defpath), ("LC_ALL", "C"), ("LANG", "C"))
     permit = native._issue_command_map(
         context.child_acquisition, role=role, command_nonce=context.nonce,
         executable=executable, argv=argv, env=environment, fd_sources=sources,
+        git_remote_binding=remote,
     )
     return native.SpawnSpec(executable, argv, environment, sources, command_map=permit)
 
@@ -1711,21 +1815,31 @@ def _bootstrap_map(context: _Context, bootstrap: native.CommandBootstrapMap,
         result[5] = account.adopt_account_hold(bootstrap, binding=bootstrap.account_binding)
     else:
         result[5] = account.adopt_fd(5, access=os.O_RDONLY, kind="null")
+    if bootstrap.fd_map_version == 2:
+        from ._git_remote_command_channel import adopt
+        _require(context.git_remote_binding is bootstrap.git_remote_binding)
+        result[8] = adopt(bootstrap, relay)
+    else:
+        _require(context.git_remote_binding is None)
     return result
 
 
 def _hello(context: _Context) -> bytes:
     return _scalar(context.nonce, role=context.role, pid=context.pid,
-                   parent=os.getppid(), session=os.getsid(0), group=os.getpgrp(), map=1)
+                   parent=os.getppid(), session=os.getsid(0), group=os.getpgrp(),
+                   map=1 if context.git_remote_binding is None else 2)
 
 
 def _admit_hello(context: _Context, child: native.Child, content: bytes, role: str,
                  session: int, group: int) -> None:
+    if context.git_remote_binding is not None:
+        context.git_remote_binding._check(context.nonce)
     value = _scalar_fields(content, context.nonce, {"role", "pid", "parent", "session", "group", "map"})
     _require(child is context.child_acquisition.child and child.wait_state == "OWNED"
              and not child.numeric_retired and value["role"] == role and value["pid"] == child.pid
              and all(_integer(value[key], 1, PID_LIMIT) for key in ("pid", "parent", "session", "group"))
-             and type(value["map"]) is int and value["map"] == 1
+             and type(value["map"]) is int
+             and value["map"] == (1 if context.git_remote_binding is None else 2)
              and value["parent"] == context.pid and value["session"] == session and value["group"] == group
              and os.getsid(child.pid) == session and os.getpgid(child.pid) == group)
 
@@ -1804,6 +1918,7 @@ def _wait_original(context: _Context, child: native.Child, pump: Callable[[], No
     # All caller-owned numeric routes MUST be permanently retired first. A
     # genuine pid0 permits another original wait, never another signal/probe.
     child.retire_numeric()
+    spins = 0
     while time.monotonic_ns() < context.cutoff():
         try:
             receipt = child.poll_wait()
@@ -1817,7 +1932,8 @@ def _wait_original(context: _Context, child: native.Child, pump: Callable[[], No
             pump()
         except BaseException as error:
             context.record(error)
-        _pause(context.cutoff())
+        spins += 1
+        _pause(context.cutoff(), quick=spins <= QUICK_SPINS)
     context.cleanup_unknown = True
     return None
 
@@ -2271,6 +2387,7 @@ class _Worker:
         _require(bootstrap.account_binding is None and self.mapping[5].account_binding is None)
         self.upstream = _Wire(context, self.mapping[3], self.mapping[4])
         self.exec_retired = self.reject_attempted = False
+        self.git_remote_limits_entered = False
         self.effects: list[_FileEffect] = []
 
     def _setup(self, operation: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -2331,6 +2448,15 @@ class _Worker:
                 _require(self._setup("stderr_dup", os.dup2, self.mapping[7].fileno(), 2, inheritable=True) == 2)
             for fd in (0, 1, 2):
                 _require(self._setup("stdio_inheritance", os.set_inheritable, fd, True) is None)
+            if ctx.git_remote_binding is not None:
+                from ._git_remote_command_channel import binding_of
+                endpoint = self.mapping[8]
+                _require(binding_of(endpoint, ctx.nonce) is ctx.git_remote_binding)
+                endpoint._validate()
+                from ._git_remote_command_limits import apply_worker_limits
+                apply_worker_limits(self, endpoint)
+                _require(self._setup("git_remote_inheritance", os.set_inheritable,
+                                    endpoint.fileno(), True) is None)
             stage = "cwd"
             _require(self._setup("cwd", os.chdir, decoded.cwd) is None)
             stage = "signals"
@@ -2442,7 +2568,8 @@ class _Anchor:
         incoming, command_writer = self.producer.pipe()
         status_reader, outgoing = self.producer.pipe()
         null_hold = self.producer.open_null(writable=False)
-        sources = (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7])
+        remote = () if ctx.git_remote_binding is None else (self.mapping[8],)
+        sources = (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7], *remote)
         spec = _command_spec(ctx, "W", sources)
         # Publish the original control pair before any creator can exist. An
         # interrupted creation/return therefore still has an EOF withdrawal
@@ -2452,7 +2579,7 @@ class _Anchor:
         self.create_route.queue()
         self.create_route.attempt()  # Original CREATE_W consumption before start.
         self.child = _spawn(ctx, spec, self._parent)
-        for lease in (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7]):
+        for lease in (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7], *remote):
             ctx.close(lease)
         hello = _receive(self.downstream, Tag.HELLO, self._parent)
         _admit_hello(ctx, self.child, hello, "W", self.session, ctx.pid)
@@ -2484,13 +2611,20 @@ class _Anchor:
         # W numeric signal/probe authority is retired BEFORE the very first
         # potentially consuming wait, including a genuine pid0 poll.
         self.child.retire_numeric()
+        spins = 0
         while self.wait is None or not self.downstream.eof:
             ctx.check()
             self._worker_frames()
             if self.wait is None:
                 self.wait = self.child.poll_wait()
             _check_stop(ctx, parent)
-            _pause(ctx.run)
+            if self.wait is not None and self.downstream.eof:
+                break
+            # W's frames and EOF wake this wait; only W's final reap polls,
+            # briefly fast and then at the original POLL for a long-lived tool.
+            readers = _live_readers((self.downstream.reader, self.downstream.eof))
+            spins = 0 if readers else spins + 1
+            _pause(ctx.run, readers=readers, quick=not readers and spins <= QUICK_SPINS)
         _require(self.armed and not self.worker_protocol_failed and not self.downstream.poisoned)
 
     def _local_producers(self) -> bool:
@@ -2783,12 +2917,13 @@ class _Custodian:
         self.source_readers = [stdout, stderr]
         for source in self.source_readers:
             os.set_blocking(source.fileno(), False)
-        sources = (*nulls, child_input, child_status, self.mapping[5], child_stdout, child_stderr)
+        remote = () if ctx.git_remote_binding is None else (self.mapping[8],)
+        sources = (*nulls, child_input, child_status, self.mapping[5], child_stdout, child_stderr, *remote)
         self.downstream = _Wire(ctx, reader, writer)
         self.downstream.expected_manifest = manifest
         self.child = _spawn(ctx, _command_spec(ctx, "A", sources), self._parent)
         self.group = _AnchorGroup(ctx, self.child)
-        for lease in (*nulls, child_input, child_status, child_stdout, child_stderr):
+        for lease in (*nulls, child_input, child_status, child_stdout, child_stderr, *remote):
             ctx.close(lease)
         hello = _receive(self.downstream, Tag.HELLO, self._parent)
         _admit_hello(ctx, self.child, hello, "A", ctx.pid, self.child.pid)
@@ -2819,7 +2954,8 @@ class _Custodian:
             self._pump()
             _check_stop(ctx, parent)
             _require(not self.downstream.eof or self.anchor_work is not None)
-            _pause(ctx.run)
+            if self.anchor_work is None:
+                _pause(ctx.run, readers=_live_readers((self.downstream.reader, self.downstream.eof)))
 
     def _stop_anchor(self) -> None:
         wire = self.downstream
@@ -2879,16 +3015,19 @@ class _Custodian:
                 ctx.record(error)
                 if wire.poisoned:
                     break
-            _pause(ctx.cutoff())
+            if not wire.eof and self.anchor_work is None:
+                _pause(ctx.cutoff(), readers=_live_readers((wire.reader, wire.eof)))
         try:
             self.group.terminate()
+            spins = 0
             while not self.group.probe() and time.monotonic_ns() < ctx.cutoff():
                 try:
                     self._pump()
                 except BaseException as error:
                     self.anchor_protocol_failed = True
                     ctx.record(error)
-                _pause(ctx.cutoff())
+                spins += 1
+                _pause(ctx.cutoff(), quick=spins <= QUICK_SPINS)
         except BaseException as error:
             ctx.record(error, unknown=True)
         finally:
@@ -2900,7 +3039,8 @@ class _Custodian:
                 self.group_done_sent = True
                 while not wire.eof and time.monotonic_ns() < ctx.cutoff():
                     self._pump()
-                    _pause(ctx.cutoff())
+                    if not wire.eof:
+                        _pause(ctx.cutoff(), readers=_live_readers((wire.reader, wire.eof)))
             except BaseException as error:
                 self.anchor_protocol_failed = True
                 ctx.record(error)
@@ -2917,9 +3057,9 @@ class _Custodian:
         self.wait = _wait_original(ctx, self.child, self._pump)
         while not all(self.source_eof) and time.monotonic_ns() < ctx.cutoff():
             self._source_io()
-            if self.source_failed:
+            if self.source_failed or all(self.source_eof):
                 break
-            _pause(ctx.cutoff())
+            _pause(ctx.cutoff(), readers=_live_readers(*zip(self.source_readers, self.source_eof)))
         if wire is not None:
             wire.close_writer()
             ctx.close(wire.reader)
@@ -2974,7 +3114,19 @@ class _Custodian:
         # latched cannot produce success, and a later signal invalidates this
         # original epoch rather than inheriting an already-built success frame.
         epoch = (ctx.error_epoch, ctx.signal_epoch)
-        valid = valid and ctx.primary is None and not ctx.stopped
+        primary, stopped = ctx.primary is not None, ctx.stopped
+        valid = valid and not primary and not stopped
+        # Simultaneous failed gates, not a chronological cause. The existing
+        # fallback record above can itself account for primary/stopped bits.
+        # Any later error/signal still invalidates this SAME terminal epoch.
+        failure_mask = None
+        if producer:
+            failure_mask = ((0 if anchor["result"] else 1)
+                            | (2 if self.output_overflow else 0)
+                            | (0 if self.wait.status_code == HELPER_OK else 4)
+                            | (0 if relay else 8)
+                            | (16 if primary else 0)
+                            | (32 if stopped else 0))
         no_target = None
         if producer and anchor is not None:
             if anchor["no_child"]:
@@ -2986,7 +3138,7 @@ class _Custodian:
         terminal = _scalar(ctx.nonce, create=self.create_route.attempted, run=self.run_route.attempted,
                             no_target=no_target, wait=None if anchor is None else anchor["wait"],
                             producer=producer, result=valid, stdout=len(self.output[0]), stderr=len(self.output[1]),
-                            fence=None if self.writer is None else self.writer.complete)
+                            fence=None if self.writer is None else self.writer.complete, failure_mask=failure_mask)
         try:
             _send(parent, Tag.TERMINAL, terminal, lambda: None, normal=False)
         except BaseException as error:
@@ -3016,8 +3168,14 @@ def helper_main(argv: list[str], policy: int | None) -> int:
     """Only the fixed loader calls this; W's loader guards this entire call."""
     context: _Context | None = None
     try:
-        _require(type(argv) is list and len(argv) == 9 and argv[0] in ("C", "A", "W")
-                 and argv[8] == "1")
+        _require(type(argv) is list and argv and argv[0] in ("C", "A", "W")
+                 and (len(argv) == 9 and argv[8] == "1"
+                      or len(argv) == 10 and argv[8] == "2"))
+        version = int(argv[8])
+        remote_identity = None
+        if version == 2:
+            from ._git_remote_command_channel import parsed_binding
+            remote_identity = parsed_binding(argv[9])
         role = argv[0]
         parent, session, group, run, hard = (int(value) for value in argv[1:6])
         _require(all(_integer(value, 1, PID_LIMIT) for value in (parent, session, group))
@@ -3025,7 +3183,8 @@ def helper_main(argv: list[str], policy: int | None) -> int:
                  and len(argv[6]) == 32 and all(char in "0123456789abcdef" for char in argv[6]))
         nonce = bytes.fromhex(argv[6])
         account = None if argv[7] == "-" else tuple(int(value) for value in argv[7].split(","))
-        _require(account is None or len(account) == 3 and all(type(value) is int for value in account))
+        _require(account is None or version == 1 and len(account) == 3
+                 and all(type(value) is int for value in account))
         _require(os.getppid() == parent and os.getsid(0) == session and os.getpgrp() == group
                  and time.monotonic_ns() < run and hard - run == CLEANUP_NS)
         if role == "C":
@@ -3043,7 +3202,9 @@ def helper_main(argv: list[str], policy: int | None) -> int:
             signal.signal(signum, context.helper_signal)
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         bootstrap = native._issue_command_bootstrap(role=role, command_nonce=nonce,
-                    parent_pid=parent, parent_session=session, parent_group=group, account_binding=account)
+                    parent_pid=parent, parent_session=session, parent_group=group, account_binding=account,
+                    fd_map_version=version, git_remote_identity=remote_identity)
+        context.git_remote_binding = bootstrap.git_remote_binding
         if role == "W":
             _Worker(context, bootstrap).run()
             return HELPER_UNKNOWN  # Only into the loader's non-returning tail.
@@ -3062,7 +3223,7 @@ class _Outer:
     def __init__(self, guard: DefaultCancellation, owns: bool, timeout: int,
                  scope: AccountExecutionScope | None, binding: JournalledCommandBinding | None,
                  *, suppress_cancel: bool, evidence: CommandCallEvidence | None = None,
-                 text: bool = True) -> None:
+                 text: bool = True, git_remote_channel=None) -> None:
         self._store_timing = (None if evidence is None else evidence._fixed_timing(
             guard, timeout=timeout, owns=owns, scope=scope, binding=binding))
         self.nonce = os.urandom(16) if scope is None else scope.nonce
@@ -3073,6 +3234,12 @@ class _Outer:
         self.ctx = _Context("O", self.nonce, run, hard,
                             guard=guard, suppress_cancel=suppress_cancel)
         self.guard, self.owns, self.scope, self.binding = guard, owns, scope, binding
+        self.git_remote_channel = git_remote_channel
+        if git_remote_channel is not None:
+            from ._git_remote_command_channel import OriginalChannel
+            _require(type(git_remote_channel) is OriginalChannel and scope is None
+                     and binding is None and evidence is None and not suppress_cancel)
+            git_remote_channel.bind_context(self.ctx)
         self.slot = CommandOutcomeSlot(None, self.nonce, _key=_KEY) if scope is None else scope.outcome
         if scope is None:
             _require(binding is None)
@@ -3081,6 +3248,18 @@ class _Outer:
             _require(scope._source._lease.cancellation is guard)
             scope._consume(self, binding)
         guard.lifetime_ledger._bind_command(self.slot)
+        # One fixed read-only original-slot binding. This must not poll STOP or
+        # introduce native work before the normal CleanupScope is registered.
+        ios_source = guard._ios_archive_source
+        if ios_source is not None:
+            from ._desktop_ios_archive_control import IOSArchiveInput
+            _require(type(ios_source) is IOSArchiveInput)
+            ios_source.require_operation().bind_command_slot(self, self.slot)
+        allocation_source = guard._version_allocation_source
+        if allocation_source is not None:
+            # Same original slot, rooted before any command acquisition. The
+            # source borrower has no command or finality engine of its own.
+            allocation_source.require_operation().bind_command_slot(self, self.slot)
         self.create_route, self.run_route = _Route(Tag.CREATE_W), _Route(Tag.RUN_TOOL)
         self.ctx.routes.extend((self.create_route, self.run_route))
         self.io: native.Acquisition | None = None
@@ -3104,6 +3283,19 @@ class _Outer:
         self.observation: FenceObservationDecoder | None = None
         if binding is not None and binding.fence_observation is FenceObservationPolicy.TRACE_V1:
             self.observation = FenceObservationDecoder(self.nonce, binding._fields["sequence"], uid=binding._fields["uid"])
+        # Fixed Apple key child only. Bind the SAME original slot after its
+        # backing is initialized and BEFORE native command acquisition. A late
+        # STOP may suppress CompletedProcess; it must not lose generated bytes.
+        apple_source = getattr(guard, "_apple_provisioning_source", None)
+        if apple_source is not None:
+            from ._desktop_apple_provisioning_control import AppleProvisioningInput
+            from ._desktop_apple_distribution_key import bind_original_command_slot
+            _require(type(apple_source) is AppleProvisioningInput)
+            bind_original_command_slot(apple_source.require_operation(), self, self.slot)
+            from ._desktop_apple_certificate_control import bind_post_command_slot
+            bind_post_command_slot(apple_source.require_operation(), self, self.slot)
+            from ._desktop_apple_p12_assembly import bind_original_command_slot as bind_p12_original
+            bind_p12_original(apple_source.require_operation(), self, self.slot)
 
     def prepared_reservation(self) -> bool:
         self.ctx.check()
@@ -3141,7 +3333,8 @@ class _Outer:
 
     def _terminal(self, content: bytes) -> dict[str, Any]:
         fields = _scalar_fields(content, self.nonce,
-                                {"create", "run", "no_target", "wait", "producer", "result", "stdout", "stderr", "fence"})
+                                {"create", "run", "no_target", "wait", "producer", "result", "stdout", "stderr", "fence",
+                                 "failure_mask"})
         _require(all(type(fields[name]) is bool for name in ("create", "run", "producer", "result"))
                  and fields["no_target"] in (None, "NO_W_CREATION", "CLOSED_BEFORE_RUN", "EXEC_REJECTED")
                  and (fields["wait"] is None or _valid_receipt(fields["wait"]))
@@ -3157,6 +3350,12 @@ class _Outer:
                  and (not fields["result"] or fields["producer"] and fields["wait"] is not None
                       and fields["run"] and self.ready
                       and (self.binding is None or fields["fence"] is True)))
+        mask = fields["failure_mask"]
+        # A primary implies stopped; a failed base gate records a primary.
+        # Unsealed terminals carry no diagnostic and cannot mint finality.
+        _require(mask is None if not fields["producer"] else
+                 _integer(mask, 0, 63) and (mask in (0, 32) or mask >= 48)
+                 and fields["result"] is (mask == 0))
         _require(self.frozen is not None
                  and fields["stdout"] + fields["stderr"] <= self.frozen.manifest.limit
                  and (self.frozen.manifest.capture or fields["stdout"] == fields["stderr"] == 0))
@@ -3226,11 +3425,16 @@ class _Outer:
             self.protocol_failed = True
             raise ProcessError(ERROR)
 
-    def _until(self, predicate: Callable[[], bool]) -> None:
+    def _until(self, predicate: Callable[[], bool], *, drain_outputs_after_terminal: bool = False) -> None:
         while not predicate():
             self.ctx.check()
             self._pump()
-            _require(self.wire is not None and (not self.wire.eof or predicate()))
+            # Final control EOF does not order this reader's stdout/stderr
+            # EOF observations. Only the final RUNNING caller may keep draining
+            # after an accepted terminal; all earlier handshakes still refuse.
+            _require(self.wire is not None and (not self.wire.eof or predicate()
+                     or drain_outputs_after_terminal is True and self.phase == "RUNNING"
+                     and self.sealed and self.terminal is not None))
             self.ctx.check()
             if not predicate():
                 readers = tuple(reader for reader, eof in (
@@ -3259,11 +3463,13 @@ class _Outer:
             os.set_blocking(reader.fileno(), False)
         hold = (self.io.open_null(writable=False) if self.scope is None else
                 self.io.export_account_hold(self.scope._source._locked_source, command_nonce=self.nonce))
-        sources = (*nulls, child_input, child_status, hold, child_stdout, child_stderr)
+        remote = (() if self.git_remote_channel is None else
+                  (self.git_remote_channel.export(ctx, self.io),))
+        sources = (*nulls, child_input, child_status, hold, child_stdout, child_stderr, *remote)
         self.wire = _Wire(ctx, status_reader, input_writer, diagnostics=self.observation is not None)
         self.wire.expected_manifest = self.frozen.manifest
         self.child = _spawn(ctx, _command_spec(ctx, "C", sources), lambda: None)
-        for lease in (*nulls, child_input, child_status, hold, child_stdout, child_stderr):
+        for lease in (*nulls, child_input, child_status, hold, child_stdout, child_stderr, *remote):
             ctx.close(lease)
         self.phase = "STARTING"
         self._until(lambda: self.hello is not None)
@@ -3295,7 +3501,8 @@ class _Outer:
         _require(not self.sealed and not self.run_route.retired)
         self.phase = "RUNNING"
         _send(self.wire, Tag.RUN_TOOL, _scalar(self.nonce), self._pump, route=self.run_route)
-        self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof))
+        self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof),
+                    drain_outputs_after_terminal=True)
         _require(not self.protocol_failed and not self.output_failed)
 
     def _safe_pump(self) -> None:
@@ -3413,12 +3620,113 @@ class _Outer:
         return outcome
 
 
+def _owner_finality_diagnostic(engine: _Outer) -> tuple | None:
+    """Bounded stored observations after publication; never finality authority.
+
+    Bits denote failed predicates. Missing wait/terminal/wire makes their child
+    bits inapplicable, not passed. No native queries, clocks, cleanup or locks.
+    """
+    ctx = engine.ctx
+    if (type(ctx.acquisitions) is not list or len(ctx.acquisitions) > 64
+            or type(ctx.tasks) is not list or len(ctx.tasks) > 64):
+        return None
+    # Bounded copies also cap allocation if an original worker appends later.
+    acquisitions, tasks = tuple(ctx.acquisitions[:65]), tuple(ctx.tasks[:65])
+    if len(acquisitions) > 64 or len(tasks) > 64:
+        return None
+    leases, total = [], 0
+    for acquisition in acquisitions:
+        original = acquisition._leases
+        if type(original) is not list or len(original) > 512 - total:
+            return None
+        held = tuple(original[:513 - total])
+        total += len(held)
+        if total > 512:
+            return None
+        leases.append(held)
+    # Do not call Acquisition.cleanup_unknown/.leases: they traverse/allocate
+    # the live collection without our diagnostic ceiling. Read the same fields
+    # against the bounded original leases instead. This is not an atomic proof.
+    states = {}
+    cleanup = 0
+    for acquisition, held in zip(acquisitions, leases):
+        settled = not acquisition._create_running and acquisition._active_calls == 0
+        unknown = (acquisition._creation_unknown or acquisition._resource_unknown
+                   or any(lease.unknown for lease in held))
+        states[id(acquisition)] = (settled, unknown)
+        cleanup |= (0 if settled else 1) | (2 if unknown else 0)
+        if any(lease.state not in ("NEW", "CLOSED") for lease in held):
+            cleanup |= 4
+    for task in tasks:
+        state = states.get(id(task.acquisition))
+        if state is not None and (not task.joined or not state[0] or state[1]):
+            cleanup |= 8
+    child_state = states.get(id(ctx.child_acquisition))
+    if child_state is None:
+        return None
+    outer = ((0 if engine.handlers_complete else 1)
+             | (0 if engine.local_cleanup_complete else 2) | (4 if ctx.cleanup_unknown else 0))
+    if engine.child is None:
+        failed = (ctx.child_acquisition.attempted, child_state[1], any(not task.joined for task in tasks),
+                  engine.create_route.attempted, engine.run_route.attempted,
+                  not engine.create_route.retired, not engine.run_route.retired)
+        return (1, 0, outer | sum(int(value) << (index + 3) for index, value in enumerate(failed)), cleanup, None)
+    wait, terminal, wire = engine.wait, engine.terminal, engine.wire
+    failed = (wait is None, wait is not None and wait is not engine.child.receipt,
+              wait is not None and wait.status_kind != "exit",
+              wait is not None and wait.status_code not in (HELPER_OK, HELPER_FAILED),
+              terminal is None, terminal is not None and not terminal["producer"], not engine.sealed,
+              wire is None, wire is not None and not wire.eof, wire is not None and wire.poisoned,
+              engine.protocol_failed, len(engine.readers) != 2, not engine.output_eof[0],
+              not engine.output_eof[1], engine.output_failed,
+              terminal is not None and len(engine.outputs[0]) != terminal["stdout"],
+              terminal is not None and len(engine.outputs[1]) != terminal["stderr"])
+    mask = None
+    if terminal is not None and terminal["producer"] and engine.sealed:
+        observed = terminal["failure_mask"]
+        if type(observed) is int and (observed in (0, 32) or 48 <= observed <= 63):
+            mask = observed
+    return (1, 1, outer | sum(int(value) << (index + 3) for index, value in enumerate(failed)), cleanup, mask)
+
+
 def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: Path | None,
                 timeout: int, capture: bool, output_limit: int,
                 cancellation: DefaultCancellation | None, on_start: Callable[[int], None] | None,
                 cleanup: bool, execution_scope: AccountExecutionScope | None,
                 journal_binding: JournalledCommandBinding | None,
                 _evidence: CommandCallEvidence | None = None, text: bool = True,
+                ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    # Ordinary public/internal callers cannot append a descriptor or choose a map.
+    return _run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+                        output_limit=output_limit, cancellation=cancellation, on_start=on_start,
+                        cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding,
+                        _evidence=_evidence, text=text)
+
+
+def _run_git_remote_command(channel, argv: Sequence[str], *, environ: Mapping[str, str],
+                            cwd: Path, timeout: int, output_limit: int, text: bool = False):
+    from ._git_remote_command_channel import OriginalChannel
+    _require(type(channel) is OriginalChannel and _integer(timeout, 1, 45)
+             and type(text) is bool and _integer(output_limit, 1, 256 * 1024))
+    guard = channel.guard
+    _require(type(guard) is DefaultCancellation)
+    argv, environ = tuple(argv), dict(environ)
+    channel.admit_command(guard, argv, environ=environ, cwd=cwd, capture=True,
+        text=text, output_limit=output_limit, on_start=None, cleanup=False,
+        execution_scope=None, journal_binding=None, evidence=None)
+    timeout, output_limit = channel.source.command_limits(timeout, True, output_limit)
+    return _run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=True,
+        output_limit=output_limit, cancellation=guard, on_start=None, cleanup=False,
+        execution_scope=None, journal_binding=None, text=text, _git_remote_channel=channel)
+
+
+def _run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: Path | None,
+                timeout: int, capture: bool, output_limit: int,
+                cancellation: DefaultCancellation | None, on_start: Callable[[int], None] | None,
+                cleanup: bool, execution_scope: AccountExecutionScope | None,
+                journal_binding: JournalledCommandBinding | None,
+                _evidence: CommandCallEvidence | None = None, text: bool = True,
+                _git_remote_channel=None,
                 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     _require(type(text) is bool)
     if _evidence is not None:
@@ -3449,7 +3757,8 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                                      "owned command cancellation handlers could not be restored")
     suppress = cleanup and guard.cancelled and guard.depth > 0
     engine = _Outer(guard, owns, timeout, execution_scope, journal_binding,
-                    suppress_cancel=suppress, evidence=_evidence, text=text)
+                    suppress_cancel=suppress, evidence=_evidence, text=text,
+                    git_remote_channel=_git_remote_channel)
 
     def fork_relinquish() -> None:
         if engine.ctx.pid != os.getpid():
@@ -3500,6 +3809,12 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
             # conservative direction and retain the original typed object.
             preserve_lifetime_error(primary, dispatched=dispatched, contained=final)
             primary.cleanup_complete = primary.cleanup_complete and final
+            try:
+                if type(primary) in (ProcessError, ProcessCleanupError, ProcessOutcomeUnknown):
+                    primary.owner_finality_diagnostic = None
+                    primary.owner_finality_diagnostic = _owner_finality_diagnostic(engine)
+            except BaseException:
+                pass  # Optional DATA allocation/observation cannot replace the original.
             raise primary
         if isinstance(primary, (KeyboardInterrupt, SystemExit)):
             # Keep the exact original object. The actual guard's monotonic
@@ -3510,13 +3825,30 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                  if final else ProcessCleanupError("owned command cleanup could not be confirmed",
                                                    dispatched=dispatched, contained=False))
         preserve_lifetime_error(error, previous=primary, dispatched=dispatched, contained=final)
+        try:
+            error.owner_finality_diagnostic = None
+            error.owner_finality_diagnostic = _owner_finality_diagnostic(engine)
+        except BaseException:
+            pass
         raise error from None
     if not final:
-        raise ProcessCleanupError("owned command cleanup could not be confirmed", dispatched=dispatched, contained=False)
+        error = ProcessCleanupError("owned command cleanup could not be confirmed", dispatched=dispatched, contained=False)
+        try:
+            error.owner_finality_diagnostic = None
+            error.owner_finality_diagnostic = _owner_finality_diagnostic(engine)
+        except BaseException:
+            pass
+        raise error
     if outcome.no_target is not None:
         raise ProcessError("owned command executable could not be started" if outcome.no_target.kind == "EXEC_REJECTED"
                            else "owned command was stopped before execution", dispatched=False)
     if outcome.result_integrity != "complete" or outcome.returncode is None or engine.decoded is None:
-        raise ProcessError("owned command produced incomplete output", dispatched=dispatched)
+        mask = None
+        if outcome.result_integrity != "complete" and engine.terminal is not None:
+            observed = engine.terminal["failure_mask"]
+            if observed is not None and observed != 0:
+                mask = observed
+        raise ProcessError("owned command produced incomplete output", dispatched=dispatched,
+                           owner_failure_mask=mask)
     assert engine.frozen is not None
     return subprocess.CompletedProcess(list(engine.frozen.args), outcome.returncode, *engine.decoded)

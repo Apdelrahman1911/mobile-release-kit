@@ -1,0 +1,754 @@
+{
+  "certificateCount": 121,
+  "certificates": [
+    {
+      "derBytes": 2007,
+      "derSha256": "9a6ec012e1a7da9dbe34194d478ad7c0db1822fb071df12981496ed104384113",
+      "jksAlias": "debian:accvraiz1.pem",
+      "name": "mozilla/ACCVRAIZ1.crt"
+    },
+    {
+      "derBytes": 1415,
+      "derSha256": "ebc5570c29018c4d67b1aa127baf12f703b4611ebc17b7dab5573894179b93fa",
+      "jksAlias": "debian:ac_raiz_fnmt-rcm.pem",
+      "name": "mozilla/AC_RAIZ_FNMT-RCM.crt"
+    },
+    {
+      "derBytes": 626,
+      "derSha256": "554153b13d2cf9ddb753bfbe1a4e0ae08d0aa4187058fe60a2b862b2e4b87bcb",
+      "jksAlias": "debian:ac_raiz_fnmt-rcm_servidores_seguros.pem",
+      "name": "mozilla/AC_RAIZ_FNMT-RCM_SERVIDORES_SEGUROS.crt"
+    },
+    {
+      "derBytes": 1523,
+      "derSha256": "fb8fec759169b9106b1e511644c618c51304373f6c0643088d8beffd1b997599",
+      "jksAlias": "debian:anf_secure_server_root_ca.pem",
+      "name": "mozilla/ANF_Secure_Server_Root_CA.crt"
+    },
+    {
+      "derBytes": 1471,
+      "derSha256": "55926084ec963a64b96e2abe01ce0ba86a64fbfebcc7aab5afc155b37fd76066",
+      "jksAlias": "debian:actalis_authentication_root_ca.pem",
+      "name": "mozilla/Actalis_Authentication_Root_CA.crt"
+    },
+    {
+      "derBytes": 837,
+      "derSha256": "8ecde6884f3d87b1125ba31ac3fcb13d7016de7f57cc904fe1cb97c6ae98196e",
+      "jksAlias": "debian:amazon_root_ca_1.pem",
+      "name": "mozilla/Amazon_Root_CA_1.crt"
+    },
+    {
+      "derBytes": 1349,
+      "derSha256": "1ba5b2aa8c65401a82960118f80bec4f62304d83cec4713a19c39c011ea46db4",
+      "jksAlias": "debian:amazon_root_ca_2.pem",
+      "name": "mozilla/Amazon_Root_CA_2.crt"
+    },
+    {
+      "derBytes": 442,
+      "derSha256": "18ce6cfe7bf14e60b2e347b8dfe868cb31d02ebb3ada271569f50343b46db3a4",
+      "jksAlias": "debian:amazon_root_ca_3.pem",
+      "name": "mozilla/Amazon_Root_CA_3.crt"
+    },
+    {
+      "derBytes": 502,
+      "derSha256": "e35d28419ed02025cfa69038cd623962458da5c695fbdea3c22b0bfb25897092",
+      "jksAlias": "debian:amazon_root_ca_4.pem",
+      "name": "mozilla/Amazon_Root_CA_4.crt"
+    },
+    {
+      "derBytes": 891,
+      "derSha256": "f356bea244b7a91eb35d53ca9ad7864ace018e2d35d5f8f96ddf68a6f41aa474",
+      "jksAlias": "debian:atos_trustedroot_2011.pem",
+      "name": "mozilla/Atos_TrustedRoot_2011.crt"
+    },
+    {
+      "derBytes": 537,
+      "derSha256": "b2fae53e14ccd7ab9212064701ae279c1d8988facb775fa8a008914e663988a8",
+      "jksAlias": "debian:atos_trustedroot_root_ca_ecc_tls_2021.pem",
+      "name": "mozilla/Atos_TrustedRoot_Root_CA_ECC_TLS_2021.crt"
+    },
+    {
+      "derBytes": 1384,
+      "derSha256": "81a9088ea59fb364c548a6f85559099b6f0405efbf18e5324ec9f457ba00112f",
+      "jksAlias": "debian:atos_trustedroot_root_ca_rsa_tls_2021.pem",
+      "name": "mozilla/Atos_TrustedRoot_Root_CA_RSA_TLS_2021.crt"
+    },
+    {
+      "derBytes": 1560,
+      "derSha256": "57de0583efd2b26e0361da99da9df4648def7ee8441c3b728afa9bcde0f9b26a",
+      "jksAlias": "debian:autoridad_de_certificacion_firmaprofesional_cif_a62634068.pem",
+      "name": "mozilla/Autoridad_de_Certificacion_Firmaprofesional_CIF_A62634068.crt"
+    },
+    {
+      "derBytes": 1400,
+      "derSha256": "f3896f88fe7c0a882766a7fa6ad2749fb57a7f3e98fb769c1fa7b09c2c44d5ae",
+      "jksAlias": "debian:bjca_global_root_ca1.pem",
+      "name": "mozilla/BJCA_Global_Root_CA1.crt"
+    },
+    {
+      "derBytes": 553,
+      "derSha256": "574df6931e278039667b720afdc1600fc27eb66dd3092979fb73856487212882",
+      "jksAlias": "debian:bjca_global_root_ca2.pem",
+      "name": "mozilla/BJCA_Global_Root_CA2.crt"
+    },
+    {
+      "derBytes": 1373,
+      "derSha256": "9a114025197c5bb95d94e63d55cd43790847b646b23cdf11ada4a00eff15fb48",
+      "jksAlias": "debian:buypass_class_2_root_ca.pem",
+      "name": "mozilla/Buypass_Class_2_Root_CA.crt"
+    },
+    {
+      "derBytes": 1373,
+      "derSha256": "edf7ebbca27a2a384d387b7d4010c666e2edb4843e4c29b4ae1d5b9332e6b24d",
+      "jksAlias": "debian:buypass_class_3_root_ca.pem",
+      "name": "mozilla/Buypass_Class_3_Root_CA.crt"
+    },
+    {
+      "derBytes": 1389,
+      "derSha256": "e23d4a036d7b70e9f595b1422079d2b91edfbb1fb651a0633eaa8a9dc5f80703",
+      "jksAlias": "debian:ca_disig_root_r2.pem",
+      "name": "mozilla/CA_Disig_Root_R2.crt"
+    },
+    {
+      "derBytes": 1425,
+      "derSha256": "5cc3d78e4e1d5e45547a04e6873e64f90cf9536d1ccc2ef800f355c4c5fd70fd",
+      "jksAlias": "debian:cfca_ev_root.pem",
+      "name": "mozilla/CFCA_EV_ROOT.crt"
+    },
+    {
+      "derBytes": 653,
+      "derSha256": "1793927a0614549789adce2f8f34f7f0b66d0f3ae3a3b84d21ec15dbba4fadc7",
+      "jksAlias": "debian:comodo_ecc_certification_authority.pem",
+      "name": "mozilla/COMODO_ECC_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 1500,
+      "derSha256": "52f0e1c4e58ec629291b60317f074671b85d7ea80d5b07273463534b32b40234",
+      "jksAlias": "debian:comodo_rsa_certification_authority.pem",
+      "name": "mozilla/COMODO_RSA_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 507,
+      "derSha256": "b4585f22e4ac756a4e8612a1361c5d9d031a93fd84febb778fa3068b0fc42dc2",
+      "jksAlias": "debian:certainly_root_e1.pem",
+      "name": "mozilla/Certainly_Root_E1.crt"
+    },
+    {
+      "derBytes": 1355,
+      "derSha256": "77b82cd8644c4305f7acc5cb156b45675004033d51c60c6202a8e0c33467d3a0",
+      "jksAlias": "debian:certainly_root_r1.pem",
+      "name": "mozilla/Certainly_Root_R1.crt"
+    },
+    {
+      "derBytes": 1631,
+      "derSha256": "d48d3d23eedb50a459e55197601c27774b9d7b18c94d5a059511a10250b93168",
+      "jksAlias": "debian:certigna_root_ca.pem",
+      "name": "mozilla/Certigna_Root_CA.crt"
+    },
+    {
+      "derBytes": 617,
+      "derSha256": "6b328085625318aa50d173c98d8bda09d57e27413d114cf787a0f5d06c030cf6",
+      "jksAlias": "debian:certum_ec-384_ca.pem",
+      "name": "mozilla/Certum_EC-384_CA.crt"
+    },
+    {
+      "derBytes": 959,
+      "derSha256": "5c58468d55f58e497e743982d2b50010b6d165374acf83a7d4a32db768c4408e",
+      "jksAlias": "debian:certum_trusted_network_ca.pem",
+      "name": "mozilla/Certum_Trusted_Network_CA.crt"
+    },
+    {
+      "derBytes": 1494,
+      "derSha256": "b676f2eddae8775cd36cb0f63cd1d4603961f49e6265ba013a2f0307b6d0b804",
+      "jksAlias": "debian:certum_trusted_network_ca_2.pem",
+      "name": "mozilla/Certum_Trusted_Network_CA_2.crt"
+    },
+    {
+      "derBytes": 1476,
+      "derSha256": "fe7696573855773e37a95e7ad4d9cc96c30157c15d31765ba9b15704e1ae78fd",
+      "jksAlias": "debian:certum_trusted_root_ca.pem",
+      "name": "mozilla/Certum_Trusted_Root_CA.crt"
+    },
+    {
+      "derBytes": 735,
+      "derSha256": "e59aaa816009c22bff5b25bad37df306f049797c1f81d85ab089e657bd8f0044",
+      "jksAlias": "debian:d-trust_br_root_ca_1_2020.pem",
+      "name": "mozilla/D-TRUST_BR_Root_CA_1_2020.crt"
+    },
+    {
+      "derBytes": 1453,
+      "derSha256": "0552e6f83fdf65e8fa9670e666df28a4e21340b510cbe52566f97c4fb94b2bd1",
+      "jksAlias": "debian:d-trust_br_root_ca_2_2023.pem",
+      "name": "mozilla/D-TRUST_BR_Root_CA_2_2023.crt"
+    },
+    {
+      "derBytes": 735,
+      "derSha256": "08170d1aa36453901a2f959245e347db0c8d37abaabc56b81aa100dc958970db",
+      "jksAlias": "debian:d-trust_ev_root_ca_1_2020.pem",
+      "name": "mozilla/D-TRUST_EV_Root_CA_1_2020.crt"
+    },
+    {
+      "derBytes": 1453,
+      "derSha256": "8e8221b2e7d4007836a1672f0dcc299c33bc07d316f132fa1a206d587150f1ce",
+      "jksAlias": "debian:d-trust_ev_root_ca_2_2023.pem",
+      "name": "mozilla/D-TRUST_EV_Root_CA_2_2023.crt"
+    },
+    {
+      "derBytes": 1079,
+      "derSha256": "49e7a442acf0ea6287050054b52564b650e4f49e42e348d6aa38e039e957b1c1",
+      "jksAlias": "debian:d-trust_root_class_3_ca_2_2009.pem",
+      "name": "mozilla/D-TRUST_Root_Class_3_CA_2_2009.crt"
+    },
+    {
+      "derBytes": 1095,
+      "derSha256": "eec5496b988ce98625b934092eec2908bed0b0f316c2d4730c84eaf1f3d34881",
+      "jksAlias": "debian:d-trust_root_class_3_ca_2_ev_2009.pem",
+      "name": "mozilla/D-TRUST_Root_Class_3_CA_2_EV_2009.crt"
+    },
+    {
+      "derBytes": 922,
+      "derSha256": "7d05ebb682339f8c9451ee094eebfefa7953a114edb2f44949452fab7d2fc185",
+      "jksAlias": "debian:digicert_assured_id_root_g2.pem",
+      "name": "mozilla/DigiCert_Assured_ID_Root_G2.crt"
+    },
+    {
+      "derBytes": 586,
+      "derSha256": "7e37cb8b4c47090cab36551ba6f45db840680fba166a952db100717f43053fc2",
+      "jksAlias": "debian:digicert_assured_id_root_g3.pem",
+      "name": "mozilla/DigiCert_Assured_ID_Root_G3.crt"
+    },
+    {
+      "derBytes": 914,
+      "derSha256": "cb3ccbb76031e5e0138f8dd39a23f9de47ffc35e43c1144cea27d46a5ab1cb5f",
+      "jksAlias": "debian:digicert_global_root_g2.pem",
+      "name": "mozilla/DigiCert_Global_Root_G2.crt"
+    },
+    {
+      "derBytes": 579,
+      "derSha256": "31ad6648f8104138c738f39ea4320133393e3a18cc02296ef97c2ac9ef6731d0",
+      "jksAlias": "debian:digicert_global_root_g3.pem",
+      "name": "mozilla/DigiCert_Global_Root_G3.crt"
+    },
+    {
+      "derBytes": 541,
+      "derSha256": "018e13f0772532cf809bd1b17281867283fc48c6e13be9c69812854a490c1b05",
+      "jksAlias": "debian:digicert_tls_ecc_p384_root_g5.pem",
+      "name": "mozilla/DigiCert_TLS_ECC_P384_Root_G5.crt"
+    },
+    {
+      "derBytes": 1386,
+      "derSha256": "371a00dc0533b3721a7eeb40e8419e70799d2b0a0f2c1d80693165f7cec4ad75",
+      "jksAlias": "debian:digicert_tls_rsa4096_root_g5.pem",
+      "name": "mozilla/DigiCert_TLS_RSA4096_Root_G5.crt"
+    },
+    {
+      "derBytes": 1428,
+      "derSha256": "552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988",
+      "jksAlias": "debian:digicert_trusted_root_g4.pem",
+      "name": "mozilla/DigiCert_Trusted_Root_G4.crt"
+    },
+    {
+      "derBytes": 1173,
+      "derSha256": "73c176434f1bc6d5adf45b0e76e727287c8de57616c1e6e6141a2b2cbc7d8e4c",
+      "jksAlias": "debian:entrust_root_certification_authority.pem",
+      "name": "mozilla/Entrust_Root_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 1420,
+      "derSha256": "bfff8fd04433487d6a8aa60c1a29767a9fc2bbb05e420f713a13b992891d3893",
+      "jksAlias": "debian:gdca_trustauth_r5_root.pem",
+      "name": "mozilla/GDCA_TrustAUTH_R5_ROOT.crt"
+    },
+    {
+      "derBytes": 1371,
+      "derSha256": "d947432abde7b7fa90fc2e6b59101b1280e0e1c7e4e40fa3c6887fff57a7f4cf",
+      "jksAlias": "debian:gts_root_r1.pem",
+      "name": "mozilla/GTS_Root_R1.crt"
+    },
+    {
+      "derBytes": 525,
+      "derSha256": "34d8a73ee208d9bcdb0d956520934b4e40e69482596e8b6f73c8426b010a6f48",
+      "jksAlias": "debian:gts_root_r3.pem",
+      "name": "mozilla/GTS_Root_R3.crt"
+    },
+    {
+      "derBytes": 525,
+      "derSha256": "349dfa4058c5e263123b398ae795573c4e1313c83fe68f93556cd5e8031b3c7d",
+      "jksAlias": "debian:gts_root_r4.pem",
+      "name": "mozilla/GTS_Root_R4.crt"
+    },
+    {
+      "derBytes": 480,
+      "derSha256": "b085d70b964f191a73e4af0d54ae7a0e07aafdaf9b71dd0862138ab7325a24a2",
+      "jksAlias": "debian:globalsign_ecc_root_ca_-_r4.pem",
+      "name": "mozilla/GlobalSign_ECC_Root_CA_-_R4.crt"
+    },
+    {
+      "derBytes": 546,
+      "derSha256": "179fbc148a3dd00fd24ea13458cc43bfa7f59c8182d783a513f6ebec100c8924",
+      "jksAlias": "debian:globalsign_ecc_root_ca_-_r5.pem",
+      "name": "mozilla/GlobalSign_ECC_Root_CA_-_R5.crt"
+    },
+    {
+      "derBytes": 867,
+      "derSha256": "cbb522d7b7f127ad6a0113865bdf1cd4102e7d0759af635a7cf4720dc963c53b",
+      "jksAlias": "debian:globalsign_root_ca_-_r3.pem",
+      "name": "mozilla/GlobalSign_Root_CA_-_R3.crt"
+    },
+    {
+      "derBytes": 1415,
+      "derSha256": "2cabeafe37d06ca22aba7391c0033d25982952c453647349763a3ab5ad6ccf69",
+      "jksAlias": "debian:globalsign_root_ca_-_r6.pem",
+      "name": "mozilla/GlobalSign_Root_CA_-_R6.crt"
+    },
+    {
+      "derBytes": 527,
+      "derSha256": "cbb9c44d84b8043e1050ea31a69f514955d7bfd2e2c6b49301019ad61d9f5058",
+      "jksAlias": "debian:globalsign_root_e46.pem",
+      "name": "mozilla/GlobalSign_Root_E46.crt"
+    },
+    {
+      "derBytes": 1374,
+      "derSha256": "4fa3126d8d3a11d1c4855a4f807cbad6cf919d3a5a88b03bea2c6372d93c40c9",
+      "jksAlias": "debian:globalsign_root_r46.pem",
+      "name": "mozilla/GlobalSign_Root_R46.crt"
+    },
+    {
+      "derBytes": 969,
+      "derSha256": "45140b3247eb9cc8c5b4f0d7b53091f73292089e6e5a63e2749dd3aca9198eda",
+      "jksAlias": "debian:go_daddy_root_certificate_authority_-_g2.pem",
+      "name": "mozilla/Go_Daddy_Root_Certificate_Authority_-_G2.crt"
+    },
+    {
+      "derBytes": 600,
+      "derSha256": "3f99cc474acfce4dfed58794665e478d1547739f2e780f1bb4ca9b133097d401",
+      "jksAlias": "debian:harica_tls_ecc_root_ca_2021.pem",
+      "name": "mozilla/HARICA_TLS_ECC_Root_CA_2021.crt"
+    },
+    {
+      "derBytes": 1448,
+      "derSha256": "d95d0e8eda79525bf9beb11b14d2100d3294985f0c62d9fabd9cd999eccb7b1d",
+      "jksAlias": "debian:harica_tls_rsa_root_ca_2021.pem",
+      "name": "mozilla/HARICA_TLS_RSA_Root_CA_2021.crt"
+    },
+    {
+      "derBytes": 711,
+      "derSha256": "44b545aa8a25e65a73ca15dc27fc36d24c1cb9953a066539b11582dc487b4833",
+      "jksAlias": "debian:hellenic_academic_and_research_institutions_ecc_rootca_2015.pem",
+      "name": "mozilla/Hellenic_Academic_and_Research_Institutions_ECC_RootCA_2015.crt"
+    },
+    {
+      "derBytes": 1551,
+      "derSha256": "a040929a02ce53b4acf4f2ffc6981ce4496f755e6d45fe0b2a692bcd52523f36",
+      "jksAlias": "debian:hellenic_academic_and_research_institutions_rootca_2015.pem",
+      "name": "mozilla/Hellenic_Academic_and_Research_Institutions_RootCA_2015.crt"
+    },
+    {
+      "derBytes": 1390,
+      "derSha256": "f015ce3cc239bfef064be9f1d2c417e1a0264a0a94be1f0c8d121864eb6949cc",
+      "jksAlias": "debian:hipki_root_ca_-_g1.pem",
+      "name": "mozilla/HiPKI_Root_CA_-_G1.crt"
+    },
+    {
+      "derBytes": 1491,
+      "derSha256": "5a2fc03f0c83b090bbfa40604b0988446c7636183df9846e17101a447fb8efd6",
+      "jksAlias": "debian:hongkong_post_root_ca_3.pem",
+      "name": "mozilla/Hongkong_Post_Root_CA_3.crt"
+    },
+    {
+      "derBytes": 1391,
+      "derSha256": "96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6",
+      "jksAlias": "debian:isrg_root_x1.pem",
+      "name": "mozilla/ISRG_Root_X1.crt"
+    },
+    {
+      "derBytes": 543,
+      "derSha256": "69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470",
+      "jksAlias": "debian:isrg_root_x2.pem",
+      "name": "mozilla/ISRG_Root_X2.crt"
+    },
+    {
+      "derBytes": 1380,
+      "derSha256": "5d56499be4d2e08bcfcad08a3e38723d50503bde706948e42f55603019e528ae",
+      "jksAlias": "debian:identrust_commercial_root_ca_1.pem",
+      "name": "mozilla/IdenTrust_Commercial_Root_CA_1.crt"
+    },
+    {
+      "derBytes": 1386,
+      "derSha256": "30d0895a9a448a262091635522d1f52010b5867acae12c78ef958fd4f4389f2f",
+      "jksAlias": "debian:identrust_public_sector_root_ca_1.pem",
+      "name": "mozilla/IdenTrust_Public_Sector_Root_CA_1.crt"
+    },
+    {
+      "derBytes": 1525,
+      "derSha256": "2530cc8e98321502bad96f9b1fba1b099e2d299e0f4548bb914f363bc0d4531f",
+      "jksAlias": "debian:izenpe.com.pem",
+      "name": "mozilla/Izenpe.com.crt"
+    },
+    {
+      "derBytes": 1038,
+      "derSha256": "3c5f81fea5fab82c64bfa2eaecafcde8e077fc8620a7cae537163df36edbf378",
+      "jksAlias": "debian:microsec_e-szigno_root_ca_2009.pem",
+      "name": "mozilla/Microsec_e-Szigno_Root_CA_2009.crt"
+    },
+    {
+      "derBytes": 605,
+      "derSha256": "358df39d764af9e1b766e9c972df352ee15cfac227af6ad1d70e8e4a6edcba02",
+      "jksAlias": "debian:microsoft_ecc_root_certificate_authority_2017.pem",
+      "name": "mozilla/Microsoft_ECC_Root_Certificate_Authority_2017.crt"
+    },
+    {
+      "derBytes": 1452,
+      "derSha256": "c741f70f4b2a8d88bf2e71c14122ef53ef10eba0cfa5e64cfa20f418853073e0",
+      "jksAlias": "debian:microsoft_rsa_root_certificate_authority_2017.pem",
+      "name": "mozilla/Microsoft_RSA_Root_Certificate_Authority_2017.crt"
+    },
+    {
+      "derBytes": 1446,
+      "derSha256": "88f438dcf8ffd1fa8f429115ffe5f82ae1e06e0c70c375faad717b34a49e7265",
+      "jksAlias": "debian:naver_global_root_certification_authority.pem",
+      "name": "mozilla/NAVER_Global_Root_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 1049,
+      "derSha256": "6c61dac3a2def031506be036d2a6fe401994fbd13df9c8d466599274c446ec98",
+      "jksAlias": "debian:netlock_arany_=class_gold=_főtanúsítvány.pem",
+      "name": "mozilla/NetLock_Arany_=Class_Gold=_Főtanúsítvány.crt"
+    },
+    {
+      "derBytes": 569,
+      "derSha256": "eec997c0c30f216f7e3b8b307d2bae42412d753fc8219dafd1520b2572850f49",
+      "jksAlias": "debian:oiste_server_root_ecc_g1.pem",
+      "name": "mozilla/OISTE_Server_Root_ECC_G1.crt"
+    },
+    {
+      "derBytes": 1415,
+      "derSha256": "9ae36232a5189ffddb353dfd26520c015395d22777dac59db57b98c089a651e6",
+      "jksAlias": "debian:oiste_server_root_rsa_g1.pem",
+      "name": "mozilla/OISTE_Server_Root_RSA_G1.crt"
+    },
+    {
+      "derBytes": 953,
+      "derSha256": "6b9c08e86eb0f767cfad65cd98b62149e5494a67f5845e7bd1ed019f27b86bd6",
+      "jksAlias": "debian:oiste_wisekey_global_root_gb_ca.pem",
+      "name": "mozilla/OISTE_WISeKey_Global_Root_GB_CA.crt"
+    },
+    {
+      "derBytes": 621,
+      "derSha256": "8560f91c3624daba9570b5fea0dbe36ff11a8323be9486854fb3f34a5571198d",
+      "jksAlias": "debian:oiste_wisekey_global_root_gc_ca.pem",
+      "name": "mozilla/OISTE_WISeKey_Global_Root_GC_CA.crt"
+    },
+    {
+      "derBytes": 1380,
+      "derSha256": "8a866fd1b276b57e578e921c65828a2bed58e9f2f288054134b7f1f4bfc9cc74",
+      "jksAlias": "debian:quovadis_root_ca_1_g3.pem",
+      "name": "mozilla/QuoVadis_Root_CA_1_G3.crt"
+    },
+    {
+      "derBytes": 1380,
+      "derSha256": "8fe4fb0af93a4d0d67db0bebb23e37c71bf325dcbcdd240ea04daf58b47e1840",
+      "jksAlias": "debian:quovadis_root_ca_2_g3.pem",
+      "name": "mozilla/QuoVadis_Root_CA_2_G3.crt"
+    },
+    {
+      "derBytes": 1380,
+      "derSha256": "88ef81de202eb018452e43f864725cea5fbd1fc2d9d205730709c5d8b8690f46",
+      "jksAlias": "debian:quovadis_root_ca_3_g3.pem",
+      "name": "mozilla/QuoVadis_Root_CA_3_G3.crt"
+    },
+    {
+      "derBytes": 664,
+      "derSha256": "22a2c1f7bded704cc1e701b5f408c310880fe956b5de2a4a44f99c873a25a7c8",
+      "jksAlias": "debian:ssl.com_ev_root_certification_authority_ecc.pem",
+      "name": "mozilla/SSL.com_EV_Root_Certification_Authority_ECC.crt"
+    },
+    {
+      "derBytes": 1519,
+      "derSha256": "2e7bf16cc22485a7bbe2aa8696750761b0ae39be3b2fe9d0cc6d4ef73491425c",
+      "jksAlias": "debian:ssl.com_ev_root_certification_authority_rsa_r2.pem",
+      "name": "mozilla/SSL.com_EV_Root_Certification_Authority_RSA_R2.crt"
+    },
+    {
+      "derBytes": 657,
+      "derSha256": "3417bb06cc6007da1b961c920b8ab4ce3fad820e4aa30b9acbc4a74ebdcebc65",
+      "jksAlias": "debian:ssl.com_root_certification_authority_ecc.pem",
+      "name": "mozilla/SSL.com_Root_Certification_Authority_ECC.crt"
+    },
+    {
+      "derBytes": 1505,
+      "derSha256": "85666a562ee0be5ce925c1d8890a6f76a87ec16d4d7d5f29ea7419cf20123b69",
+      "jksAlias": "debian:ssl.com_root_certification_authority_rsa.pem",
+      "name": "mozilla/SSL.com_Root_Certification_Authority_RSA.crt"
+    },
+    {
+      "derBytes": 574,
+      "derSha256": "c32ffd9f46f936d16c3673990959434b9ad60aafbb9e7cf33654f144cc1ba143",
+      "jksAlias": "debian:ssl.com_tls_ecc_root_ca_2022.pem",
+      "name": "mozilla/SSL.com_TLS_ECC_Root_CA_2022.crt"
+    },
+    {
+      "derBytes": 1421,
+      "derSha256": "8faf7d2e2cb4709bb8e0b33666bf75a5dd45b5de480f8ea8d4bfe6bebc17f2ed",
+      "jksAlias": "debian:ssl.com_tls_rsa_root_ca_2022.pem",
+      "name": "mozilla/SSL.com_TLS_RSA_Root_CA_2022.crt"
+    },
+    {
+      "derBytes": 886,
+      "derSha256": "a1339d33281a0b56e557d3d32b1ce7f9367eb094bd5fa72a7e5004c8ded7cafe",
+      "jksAlias": "debian:szafir_root_ca2.pem",
+      "name": "mozilla/SZAFIR_ROOT_CA2.crt"
+    },
+    {
+      "derBytes": 574,
+      "derSha256": "c90f26f0fb1b4018b22227519b5ca2b53e2ca5b3be5cf18efe1bef47380c5383",
+      "jksAlias": "debian:sectigo_public_server_authentication_root_e46.pem",
+      "name": "mozilla/Sectigo_Public_Server_Authentication_Root_E46.crt"
+    },
+    {
+      "derBytes": 1422,
+      "derSha256": "7bb647a62aeeac88bf257aa522d01ffea395e0ab45c73f93f65654ec38f25a06",
+      "jksAlias": "debian:sectigo_public_server_authentication_root_r46.pem",
+      "name": "mozilla/Sectigo_Public_Server_Authentication_Root_R46.crt"
+    },
+    {
+      "derBytes": 886,
+      "derSha256": "3f034bb5704d44b2d08545a02057de93ebf3905fce721acbc730c06ddaee904e",
+      "jksAlias": "debian:securesign_root_ca12.pem",
+      "name": "mozilla/SecureSign_Root_CA12.crt"
+    },
+    {
+      "derBytes": 1398,
+      "derSha256": "4b009c1034494f9ab56bba3ba1d62731fc4d20d8955adcec10a925607261e338",
+      "jksAlias": "debian:securesign_root_ca14.pem",
+      "name": "mozilla/SecureSign_Root_CA14.crt"
+    },
+    {
+      "derBytes": 551,
+      "derSha256": "e778f0f095fe843729cd1a0082179e5314a9c291442805e1fb1d8fb6b8886c3a",
+      "jksAlias": "debian:securesign_root_ca15.pem",
+      "name": "mozilla/SecureSign_Root_CA15.crt"
+    },
+    {
+      "derBytes": 572,
+      "derSha256": "e74fbda55bd564c473a36b441aa799c8a68e077440e8288b9fa1e50e4bbaca11",
+      "jksAlias": "debian:security_communication_ecc_rootca1.pem",
+      "name": "mozilla/Security_Communication_ECC_RootCA1.crt"
+    },
+    {
+      "derBytes": 891,
+      "derSha256": "513b2cecb810d4cde5dd85391adfc6c2dd60d87bb736d2b521484aa47a0ebef6",
+      "jksAlias": "debian:security_communication_rootca2.pem",
+      "name": "mozilla/Security_Communication_RootCA2.crt"
+    },
+    {
+      "derBytes": 993,
+      "derSha256": "2ce1cb0bf9d2f9e102993fbe215152c3b2dd0cabde1c68e5319b839154dbb7f5",
+      "jksAlias": "debian:starfield_root_certificate_authority_-_g2.pem",
+      "name": "mozilla/Starfield_Root_Certificate_Authority_-_G2.crt"
+    },
+    {
+      "derBytes": 1011,
+      "derSha256": "568d6905a2c88708a4b3025190edcfedb1974a606a13c6e5290fcb2ae63edab5",
+      "jksAlias": "debian:starfield_services_root_certificate_authority_-_g2.pem",
+      "name": "mozilla/Starfield_Services_Root_Certificate_Authority_-_G2.crt"
+    },
+    {
+      "derBytes": 1431,
+      "derSha256": "193144f431e0fddb740717d4de926a571133884b4360d30e272913cbe660ce41",
+      "jksAlias": "debian:swisssign_rsa_tls_root_ca_2022_-_1.pem",
+      "name": "mozilla/SwissSign_RSA_TLS_Root_CA_2022_-_1.crt"
+    },
+    {
+      "derBytes": 967,
+      "derSha256": "91e2f5788d5810eba7ba58737de1548a8ecacd014598bc0b143e041b17052552",
+      "jksAlias": "debian:t-telesec_globalroot_class_2.pem",
+      "name": "mozilla/T-TeleSec_GlobalRoot_Class_2.crt"
+    },
+    {
+      "derBytes": 967,
+      "derSha256": "fd73dad31c644ff1b43bef0ccdda96710b9cd9875eca7e31707af3e96d522bbd",
+      "jksAlias": "debian:t-telesec_globalroot_class_3.pem",
+      "name": "mozilla/T-TeleSec_GlobalRoot_Class_3.crt"
+    },
+    {
+      "derBytes": 1127,
+      "derSha256": "46edc3689046d53a453fb3104ab80dcaec658b2660ea1629dd7e867990648716",
+      "jksAlias": "debian:tubitak_kamu_sm_ssl_kok_sertifikasi_-_surum_1.pem",
+      "name": "mozilla/TUBITAK_Kamu_SM_SSL_Kok_Sertifikasi_-_Surum_1.crt"
+    },
+    {
+      "derBytes": 1425,
+      "derSha256": "3f63bb2814be174ec8b6439cf08d6d56f0b7c405883a5648a334424d6b3ec558",
+      "jksAlias": "debian:twca_cyber_root_ca.pem",
+      "name": "mozilla/TWCA_CYBER_Root_CA.crt"
+    },
+    {
+      "derBytes": 1349,
+      "derSha256": "59769007f7685d0fcd50872f9f95d5755a5b2b457d81f3692b610a98672f0e1b",
+      "jksAlias": "debian:twca_global_root_ca.pem",
+      "name": "mozilla/TWCA_Global_Root_CA.crt"
+    },
+    {
+      "derBytes": 895,
+      "derSha256": "bfd88fe1101c41ae3e801bf8be56350ee9bad1a6b9bd515edc5c6d5b8711ac44",
+      "jksAlias": "debian:twca_root_certification_authority.pem",
+      "name": "mozilla/TWCA_Root_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 582,
+      "derSha256": "578af4ded0853f4e5998db4aeaf9cbea8d945f60b620a38d1a3c13b2bc7ba8e1",
+      "jksAlias": "debian:telekom_security_tls_ecc_root_2020.pem",
+      "name": "mozilla/Telekom_Security_TLS_ECC_Root_2020.crt"
+    },
+    {
+      "derBytes": 1463,
+      "derSha256": "efc65cadbb59adb6efe84da22311b35624b71b3b1ea0da8b6655174ec8978646",
+      "jksAlias": "debian:telekom_security_tls_rsa_root_2023.pem",
+      "name": "mozilla/Telekom_Security_TLS_RSA_Root_2023.crt"
+    },
+    {
+      "derBytes": 1400,
+      "derSha256": "242b69742fcb1e5b2abf98898b94572187544e5b4d9911786573621f6a74b82c",
+      "jksAlias": "debian:telia_root_ca_v2.pem",
+      "name": "mozilla/Telia_Root_CA_v2.crt"
+    },
+    {
+      "derBytes": 1449,
+      "derSha256": "e0d3226aeb1163c2e48ff9be3b50b4c6431be7bb1eacc5c36b5d5ec509039a08",
+      "jksAlias": "debian:trustasia_global_root_ca_g3.pem",
+      "name": "mozilla/TrustAsia_Global_Root_CA_G3.crt"
+    },
+    {
+      "derBytes": 601,
+      "derSha256": "be4b56cb5056c0136a526df444508daa36a0b54f42e4ac38f72af470e479654c",
+      "jksAlias": "debian:trustasia_global_root_ca_g4.pem",
+      "name": "mozilla/TrustAsia_Global_Root_CA_G4.crt"
+    },
+    {
+      "derBytes": 565,
+      "derSha256": "c0076b9ef0531fb1a656d67c4ebe97cd5dbaa41ef44598acc2489878c92d8711",
+      "jksAlias": "debian:trustasia_tls_ecc_root_ca.pem",
+      "name": "mozilla/TrustAsia_TLS_ECC_Root_CA.crt"
+    },
+    {
+      "derBytes": 1412,
+      "derSha256": "06c08d7dafd876971eb1124fe67f847ec0c7a158d3ea53cbe940e2ea9791f4c3",
+      "jksAlias": "debian:trustasia_tls_rsa_root_ca.pem",
+      "name": "mozilla/TrustAsia_TLS_RSA_Root_CA.crt"
+    },
+    {
+      "derBytes": 1463,
+      "derSha256": "2e44102ab58cb85419451c8e19d9acf3662cafbc614b6a53960a30f7d0e2eb41",
+      "jksAlias": "debian:tuntrust_root_ca.pem",
+      "name": "mozilla/TunTrust_Root_CA.crt"
+    },
+    {
+      "derBytes": 1374,
+      "derSha256": "d43af9b35473755c9684fc06d7d8cb70ee5c28e773fb294eb41ee71722924d24",
+      "jksAlias": "debian:uca_extended_validation_root.pem",
+      "name": "mozilla/UCA_Extended_Validation_Root.crt"
+    },
+    {
+      "derBytes": 1354,
+      "derSha256": "9bea11c976fe014764c1be56a6f914b5a560317abd9988393382e5161aa0493c",
+      "jksAlias": "debian:uca_global_g2_root.pem",
+      "name": "mozilla/UCA_Global_G2_Root.crt"
+    },
+    {
+      "derBytes": 659,
+      "derSha256": "4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a",
+      "jksAlias": "debian:usertrust_ecc_certification_authority.pem",
+      "name": "mozilla/USERTrust_ECC_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 1506,
+      "derSha256": "e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2",
+      "jksAlias": "debian:usertrust_rsa_certification_authority.pem",
+      "name": "mozilla/USERTrust_RSA_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 1355,
+      "derSha256": "657cfe2fa73faa38462571f332a2363a46fce7020951710702cdfbb6eeda3305",
+      "jksAlias": "debian:certsign_root_ca_g2.pem",
+      "name": "mozilla/certSIGN_Root_CA_G2.crt"
+    },
+    {
+      "derBytes": 580,
+      "derSha256": "beb00b30839b9bc32c32e4447905950641f26421b15ed089198b518ae2ea1b99",
+      "jksAlias": "debian:e-szigno_root_ca_2017.pem",
+      "name": "mozilla/e-Szigno_Root_CA_2017.crt"
+    },
+    {
+      "derBytes": 723,
+      "derSha256": "b49141502d00663d740f2e7ec340c52800962666121a36d09cf7dd2b90384fb4",
+      "jksAlias": "debian:e-szigno_tls_root_ca_2023.pem",
+      "name": "mozilla/e-Szigno_TLS_Root_CA_2023.crt"
+    },
+    {
+      "derBytes": 1460,
+      "derSha256": "c0a6f4dc63a24bfdcf54ef2a6a082a0a72de35803e2ff5ff527ae5d87206dfd5",
+      "jksAlias": "debian:epki_root_certification_authority.pem",
+      "name": "mozilla/ePKI_Root_Certification_Authority.crt"
+    },
+    {
+      "derBytes": 559,
+      "derSha256": "bc4d809b15189d78db3e1d8cf4f9726a795da1643ca5f1358e1ddb0edc0d7eb3",
+      "jksAlias": "debian:emsign_ecc_root_ca_-_c3.pem",
+      "name": "mozilla/emSign_ECC_Root_CA_-_C3.crt"
+    },
+    {
+      "derBytes": 594,
+      "derSha256": "86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b",
+      "jksAlias": "debian:emsign_ecc_root_ca_-_g3.pem",
+      "name": "mozilla/emSign_ECC_Root_CA_-_G3.crt"
+    },
+    {
+      "derBytes": 887,
+      "derSha256": "125609aa301da0a249b97a8239cb6a34216f44dcac9f3954b14292f2e8c8608f",
+      "jksAlias": "debian:emsign_root_ca_-_c1.pem",
+      "name": "mozilla/emSign_Root_CA_-_C1.crt"
+    },
+    {
+      "derBytes": 920,
+      "derSha256": "40f6af0346a99aa1cd1d555a4e9cce62c7f9634603ee406615833dc8c8d00367",
+      "jksAlias": "debian:emsign_root_ca_-_g1.pem",
+      "name": "mozilla/emSign_Root_CA_-_G1.crt"
+    },
+    {
+      "derBytes": 531,
+      "derSha256": "30fbba2c32238e2a98547af97931e550428b9b3f1c8eeb6633dcfa86c5b27dd3",
+      "jksAlias": "debian:vtrus_ecc_root_ca.pem",
+      "name": "mozilla/vTrus_ECC_Root_CA.crt"
+    },
+    {
+      "derBytes": 1370,
+      "derSha256": "8a71de6559336f426c26e53880d00d88a18da4c6a91f0dcb6194e206c5c96387",
+      "jksAlias": "debian:vtrus_root_ca.pem",
+      "name": "mozilla/vTrus_Root_CA.crt"
+    }
+  ],
+  "package": {
+    "architecture": "all",
+    "name": "ca-certificates",
+    "sha256": "6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50",
+    "size": 139430,
+    "version": "20260601~24.04.1"
+  },
+  "publicMemberDataSha256": "9282773407f7e6794037c4487297c362e2cb29219858bd824c637d900d76975b",
+  "schema": "mrk-ubuntu-stock-ca-policy-v1",
+  "signedIndexEvidence": {
+    "noble-updates-InRelease": {
+      "bytes": 126125,
+      "sha256": "9105e8cf407c011c45313dfbb3ffe84fc4a13f2e29df6663520d79d435361897"
+    },
+    "noble-updates-main-binary-amd64-Packages.xz": {
+      "bytes": 1263288,
+      "sha256": "a5467179a385992d3fd43caff3d237c89e042d8a3cb13f1214f279ff6a89dfeb"
+    },
+    "noble-updates-signature-status.txt": {
+      "bytes": 607,
+      "sha256": "00d9b834b75745a27f51e2d3b8f2ff81189e03bf7b903a1a79c306132e60023a"
+    }
+  }
+}

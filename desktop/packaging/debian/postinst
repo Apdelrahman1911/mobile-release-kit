@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+case "${1-}" in
+  configure)
+    # Only the fixed, package-owned Rust publisher runs as administrator.
+    # Known completed publication is revalidated by native identities.
+    # Unknown/partial publication errors are never repaired or hidden.
+    exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+      /usr/lib/mobile-release-kit/mrk-runtime-publish
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure) exit 0 ;;
+  *) exit 1 ;;
+esac

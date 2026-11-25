@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "sourceBase": "c52b57a5ef2d877e03be66387301266729aaa36d",
+  "sourceHead": "2e8f6c1d",
+  "host": {
+    "os": "macOS 27.0",
+    "architecture": "arm64",
+    "python": "3.11",
+    "rust": "1.98.1"
+  },
+  "interpretation": "Source/test evidence only. No installed-app, signed-release, provider-account or complete production qualification.",
+  "checks": [
+    {
+      "scope": "frontend",
+      "tests": 2464,
+      "passed": 2464,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "f37be93365998abee7866004a0c1f5409474941cb3c327b5c5d9988a09714bd6"
+    },
+    {
+      "scope": "interruption-recovery",
+      "tests": 146,
+      "passed": 146,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "de15df3f62ef47de92f8cd32a278f6eebcfbf7543480140a4be7e4456ed3c0ab"
+    },
+    {
+      "scope": "android-source-and-version-journey",
+      "tests": 180,
+      "passed": 180,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "652d12ae8af04af5271b6d7311605a40ae005fcfb0529f55aa9a944df26055b9"
+    },
+    {
+      "scope": "ios-source-and-version-journey",
+      "tests": 63,
+      "passed": 63,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "5bb048c1daf76336b8c44d357a2c58aa3a36f0725c10df07d520bd5845d82e6d"
+    },
+    {
+      "scope": "credential-security",
+      "tests": 91,
+      "passed": 90,
+      "skipped": 1,
+      "failed": 0,
+      "outputSha256": "c6ff85a37afd4b55dffebc4acf0f9b3ae50eb8ea25cc9529fc52d54ed14972f4"
+    },
+    {
+      "scope": "store-preparation-and-recovery",
+      "tests": 52,
+      "passed": 52,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "759fdcb8bdd4de748d4ea5935b28fdb17906e6a430da63b884cb3e91481a3967"
+    },
+    {
+      "scope": "provider-contracts-network-denied",
+      "tests": 136,
+      "passed": 136,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "9abac5a39b9b5978ac8b20048135b932eb9e702f5fb250f77761fe5f7024ab5d"
+    },
+    {
+      "scope": "provider-source-and-edit-owners",
+      "tests": 52,
+      "passed": 52,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "e8b917b5e4a5da48e657e19b2fcbfbd02490eb291d7f791b08a4d7ca2183c9cc"
+    },
+    {
+      "scope": "store-ios-stage-and-metadata",
+      "tests": 92,
+      "passed": 90,
+      "skipped": 1,
+      "failed": 1,
+      "outputSha256": "1a28acb14537a6a09ce524bc10500a75c76e17908728da4a0abc3bcf077c7e02"
+    },
+    {
+      "scope": "store-frontend",
+      "tests": 51,
+      "passed": 51,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "7e7c9603e94249750f08d47206eacfb2f3497ecaaaa452055c75e537f9745d86"
+    },
+    {
+      "scope": "git-core-and-desktop-workers",
+      "tests": 660,
+      "passed": 656,
+      "skipped": 4,
+      "failed": 0,
+      "outputSha256": "b7bc7070704202e3e76b3ff59fe747622bef2c28011fb92e0e7a6f5374bd1b5f",
+      "modules": [
+        "test_desktop_git_branches",
+        "test_desktop_git_fast_forward",
+        "test_desktop_git_init",
+        "test_desktop_git_local",
+        "test_desktop_git_local_protocol",
+        "test_desktop_git_push",
+        "test_desktop_git_push_entry",
+        "test_desktop_git_push_new_branch",
+        "test_desktop_git_push_protocol",
+        "test_desktop_git_read",
+        "test_desktop_git_remote",
+        "test_desktop_git_remote_helper_entry",
+        "test_desktop_git_remote_protocol",
+        "test_desktop_git_rename",
+        "test_desktop_git_switch",
+        "test_desktop_git_upstream",
+        "test_git_branches_owned",
+        "test_git_commands",
+        "test_git_fast_forward_owned",
+        "test_git_fetch_observation",
+        "test_git_push_body",
+        "test_git_push_create_observation",
+        "test_git_push_helper",
+        "test_git_push_new_branch",
+        "test_git_push_observation",
+        "test_git_push_private_protocol",
+        "test_git_push_transport",
+        "test_git_push_wire",
+        "test_git_remote_command_channel",
+        "test_git_remote_command_limits",
+        "test_git_remote_control",
+        "test_git_remote_failure_clock",
+        "test_git_remote_helper",
+        "test_git_remote_input_channel",
+        "test_git_remote_metadata",
+        "test_git_remote_transport",
+        "test_git_remote_wire",
+        "test_git_rename_owned",
+        "test_git_repository_branches",
+        "test_git_repository_fast_forward",
+        "test_git_repository_fetch",
+        "test_git_repository_init",
+        "test_git_repository_init_real",
+        "test_git_repository_local",
+        "test_git_repository_local_owned",
+        "test_git_repository_push",
+        "test_git_repository_push_new_branch",
+        "test_git_repository_read",
+        "test_git_repository_read_owned",
+        "test_git_repository_rename",
+        "test_git_repository_switch",
+        "test_git_repository_upstream",
+        "test_git_service",
+        "test_git_switch_owned"
+      ],
+      "fixtureNamespace": "Physical private temporary directory owned by the test account and its effective group"
+    }
+  ],
+  "rustChecks": [
+    {
+      "role": "cargo-check",
+      "argv": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "--locked",
+        "--no-default-features",
+        "--jobs",
+        "1",
+        "--manifest-path",
+        "desktop/src-tauri/Cargo.toml"
+      ],
+      "groupRssLimitBytes": 3221225472,
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 1949.497999167,
+      "peakObservedGroupRssBytes": 2812182528,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "4e77e713a25de1047b3333f86c39204eedb8172e87f4ee986b5d23b2eaa2b386"
+    },
+    {
+      "role": "installed-cli-check",
+      "argv": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "--locked",
+        "--no-default-features",
+        "--jobs",
+        "1",
+        "--manifest-path",
+        "desktop/src-tauri/Cargo.toml",
+        "--features",
+        "installed-cli",
+        "--bin",
+        "mrk"
+      ],
+      "groupRssLimitBytes": 3221225472,
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 285.769118417,
+      "peakObservedGroupRssBytes": 2684518400,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "5bfa067737ca34757167d11e79720360966e504f3abd941acedae2ebcc12d154"
+    }
+  ],
+  "frontendBuild": {
+    "originalReturn": 0,
+    "outputSha256": "4fb3397d562d5adf4de025c790629a9acdcfe9eaf2fe3bcd3e089a902370ab92",
+    "warning": "Existing 3.79 MB frontend chunk"
+  },
+  "knownQualificationFailure": "Protected Xcode resolver rejects root-owned group-writable /Applications (0775), before pending state or credentials. Security checks unchanged.",
+  "reproduce": {
+    "frontendTests": "npm --prefix desktop test (Python >=3.11 on PATH)",
+    "frontendBuild": "npm --prefix desktop run build",
+    "gitTests": "PYTHONPATH=src:tests/unit:tests/desktop python3.11 -m unittest <git module list>; TMPDIR must use the recorded fixture namespace policy"
+  }
+}

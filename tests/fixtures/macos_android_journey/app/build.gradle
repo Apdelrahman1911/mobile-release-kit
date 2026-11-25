@@ -1,0 +1,4 @@
+plugins { id 'com.android.application' }
+def fixtureVersion = new Properties()
+rootProject.file('public/version.properties').withInputStream { fixtureVersion.load(it) }
+android { namespace 'org.mrk.fixture'; compileSdk 35; buildToolsVersion '35.0.0'; defaultConfig { applicationId 'org.mrk.fixture'; minSdk 23; targetSdk 35; versionCode Integer.parseInt(fixtureVersion['BUILD_NUMBER']); versionName fixtureVersion['VERSION_NAME'] }; compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 } }

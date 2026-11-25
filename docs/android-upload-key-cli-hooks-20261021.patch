@@ -1,0 +1,943 @@
+diff --git a/desktop/package.json b/desktop/package.json
+index a00f6623..93da6984 100644
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+index f2520cf6..09a6683f 100644
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1,3 +1,5 @@
++import { AgentUploadKeyAccessController } from './agentUploadKeyAccessController.ts';
++import { AgentUploadKeyAccess } from './components/AgentUploadKeyAccess.tsx';
+ import { GitPushNewBranch } from './components/GitPushNewBranch.tsx';
+ import { GitPush } from './components/GitPush.tsx';
+ import { LocalStoreReconcileController, localStoreReconcileOwnerReason } from './localStoreReconcile.ts';
+@@ -764,6 +766,16 @@ export function App() {
+   }, undefined, savedCommandBusy));
+   assetControllerRef.current = assetSession;
+   const assetState = useSyncExternalStore(assetSession.subscribe, assetSession.getSnapshot, assetSession.getSnapshot);
++  const [agentUploadKey] = useState(() => new AgentUploadKeyAccessController({ current: () => {
++    const service = pathService.current, selected = workspaceRef.current.selectedId;
++    const project = selected && !connectionPicking.current && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] ?? null : null;
++    const assets = assetSession.getSnapshot();
++    return { port: service.api?.mode === 'native' ? service.api.agentUploadKeyAccess ?? null : null,
++      nativeSession: service.api?.mode === 'native' ? service : null, projectId: project ? selected : null, project, assets,
++      generateReady: assetSession.canConfirmUploadKey(assets), blockedReason: savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) };
++  } }));
++  useSyncExternalStore(agentUploadKey.subscribe, agentUploadKey.getSnapshot, agentUploadKey.getSnapshot);
++  useEffect(() => { agentUploadKey.syncContext(); });
+   // Evidence selection has deliberately no source-project or draft callback.
+   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
+   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
+@@ -1679,6 +1691,7 @@ export function App() {
+   useEffect(() => { if (api) void versionEdit.connect(api); }, [api, versionEdit]);
+   useEffect(() => () => versionEdit.dispose(), [versionEdit]);
+   useEffect(() => { if (api) void assetSession.connect(api); }, [api, assetSession]);
++  useEffect(() => () => agentUploadKey.dispose(), [agentUploadKey]);
+   useEffect(() => () => assetSession.dispose(), [assetSession]);
+ 
+   useEffect(() => {
+@@ -2279,7 +2292,8 @@ export function App() {
+           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
+         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
+           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
+-          nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState)} />}
++          nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? agentUploadKey.ownerReason()}
++          delegation={<AgentUploadKeyAccess controller={agentUploadKey} />} />}
+         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
+           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
+         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+index b40af136..90ec568f 100644
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -95,6 +95,7 @@ import { createGitHubDeviceApi } from './githubDeviceConnectionProtocol.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createVersionReservePort } from './versionReserve.ts';
++import { createAgentUploadKeyAccessPort } from './agentUploadKeyAccess.ts';
+ import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
+ import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+ import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+@@ -425,6 +426,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
+     githubDevice: createGitHubDeviceApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
+     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
++    agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+diff --git a/desktop/src/pages/Credentials.tsx b/desktop/src/pages/Credentials.tsx
+index 39464f23..8479d114 100644
+--- a/desktop/src/pages/Credentials.tsx
++++ b/desktop/src/pages/Credentials.tsx
+@@ -1,4 +1,5 @@
+ import { useLayoutEffect, useRef, useState } from 'react';
++import type { ReactNode } from 'react';
+ import type { Catalog, CredentialGuide, HelpContent } from '../types.ts';
+ import { Badge, DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+ import { Icon } from '../components/Icon.tsx';
+@@ -33,7 +34,7 @@ function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { g
+   </section>;
+ }
+ 
+-export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, onOfflineChecks, onAndroidSigning, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; onOfflineChecks: () => void; onAndroidSigning: () => void; nativeBusyReason?: string | null }) {
++export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, onOfflineChecks, onAndroidSigning, delegation, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; onOfflineChecks: () => void; onAndroidSigning: () => void; delegation?: ReactNode; nativeBusyReason?: string | null }) {
+   const [filter, setFilter] = useState('');
+   const [selectedGuide, setSelectedGuide] = useState('');
+   const [preparation, setPreparation] = useState<ReleaseInputPreparationTarget | null>(null);
+@@ -78,6 +79,7 @@ export function Credentials({ catalog, state, controller, project, inputState, i
+     {nativeBusyReason && <p className="review-caution" role="status">{nativeBusyReason} Private session controls cannot start conflicting work; original status, cancellation and discard remain separate.</p>}
+     <div ref={sessionRef} tabIndex={-1}><CredentialSession state={state} controller={controller} project={project} guide={catalog?.credentialGuide ?? null} onHelp={onHelp} nativeBusyReason={nativeBusyReason}
+       preparation={preparation} isPreparationCurrent={isPreparationCurrent} takePreparation={takePreparation} dismissPreparation={dismissPreparation} /></div>
++    {delegation}
+     <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={openGuide} />
+     <details className="card progressive-disclosure" ref={referenceRef}>
+       <summary>Reference: where to find files, supported formats &amp; privacy</summary>
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+index 5a719c20..ccdc9d68 100644
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -436,6 +436,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
++  readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
+   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+index 6315b41e..86aea2cd 100644
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -289,6 +289,7 @@ fn main() {
+     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
++    "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+index 23163222..8703adb7 100644
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -13,6 +13,7 @@
+     "allow-agent-git-repository-access", "allow-allow-agent-git-repository", "allow-revoke-agent-git-repository",
+     "allow-agent-git-remote-access", "allow-allow-agent-git-remote", "allow-revoke-agent-git-remote",
+     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
++    "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
+     "allow-agent-git-index-access",
+     "allow-allow-agent-git-index",
+     "allow-revoke-agent-git-index",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+index 2c4f1bee..05fbbd37 100644
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -56,10 +56,11 @@ impl Persisted {
+ }
+ 
+ struct Grant { id: Id, projects: BTreeSet<Id>, expires: Instant,
+-    reserve_read: Arc<crate::service_version_reserve_requests::ReadPermission> }
++    reserve_read: Arc<crate::service_version_reserve_requests::ReadPermission>,
++    upload_key_read: Arc<crate::service_upload_key_requests::ReadPermission> }
+ // Only the original Grant drop/replacement revokes. Cloned facets do not own
+ // consent and their Drop cannot revoke/renew the original.
+-impl Drop for Grant { fn drop(&mut self) { self.reserve_read.revoke(Instant::now()); } }
++impl Drop for Grant { fn drop(&mut self) { let at=Instant::now(); self.reserve_read.revoke(at); self.upload_key_read.revoke(at); } }
+ struct State {
+     revision: Revision, saved: Persisted,
+     // Runtime aliases are NEVER persisted or restored. Each genuine native
+@@ -88,12 +89,15 @@ mod git_index;
+ mod agent_version_reserve;
+ #[path="service_play_cleanup_application.rs"]
+ mod agent_play_cleanup;
++#[path="application_service_upload_key_requests.rs"]
++mod upload_key;
+ 
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+     history_lease: Option<Arc<HistoryLease>>,
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
++    upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+@@ -128,11 +132,12 @@ impl ApplicationService {
+         let instance = Id::random()?;
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
++        let upload_key_requests = Arc::new(crate::service_upload_key_requests::Inbox::new(instance.clone()));
+         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, upload_key_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -185,7 +190,7 @@ impl ApplicationService {
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -349,6 +354,7 @@ impl ApplicationService {
+         let intent_at = Instant::now();
+         self.read_publication_current()?;
+         let read_epoch = self.version_reserve_requests.read_permission_epoch()?;
++        let upload_key_epoch = self.upload_key_requests.read_epoch()?;
+         if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_some_and(|life| life.is_zero() || life > MAX_ACCESS) { return Err(Error::InvalidRequest); }
+         let mut state = self.lock()?; self.check(&state)?;
+         let selected: BTreeSet<_> = projects.into_iter().collect();
+@@ -359,22 +365,24 @@ impl ApplicationService {
+             _ => return Err(Error::AccessDenied),
+         };
+         let next = Grant { id: Id::random()?, projects: selected, expires,
+-            reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)) };
++            reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)),
++            upload_key_read: Arc::new(crate::service_upload_key_requests::ReadPermission::new(expires)) };
+         // Reject a revoke which overtook original validation/IO. On failure
+         // next drops (revoking only itself); the old Grant remains untouched.
+         self.read_publication_current()?;
+         self.version_reserve_requests.publish_read_permission(&next.reserve_read, read_epoch)?;
++        self.upload_key_requests.publish_read(&next.upload_key_read, upload_key_epoch)?;
+         self.read_publication_current()?;
+-        if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); }
++        if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); old.upload_key_read.revoke(intent_at); }
+         state.grant = Some(next);
+         let status = access_status(&state);
+         self.read_publication_current()?; Ok(status)
+     }
+     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
+         let at = Instant::now();
+-        self.version_reserve_requests.read_revoked(at); // Memory only, before possible store/IO wait.
++        self.version_reserve_requests.read_revoked(at); self.upload_key_requests.read_revoked(at); // Memory only, before possible store/IO wait.
+         let mut state = self.lock()?;
+-        if let Some(old) = &state.grant { old.reserve_read.revoke(at); }
++        if let Some(old) = &state.grant { old.reserve_read.revoke(at); old.upload_key_read.revoke(at); }
+         state.grant = None; Ok(())
+     }
+     pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> {
+@@ -415,6 +423,10 @@ impl ApplicationService {
+             // These two fixed routes touch only the bounded proposal inbox.
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
++                p::RequestBody::UploadKeyScope(q) => return self.upload_key_scope(client,&q.project_id),
++                p::RequestBody::UploadKeySubmit(v) => return self.upload_key_submit(client,v.clone()),
++                p::RequestBody::UploadKeyStatus(q) => return self.upload_key_query(client,q,false),
++                p::RequestBody::UploadKeyCancel(q) => return self.upload_key_query(client,q,true),
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
+@@ -467,6 +479,7 @@ impl ApplicationService {
+             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
++                p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+@@ -516,7 +529,7 @@ impl ApplicationService {
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+index f3e73cd3..52713ab0 100644
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -59,6 +59,7 @@ impl ApplicationService {
+         additional_requests.extend(self.git_index_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.identity_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.version_reserve_requests.catalogue_requests(&self.instance, project)?);
++        additional_requests.extend(self.upload_key_requests.retained_ids(project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::AndroidUploadKey,request_id}));
+         let view = data::Catalogue {
+             schema_version: 2,
+             scope: data::Scope::CurrentHostRetainedRequests,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+index 56fd929a..ea6ad515 100644
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -54,6 +54,11 @@ pub(crate) mod agent_identity;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "asset_session_agent_local_checks.rs"]
+ pub(crate) mod agent_local_checks;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_agent_upload_key.rs"]
++pub(crate) mod agent_upload_key;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use agent_upload_key::{UploadKeyRelay,UploadKeyAgentRetired};
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "asset_session_agent_android_build.rs"]
+ pub(crate) mod agent_android_build;
+@@ -431,6 +436,8 @@ struct Retirement {
+ }
+ 
+ pub(crate) struct OriginalWork {
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_upload_key: std::sync::OnceLock<Arc<crate::service_upload_key_requests::NativeLink>>,
+     pub(crate) id: u32, stop: AtomicBool, ended: AtomicBool, deadline: Mutex<Option<Instant>>,
+     cleanup_end: Mutex<Option<Instant>>,
+     image_failure: Mutex<images::FailureLatch>,
+@@ -473,7 +480,7 @@ impl OriginalWork {
+     fn construct(id: u32, gui_needed: bool, document: Weak<Inner>, inspect: bool) -> Arc<Self> {
+         let admitted = Instant::now();
+         let end = admitted + if inspect { installation::WORK_TIME } else { WORK };
+-        Arc::new_cyclic(|owner| Self { id, stop: AtomicBool::new(false), ended: AtomicBool::new(false), deadline: Mutex::new(Some(end)),
++        Arc::new_cyclic(|owner| Self { #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: std::sync::OnceLock::new(), id, stop: AtomicBool::new(false), ended: AtomicBool::new(false), deadline: Mutex::new(Some(end)),
+             // Ceiling is owned from admission; Slot.cleanup_end remains None
+             // until actual STOP. These are not the same lifecycle flag.
+             cleanup_end: Mutex::new(inspect.then_some(end + CLEANUP)),
+@@ -875,6 +882,8 @@ struct DocumentState {
+     version_enrollment: version_enrollment::State,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     version_reserve: version_reserve::State,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_upload_key: agent_upload_key::State,
+     session_owner_reason: Option<Reason>,
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     first_origin: Option<installed_session_observation::FirstOrigin>,
+@@ -2172,6 +2181,10 @@ mod lookup_memory {
+             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_upload_key_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(agent_upload_key::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
+@@ -2971,7 +2984,7 @@ impl DocumentBinding {
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+             github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+@@ -4723,6 +4736,8 @@ impl DocumentBinding {
+         Ok(generation == context.registry_generation && root.identity == context.project.identity && root.path == context.project.path)
+     }
+     fn expire(&self, state: &mut DocumentState, now: Instant) {
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_upload_key::forward(state);
+         git_read::reconcile(state);
+         git_local::reconcile(&self.inner,state);
+         let owner_reason = self.live_session_owner_reason();
+@@ -5052,6 +5067,8 @@ fn project_path_idle_gate(state: &DocumentState, installed_profile: bool) -> Res
+     idle(state)
+ }
+ fn invalidate_all(state: &mut DocumentState) {
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_upload_key::stop(state,Instant::now());
+     git_read::stop(state);
+     git_local::invalidate(state);
+     version_allocation::stop(state);
+@@ -5825,6 +5842,8 @@ impl DocumentBinding {
+                 Err(_) => self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None),
+             }
+         }
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_upload_key::retired(self,&self.lock());
+     }
+ 
+     #[cfg(test)]
+@@ -6124,6 +6143,8 @@ impl DocumentBinding {
+         let cleanup_only = matches!(&job, Job::Vault(vault::Job::Release));
+         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+         let cleanup_only = false;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        { agent_upload_key::retired(self,state); agent_upload_key::before_install(state,&slot,cleanup_only)?; }
+         if state.maintenance.closed() && !cleanup_only { return Err(AssetError::new(Reason::Busy)); }
+         // An already-late-settled unrelated path remains Unknown. Only the
+         // revoked vault lease's finite Release may retain/retire that old slot;
+@@ -6167,6 +6188,8 @@ impl DocumentBinding {
+             run_job(document, worker, job).await;
+         }));
+         fixture_event!(owner, CoordinatorRegistered, 0);
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if let Some(link)=owner.agent_upload_key.get() { link.installed(owner.id).map_err(|_| AssetError::new(Reason::CleanupUnknown))?; }
+         // The original handle, GUI acquisition facts and child/resource slots
+         // exist before this sender can be used. The caller releases the actual
+         // DocumentBinding lock before opening the start barrier.
+@@ -6899,7 +6922,7 @@ impl DocumentBinding {
+                 && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
+                 && !version_allocation::pending(&state) && !version_enrollment::pending(&state)
+                 && {
+-                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) }
++                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) && !agent_upload_key::pending(&state) }
+                     #[cfg(not(any(target_os="linux",target_os="macos")))] { true }
+                 }
+                 && state.maintenance.can_exit()
+@@ -8510,7 +8533,7 @@ pub(crate) fn assert_project_path_document_contracts() {
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+@@ -8648,7 +8671,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+@@ -8749,7 +8772,7 @@ mod tests {
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+             github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+diff --git a/desktop/src-tauri/src/asset_session_vault.rs b/desktop/src-tauri/src/asset_session_vault.rs
+index 850fc603..8244c48e 100644
+--- a/desktop/src-tauri/src/asset_session_vault.rs
++++ b/desktop/src-tauri/src/asset_session_vault.rs
+@@ -2496,7 +2496,12 @@ impl DocumentBinding {
+         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
+     }
+     pub(super) fn bind_vault(&self, token: &str) -> Result<AssetStatus, AssetError> {
++        self.bind_vault_delegated(token,None)
++    }
++    pub(super) fn bind_vault_delegated(&self, token:&str, agent:Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus,AssetError> {
+         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, true)?;
++        if let Some(link)=&agent { super::agent_upload_key::consume(self,&state,link,crate::service_upload_key_protocol::Kind::BindReviewed)?; }
++        else { super::agent_upload_key::gui_available(&state)?; }
+         let preview = self.consume_preview(&mut state, token, true)?;
+         let decision = (|| -> Result<(Slot, Job), AssetError> {
+             let roster = self.vault_roster(&mut state)?;
+@@ -2518,6 +2523,7 @@ impl DocumentBinding {
+         })();
+         let (slot, job) = match decision { Ok(decision) => decision, Err(error) => return Err(self.refuse_consumed(&mut state, error)) };
+         for assignment in &mut state.assignments { if Some(assignment.kind) == slot.kind { assignment.availability = AssignmentAvailability::Unavailable; } }
++        if let Some(link)=&agent { super::agent_upload_key::attach(&state,&slot.owner,link)?; }
+         let start = self.install(&mut state, slot, super::Job::Vault(job))?;
+         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
+     }
+diff --git a/desktop/src-tauri/src/credential_upload_key.rs b/desktop/src-tauri/src/credential_upload_key.rs
+index 0d9eb96b..5c15e0ac 100644
+--- a/desktop/src-tauri/src/credential_upload_key.rs
++++ b/desktop/src-tauri/src/credential_upload_key.rs
+@@ -926,6 +926,7 @@ impl DocumentBinding {
+         if !consent.qualified(self) || native_availability != wire::Availability::Available {
+             return Err(AssetError::new(Reason::Unqualified));
+         }
++        let agent = consent.agent().cloned(); // Original claim retained before any native prepare.
+         self.reconcile();
+         let context = {
+             let mut state = self.lock();
+@@ -1099,6 +1100,7 @@ impl DocumentBinding {
+                 saved,
+             )
+             .map_err(|_| AssetError::new(Reason::ContextStale))?;
++        if let Some(link)=&agent { link.preparation(preparation.operation_id(),preparation.owner_generation()).map_err(|_| AssetError::new(Reason::CleanupUnknown))?; }
+         if !preparation.current()
+             || preparation.inspection_reservation_bytes()
+                 != crate::macos_install_record::CONTROL_LIMIT
+@@ -1223,6 +1225,7 @@ impl DocumentBinding {
+         {
+             return Err(AssetError::new(Reason::Capacity));
+         }
++        if let Some(link)=&agent { crate::asset_session::agent_upload_key::attach(&state,&slot.owner,link)?; }
+         let start = self.install(
+             &mut state,
+             slot,
+diff --git a/desktop/src-tauri/src/credential_upload_key_controls.rs b/desktop/src-tauri/src/credential_upload_key_controls.rs
+index 05096fa9..c5bad645 100644
+--- a/desktop/src-tauri/src/credential_upload_key_controls.rs
++++ b/desktop/src-tauri/src/credential_upload_key_controls.rs
+@@ -8,6 +8,8 @@ use crate::edit_owner::SavedEditStamp;
+ #[path = "credential_upload_key_recovery.rs"]
+ pub(in crate::asset_session) mod recovery;
+ pub(crate) use recovery::{request as recovery_request, RecoveryRequest};
++#[path="credential_upload_key_delegation.rs"]
++pub(in crate::asset_session) mod delegation;
+ 
+ // Nonshipping selector is consumed INSIDE the same bodies. Registration alone
+ // cannot enable renderer status/prepare/create; ordinary qualification is unchanged.
+@@ -223,8 +225,10 @@ pub(in crate::asset_session) struct Consent {
+     prepared: Arc<PreparedSetup>,
+     revision: u32,
+     admission: Admission,
++    agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>,
+ }
+ impl Consent {
++    pub(in crate::asset_session) fn agent(&self) -> Option<&Arc<crate::service_upload_key_requests::NativeLink>> { self.agent.as_ref() }
+     pub(super) fn qualified(&self,document:&DocumentBinding)->bool {self.admission.qualified(document) && self.admission.same(&self.prepared.admission)}
+     pub(super) fn preparation(&self) -> &Arc<PreparedSetup> {
+         &self.prepared
+@@ -997,6 +1001,7 @@ impl DocumentBinding {
+     pub(in crate::asset_session) async fn prepare_upload_key_setup_selected(&self,
+         request:ContextRequest,app_data:&std::path::Path,selection:Qualification) -> Result<UploadKeyStatus,AssetError> {
+         let admission=selection.admit(self,SelectedAction::Prepare,Some(app_data))?;
++        crate::asset_session::agent_upload_key::gui_available(&self.lock())?;
+         self.reconcile();
+         let (flight, ticket) = {
+             let mut state = self.lock();
+@@ -1196,6 +1201,12 @@ impl DocumentBinding {
+         self.create_upload_key_selected(request,Qualification::Ordinary)
+     }
+     pub(in crate::asset_session) fn create_upload_key_selected(&self,request:CreateRequest,selection:Qualification)->Result<UploadKeyStatus,AssetError> {
++        self.create_upload_key_origin(request,selection,None)
++    }
++    pub(in crate::asset_session) fn create_upload_key_delegated(&self,request:CreateRequest,link:Arc<crate::service_upload_key_requests::NativeLink>)->Result<UploadKeyStatus,AssetError> {
++        self.create_upload_key_origin(request,Qualification::Ordinary,Some(link))
++    }
++    fn create_upload_key_origin(&self,request:CreateRequest,selection:Qualification,agent:Option<Arc<crate::service_upload_key_requests::NativeLink>>)->Result<UploadKeyStatus,AssetError> {
+         let admission=selection.admit(self,SelectedAction::Create,None)?;
+         let (consent, service, tools) = {
+             let mut state = self.lock();
+@@ -1237,6 +1248,8 @@ impl DocumentBinding {
+                 .upload_key_tool_loan(&self.inner.session_identity)
+                 .map_err(|_| AssetError::new(Reason::Unqualified))?
+                 .ok_or_else(|| AssetError::new(Reason::Unqualified))?;
++            if let Some(link)=&agent { crate::asset_session::agent_upload_key::consume(self,&state,link,crate::service_upload_key_protocol::Kind::GenerateNew)?; }
++            else { crate::asset_session::agent_upload_key::gui_available(&state)?; }
+             if prepared
+                 .attempted
+                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+@@ -1249,6 +1262,7 @@ impl DocumentBinding {
+                     admission,
+                     prepared,
+                     revision: request.expected_revision,
++                    agent,
+                 },
+                 service,
+                 tools,
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+index 457e79a1..2c8c3af8 100644
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -34,6 +34,8 @@ mod play_cleanup;
+ // frame, operation/Document quota, or total allocator bound. Keep complete
+ // compiled capabilities instead of silently omitting newly supported families.
+ const CAPABILITIES_BYTES: usize = 32 * 1024;
++#[path="installed_cli_upload_key.rs"]
++mod upload_key;
+ 
+ const HELP: &str = "Mobile Release Kit agent CLI\n\n\
+ Usage:\n\
+@@ -41,6 +43,10 @@ Usage:\n\
+   mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+   mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk upload-key-scope PROJECT_ID [--json]\n\
++  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
++  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -250,6 +256,11 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
+                 "privateEditIdInput":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
++            "androidUploadKey": {"actions":["generate-new","bind-reviewed"],"defaultEnabled":false,"oneUse":true,
++                "maxAllowSeconds":crate::service_upload_key_protocol::ALLOW_SECONDS,"maxRetainedRequests":crate::service_upload_key_protocol::REQUEST_LIMIT,
++                "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
++                "privateArguments":false,"backup":false,"rememberAssignment":false,"recoveryAcknowledgment":false,
++                "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
+             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
+                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
+                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
+@@ -267,7 +278,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -300,6 +311,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+         }
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
++        text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
+         text.into_bytes()
+@@ -391,6 +403,7 @@ fn human(response: &p::ResponseBody) -> String {
+         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
++        p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
+@@ -424,6 +437,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
+     let args = collect_arguments(args);
+     let json = args.iter().any(|a| a == "--json");
+     if identity::recognizes(&args) { return identity::run(args); }
++    if upload_key::recognizes(&args) { return upload_key::run(args); }
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+     if git_index::recognizes(&args) { return git_index::run(args); }
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+index 7e8922fa..4d430426 100644
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -4,6 +4,8 @@
+ #![forbid(unsafe_code)]
+ 
+ mod service_protocol;
++mod service_upload_key_protocol;
++mod service_upload_key_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+ #[path="service_version_reserve_requests.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+index 6cc29755..3287abb2 100644
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -123,6 +123,8 @@ mod git_fetch_state;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod git_local_state;
+ mod service_protocol;
++mod service_upload_key_protocol;
++mod service_upload_key_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+ #[path="service_version_reserve_requests.rs"]
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+index 05e35d01..1dbcbdb9 100644
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -209,6 +209,10 @@ pub enum RequestBody {
+     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
+     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
+     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
++    #[serde(rename="upload-key.scope")] UploadKeyScope(ProjectQuery),
++    #[serde(rename="upload-key.submit")] UploadKeySubmit(crate::service_upload_key_protocol::Submit),
++    #[serde(rename="upload-key.status")] UploadKeyStatus(crate::service_upload_key_protocol::Query),
++    #[serde(rename="upload-key.cancel")] UploadKeyCancel(crate::service_upload_key_protocol::Query),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -276,6 +280,8 @@ pub struct ServiceInfo {
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
+     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
++    UploadKeyAccess(crate::service_upload_key_protocol::Access),
++    UploadKeyRequest(crate::service_upload_key_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+     GitIndexScope(crate::service_git_protocol::Scope),
+     GitIndexRequest(crate::service_git_protocol::Status),
+@@ -331,6 +337,8 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
+     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
+         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
++    if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
++        && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+@@ -406,6 +414,8 @@ fn validate_response(response: &Response) -> Result<(), Error> {
+             let mut seen = std::collections::BTreeSet::new();
+             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
+         }
++        ResponseBody::UploadKeyAccess(row) => { row.validate()?; if serde_json::to_vec(row).map_err(|_| Error::InvalidRequest)?.len() > crate::service_upload_key_protocol::VIEW_LIMIT { return Err(Error::InvalidRequest); } },
++        ResponseBody::UploadKeyRequest(row) => { row.validate()?; if serde_json::to_vec(row).map_err(|_| Error::InvalidRequest)?.len() > crate::service_upload_key_protocol::VIEW_LIMIT { return Err(Error::InvalidRequest); } },
+         ResponseBody::VersionReserveRequest(row) => {
+             row.validate()?;
+             if row.origin.service_instance != response.service_instance
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+index b8b29a1e..4db34e30 100644
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
+ pub(crate) const DETAIL_LIMIT: usize = local::LIMIT + build::LIMIT;
+ pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_LIMIT
+     + crate::agent_identity_requests::LIMIT
+-    + crate::service_version_reserve_protocol::REQUEST_LIMIT;
++    + crate::service_version_reserve_protocol::REQUEST_LIMIT
++    + crate::service_upload_key_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -23,7 +24,7 @@ pub(crate) const DOCUMENT_BACKING: usize = 8
+         + std::mem::size_of::<Catalogue>()
+         + 64
+         + DETAIL_LIMIT * (std::mem::size_of::<Request>() + 3 * 32 + std::mem::size_of::<usize>())
+-        // The returned IDs plus ONE temporary immutable-input list. The three
++        // The returned IDs plus ONE temporary immutable-input list. The four
+         // additional inboxes are copied in sequence, never held concurrently.
+         + (ADDITIONAL_LIMIT + 32) * (std::mem::size_of::<AdditionalRequest>() + 32)
+         + 1024);
+@@ -167,6 +168,7 @@ pub enum AdditionalFamily {
+     GitRemote,
+     Identity,
+     VersionReservation,
++    AndroidUploadKey,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+@@ -174,6 +176,7 @@ impl AdditionalFamily {
+             Self::GitIndex | Self::GitCommit | Self::GitRepository | Self::GitRemote => 0,
+             Self::Identity => 1,
+             Self::VersionReservation => 2,
++            Self::AndroidUploadKey => 3,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -184,6 +187,7 @@ impl AdditionalFamily {
+             Self::GitRemote => "git-remote-status",
+             Self::Identity => "identity-request-status",
+             Self::VersionReservation => "version-reserve-status",
++            Self::AndroidUploadKey => "upload-key-status",
+         }
+     }
+ }
+@@ -245,7 +249,7 @@ impl Catalogue {
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 3];
++        let mut counts = [0usize; 4];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -258,6 +262,7 @@ impl Catalogue {
+         if counts[0] > crate::service_git_protocol::REQUEST_LIMIT
+             || counts[1] > crate::agent_identity_requests::LIMIT
+             || counts[2] > crate::service_version_reserve_protocol::REQUEST_LIMIT
++            || counts[3] > crate::service_upload_key_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+index 496f7579..87d37293 100644
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -130,7 +130,8 @@ struct ShellState {
+     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))] exit_observer: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+ }
+ struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool,
+-    #[cfg(any(target_os="linux",target_os="macos"))] version_reserve: Arc<crate::asset_session::ReserveRelay> }
++    #[cfg(any(target_os="linux",target_os="macos"))] version_reserve: Arc<crate::asset_session::ReserveRelay>,
++    #[cfg(any(target_os="linux",target_os="macos"))] upload_key:Arc<crate::asset_session::UploadKeyRelay> }
+ 
+ #[tauri::command]
+ fn application_read_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -1587,6 +1588,45 @@ async fn revoke_agent_local_check(webview: Webview, request: tauri::ipc::Request
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local checks are not supported on this platform.")) }
+ }
+ #[tauri::command]
++async fn agent_upload_key_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {
++        let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++        crate::asset_session::agent_upload_key::decode_empty(raw)?;
++        serde_json::to_value(state.document.agent_upload_key_access(window)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Upload-key delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_upload_key(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {
++        let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++        let args=crate::asset_session::agent_upload_key::decode_allow(raw)?;
++        serde_json::to_value(state.document.allow_agent_upload_key(window,args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Upload-key delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_upload_key(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {
++        let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++        let args=crate::asset_session::agent_upload_key::decode_revoke(raw)?;
++        serde_json::to_value(state.document.revoke_agent_upload_key(window,args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Upload-key delegation is unavailable on this platform."))}
++}
++#[tauri::command]
+ async fn agent_version_reserve_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window=edit_window(&webview)?;
+@@ -3253,13 +3293,20 @@ struct PlayCleanupRelayGuard {document:DocumentBinding,closed:bool}
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl Drop for PlayCleanupRelayGuard {fn drop(&mut self){if !self.closed {self.document.play_cleanup_agent_relay_closed();}}}
+ 
++#[cfg(any(target_os="linux",target_os="macos"))]
++struct UploadKeyRelayGuard {document:DocumentBinding,slot:Arc<crate::asset_session::UploadKeyRelay>,closed:bool}
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for UploadKeyRelayGuard {fn drop(&mut self){if !self.closed{self.slot.lost(&self.document);}}}
+ #[deny(unused_variables, unused_assignments)]
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
+-    #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
++    #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
++    #[cfg(any(target_os="linux",target_os="macos"))] upload_key:Arc<crate::asset_session::UploadKeyRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let reserve_guard=VersionReserveRelayGuard {document:document.clone(),slot:reserve.clone(),closed:false};
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let play_cleanup_guard=PlayCleanupRelayGuard{document:document.clone(),closed:false};
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let upload_key_guard=UploadKeyRelayGuard {document:document.clone(),slot:upload_key.clone(),closed:false};
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
+     #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -3304,6 +3351,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut play_cleanup_guard=play_cleanup_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut upload_key_guard=upload_key_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut git_index_guard = git_index_guard;
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         let mut repository_summary_guard = repository_summary_guard;
+@@ -3374,6 +3423,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+                     document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
++                    upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
+                 }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+@@ -3392,6 +3442,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             document.play_cleanup_agent_tick();
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            upload_key.tick(&document).await;
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             match app.path().app_local_data_dir() {
+                 Ok(location)=>reserve.tick(&document,&location).await,
+                 Err(_)=>reserve.lost(&document),
+@@ -3751,6 +3803,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+                     document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
++                    upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
+                 }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                 result = revisions.changed() => { if result.is_err() { return; } },
+@@ -3803,7 +3856,8 @@ async fn settle_relay(app: &tauri::AppHandle) -> bool {
+ 
+ #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding,
+-    #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
++    #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
++    #[cfg(any(target_os="linux",target_os="macos"))] upload_key:Arc<crate::asset_session::UploadKeyRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+     let (start, enter) = oneshot::channel();
+     let handle = tauri::async_runtime::spawn(async move {
+         if enter.await.is_err() { return; }
+@@ -3812,6 +3866,8 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding,
+             // Neither continuation nor this join ever acquires RelayBook.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             reserve.join_finished(&document).await;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            upload_key.join_finished(&document).await;
+             // One fixed app-level exit observer. can_exit only observes the
+             // already-ended original quit coordinator; it starts no dialog or
+             // business operation. Windows extends this SAME finality path with
+@@ -5115,7 +5171,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
+                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))] picker: Arc::new(AtomicBool::new(false)),
+                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))] closing: AtomicBool::new(false),
+                 exit_ready: AtomicBool::new(false), relay_stop, relay: AsyncMutex::new(RelayBook { handle: None, settled: false,
+-                    #[cfg(any(target_os="linux",target_os="macos"))] version_reserve:Arc::new(crate::asset_session::ReserveRelay::new()) }),
++                    #[cfg(any(target_os="linux",target_os="macos"))] version_reserve:Arc::new(crate::asset_session::ReserveRelay::new()),
++                    #[cfg(any(target_os="linux",target_os="macos"))] upload_key:Arc::new(crate::asset_session::UploadKeyRelay::new()) }),
+                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))] exit_observer: Mutex::new(None),
+             });
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -5276,15 +5333,19 @@ fn builder() -> tauri::Builder<tauri::Wry> {
+             let mut book = state.relay.try_lock().map_err(|_| "The original event relay could not be retained.")?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             let reserve=book.version_reserve.clone(); // Rooted before either enter barrier.
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            let upload_key=book.upload_key.clone();
+             let (handle, start) = start_relay(app.handle().clone(), bridge.edits.clone(), document.clone(), stop_receiver,
+-                #[cfg(any(target_os="linux",target_os="macos"))] reserve.clone());
++                #[cfg(any(target_os="linux",target_os="macos"))] reserve.clone(),
++                #[cfg(any(target_os="linux",target_os="macos"))] upload_key.clone());
+             book.handle = Some(handle); drop(book);
+             let _ = start.send(());
+             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+             {
+                 let mut book = state.exit_observer.lock().map_err(|_| "The original exit observer could not be retained.")?;
+                 let (handle, start) = start_exit_observer(app.handle().clone(), document,
+-                    #[cfg(any(target_os="linux",target_os="macos"))] reserve);
++                    #[cfg(any(target_os="linux",target_os="macos"))] reserve,
++                    #[cfg(any(target_os="linux",target_os="macos"))] upload_key);
+                 *book = Some(handle); drop(book);
+                 let _ = start.send(());
+             }
+@@ -5315,6 +5376,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
+             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
++            agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,
+             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+             agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
+             agent_git_repository_access, allow_agent_git_repository, revoke_agent_git_repository,
+diff --git a/desktop/src-tauri/src/android_build_wiring_tests.rs b/desktop/src-tauri/src/android_build_wiring_tests.rs
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -7,6 +7,8 @@
+     DocumentState {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_local_check_grant: None,
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        agent_upload_key: agent_upload_key::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_ios_archive_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+diff --git a/desktop/src-tauri/src/asset_session_installation_memory.rs b/desktop/src-tauri/src/asset_session_installation_memory.rs
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -561,6 +561,8 @@
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_local_check_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
++        agent_upload_key: agent_upload_key::State::default(),
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_ios_archive_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+@@ -674,6 +676,8 @@
+             DocumentState {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_local_check_grant: None,
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        agent_upload_key: agent_upload_key::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_ios_archive_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]

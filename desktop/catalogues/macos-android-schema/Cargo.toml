@@ -1,0 +1,19 @@
+[package]
+name = "mrk-android-catalogue-schema"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+autobins = false
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "forbid"

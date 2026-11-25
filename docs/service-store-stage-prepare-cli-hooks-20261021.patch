@@ -1,0 +1,56 @@
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1,6 +1,6 @@
+ import { AgentStorePreparation } from './components/AgentStorePreparation.tsx';
+ import { StorePreparationController } from './agentStorePreparationController.ts';
+-import { storePreparationInput, storePreparationPeerReason } from './agentStorePreparation.ts';
++import { storePreparationInput, storePreparationPeerReason, storePreparationPreparesIntent } from './agentStorePreparation.ts';
+ import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
+ import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
+ import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
+@@ -1151,8 +1151,8 @@
+     const observation=project?localStoreProjectObservation(project,releaseVersion.getSnapshot()):null;
+     const input=storePreparationInput(kind,observation,assetSession.getSnapshot(),localHistory.getSnapshot());
+     const peer=storePreparationControllerRef.current?.peer()??null;
+-    const peers=storePreparationPeerReason(peer&&!peer.input.kind.endsWith('-candidate')?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
+-      storePreparationPeerReason(peer?.input.kind.endsWith('-candidate')?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()));
++    const peers=storePreparationPeerReason(peer&&!storePreparationPreparesIntent(peer.input.kind)?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
++      storePreparationPeerReason(peer&&storePreparationPreparesIntent(peer.input.kind)?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()));
+     return {port:service.api?.mode==='native'?service.api.agentStorePreparation??null:null,nativeSession:service.api?.mode==='native'?service:null,
+       projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',input,
+       blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??storeExecuteBusy()??storeReconcileBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -348,6 +348,7 @@
+                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
+                 "nativePrepareCommand":"store-prepare","separateStartCommand":"store-start","prepareAuthorizesStart":false,
++                "nativePrepareKinds":["android-access","ios-access","android-candidate","ios-candidate","android-versions","ios-versions","paired-versions","android-external-testing","ios-external-testing","android-production-submit","ios-production-submit"],"stagePreparationIsExecution":false,
+                 "currentInventory":["android","ios","paired"],"inventoryIsAllocationAuthority":false,"pairedInventoryRequiresTwoCurrentLoans":true,
+                 "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
+                 "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":true,"oldSubmitQueryVariants":false,"nativeAvailabilityChecked":false},
+diff --git a/desktop/src-tauri/src/asset_session_store_material.rs b/desktop/src-tauri/src/asset_session_store_material.rs
+--- a/desktop/src-tauri/src/asset_session_store_material.rs
++++ b/desktop/src-tauri/src/asset_session_store_material.rs
+@@ -314,6 +314,19 @@
+             }
+             let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
+             assert!(original.current(&state,7,&root)&&original.prepare_matches(&c,7,&root));assert!(!original.prepare_current(&c,7,&root));
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            {
++                let same=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
++                crate::asset_session::agent_store::preparation::tests::assert_stage_pins(&original,&same,&c,true);
++                // Same public record/key values, different actual Payload Arc.
++                let replacement=Arc::new(Payload{kind:Kind::AppleReviewContact,material:None,fields:Some(commands::own_fields(Kind::AppleReviewContact,
++                    &serde_json::json!({"contactFirstName":"Fictional","contactLastName":"Reviewer","contactEmail":"review@example.invalid","contactPhone":"+15555550100"})).ok().unwrap())});
++                let held=std::mem::replace(&mut state.records[1].payload,replacement);
++                let other=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
++                crate::asset_session::agent_store::preparation::tests::assert_stage_pins(&original,&other,&c,false);
++                state.records[1].payload=held;
++            }
++
+             let parts=original.parts().unwrap();assert_eq!(parts.len(),if demo{11}else{9});
+             assert_eq!(parts[3].0,"contact-first-name");assert_eq!(parts[3].1.as_ptr(),state.records[1].payload.fields.as_ref().unwrap().borrow_value("contactFirstName").unwrap().as_ptr());
+             assert_eq!(parts[7].0,"commitment-key-base64");assert_eq!(parts[7].1.as_ptr(),state.records[2].payload.fields.as_ref().unwrap().borrow_value("keyBase64").unwrap().as_ptr());

@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "fields": [
+    {
+      "id": "platform",
+      "label": "Store platform",
+      "requiredness": "required",
+      "requiredWhen": "For every image import.",
+      "what": "The Android or iOS Store listing that will use these images.",
+      "why": "The platforms use different folders and image slots.",
+      "where": "Choose an enabled platform from this project's saved Configuration.",
+      "format": "Android or iOS. This action uses saved settings, not unsaved form changes.",
+      "failure": "A disabled platform or changed saved configuration blocks import. No other listing is changed."
+    },
+    {
+      "id": "locale",
+      "label": "Listing language",
+      "requiredness": "required",
+      "requiredWhen": "For every image import.",
+      "what": "The language and region of the listing that should show these images.",
+      "why": "Images with localized text must be kept with the correct listing language.",
+      "where": "Choose a saved metadata locale. Add a missing language on the Configuration screen first.",
+      "format": "A configured locale such as en-US or fr-FR; choose it from the list.",
+      "failure": "An unconfigured locale is refused. Import does not translate an image or add a language automatically."
+    },
+    {
+      "id": "assetType",
+      "label": "Image slot or device size",
+      "requiredness": "required",
+      "requiredWhen": "For every image import.",
+      "what": "Where this image belongs, such as a Play icon, phone screenshots or an Apple display size.",
+      "why": "Store tools distinguish these slots and can require exact dimensions.",
+      "where": "Use the slot requested by your Store listing. For Apple, match the screenshot device and dimensions shown here.",
+      "format": "Choose one supported slot for this batch. Apple dimensions come from the project's pinned Store tool.",
+      "failure": "An unsupported type, mismatched Apple dimensions, duplicate image or excessive set blocks the affected import. This is not Store approval."
+    },
+    {
+      "id": "files",
+      "label": "Select image files",
+      "requiredness": "required",
+      "requiredWhen": "For a new import; recovery does not need source files.",
+      "what": "The PNG or JPEG screenshots or artwork to copy into this project's public Store metadata.",
+      "why": "The app registers the copies in the correct locale and image slot for you.",
+      "where": "Capture your app's screen or select the approved files supplied by your designer. Use the native Select files button.",
+      "format": "Up to 10 PNG/JPEG images, 10 MiB each and 24 MiB together. A single-image slot accepts one file.",
+      "failure": "Wrong formats, invalid headers, changed files or a large batch are refused. Select a corrected or smaller batch; no partial import is hidden."
+    },
+    {
+      "id": "replaceExisting",
+      "label": "Replace this existing project image",
+      "requiredness": "optional",
+      "requiredWhen": "Only when intentionally replacing the exact same public destination file.",
+      "what": "Replace the existing project copy with this selected image.",
+      "why": "Keeping the existing image is the default so your work is not overwritten accidentally.",
+      "where": "Compare the existing, selected and resulting image details in this preview before checking the option.",
+      "format": "An explicit choice for this file only. Identical contents are kept unchanged. A different format in a single-image slot is a conflict.",
+      "failure": "If the file, configuration or preview changes, confirmation is stale and replacement is refused. The selected original source file is never overwritten."
+    },
+    {
+      "id": "copyConfirmation",
+      "label": "Confirm local public copies",
+      "requiredness": "required",
+      "requiredWhen": "Before applying an import preview.",
+      "what": "Consent to create or explicitly replace the public project files shown in this preview.",
+      "why": "These copies may be committed to your repository and later uploaded by a separate reviewed release operation.",
+      "where": "Review the exact destinations, image details and resulting order here. Check that the images contain no private information.",
+      "format": "Confirm this preview only. Originals stay where you selected them; nothing is moved or uploaded.",
+      "failure": "Header checks do not decode all pixels, detect private image content or prove Store acceptance. Cancellation after Apply may not undo a committed copy."
+    },
+    {
+      "id": "recoveryConfirmation",
+      "label": "Confirm reviewed image recovery",
+      "requiredness": "required",
+      "requiredWhen": "Before a recoverable interrupted image transaction is restored or cleaned up.",
+      "what": "A new, explicitly reviewed attempt to finish recovery of an interrupted local image import.",
+      "why": "An interruption can leave either uncommitted changes to restore or committed images with cleanup still pending.",
+      "where": "Choose Inspect image recovery, then read whether the preview restores originals or keeps committed images and removes only owned leftovers.",
+      "format": "Confirm the current inspected action. Do not move, edit or delete the hidden recovery files yourself.",
+      "failure": "Changed, incomplete or unrecognized state is preserved as a conflict. Recovery does not retry import, touch Store state or assume that a missing reply means success."
+    }
+  ]
+}

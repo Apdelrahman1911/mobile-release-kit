@@ -91,6 +91,15 @@ _AUTHORITY_DEFERRED_FIXTURES = frozenset({
 _AUTHORITY_UNIT_FIXTURES = frozenset({
     "unit", "unit.test_ios_profile_authority", "unit.ios_profile_helpers", "unit.ios_entitlement_helpers",
 })
+_POLICY_PRODUCT_FIXTURES = frozenset({
+    "mobile_release.credential_policy", "mobile_release.credential_requirements",
+    "mobile_release.github_workflow_candidate_compat", "mobile_release.toolchain_policy",
+    "mobile_release.workflow_payloads",
+})
+_DISPATCH_PRODUCT_FIXTURES = _POLICY_PRODUCT_FIXTURES | {
+    "mobile_release._store_runtime", "mobile_release.android_zip", "mobile_release.config_payloads",
+    "mobile_release.initialization_payloads", "mobile_release.release_confirmation",
+}
 _ISOLATED_IMPORT_FIXTURES = (
     ("unit.test_native_process", ("unit",), frozenset({"unit", "unit.test_native_process"}),
      frozenset({"mobile_release", "mobile_release._native_process"})),
@@ -127,7 +136,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release._store_lane_contract",
                 "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | _POLICY_PRODUCT_FIXTURES),
     ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
@@ -142,7 +151,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release._store_lane_contract",
                 "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | _POLICY_PRODUCT_FIXTURES),
     ("unit.test_local_signing_persistent", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
                 "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
@@ -155,7 +164,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | _POLICY_PRODUCT_FIXTURES),
     ("unit.test_local_signing_composition", ("workflow", "unit"),
      frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
                 "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
@@ -174,7 +183,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | _DISPATCH_PRODUCT_FIXTURES),
     ("unit.test_ios_entitlements", ("unit",),
      frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -185,7 +194,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
                 "mobile_release.reporting", "mobile_release.tooling",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | _POLICY_PRODUCT_FIXTURES),
     ("unit.test_operation_recovery", ("unit",),
      frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
                 "unit.ios_entitlement_helpers", "unit.test_operation_recovery",
@@ -204,7 +213,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | _DISPATCH_PRODUCT_FIXTURES),
     ("unit.test_ios_profile_authority", ("unit",),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -220,7 +229,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | _POLICY_PRODUCT_FIXTURES),
     ("unit.test_local_signing_failures", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -239,7 +248,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | _DISPATCH_PRODUCT_FIXTURES),
     ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -258,7 +267,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | _DISPATCH_PRODUCT_FIXTURES),
     ("unit.test_owned_process", ("unit",),
      frozenset({"unit", "unit.test_owned_process"}),
      frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
@@ -267,7 +276,7 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release._store_lane_contract",
                 "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | _POLICY_PRODUCT_FIXTURES),
 )
 _ISOLATED_PRIME_FIXTURES = (
     ("unit.test_ios_entitlements", ("mobile_release.ios_profiles", "mobile_release.ios_plist_binary")),
@@ -564,12 +573,12 @@ class NativeProfileCITests(unittest.TestCase):
         paths = fixture_paths(controller)
         steps = controller.catalog(paths, "macos", deadline=12345.0, scope="native-support")
         suites = {
-            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 32),
+            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 35),
             "ruby-native-spawn": ("test_native_process_spawn.rb", 52),
             "ruby-native-owner": ("test_native_upload_process.rb", 52),
             "ruby-native-capture": ("test_native_upload_validation.rb", 22),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", 1),
-            "ruby-android_upload_validation": ("test_android_upload_validation.rb", 32),
+            "ruby-android_upload_validation": ("test_android_upload_validation.rb", 37),
         }
         actual = [item for item in steps if item.id in suites]
         self.assertEqual([item.id for item in actual], list(suites))
@@ -598,21 +607,26 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertTrue(all(row["status"] == "UNEXECUTED" for row in report.rows[len(calls):]))
 
     def test_native_source_and_wheel_catalog_follow_the_protected_platform_route(self):
-        from .test_ci_verification import NATIVE_TARGET_CONDITION, NATIVE_SUPPORT_TARGET_CONDITION
         workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
         aggregate = workflow["jobs"]["test"]
-        # CIWorkflowIsolationTests executes the current four-result guard,
-        # including every unsuccessful predecessor; do not replay its old
-        # two-result shell matrix here. Retain this distinct native gate binding.
         self.assertIn("test-native-profiles", aggregate["needs"])
         self.assertIn("test-native-support", aggregate["needs"])
-        for name, scope, condition in (("test-native-profiles", "native-python", NATIVE_TARGET_CONDITION),
-                                       ("test-native-support", "native-support", NATIVE_SUPPORT_TARGET_CONDITION)):
+        for name, scope, targets in (("test-native-profiles", "native-python", {"full", "macos"}),
+                                     ("test-native-support", "native-support", {"full", "macos", "store-lane-macos"})):
             with self.subTest(job=name):
                 native_job = workflow["jobs"][name]
                 self.assertEqual(native_job["runs-on"], "macos-26")
                 self.assertEqual(native_job["permissions"], {"contents": "read"})
-                self.assertEqual(native_job["if"], condition)
+                for event, core, target in itertools.product(
+                        ("pull_request", "push", "workflow_dispatch"),
+                        ("true", "false"), ("full", "macos", "store-lane-macos", "linux", "unknown")):
+                    context = {"github": {"event_name": event},
+                               "needs": {"changes": {"outputs": {"core": core}}},
+                               "inputs": {"verification_target": target}}
+                    expected = core == "true" and (event != "workflow_dispatch" or target in targets)
+                    with self.subTest(event=event, core=core, target=target):
+                        self.assertEqual(evaluate_condition(native_job["if"], context,
+                                                            success=True, cancelled=False), expected)
                 self.assertNotIn("continue-on-error", native_job)
                 self.assertNotIn("environment", native_job)
                 self.assertEqual(native_job["steps"][-1]["run"], coordinator_shell("macos", scope=scope))

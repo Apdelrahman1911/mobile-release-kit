@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Exact hosted kernel ABI observation; no installed-runtime/product qualification",
+  "sourceCommit": "2cbdc930bd3a54d18a511a64ac004052da9c04d6",
+  "sourceTree": "367a64425d3a879e5894fa79806721d7f9defa4a",
+  "runId": 43015436984,
+  "runAttempt": 1,
+  "runUrl": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/43015436984",
+  "artifact": {
+    "id": 13853680157,
+    "size": 1460371,
+    "sha256": "0be993c1808ecd6a921f25a09fdefa99d13a17e4d4499fd3b4c85844c6e3ff9f"
+  },
+  "kernel": {
+    "release": "7.0.0-1017-azure",
+    "packageVersion": "7.0.0-1017.17~24.04.1",
+    "system": "Linux",
+    "machine": "x86_64",
+    "ubuntu": "24.04"
+  },
+  "installedHeaders": [
+    {
+      "original": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/mount.h",
+      "resolved": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/mount.h",
+      "path": "linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/mount.h",
+      "size": 9754,
+      "sha256": "24944cf08a87d0a9fd354a57421e7046455177395ed1816c13529f20c0e2897d"
+    },
+    {
+      "original": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/stat.h",
+      "resolved": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/stat.h",
+      "path": "linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/stat.h",
+      "size": 7879,
+      "sha256": "c900a05e031d999074db5ac3567f651ce2cf2f9f9e0a686810d6453c9f8b9526"
+    },
+    {
+      "original": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/linux/proc_ns.h",
+      "resolved": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/linux/proc_ns.h",
+      "path": "linux-azure-7.0-headers-7.0.0-1017/include/linux/proc_ns.h",
+      "size": 2004,
+      "sha256": "63376480b58e72b13c36b69daf536a089a2af558544863e9e2f1fe37e7ffd537"
+    },
+    {
+      "original": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/nsfs.h",
+      "resolved": "/usr/src/linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/nsfs.h",
+      "path": "linux-azure-7.0-headers-7.0.0-1017/include/uapi/linux/nsfs.h",
+      "size": 3843,
+      "sha256": "da2a23c34182dec8b65bf8be116e169d0970f68907024e00c6ada4c846c04d65"
+    },
+    {
+      "original": "/usr/src/linux-headers-7.0.0-1017-azure/arch/x86/include/generated/uapi/asm/unistd_64.h",
+      "resolved": "/usr/src/linux-headers-7.0.0-1017-azure/arch/x86/include/generated/uapi/asm/unistd_64.h",
+      "path": "linux-headers-7.0.0-1017-azure/arch/x86/include/generated/uapi/asm/unistd_64.h",
+      "size": 10496,
+      "sha256": "fb345c85da52add8c7eb5b64274a8d8282975f0a3dd33f9aa172d4be8e95070a"
+    },
+    {
+      "original": "/usr/src/linux-headers-7.0.0-1017-azure/include/generated/uapi/linux/version.h",
+      "resolved": "/usr/src/linux-headers-7.0.0-1017-azure/include/generated/uapi/linux/version.h",
+      "path": "linux-headers-7.0.0-1017-azure/include/generated/uapi/linux/version.h",
+      "size": 216,
+      "sha256": "3143ce97d1e0c432cfa8a16a76eac701cead3213f3cd8f143b2fe08b81896e3c"
+    },
+    {
+      "original": "/usr/src/linux-headers-7.0.0-1017-azure/include/generated/utsrelease.h",
+      "resolved": "/usr/src/linux-headers-7.0.0-1017-azure/include/generated/utsrelease.h",
+      "path": "linux-headers-7.0.0-1017-azure/include/generated/utsrelease.h",
+      "size": 75,
+      "sha256": "3f7a2f21b8a50fcc125a2ee0b695c885415f1a611dc4e918b606978c2b686e7a"
+    }
+  ],
+  "observer": {
+    "path": "/home/runner/work/_temp/abi-observation/compiled/publisher-abi-libtest",
+    "size": 2567952,
+    "sha256": "2b7db18cc96115213f4ca7b6d1783138f1eae58e9c6d1fd80486d4b7f4aa2ca5"
+  },
+  "originalPhases": {
+    "publisher-abi-compile": {
+      "role": "publisher-abi-compile",
+      "argv": [
+        "/home/runner/work/_temp/abi-observation/rust/bin/cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--no-default-features",
+        "--features",
+        "ubuntu-runtime-publisher",
+        "--lib",
+        "--no-run"
+      ],
+      "timeoutSeconds": 1800,
+      "originalReturn": 0,
+      "captureFailure": null,
+      "capturedBytes": {
+        "stdout": 0,
+        "stderr": 147493
+      },
+      "elapsedSeconds": 455.94697519499994,
+      "peakObservedGroupRssBytes": 768548864,
+      "finalFreeDiskBytes": 87480864768,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "0935f1c374824cfbd64a6d83dbc73846122d348026e9b1b777f79f39e3be1377"
+    },
+    "publisher-data-tests": {
+      "role": "publisher-data-tests",
+      "argv": [
+        "/home/runner/work/_temp/abi-observation/compiled/publisher-abi-libtest",
+        "runtime_publication::",
+        "--test-threads=1"
+      ],
+      "timeoutSeconds": 300,
+      "originalReturn": 0,
+      "captureFailure": null,
+      "capturedBytes": {
+        "stdout": 2930,
+        "stderr": 0
+      },
+      "elapsedSeconds": 0.008894714000007298,
+      "peakObservedGroupRssBytes": 0,
+      "finalFreeDiskBytes": 87477071872,
+      "stdoutSha256": "bc68b0b1832169f6bad5bb2b99fe062f2d2b8acc19a4ec0708fdfcb3a29eb172",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publisher-helper-tests": {
+      "role": "publisher-helper-tests",
+      "argv": [
+        "/home/runner/work/_temp/abi-observation/compiled/publisher-abi-libtest",
+        "runtime_publication::tests::helper_",
+        "--ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "timeoutSeconds": 300,
+      "originalReturn": 0,
+      "captureFailure": null,
+      "capturedBytes": {
+        "stdout": 993,
+        "stderr": 0
+      },
+      "elapsedSeconds": 0.010208401999989292,
+      "peakObservedGroupRssBytes": 3612672,
+      "finalFreeDiskBytes": 87476924416,
+      "stdoutSha256": "443db410025cd74cd44a8f98152ff5587cc82d68dcc57f077ced4c2266171191",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "hosted-root-abi-observation": {
+      "role": "hosted-root-abi-observation",
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "HOME=/root",
+        "LANG=C",
+        "LC_ALL=C",
+        "GITHUB_ACTIONS=true",
+        "RUNNER_ENVIRONMENT=github-hosted",
+        "MRK_UBUNTU_ABI_OBSERVATION=1",
+        "/usr/bin/strace",
+        "--kill-on-exit",
+        "-f",
+        "-yy",
+        "-s",
+        "4096",
+        "-e",
+        "trace=statx,statmount,openat2,fstat,newfstatat,fstatfs,fgetxattr,read,close,uname,getuid,geteuid,getgid,getegid,getpid,gettid",
+        "/home/runner/work/_temp/abi-observation/compiled/publisher-abi-libtest",
+        "--exact",
+        "runtime_publication::platform_native_tests::root_current_hosted_abi_observation",
+        "--ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "timeoutSeconds": 180,
+      "originalReturn": 0,
+      "captureFailure": null,
+      "capturedBytes": {
+        "stdout": 890,
+        "stderr": 67260
+      },
+      "elapsedSeconds": 0.27268851200005884,
+      "peakObservedGroupRssBytes": 11296768,
+      "finalFreeDiskBytes": 87476830208,
+      "stdoutSha256": "c33438e2824ac915656407a032e8245e9400bc9d7660834894479ab2ca21abe2",
+      "stderrSha256": "0eb322e3fb44fa58f060cc8accede7939073b667799edf31198ba4415e960b74"
+    }
+  },
+  "observedRootMount": {
+    "device": [
+      8,
+      1
+    ],
+    "filesystemMagic": 61267,
+    "mountAttributes": 0,
+    "oldMountId": 28,
+    "uniqueMountId": 2147483678
+  },
+  "namespaceFacts": {
+    "userInode": 4026531837,
+    "pidInode": 4026531836,
+    "nsfsChecked": true,
+    "uidAndGidMaps": [
+      0,
+      0,
+      4294967295
+    ],
+    "currentAndPid1RootAgreement": true
+  },
+  "syscallFacts": {
+    "statmountRequestVersion": 0,
+    "statmountRequestBytes": 24,
+    "statmountOutputBytes": 512,
+    "basicMask": 3,
+    "statxUniqueMountId": true
+  },
+  "originalProductionKernelAccepted": false,
+  "namespaceMountAndIdentityChecksChanged": false,
+  "publicationPerformed": false,
+  "installedLifecycleTested": false,
+  "productQualified": false
+}

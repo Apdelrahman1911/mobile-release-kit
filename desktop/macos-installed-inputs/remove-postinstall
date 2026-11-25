@@ -1,0 +1,35 @@
+#!/bin/sh
+# This dedicated package removes the managed app or resumes an interrupted
+# removal. The native entry independently authenticates both modes; shell
+# presence is only a dispatch hint, never permission to delete anything.
+set -eu
+umask 077
+printf '%s\n' 'MRK_MACOS_REMOVE_POSTINSTALL_PHASE=entry' >&2
+# Installer supplies the package, destination and target volume first; any
+# trailing value it adds is never read and carries no authority.
+if [ "$#" -lt 3 ] || [ "$3" != "/" ]; then
+    printf '%s\n' 'MRK_MACOS_REMOVE_POSTINSTALL_REFUSED=target' >&2
+    exit 78
+fi
+case "$1" in
+    /*) ;;
+    *) printf '%s\n' 'MRK_MACOS_REMOVE_POSTINSTALL_REFUSED=package' >&2
+       exit 78 ;;
+esac
+app='/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app'
+if [ -e "$app" ] || [ -L "$app" ]; then
+    printf '%s\n' 'MRK_MACOS_REMOVE_POSTINSTALL_PHASE=live-exec' >&2
+    # A failed live exec is terminal: never retry through the recovery copy.
+    exec '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove' "$1"
+fi
+case "$0" in
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) printf '%s\n' 'MRK_MACOS_REMOVE_POSTINSTALL_REFUSED=entry' >&2
+       exit 78 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 78
+printf '%s\n' 'MRK_MACOS_REMOVE_POSTINSTALL_PHASE=resume-exec' >&2
+# The same signed binary is packaged for recovery only. --resume must refuse a
+# present/ambiguous app, absent prior admission or unknown original ownership.
+exec ./mrk-macos-remove --resume "$1"

@@ -1,0 +1,2020 @@
+diff --git a/desktop/package.json b/desktop/package.json
+index ab69e763..9ca4d936 100644
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -14,7 +14,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build",
+     "test:agent-store-preparation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-preparation.test.mjs"
+   },
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+index 63834b6c..737215f3 100644
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -292,7 +292,7 @@ fn main() {
+     "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
+     "agent_metadata_images_status", "allow_agent_metadata_images_apply", "revoke_agent_metadata_images",
+     "agent_metadata_text_status", "allow_agent_metadata_text_apply", "revoke_agent_metadata_text",
+-    "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
++    "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve", "agent_version_reserve_review_status", "cancel_agent_version_reserve_review",
+     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+     "agent_store_access", "allow_agent_store", "revoke_agent_store",
+     "agent_store_preparation_access", "revoke_agent_store_preparation", "allow_agent_store_prepare", "allow_agent_store_preparation_start",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+index 9015283c..73f5da70 100644
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -18,7 +18,7 @@
+     "allow-revoke-agent-git-commit",
+     "allow-agent-git-repository-access", "allow-allow-agent-git-repository", "allow-revoke-agent-git-repository",
+     "allow-agent-git-remote-access", "allow-allow-agent-git-remote", "allow-revoke-agent-git-remote",
+-    "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
++    "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve", "allow-agent-version-reserve-review-status", "allow-cancel-agent-version-reserve-review",
+     "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
+     "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
+     "allow-agent-store-preparation-access", "allow-revoke-agent-store-preparation", "allow-allow-agent-store-prepare", "allow-allow-agent-store-preparation-start",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+index e14a8ee5..8e676c77 100644
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -479,6 +479,7 @@ impl ApplicationService {
+                 p::RequestBody::VersionEditPrepare(v)=>return self.service_version_edit_prepare(client,v.clone()),
+                 p::RequestBody::VersionEditStatus(q)=>return self.service_version_edit_query(client,q,false),
+                 p::RequestBody::VersionEditCancel(q)=>return self.service_version_edit_query(client,q,true),
++                p::RequestBody::VersionReserveReview(v)=>return self.service_version_reserve_review(client,v.clone()),
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                 p::RequestBody::GitHubActionSubmit(v)=>return self.service_github_action_submit(client,v.clone()),
+                 p::RequestBody::GitHubActionStatus(q)=>return self.service_github_action_query(client,q,false),
+@@ -557,7 +558,7 @@ impl ApplicationService {
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::AppleProvisioningPrepare(_) | p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+                 p::RequestBody::VersionEditPrepare(_) | p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
+-                p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
++                p::RequestBody::VersionReserveReview(_) | p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                 p::RequestBody::GitHubActionSubmit(_) | p::RequestBody::GitHubActionStatus(_) | p::RequestBody::GitHubActionCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+index 6ffe9518..1d8ff7fd 100644
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -38,6 +38,8 @@ mod version_reserve;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use version_reserve::ReservedVersionEditGate;
+ #[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use version_reserve::agent::review::{start_request as decode_agent_version_reserve_review_start,status_request as decode_agent_version_reserve_review_status};
++#[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use version_reserve::agent::{ReserveRelay,decode_allow as decode_agent_version_reserve_allow,decode_empty as decode_agent_version_reserve_empty};
+ #[path = "asset_session_version_enrollment.rs"]
+ mod version_enrollment;
+diff --git a/desktop/src-tauri/src/asset_session_agent_version_reserve.rs b/desktop/src-tauri/src/asset_session_agent_version_reserve.rs
+index 9f7a31c6..31b40ba9 100644
+--- a/desktop/src-tauri/src/asset_session_agent_version_reserve.rs
++++ b/desktop/src-tauri/src/asset_session_agent_version_reserve.rs
+@@ -6,11 +6,13 @@ use crate::{
+     service_protocol::{Error, Id},
+     service_version_reserve_protocol as wire, service_version_reserve_requests as requests,
+ };
+-use serde::Deserialize;
++use serde::{Deserialize, Serialize};
+ use std::path::PathBuf;
+ 
+ #[path = "asset_session_agent_version_relay.rs"]
+ mod relay;
++#[path = "asset_session_agent_version_reserve_review.rs"]
++pub(in crate::asset_session) mod review;
+ pub(crate) use relay::ReserveRelay;
+ 
+ #[derive(Deserialize)]
+@@ -19,6 +21,7 @@ pub(crate) struct Allow {
+     project_id: String,
+     review_id: Id,
+     expected_reserve_revision: u32,
++    expected_allow_revision: String,
+     consent_version: String,
+ }
+ pub(crate) fn decode_allow(bytes: &[u8]) -> Result<Allow, BridgeError> {
+@@ -29,6 +32,7 @@ pub(crate) fn decode_allow(bytes: &[u8]) -> Result<Allow, BridgeError> {
+     let args = Allow::deserialize(&value).map_err(|_| BridgeError::invalid())?;
+     if !crate::protocol::valid_id(&args.project_id)
+         || !(1..u32::MAX).contains(&args.expected_reserve_revision)
++        || allow_revision(&args.expected_allow_revision).is_none()
+         || args.consent_version != wire::CONSENT
+     {
+         return Err(BridgeError::invalid());
+@@ -46,6 +50,21 @@ pub(crate) fn decode_empty(bytes: &[u8]) -> Result<(), BridgeError> {
+         Err(BridgeError::invalid())
+     }
+ }
++// MAIN-only revocation comparison. The CLI's Access/Submit wire is unchanged.
++// Fixed-width lowercase text avoids JS integer rounding; MAX is absorbing.
++fn allow_revision(value: &str) -> Option<u64> {
++    if value.len() != 16 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
++        return None;
++    }
++    u64::from_str_radix(value, 16).ok().filter(|v| *v < u64::MAX)
++}
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct MainAccess {
++    #[serde(flatten)]
++    access: wire::Access,
++    allow_revision: String,
++}
+ struct Grant {
+     scope: Arc<requests::NativeScope>,
+     review: Arc<()>,
+@@ -69,9 +88,43 @@ pub(super) struct State {
+     grant: Option<Arc<Grant>>,
+     active: Option<Active>,
+     pending: Option<Arc<requests::Entry>>,
++    review_pending: Option<Arc<review::Link>>,
+     epoch: std::sync::atomic::AtomicU64,
+     relay_lost: bool,
+ }
++impl State {
++    fn allow_epoch(&self) -> Result<u64, Error> {
++        let epoch = self.epoch.load(Ordering::SeqCst);
++        if epoch == u64::MAX { Err(Error::StateUnknown) } else { Ok(epoch) }
++    }
++    // Claimed once at the first real Doc cut, not on arrival from renderer
++    // DATA. Host waiting retains only this exact private successor.
++    fn claim_allow(&self, expected: u64) -> Result<u64, Error> {
++        if expected == u64::MAX { return Err(Error::StateUnknown); }
++        let next = expected.checked_add(1).ok_or(Error::StateUnknown)?;
++        match self.epoch.compare_exchange(expected, next, Ordering::SeqCst, Ordering::SeqCst) {
++            Ok(_) if next < u64::MAX => Ok(next),
++            Ok(_) | Err(u64::MAX) => Err(Error::StateUnknown),
++            Err(_) => Err(Error::Conflict),
++        }
++    }
++    fn allow_current(&self, successor: u64) -> bool {
++        successor < u64::MAX && self.epoch.load(Ordering::SeqCst) == successor
++    }
++    fn invalidate_allow(&self) -> bool {
++        let old = self.epoch.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
++            |value| Some(value.checked_add(1).unwrap_or(u64::MAX))).unwrap();
++        old < u64::MAX - 1
++    }
++    fn main_access(&self, access: wire::Access) -> Result<MainAccess, BridgeError> {
++        access.validate().map_err(public)?;
++        let result = MainAccess { access, allow_revision: format!("{:016x}", self.allow_epoch().map_err(public)?) };
++        if serde_json::to_vec(&result).map_err(|_| BridgeError::protocol())?.len() > wire::STATUS_LIMIT {
++            return Err(BridgeError::protocol());
++        }
++        Ok(result)
++    }
++}
+ pub(super) const BACKING: usize = 32 * 1024 + std::mem::size_of::<State>() + relay::BACKING;
+ fn public(e: Error) -> BridgeError {
+     application_service::public_error(e)
+@@ -97,7 +150,7 @@ fn service(state: &DocumentState) -> Result<Option<Arc<ApplicationService>>, Bri
+ }
+ pub(in crate::asset_session) fn pending(state: &DocumentState) -> bool {
+     let agent = &state.version_reserve.agent;
+-    agent.relay_lost || agent.pending.as_ref().is_some_and(|e| e.pending())
++    agent.relay_lost || agent.pending.as_ref().is_some_and(|e| e.pending()) || review::pending(state)
+ }
+ pub(in crate::asset_session) fn gui_current(state: &DocumentState) -> Result<(), BridgeError> {
+     if pending(state)
+@@ -112,11 +165,16 @@ pub(in crate::asset_session) fn gui_current(state: &DocumentState) -> Result<(),
+ /// later timestamp. Only memory cells/STOP, never Service/Host IO.
+ pub(in crate::asset_session) fn stop(state: &DocumentState, at: Instant) {
+     let agent = &state.version_reserve.agent;
+-    let _ = agent
+-        .epoch
+-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+-            Some(n.saturating_add(1))
+-        });
++    if !agent.invalidate_allow() {
++        // No wrapped/stale revision can grant again. Keep any actual original
++        // and contract its same STOP; never drop it to make room for a grant.
++        if let Some(entry) = &agent.pending { entry.unknown(); }
++        if let Some(link) = &agent.review_pending { link.entry.unknown(); }
++        if let Some(lane) = &state.version_reserve.lane {
++            lane.control.stop_at(at);
++            lane.control.unknown();
++        }
++    }
+     if let Some(service) = agent.service.as_ref().and_then(Weak::upgrade) {
+         let _ = service
+             .version_reserve_requests()
+@@ -226,7 +284,9 @@ impl DocumentBinding {
+     fn reserve_review_native(
+         &self,
+         state: &DocumentState,
+-        args: &Allow,
++        project_id: &str,
++        review_id: &Id,
++        expected_reserve_revision: u32,
+         claimed: Option<&Arc<requests::NativeLink>>,
+     ) -> Result<(Arc<()>, NativeProject), BridgeError> {
+         self.passive_query_gate_locked(state, &self.inner.bridge)?;
+@@ -245,7 +305,7 @@ impl DocumentBinding {
+             || !self.inner.bridge.supervisor.can_exit()
+             || version_allocation::pending(state)
+             || !matches!(state.version_reserve.view.phase, p::Phase::Reviewed)
+-            || state.version_reserve.view.revision != args.expected_reserve_revision
++            || state.version_reserve.view.revision != expected_reserve_revision
+         {
+             return Err(p::refused());
+         }
+@@ -254,18 +314,19 @@ impl DocumentBinding {
+             .review
+             .as_ref()
+             .filter(|r| {
+-                r.id == args.review_id.as_str()
+-                    && r.input.project_id == args.project_id
++                r.id == review_id.as_str()
++                    && r.input.project_id == project_id
+                     && Instant::now() < r.end
+             })
+             .ok_or_else(p::refused)?;
++        if review.delegated.as_ref().is_some_and(|v|!v.entry.ready_current(&review.identity,Instant::now())) {return Err(p::refused())}
+         if let Some(link) = claimed {
+             admission(state, review, link)?;
+         }
+         let (registration, root) = self
+             .inner
+             .bridge
+-            .native_project(&args.project_id)
++            .native_project(project_id)
+             .map_err(|_| p::refused())?;
+         let edit = self
+             .inner
+@@ -278,7 +339,7 @@ impl DocumentBinding {
+             .ok_or_else(p::refused)?
+             .version_source_input(
+                 &self.inner,
+-                &args.project_id,
++                project_id,
+                 &review.input.reference,
+                 &edit,
+             )?;
+@@ -304,7 +365,7 @@ impl DocumentBinding {
+         Ok((
+             review.identity.clone(),
+             NativeProject {
+-                runtime_id: args.project_id.clone(),
++                runtime_id: project_id.to_owned(),
+                 canonical_root: root.path,
+                 device,
+                 inode,
+@@ -317,13 +378,13 @@ impl DocumentBinding {
+     pub(crate) fn agent_version_reserve_access(
+         &self,
+         window: &str,
+-    ) -> Result<wire::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+         let state = self.lock();
+         let Some(service) = service(&state)? else {
+-            return Ok(wire::Access::empty());
++            return state.version_reserve.agent.main_access(wire::Access::empty());
+         };
+         service.native_history_current().map_err(public)?;
+         let mut value = service
+@@ -355,7 +416,7 @@ impl DocumentBinding {
+             }
+         }
+         value.validate().map_err(public)?;
+-        Ok(value)
++        state.version_reserve.agent.main_access(value)
+     }
+     fn agent_reserved_current(
+         &self,
+@@ -408,19 +469,27 @@ impl DocumentBinding {
+         &self,
+         window: &str,
+         args: Allow,
+-    ) -> Result<wire::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN || args.consent_version != wire::CONSENT {
+             return Err(BridgeError::invalid());
+         }
++        let expected = allow_revision(&args.expected_allow_revision).ok_or_else(BridgeError::invalid)?;
+         let grant_id = Id::random().map_err(public)?;
+         let (identity, native, epoch) = {
+             let state = self.lock();
+-            let (identity, native) = self.reserve_review_native(&state, &args, None)?;
+-            (
+-                identity,
+-                native,
+-                state.version_reserve.agent.epoch.load(Ordering::SeqCst),
+-            )
++            if state.version_reserve.agent.allow_epoch().map_err(public)? != expected {
++                return Err(p::refused());
++            }
++            let (identity, native) = self.reserve_review_native(&state, &args.project_id,
++                &args.review_id, args.expected_reserve_revision, None)?;
++            let successor = match state.version_reserve.agent.claim_allow(expected) {
++                Ok(value) => value,
++                Err(e) => {
++                    if e == Error::StateUnknown { stop(&state, Instant::now()); }
++                    return Err(public(e));
++                }
++            };
++            (identity, native, successor)
+         };
+         // Original Host+Service can do IO. No Doc/Edit/inbox/relay guard lives here.
+         let host = &self.inner.bridge.application_service;
+@@ -434,11 +503,11 @@ impl DocumentBinding {
+             return Err(p::refused());
+         }
+         let mut state = self.lock();
+-        let (current, current_native) = self.reserve_review_native(&state, &args, None)?;
++        let (current, current_native) = self.reserve_review_native(&state, &args.project_id,
++            &args.review_id, args.expected_reserve_revision, None)?;
+         if !Arc::ptr_eq(&identity, &current)
+             || !same_native(&native, &current_native)
+-            || state.version_reserve.agent.epoch.load(Ordering::SeqCst) != epoch
+-            || epoch == u64::MAX
++            || !state.version_reserve.agent.allow_current(epoch)
+             || state
+                 .version_reserve
+                 .agent
+@@ -474,34 +543,34 @@ impl DocumentBinding {
+             review: identity,
+             native,
+         }));
+-        Ok(access)
++        state.version_reserve.agent.main_access(access)
+     }
+     pub(crate) fn revoke_agent_version_reserve(
+         &self,
+         window: &str,
+-    ) -> Result<wire::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
++        let at = Instant::now();
+         let mut state = self.lock();
+-        let _ = state.version_reserve.agent.epoch.fetch_update(
+-            Ordering::SeqCst,
+-            Ordering::SeqCst,
+-            |n| Some(n.saturating_add(1)),
+-        );
++        if !state.version_reserve.agent.invalidate_allow() {
++            stop(&state, at);
++            return Err(public(Error::StateUnknown));
++        }
+         let Some(service) = service(&state)? else {
+-            return Ok(wire::Access::empty());
++            return state.version_reserve.agent.main_access(wire::Access::empty());
+         };
+         let result = service
+             .version_reserve_requests()
+-            .revoke(wire::Reason::PermissionRevoked, Instant::now())
++            .revoke(wire::Reason::PermissionRevoked, at)
+             .map_err(public);
+         if let Some(active) = &state.version_reserve.agent.active {
+             if let Some(lane) = active.lane.upgrade() {
+                 forward(&lane);
+             }
+         }
+-        result
++        state.version_reserve.agent.main_access(result?)
+     }
+     fn agent_reserve_claim(&self) -> Result<Option<requests::Claim>, BridgeError> {
+         let mut state = self.lock();
+@@ -524,13 +593,8 @@ impl DocumentBinding {
+     ) -> Result<(), BridgeError> {
+         let state = self.lock();
+         let scope = link.scope();
+-        let args = Allow {
+-            project_id: scope.runtime_id.clone(),
+-            review_id: scope.review_id.clone(),
+-            expected_reserve_revision: scope.review_revision,
+-            consent_version: wire::CONSENT.into(),
+-        };
+-        let (_, native) = self.reserve_review_native(&state, &args, Some(link))?;
++        let (_, native) = self.reserve_review_native(&state, &scope.runtime_id,
++            &scope.review_id, scope.review_revision, Some(link))?;
+         let grant = state
+             .version_reserve
+             .agent
+@@ -565,6 +629,7 @@ impl DocumentBinding {
+         }
+         if lost {
+             state.version_reserve.agent.relay_lost = true;
++            if let Some(link)=&state.version_reserve.agent.review_pending {if link.entry.pending(){link.entry.unknown();}}
+             if let Some(entry) = &state.version_reserve.agent.pending {
+                 entry.unknown();
+             }
+diff --git a/desktop/src-tauri/src/asset_session_agent_version_reserve_tests.rs b/desktop/src-tauri/src/asset_session_agent_version_reserve_tests.rs
+index eba7aa47..c4971c79 100644
+--- a/desktop/src-tauri/src/asset_session_agent_version_reserve_tests.rs
++++ b/desktop/src-tauri/src/asset_session_agent_version_reserve_tests.rs
+@@ -5,7 +5,7 @@ use serde_json::json;
+ 
+ fn allow() -> Value {
+     json!({"projectId":"project-1","reviewId":"00000000000000000000000000000001",
+-        "expectedReserveRevision":7,"consentVersion":wire::CONSENT})
++        "expectedReserveRevision":7,"expectedAllowRevision":"0000000000000000","consentVersion":wire::CONSENT})
+ }
+ #[test]
+ fn allow_requires_exact_review_revision_and_consent_without_caller_authority() {
+@@ -13,10 +13,12 @@ fn allow_requires_exact_review_revision_and_consent_without_caller_authority() {
+     let decoded = decode_allow(&serde_json::to_vec(&value).unwrap()).unwrap();
+     assert_eq!(decoded.project_id, "project-1");
+     assert_eq!(decoded.expected_reserve_revision, 7);
++    assert_eq!(decoded.expected_allow_revision, "0000000000000000");
+     for field in [
+         "projectId",
+         "reviewId",
+         "expectedReserveRevision",
++        "expectedAllowRevision",
+         "consentVersion",
+     ] {
+         let mut missing = value.clone();
+@@ -29,6 +31,12 @@ fn allow_requires_exact_review_revision_and_consent_without_caller_authority() {
+         ("expectedReserveRevision", json!(0)),
+         ("expectedReserveRevision", json!(u32::MAX)),
+         ("expectedReserveRevision", json!("7")),
++        ("expectedAllowRevision", json!(0)),
++        ("expectedAllowRevision", json!(null)),
++        ("expectedAllowRevision", json!("0")),
++        ("expectedAllowRevision", json!("000000000000000A")),
++        ("expectedAllowRevision", json!("0000000000000000\n")),
++        ("expectedAllowRevision", json!("ffffffffffffffff")),
+         ("consentVersion", json!("agent-local-build-once-v1")),
+         ("source", json!({})),
+         ("candidateId", json!("not accepted")),
+@@ -52,6 +60,50 @@ fn allow_requires_exact_review_revision_and_consent_without_caller_authority() {
+     large.extend(&bytes);
+     assert!(decode_allow(&large).is_err());
+ }
++
++#[test]
++fn original_main_revision_fences_revoke_before_first_allow_and_between_real_cuts() {
++    let state = State::default();
++    // The actual MAIN accessor also works before a Service/Grant exists.
++    let checked = state.main_access(wire::Access::empty()).unwrap();
++    let expected = allow_revision(&checked.allow_revision).unwrap();
++    assert_eq!(expected, 0);
++    assert!(state.service.is_none() && state.grant.is_none());
++    assert!(state.invalidate_allow()); // Revoke overtakes the delayed first cut.
++    assert_eq!(state.claim_allow(expected), Err(Error::Conflict));
++    let fresh = state.main_access(wire::Access::empty()).unwrap();
++    let expected = allow_revision(&fresh.allow_revision).unwrap();
++    let successor = state.claim_allow(expected).unwrap();
++    assert!(state.allow_current(successor));
++    assert_eq!(state.claim_allow(expected), Err(Error::Conflict)); // Never reused.
++    assert!(state.invalidate_allow()); // Same original Host-wait gap, no new clock.
++    assert!(!state.allow_current(successor));
++    assert!(state.service.is_none() && state.grant.is_none());
++
++    // Only MAIN's envelope changes. CLI Access remains the exact old DTO.
++    let main = serde_json::to_value(state.main_access(wire::Access::empty()).unwrap()).unwrap();
++    let mut old = serde_json::to_value(wire::Access::empty()).unwrap();
++    assert_eq!(old.as_object().unwrap().len(), 10);
++    old["allowRevision"] = json!("0000000000000003");
++    assert_eq!(main, old);
++    assert!(serde_json::to_vec(&main).unwrap().len() <= wire::STATUS_LIMIT);
++}
++
++#[test]
++fn main_revision_overflow_is_absorbing_and_cannot_wrap_or_issue_another_stamp() {
++    let state = State::default();
++    state.epoch.store(u64::MAX - 1, Ordering::SeqCst);
++    assert_eq!(allow_revision("fffffffffffffffe"), Some(u64::MAX - 1));
++    assert_eq!(state.claim_allow(u64::MAX - 1), Err(Error::StateUnknown));
++    assert_eq!(state.epoch.load(Ordering::SeqCst), u64::MAX);
++    assert_eq!(state.allow_epoch(), Err(Error::StateUnknown));
++    assert_eq!(state.claim_allow(0), Err(Error::StateUnknown));
++    assert!(!state.allow_current(u64::MAX));
++    assert!(!state.invalidate_allow());
++    assert!(state.main_access(wire::Access::empty()).is_err());
++    assert_eq!(state.epoch.load(Ordering::SeqCst), u64::MAX);
++    assert!(state.service.is_none() && state.grant.is_none());
++}
+ #[test]
+ fn status_and_revoke_accept_only_bounded_empty_raw_objects() {
+     decode_empty(b"{}").unwrap();
+diff --git a/desktop/src-tauri/src/asset_session_version_allocation.rs b/desktop/src-tauri/src/asset_session_version_allocation.rs
+index 5eccf514..cc345aa0 100644
+--- a/desktop/src-tauri/src/asset_session_version_allocation.rs
++++ b/desktop/src-tauri/src/asset_session_version_allocation.rs
+@@ -14,6 +14,12 @@ pub(super) const COMPLETING: u8 = 2;
+ pub(super) const RETURNED: u8 = 3;
+ pub(super) const UNKNOWN: u8 = 4;
+ 
++pub(super) fn source_quote(input_bytes:usize)->Option<usize>{
++    VersionAllocationSourceAdmission::reservation_bytes()?.checked_add(input_bytes)?.checked_add(
++        std::mem::size_of::<Lane>()+std::mem::size_of::<VersionAllocationSourceCompletion>()+256)
++}
++
++
+ pub(super) fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<MutexGuard<'a, T>> {
+     let result = slot.lock();
+     if result.is_err() {
+@@ -35,6 +41,8 @@ pub(super) struct Lane {
+     pub(super) reservation_bytes: usize,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     pub(super) reserve: Option<Arc<version_reserve::Lane>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(super) review: Option<Arc<version_reserve::agent::review::Link>>,
+ }
+ impl Lane {
+     pub(super) fn returned(&self) -> bool {
+@@ -80,6 +88,8 @@ impl Lane {
+         self.stage.store(UNKNOWN, Ordering::SeqCst);
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if let Some(reserve)=&self.reserve {reserve.unknown();}
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(link)=&self.review {link.entry.unknown();}
+         // Do not call ControlSlot.poisoned here: its read-host retirement may
+         // perform IO, and some callers still hold Doc. This original lane
+         // remains an absorbing busy/exit fence; no new control owner is minted.
+@@ -118,6 +128,10 @@ pub(crate) struct VersionAllocationSourceGoGate {
+     pub(super) lane: Weak<Lane>,
+ }
+ impl VersionAllocationSourceGoGate {
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    pub(crate) fn review_stop(&self,now:Instant)->Option<Result<Option<Instant>,crate::service_protocol::Error>>{
++        self.lane.upgrade()?.review.as_ref().map(|l|l.entry.stop_at(now).map(|v|v.map(|s|s.1)))
++    }
+     fn original(&self, input: &Arc<VersionAllocationSourceInput>) -> Result<(DocumentBinding, Arc<Lane>), BridgeError> {
+         let document = DocumentBinding { inner: self.document.upgrade().ok_or_else(changed)? };
+         let lane = self.lane.upgrade().ok_or_else(changed)?;
+@@ -130,6 +144,8 @@ impl VersionAllocationSourceGoGate {
+         self.original(input).is_ok_and(|(document, lane)| {
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if lane.reserve.as_ref().is_some_and(|v|!v.current_control()) {return false;}
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if lane.review.as_ref().is_some_and(|v|!v.current(&lane)) {return false;}
+             lane.saved.current_version_source(&document.inner, input)
+         })
+     }
+@@ -299,20 +315,33 @@ impl DocumentBinding {
+             return Err(changed());
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        self.reserve_source_current(state,lane,edit)?;
++        {
++            if lane.review.as_ref().is_some_and(|v|!v.current(lane)){return Err(changed())}
++            self.reserve_source_current(state,lane,edit)?;
++        }
+         Ok(())
+     }
+     /// Native admission only. The root, saved hashes/path, account/provider
+     /// projection and private filesystem data are never renderer arguments.
+     /// This action does not select/mint a candidate or reserve/change a version.
+     pub(super) fn start_version_allocation_source(&self, project_id: &str, reference: &str) -> Result<Arc<Lane>, BridgeError> {
+-        let started = Instant::now();
++        self.start_version_allocation_source_impl(project_id,reference,#[cfg(any(target_os="linux",target_os="macos"))] None)
++    }
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    pub(super) fn start_version_allocation_source_linked(&self,project_id:&str,reference:&str,review:Option<Arc<version_reserve::agent::review::Link>>)->Result<Arc<Lane>,BridgeError>{
++        self.start_version_allocation_source_impl(project_id,reference,review)
++    }
++    fn start_version_allocation_source_impl(&self,project_id:&str,reference:&str,
++        #[cfg(any(target_os="linux",target_os="macos"))] review:Option<Arc<version_reserve::agent::review::Link>>)->Result<Arc<Lane>,BridgeError>{
++        let started=Instant::now();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let started=review.as_ref().map_or(started,|l|l.entry.started);
+         if !crate::protocol::valid_id(project_id) || !crate::supervisor::version_allocation_source_branch(reference) {
+             return Err(BridgeError::invalid());
+         }
+         let mut state = self.lock();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+-        version_reserve::agent::gui_current(&state)?; // Same admission lock, not a pre-await GUI check.
++        if let Some(link)=&review {version_reserve::agent::review::admission(&state,link)?}else{version_reserve::agent::gui_current(&state)?}; // SAME admission lock.
+         if pending(&state) {
+             return Err(busy());
+         }
+@@ -350,14 +379,7 @@ impl DocumentBinding {
+                 reference,
+                 &edit,
+             )?;
+-            let quote = VersionAllocationSourceAdmission::reservation_bytes()
+-                .and_then(|v| v.checked_add(input.retained_bytes()?))
+-                .and_then(|v| {
+-                    v.checked_add(
+-                        std::mem::size_of::<Lane>() + std::mem::size_of::<VersionAllocationSourceCompletion>() + 256,
+-                    )
+-                })
+-                .ok_or_else(busy)?;
++            let quote=source_quote(input.retained_bytes().ok_or_else(busy)?).ok_or_else(busy)?;
+             crate::macos_history_inventory::admission_bytes(document, quote).ok_or_else(busy)?;
+             let lane = Arc::new(Lane {
+                 saved,
+@@ -370,6 +392,8 @@ impl DocumentBinding {
+                 reservation_bytes: quote,
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 reserve: None,
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                review:review.clone(),
+             });
+             let gate =
+                 VersionAllocationSourceGoGate { document: Arc::downgrade(&self.inner), lane: Arc::downgrade(&lane) };
+@@ -379,6 +403,8 @@ impl DocumentBinding {
+                 return Err(busy());
+             }
+             state.version_allocation_source = Some(lane.clone());
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Err(error)=version_reserve::agent::review::bind(&mut state,&lane){lane.fail_unknown(self);return Err(error)}
+             // Keep Doc/Edit and the installed pending lane through original
+             // roster insertion; worker IO begins only through Supervisor latch.
+             let result = self.inner.bridge.supervisor.start_version_allocation_source(admission);
+@@ -393,7 +419,11 @@ impl DocumentBinding {
+                     Ok(lane)
+                 }
+                 Err(error) => {
+-                    if lane.stage.load(Ordering::SeqCst) == RESERVED {
++                    #[cfg(any(target_os="linux",target_os="macos"))]
++                    let delegated=lane.review.is_some();
++                    #[cfg(not(any(target_os="linux",target_os="macos")))]
++                    let delegated=false;
++                    if delegated {lane.fail_unknown(self)} else if lane.stage.load(Ordering::SeqCst) == RESERVED {
+                         state.version_allocation_source = None;
+                     }
+                     Err(error)
+diff --git a/desktop/src-tauri/src/asset_session_version_reserve.rs b/desktop/src-tauri/src/asset_session_version_reserve.rs
+index 86b4603b..82694f37 100644
+--- a/desktop/src-tauri/src/asset_session_version_reserve.rs
++++ b/desktop/src-tauri/src/asset_session_version_reserve.rs
+@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
+ pub(super) mod agent;
+ 
+ struct Review {
++    delegated: Option<Arc<agent::review::Link>>,
+     identity: Arc<()>,
+     id: String,
+     input: p::Review,
+@@ -312,12 +313,17 @@ impl DocumentBinding {
+         &self,
+         input: p::Review,
+     ) -> Result<p::Status, BridgeError> {
++        self.review_version_reservation_linked(input,None).await
++    }
++    pub(super) async fn review_version_reservation_linked(
++        &self, input:p::Review, delegated:Option<Arc<agent::review::Link>>,
++    )->Result<p::Status,BridgeError>{
+         if !input.valid() {
+             return Err(p::not_started(BridgeError::invalid()));
+         }
+         {
+             let state = self.lock();
+-            agent::gui_current(&state).map_err(p::not_started)?;
++            if let Some(link)=&delegated {agent::review::admission(&state,link)}else{agent::gui_current(&state)}.map_err(p::not_started)?;
+             if state
+                 .version_reserve
+                 .lane
+@@ -327,12 +333,10 @@ impl DocumentBinding {
+                 return Err(p::not_started(p::refused()));
+             }
+         }
+-        let id = crate::service_protocol::Id::random()
+-            .map_err(|_| p::not_started(p::unavailable()))?
+-            .as_str()
+-            .to_owned();
++        let id = match &delegated {Some(link)=>link.id.clone(),None=>crate::service_protocol::Id::random()
++            .map_err(|_| p::not_started(p::unavailable()))?.as_str().to_owned()};
+         let reading =
+-            match self.start_version_allocation_source(&input.project_id, &input.reference) {
++            match self.start_version_allocation_source_linked(&input.project_id, &input.reference, delegated.clone()) {
+                 Ok(original) => original,
+                 Err(error) => {
+                     // A pre-admission refusal is not an unknown operation. Never
+@@ -345,7 +349,7 @@ impl DocumentBinding {
+                     });
+                 }
+             };
+-        {
++        if delegated.is_none() {
+             let mut state = self.lock();
+             state.version_reserve.review = None;
+             state.version_reserve.reading = Some((id.clone(), reading.clone()));
+@@ -437,8 +441,12 @@ impl DocumentBinding {
+                 new_candidate: input.new_candidate,
+                 future_tag: input.future_tag.clone(),
+             };
++            let end=Instant::now().checked_add(Duration::from_secs(120)).ok_or_else(p::refused)?;
++            let end=delegated.as_ref().map_or(end,|l|end.min(l.entry.scope.read.end()));
++            if Instant::now()>=end{return Err(p::refused())}
+             state.version_reserve.reading = None;
+             state.version_reserve.review = Some(Review {
++                delegated:delegated.clone(),
+                 identity: Arc::new(()),
+                 id: id.clone(),
+                 input,
+@@ -447,7 +455,7 @@ impl DocumentBinding {
+                 native: original.input.clone(),
+                 store,
+                 registration,
+-                end: Instant::now() + Duration::from_secs(120),
++                end,
+                 previous,
+             });
+             state.version_reserve.view.review = Some(view);
+@@ -456,6 +464,12 @@ impl DocumentBinding {
+             state.version_reserve.view.reason = "none";
+             state.version_reserve.view.reservation = None;
+             state.version_reserve.bump();
++            if let Some(link)=&delegated {
++                let review=state.version_reserve.review.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                if link.entry.native_ready(&id,state.version_reserve.view.revision,&review.identity,review.end).is_err(){
++                    link.entry.unknown();return Err(BridgeError::cleanup_unknown())
++                }
++            }
+             Ok(state.version_reserve.current_view())
+         })();
+         if reviewed.is_err() {
+@@ -517,6 +531,7 @@ impl DocumentBinding {
+                 r.id == review_id && r.input.project_id == project && Instant::now() < r.end
+             })
+             .ok_or_else(p::refused)?;
++        if review.delegated.as_ref().is_some_and(|v|!v.entry.ready_current(&review.identity,Instant::now())) {return Err(p::refused())}
+         if let Some(link) = &agent { agent::admission(&state,review,link)?; }
+         let (registration, root) = self
+             .inner
+@@ -590,6 +605,7 @@ impl DocumentBinding {
+             .and_then(|n| n.checked_add(input.retained_bytes()? + 32 * 1024))
+             .ok_or_else(p::unavailable)?;
+         let observation = review.store.clone();
++        let reviewed_read=review.delegated.as_ref().map(|v|(v.entry.clone(),review.identity.clone()));
+         let pins = state.github.begin_version_reserve(
+             project,
+             registration,
+@@ -626,6 +642,7 @@ impl DocumentBinding {
+                 result: Mutex::new(None),
+                 reservation_bytes: quote,
+                 reserve: Some(reserve),
++                review: None,
+             }
+         });
+         let lane = source
+@@ -633,6 +650,13 @@ impl DocumentBinding {
+             .as_ref()
+             .expect("closed reserve constructor")
+             .clone();
++        if let Some((entry,identity))=reviewed_read {
++            if entry.consume_review(&identity).is_err(){
++                // Same begun original still publishes and is returned to its
++                // original caller for cleanup. Never strand a pre-GO control.
++                entry.unknown();lane.control.unknown();
++            }
++        }
+         agent::bind(&mut state,&lane); // Before Review take/publication/GO; no fallible work follows.
+         state.version_reserve.review.take();
+         state.version_reserve.lane = Some(lane.clone());
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+index 001a216f..2a019b22 100644
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -96,6 +96,7 @@ Usage:\n\
+   mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n\
+   mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk version-reserve-review PROJECT_ID SERVICE_INSTANCE --stdin [--json]\n\
+   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -354,7 +355,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
+                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
+                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
+-                "appliesSourceEdits":false,"nativeAvailabilityChecked":false,"commands":version_reserve::COMMANDS},
++                "appliesSourceEdits":false,"sourceReviewUnderRead":true,"reviewQueriesStore":false,"reserveNeedsSeparateDesktopAllow":true,"nativeAvailabilityChecked":false,"commands":version_reserve::COMMANDS},
+             "gitCommits": {"scope":"desktop-approved-whole-staged-index", "defaultEnabled":false,"oneUse":true,
+                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                 "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+@@ -408,7 +409,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+-        text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
++        text.push_str("  mrk version-reserve-review PROJECT_ID SERVICE_INSTANCE --stdin [--json]\n  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
+         text.into_bytes()
+     };
+@@ -508,7 +509,7 @@ fn human(response: &p::ResponseBody) -> String {
+         p::ResponseBody::ToolSetupRequest(_)=>"Use tool-setup-status with the same original request IDs; never replay.\n".into(),
+         p::ResponseBody::StorePreparation(_)=>"Use store-status with the original request; Prepare never authorizes Start.\n".into(),
+         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+-        p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
++        p::ResponseBody::VersionReserveReview(_) | p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
+         p::ResponseBody::VersionEditPreparation(_) => "Use version-edit-status with the same original request ID. Review and allow Save separately in Desktop.\n".into(),
+         p::ResponseBody::GitHubActionRequest(_) => "Use github-status with the retained original IDs; never replay an unconfirmed GitHub action.\n".into(),
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+index bd451ccb..f63b7c7a 100644
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -310,6 +310,7 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
+         p::ResponseBody::ToolSetupRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::StoreRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::StorePreparation(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
++        p::ResponseBody::VersionReserveReview(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+index fa4f0b43..2c68f003 100644
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -22,6 +22,8 @@ mod service_metadata_text_requests;
+ mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
++#[path="service_version_reserve_review_protocol.rs"] mod service_version_reserve_review_protocol;
++#[path="service_version_reserve_review_requests.rs"] mod service_version_reserve_review_requests;
+ #[path="service_store_protocol.rs"]
+ mod service_store_protocol;
+ #[path="service_store_prepare_protocol.rs"]
+diff --git a/desktop/src-tauri/src/installed_cli_version_reserve.rs b/desktop/src-tauri/src/installed_cli_version_reserve.rs
+index 06bd0e8c..115885ee 100644
+--- a/desktop/src-tauri/src/installed_cli_version_reserve.rs
++++ b/desktop/src-tauri/src/installed_cli_version_reserve.rs
+@@ -3,12 +3,17 @@
+ use super::*;
+ use crate::service_version_reserve_protocol as reserve;
+ 
+-pub(super) const COMMANDS: [&str; 3] = [
++#[path="installed_cli_version_reserve_review.rs"]
++mod source_review;
++
++pub(super) const COMMANDS: [&str; 4] = [
+     "version-reserve-submit",
+     "version-reserve-status",
+     "version-reserve-cancel",
++    "version-reserve-review",
+ ];
+ enum Command {
++    Review{project:Id,instance:Id},
+     Submit {
+         project: Id,
+         instance: Id,
+@@ -40,6 +45,7 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
+         words.pop();
+     }
+     let command = match words.as_slice() {
++        ["version-reserve-review",project,instance,"--stdin"]=>Command::Review{project:Id::parse(project)?,instance:Id::parse(instance)?},
+         ["version-reserve-submit", project, instance, grant, review, "--reviewed"] => {
+             Command::Submit {
+                 project: Id::parse(project)?,
+@@ -95,6 +101,7 @@ fn output(
+     if let p::ResponseBody::Error(e) = response.response {
+         return Err(e);
+     }
++    if matches!(&response.response,p::ResponseBody::VersionReserveReview(_)) && submitted.is_none(){return source_review::output(response,q,json)}
+     let p::ResponseBody::VersionReserveRequest(status) = &response.response else {
+         return Err(Error::StateUnknown);
+     };
+@@ -152,6 +159,13 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     {
+         let (q, submitted, body) = match options.command {
++            Command::Review{project,instance}=>{
++                let options=source_review::stdin_options()?;
++                let q=reserve::Query{project_id:project,service_instance:instance,request_id:Id::random()?};
++                let input=crate::service_version_reserve_review_protocol::Request{origin:q.clone(),options};input.validate()?;
++                std::io::stderr().write_all(receipt(&q).as_bytes()).map_err(|_|Error::Unavailable)?;
++                (q,None,p::RequestBody::VersionReserveReview(input))
++            },
+             Command::Submit {
+                 project,
+                 instance,
+@@ -193,6 +207,9 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
+                 request: body,
+             };
+             let response = rt.block_on(crate::installed_cli_ipc::request(&path, &request))?;
++            if let p::RequestBody::VersionReserveReview(input)=&request.request{
++                if !matches!(&response.response,p::ResponseBody::VersionReserveReview(s) if s.options==input.options){return Err(Error::StateUnknown)}
++            }
+             output(
+                 &response,
+                 &q,
+diff --git a/desktop/src-tauri/src/installed_cli_version_reserve_tests.rs b/desktop/src-tauri/src/installed_cli_version_reserve_tests.rs
+index 9d86374d..2743fa17 100644
+--- a/desktop/src-tauri/src/installed_cli_version_reserve_tests.rs
++++ b/desktop/src-tauri/src/installed_cli_version_reserve_tests.rs
+@@ -92,7 +92,8 @@ fn lost_ack_keeps_exact_public_request_and_catalogue_stays_bounded_without_readi
+     assert!(bytes.len() <= crate::installed_cli::CAPABILITIES_BYTES);
+     let catalog: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+     let cap = &catalog["versionReservation"];
+-    assert_eq!(cap["commands"].as_array().unwrap().len(), 3);
++    assert_eq!(cap["commands"].as_array().unwrap().len(), 4);
++    assert_eq!(&COMMANDS[..3], &["version-reserve-submit", "version-reserve-status", "version-reserve-cancel"]);
+     for field in [
+         "defaultEnabled",
+         "readGrantAuthorizesReserve",
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+index 41863b3a..09e212e6 100644
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -138,6 +138,8 @@ mod service_metadata_text_requests;
+ mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
++#[path="service_version_reserve_review_protocol.rs"] mod service_version_reserve_review_protocol;
++#[path="service_version_reserve_review_requests.rs"] mod service_version_reserve_review_requests;
+ #[path="service_store_protocol.rs"]
+ mod service_store_protocol;
+ #[path="service_store_prepare_protocol.rs"]
+diff --git a/desktop/src-tauri/src/service_ipc_response_memory.rs b/desktop/src-tauri/src/service_ipc_response_memory.rs
+index aaf18813..3fe0888b 100644
+--- a/desktop/src-tauri/src/service_ipc_response_memory.rs
++++ b/desktop/src-tauri/src/service_ipc_response_memory.rs
+@@ -130,6 +130,7 @@ fn quote_with(c: Cells) -> Option<Quote> {
+         crate::agent_android_build::REPORT_LIMIT
+             .checked_add(crate::agent_build_requests::STATUS_HEAP_BYTES)?,
+         crate::service_version_reserve_requests::IPC_WORKER_BACKING,
++        crate::service_version_reserve_review_requests::IPC_WORKER_BACKING,
+         crate::service_play_cleanup_requests::IPC_WORKER_BACKING,
+         crate::service_upload_key_requests::IPC_WORKER_BACKING,
+         crate::service_version_edit_requests::IPC_WORKER_BACKING,
+@@ -278,6 +279,7 @@ mod tests {
+         let old_small = [
+             crate::service_git_requests::IPC_WORKER_BACKING,
+             crate::service_version_reserve_requests::IPC_WORKER_BACKING,
++        crate::service_version_reserve_review_requests::IPC_WORKER_BACKING,
+             crate::service_play_cleanup_requests::IPC_WORKER_BACKING,
+             crate::service_upload_key_requests::IPC_WORKER_BACKING,
+             crate::service_version_edit_requests::IPC_WORKER_BACKING,
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+index f3caedac..cbf7a462 100644
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -250,6 +250,7 @@ pub enum RequestBody {
+     #[serde(rename="version-edit.prepare")] VersionEditPrepare(crate::service_version_edit_prepare_protocol::Prepare),
+     #[serde(rename="version-edit.status")] VersionEditStatus(crate::service_version_edit_protocol::Query),
+     #[serde(rename="version-edit.cancel")] VersionEditCancel(crate::service_version_edit_protocol::Query),
++    #[serde(rename="version-reserve.review")] VersionReserveReview(crate::service_version_reserve_review_protocol::Request),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -327,6 +328,7 @@ pub enum ResponseBody {
+     VersionEditRequest(crate::service_version_edit_protocol::Status),
+     VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
++    VersionReserveReview(crate::service_version_reserve_review_protocol::Status),
+     StoreRequest(crate::service_store_protocol::Status),
+     StorePreparation(Box<crate::service_store_prepare_protocol::Status>),
+     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
+@@ -407,6 +409,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
+         &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if matches!(&request.request,RequestBody::AppleProvisioningPrepare(_)|RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
+         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
++    if let RequestBody::VersionReserveReview(v)=&request.request{if bytes.len()>crate::service_version_reserve_review_protocol::REQUEST_BYTES{return Err(Error::InvalidRequest)}v.validate()?;}
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if matches!(&request.request,RequestBody::ToolSetupSubmit(_)|RequestBody::ToolSetupStatus(_)|RequestBody::ToolSetupCancel(_))
+@@ -547,6 +550,10 @@ fn validate_response(response: &Response) -> Result<(), Error> {
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_apple_provisioning_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+         },
++        ResponseBody::VersionReserveReview(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_version_reserve_review_protocol::STATUS_BYTES{return Err(Error::InvalidRequest)}
++        },
+         ResponseBody::VersionReserveRequest(row) => {
+             row.validate()?;
+             if row.origin.service_instance != response.service_instance
+diff --git a/desktop/src-tauri/src/service_version_reserve_application.rs b/desktop/src-tauri/src/service_version_reserve_application.rs
+index d94c0367..ed295d35 100644
+--- a/desktop/src-tauri/src/service_version_reserve_application.rs
++++ b/desktop/src-tauri/src/service_version_reserve_application.rs
+@@ -41,6 +41,15 @@ impl ApplicationService {
+         }
+         Ok(())
+     }
++    pub(super) fn service_version_reserve_review(&self,client:&ClientSession,input:crate::service_version_reserve_review_protocol::Request)->Result<p::ResponseBody,Error>{
++        let started=Instant::now(); // BEFORE service/Store wait, never reset at MAIN.
++        input.validate()?;
++        let state=self.lock()?;
++        self.authorize_build_client(&state,client,&input.origin.project_id)?;
++        let saved=Self::identity_point(&state,&input.origin.project_id)?;
++        let read=live_grant(&state)?.reserve_read.clone();
++        self.version_reserve_requests.enqueue_review(input,crate::service_version_reserve_review_requests::Scope{saved,read},started).map(p::ResponseBody::VersionReserveReview)
++    }
+     pub(super) fn service_version_reserve_submit(
+         &self,
+         client: &ClientSession,
+@@ -67,10 +76,9 @@ impl ApplicationService {
+         let state = self.lock()?;
+         self.authorize_build_client(&state, client, &q.project_id)?;
+         Self::identity_point(&state, &q.project_id)?;
+-        let result = self
+-            .version_reserve_requests
+-            .query(q, cancel)
+-            .map(p::ResponseBody::VersionReserveRequest);
++        let result = if self.version_reserve_requests.review_kind(q)?{
++            self.version_reserve_requests.review_status(Some(q),cancel)?.ok_or(Error::Conflict).map(p::ResponseBody::VersionReserveReview)
++        }else{self.version_reserve_requests.query(q,cancel).map(p::ResponseBody::VersionReserveRequest)};
+         drop(state);
+         result
+     }
+diff --git a/desktop/src-tauri/src/service_version_reserve_application_tests.rs b/desktop/src-tauri/src/service_version_reserve_application_tests.rs
+index 6eaefaa7..0817524d 100644
+--- a/desktop/src-tauri/src/service_version_reserve_application_tests.rs
++++ b/desktop/src-tauri/src/service_version_reserve_application_tests.rs
+@@ -8,6 +8,9 @@ use crate::application_service::tests::{
+ use crate::application_state_store::Fixture;
+ use std::{sync::mpsc, thread};
+ 
++#[path = "service_version_reserve_review_application_tests.rs"]
++mod source_review;
++
+ const OBSERVER_BOUND: Duration = Duration::from_secs(5);
+ 
+ fn setup() -> (
+diff --git a/desktop/src-tauri/src/service_version_reserve_requests.rs b/desktop/src-tauri/src/service_version_reserve_requests.rs
+index cdebc688..87bf5751 100644
+--- a/desktop/src-tauri/src/service_version_reserve_requests.rs
++++ b/desktop/src-tauri/src/service_version_reserve_requests.rs
+@@ -16,8 +16,22 @@ use std::{
+ // Native SOURCE/Lane backing remains on its original owner. Only the explicit
+ // IPC term joins the SAME8 pool (including the initial4KiB before the1KiB gate).
+ pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT;
+-pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * (4096 + std::mem::size_of::<Entry>())
+-    + 4 * 8192;
++pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * ROW_BACKING + 4 * 8192
++    + crate::service_version_reserve_review_requests::NON_ROW_BACKING
++    + 2 * p::REQUEST_LIMIT * std::mem::size_of::<Retained>();
++const ROW_BACKING:usize={let old=4096+std::mem::size_of::<Entry>();let new=crate::service_version_reserve_review_requests::ROW_BACKING;if old>new{old}else{new}};
++#[derive(Clone)]
++enum Retained {
++    Reserve(Arc<Entry>),
++    Review(Arc<crate::service_version_reserve_review_requests::Entry>),
++}
++impl Retained {
++    fn origin(&self)->&p::Query{match self{Self::Reserve(e)=>&e.input.origin,Self::Review(e)=>&e.input.origin}}
++    fn reserve(&self)->Option<&Arc<Entry>>{if let Self::Reserve(e)=self{Some(e)}else{None}}
++    fn pending(&self)->bool{match self{Self::Reserve(e)=>e.pending(),Self::Review(e)=>e.pending()}}
++    fn cancel(&self,reason:p::Reason,at:Instant){match self{Self::Reserve(e)=>e.cancel(reason,at),Self::Review(e)=>e.cancel(reason,at)}}
++    fn scope_compatible(&self,scope:&NativeScope)->bool{match self{Self::Reserve(e)=>!e.pending(),Self::Review(e)=>e.scope_compatible(scope)}}
++}
+ 
+ /// Read-only facet of the SAME original service Grant. The Grant's Drop
+ /// revokes this comparison; dropping an Arc facet cannot revoke or renew it.
+@@ -99,7 +113,7 @@ struct Book {
+     current_read: Option<Weak<ReadPermission>>,
+     read_epoch: u64,
+     lease: Option<Arc<Lease>>,
+-    entries: Vec<Arc<Entry>>,
++    entries: Vec<Retained>,
+     closed: bool,
+ }
+ pub(crate) struct Inbox {
+@@ -505,13 +519,13 @@ impl Inbox {
+         }
+         let mut rows = Vec::with_capacity(book.entries.len());
+         for entry in &book.entries {
+-            if &entry.input.origin.service_instance != instance {
++            if &entry.origin().service_instance != instance {
+                 return Err(Error::StateUnknown);
+             }
+-            if &entry.input.origin.project_id == project {
++            if &entry.origin().project_id == project {
+                 rows.push(AdditionalRequest {
+                     family: AdditionalFamily::VersionReservation,
+-                    request_id: entry.input.origin.request_id.clone(),
++                    request_id: entry.origin().request_id.clone(),
+                 });
+             }
+         }
+@@ -561,7 +575,7 @@ impl Inbox {
+         if book.closed {
+             return Err(Error::Unavailable);
+         }
+-        if book.entries.len() >= p::REQUEST_LIMIT || book.entries.iter().any(|e| e.pending()) {
++        if book.entries.len() >= p::REQUEST_LIMIT || book.entries.iter().any(|e| !e.scope_compatible(&scope)) {
+             return Err(Error::Busy);
+         }
+         if let Some(old) = &book.lease {
+@@ -579,7 +593,7 @@ impl Inbox {
+         let Some(lease) = &book.lease else {
+             return Ok(p::Access::empty());
+         };
+-        let consumed = book.entries.iter().find(|e| e.input.grant_id == lease.id);
++        let consumed = book.entries.iter().filter_map(Retained::reserve).find(|e| e.input.grant_id == lease.id);
+         let now = Instant::now();
+         let remaining = lease
+             .scope
+@@ -608,12 +622,13 @@ impl Inbox {
+         let book = self.lock()?;
+         self.access_locked(&book)
+     }
+-    pub(crate) fn blocks_review(&self) -> Result<bool, Error> {
++    pub(crate) fn blocks_review(&self) -> Result<bool, Error> { self.blocks_review_except(None) }
++    pub(crate) fn blocks_review_except(&self,original:Option<&Arc<crate::service_version_reserve_review_requests::Entry>>)->Result<bool,Error>{
+         let book = self.lock()?;
+-        Ok(book.entries.iter().any(|e| e.pending())
++        Ok(book.entries.iter().any(|e| e.pending() && !matches!((e,original),(Retained::Review(a),Some(b)) if Arc::ptr_eq(a,b)))
+             || book.lease.as_ref().is_some_and(|l| {
+                 l.live(Instant::now(), false)
+-                    && !book.entries.iter().any(|e| e.input.grant_id == l.id)
++                    && !book.entries.iter().filter_map(Retained::reserve).any(|e| e.input.grant_id == l.id)
+             }))
+     }
+     pub(crate) fn revoke(&self, reason: p::Reason, at: Instant) -> Result<p::Access, Error> {
+@@ -672,9 +687,9 @@ impl Inbox {
+         if let Some(old) = book
+             .entries
+             .iter()
+-            .find(|e| e.input.origin.request_id == input.origin.request_id)
++            .find(|e| e.origin().request_id == input.origin.request_id)
+         {
+-            return if old.input == input {
++            return if let Some(old) = old.reserve().filter(|e| e.input == input) {
+                 old.status()
+             } else {
+                 Err(Error::Conflict)
+@@ -687,11 +702,12 @@ impl Inbox {
+             return Err(Error::Busy);
+         }
+         let lease = book.lease.as_ref().ok_or(Error::AccessDenied)?.clone();
++        if book.entries.iter().any(|e|!e.scope_compatible(&lease.scope)){return Err(Error::Busy)}
+         if input.origin.project_id != lease.scope.project_id
+             || input.review_id != lease.scope.review_id
+             || input.grant_id != lease.id
+             || !lease.live(Instant::now(), false)
+-            || book.entries.iter().any(|e| e.input.grant_id == lease.id)
++            || book.entries.iter().filter_map(Retained::reserve).any(|e| e.input.grant_id == lease.id)
+         {
+             return Err(Error::AccessDenied);
+         }
+@@ -719,7 +735,7 @@ impl Inbox {
+                 stop: None,
+             }),
+         });
+-        book.entries.push(entry);
++        book.entries.push(Retained::Reserve(entry));
+         lease.scope.changes.send_modify(|_| {});
+         Ok(status)
+     }
+@@ -731,6 +747,7 @@ impl Inbox {
+         let entry = book
+             .entries
+             .iter()
++            .filter_map(Retained::reserve)
+             .find(|e| e.input.origin == *q)
+             .ok_or(Error::Conflict)?;
+         if cancel {
+@@ -743,7 +760,7 @@ impl Inbox {
+         if book.closed {
+             return Ok(None);
+         }
+-        for entry in &book.entries {
++        for entry in book.entries.iter().filter_map(Retained::reserve) {
+             entry.expire(Instant::now());
+             let mut row = entry.lock()?;
+             if row.claimed || row.stop.is_some() || row.status.state != p::State::Queued {
+@@ -764,6 +781,41 @@ impl Inbox {
+     }
+ }
+ 
++
++impl Inbox {
++    pub(crate) fn enqueue_review(&self,input:crate::service_version_reserve_review_protocol::Request,
++        scope:crate::service_version_reserve_review_requests::Scope,started:Instant)
++        ->Result<crate::service_version_reserve_review_protocol::Status,Error>{
++        input.validate()?;let mut book=self.lock()?;
++        if input.origin.service_instance!=self.instance{return Err(Error::Conflict)}
++        if let Some(old)=book.entries.iter().find(|e|e.origin().request_id==input.origin.request_id){
++            return match old{Retained::Review(e) if e.input==input=>e.status(),_=>Err(Error::Conflict)};
++        }
++        if book.closed{return Err(Error::Unavailable)}
++        if book.entries.len()>=p::REQUEST_LIMIT||book.entries.iter().any(|e|e.pending()||matches!(e,Retained::Review(v) if v.holds_review()))
++            ||book.lease.as_ref().is_some_and(|l|l.live(Instant::now(),false)&&!book.entries.iter().filter_map(Retained::reserve).any(|e|e.input.grant_id==l.id))
++        {return Err(Error::Busy)}
++        let entry=crate::service_version_reserve_review_requests::Entry::new(input,scope,started)?;
++        let status=entry.status()?;book.entries.push(Retained::Review(entry));Ok(status)
++    }
++    pub(crate) fn review_entry(&self,q:&p::Query)->Result<Arc<crate::service_version_reserve_review_requests::Entry>,Error>{
++        let book=self.lock()?;
++        if q.service_instance!=self.instance{return Err(Error::Conflict)}
++        book.entries.iter().find_map(|e|match e{Retained::Review(v) if v.input.origin==*q=>Some(v.clone()),_=>None}).ok_or(Error::Conflict)
++    }
++    pub(crate) fn review_kind(&self,q:&p::Query)->Result<bool,Error>{
++        let book=self.lock()?;
++        if q.service_instance!=self.instance{return Err(Error::Conflict)}
++        book.entries.iter().find(|e|e.origin()==q).map(|e|matches!(e,Retained::Review(_))).ok_or(Error::Conflict)
++    }
++    pub(crate) fn review_status(&self,q:Option<&p::Query>,cancel:bool)->Result<Option<crate::service_version_reserve_review_protocol::Status>,Error>{
++        let entry=if let Some(q)=q{Some(self.review_entry(q)?)}else{
++            let book=self.lock()?;book.entries.iter().rev().find_map(|e|match e{Retained::Review(e)=>Some(e.clone()),_=>None})
++        };
++        entry.map(|e|{if cancel{e.cancel(p::Reason::UserCancelled,Instant::now())}e.status()}).transpose()
++    }
++}
++
+ #[cfg(test)]
+ #[path = "service_version_reserve_requests_tests.rs"]
+ pub(crate) mod tests;
+diff --git a/desktop/src-tauri/src/service_version_reserve_requests_tests.rs b/desktop/src-tauri/src/service_version_reserve_requests_tests.rs
+index 6d44d5cb..7f33775b 100644
+--- a/desktop/src-tauri/src/service_version_reserve_requests_tests.rs
++++ b/desktop/src-tauri/src/service_version_reserve_requests_tests.rs
+@@ -4,6 +4,14 @@ use super::*;
+ pub(crate) fn id(n: u32) -> Id {
+     Id::parse(&format!("{n:032x}")).unwrap()
+ }
++
++pub(crate) fn poison_original_read(read: &ReadPermission) {
++    assert!(std::panic::catch_unwind(|| {
++        let _original = read.revoked.lock().unwrap();
++        panic!("inert original READ mutex poison");
++    }).is_err());
++    assert!(read.revoked.is_poisoned());
++}
+ pub(crate) struct Rig {
+     pub(crate) inbox: Arc<Inbox>,
+     pub(crate) scope: Arc<NativeScope>,
+@@ -68,7 +76,7 @@ fn catalogue_keeps_original_reservation_ids_without_expiry_or_result_access() {
+     let r = Rig::new();
+     r.allowed();
+     r.inbox.submit(r.input.clone()).unwrap();
+-    let entry = r.inbox.book.lock().unwrap().entries[0].clone();
++    let entry = r.inbox.book.lock().unwrap().entries[0].reserve().unwrap().clone();
+     r.scope.read.revoke(Instant::now());
+     let before = entry.row.lock().unwrap().status.clone();
+     let rows = r.inbox.catalogue_requests(&id(1), &id(2)).unwrap();
+@@ -329,7 +337,7 @@ fn thirty_two_tombstones_keep_metadata_without_thirty_two_originals() {
+     assert!(book
+         .entries
+         .iter()
+-        .all(|e| e.row.lock().unwrap().lease.is_none()));
++        .all(|e| e.reserve().unwrap().row.lock().unwrap().lease.is_none()));
+     assert!(Arc::strong_count(&r.scope) <= 3); // Rig + one current lease; no per-row Source/Lane.
+ }
+ 
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+index 283beca9..40ff8ee5 100644
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1843,6 +1843,24 @@ async fn agent_version_reserve_access(webview: Webview, request: tauri::ipc::Req
+     { let _=(window,request,state); Err(BridgeError::unavailable("Agent version reservation is unavailable on this platform.")) }
+ }
+ #[tauri::command]
++async fn agent_version_reserve_review_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::unavailable("Source review has no fixture admission."));
++    let window=edit_window(&webview)?;let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let q=crate::asset_session::decode_agent_version_reserve_review_status(raw)?;serde_json::to_value(state.document.agent_version_reserve_review_status(window,q.as_ref())?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,raw);Err(BridgeError::invalid())}
++}
++#[tauri::command]
++async fn cancel_agent_version_reserve_review(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::unavailable("Source review has no fixture admission."));
++    let window=edit_window(&webview)?;let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let q=crate::asset_session::decode_agent_version_reserve_review_status(raw)?.ok_or_else(BridgeError::invalid)?;serde_json::to_value(state.document.cancel_agent_version_reserve_review(window,&q)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,raw);Err(BridgeError::invalid())}
++}
++#[tauri::command]
+ async fn allow_agent_version_reserve(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window=edit_window(&webview)?;
+@@ -2684,8 +2702,12 @@ async fn version_reserve_status(webview: Webview, request: tauri::ipc::Request<'
+ #[tauri::command]
+ async fn version_reserve_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+-    let crate::version_reserve_protocol::Command::Review(input) = version_reserve_command("version_reserve_review", &webview, &request)?
+-        else { return Err(BridgeError::invalid()); };
++    let command=version_reserve_command("version_reserve_review", &webview, &request)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if let crate::version_reserve_protocol::Command::AgentReview(origin)=&command {
++        return state.document.review_requested_version_reservation(edit_window(&webview)?,origin).await;
++    }
++    let crate::version_reserve_protocol::Command::Review(input)=command else{return Err(BridgeError::invalid())};
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     { state.document.review_version_reservation(input).await }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+@@ -3907,6 +3929,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut version_prepare_key=None;
+         #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut version_reserve_review_key=None;
++        #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut apple_prepare_key=None;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut configuration_revision=None;
+@@ -3976,6 +4000,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+                 }
+             }
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Ok(Some(status))=document.agent_version_reserve_review_status(MAIN_WINDOW,None){
++                let key=(status.origin.clone(),status.revision);
++                if version_reserve_review_key.as_ref()!=Some(&key){let _=app.emit_to(MAIN_WINDOW,"mrk:agent-version-reserve-review",&status);version_reserve_review_key=Some(key);}
++            }
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             if let Ok(Some(status))=document.agent_version_prepare_status(None){
+                 let key=(status.origin.clone(),status.revision);
+                 if version_prepare_key.as_ref()!=Some(&key){
+@@ -5974,7 +6003,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
+             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
+             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
+-            agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
++            agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve, agent_version_reserve_review_status, cancel_agent_version_reserve_review,
+             agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,
+             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+             agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+index dd01beeb..6b891f96 100644
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -1061,6 +1061,7 @@ impl Owner {
+     fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
+         github_action_delegation::observe(self, inner);
+         agent_metadata_text::observe(self,now);
++        version_allocation::observe_review(self,now);
+         play_cleanup::observe_agent(self, inner, now); // Same original watchdog/management, no Doc lock.
+         let mut state = lock(&self.state);
+         if state.terminal { return None; }
+@@ -1078,7 +1079,7 @@ impl Owner {
+             if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),self.endpoint());}
+             self.stop.send_replace(true); self.changed.notify_waiters(); }
+         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
+-        if expired { None } else { Some(agent_metadata_text::deadline(self,now,github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint)))) }
++        if expired { None } else { Some(version_allocation::review_deadline(self,now,agent_metadata_text::deadline(self,now,github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint))))) }
+     }
+     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
+         if matches!(self.profile,Profile::GitHubPublication)&&self.publication_gate.as_ref().is_none_or(|g|!g.counter_settled()) {self.unknown(inner);return false;}
+diff --git a/desktop/src-tauri/src/supervisor_version_allocation.rs b/desktop/src-tauri/src/supervisor_version_allocation.rs
+index 1bdba958..a9ea3a62 100644
+--- a/desktop/src-tauri/src/supervisor_version_allocation.rs
++++ b/desktop/src-tauri/src/supervisor_version_allocation.rs
+@@ -43,17 +43,7 @@ fn closed(value: &Value, fields: &[&str]) -> bool {
+     value.as_object().is_some_and(|row| row.len() == fields.len() && fields.iter().all(|k| row.contains_key(*k)))
+ }
+ pub(crate) fn source_branch(value: &str) -> bool {
+-    let Some(name) = value.strip_prefix("refs/heads/") else {
+-        return false;
+-    };
+-    !name.is_empty()
+-        && name.len() <= 200
+-        && name.as_bytes()[0].is_ascii_alphanumeric()
+-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+-        && !name.contains("..")
+-        && !name.starts_with("refs/")
+-        && name.split('/').count() <= 16
+-        && name.split('/').all(|p| !p.is_empty() && !p.starts_with('.') && !p.ends_with('.') && !p.ends_with(".lock"))
++    crate::service_version_reserve_review_protocol::branch(value)
+ }
+ fn relative(value: &str) -> bool {
+     !value.is_empty()
+@@ -384,6 +374,22 @@ impl Mailbox {
+     }
+ }
+ 
++/// Sample the old READ on the SAME source watchdog, including known cleanup.
++/// No Doc/Host/service IO and no new timer/management owner.
++pub(super) fn observe_review(owner:&Owner,now:Instant){
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if let Some(result)=owner.version_allocation_source.as_ref().and_then(|s|s.gate.review_stop(now)){
++        let failure=match result{Ok(Some(at))=>Some((BridgeError::new("cancelled","The original source-review read was stopped."),at)),Err(_)=>Some((BridgeError::cleanup_unknown(),now)),_=>None};
++        if let Some((error,at))=failure{let mut state=lock(&owner.state);if state.terminal||state.unknown{return}state.fail_at(error,at);drop(state);owner.stop.send_replace(true);owner.changed.notify_waiters();}
++    }
++}
++pub(super) fn review_deadline(owner:&Owner,now:Instant,end:Instant)->Instant{
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if owner.version_allocation_source.as_ref().is_some_and(|s|s.gate.review_stop(now).is_some()){
++        let state=lock(&owner.state);if !state.terminal{return crate::service_version_reserve_review_requests::poll_end(now,end,state.unknown)}
++    }
++    end
++}
+ pub(super) struct Invocation {
+     pub(super) gate: crate::asset_session::VersionAllocationSourceGoGate,
+     pub(super) input: Arc<VersionAllocationSourceInput>,
+diff --git a/desktop/src-tauri/src/version_reserve_protocol.rs b/desktop/src-tauri/src/version_reserve_protocol.rs
+index fc16b764..e85e38f6 100644
+--- a/desktop/src-tauri/src/version_reserve_protocol.rs
++++ b/desktop/src-tauri/src/version_reserve_protocol.rs
+@@ -7,14 +7,7 @@ use crate::{
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+ pub(crate) const LIMIT: usize = 8192;
+-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+-#[serde(rename_all = "lowercase")]
+-pub(crate) enum Increment {
+-    Build,
+-    Patch,
+-    Minor,
+-    Major,
+-}
++pub(crate) use crate::service_version_reserve_review_protocol::Increment;
+ #[derive(Clone, Deserialize, Serialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct Review {
+@@ -50,6 +43,8 @@ impl Review {
+ pub(crate) enum Command {
+     Status,
+     Review(Review),
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    AgentReview(crate::service_version_reserve_review_protocol::Query),
+     Reserve {
+         project_id: String,
+         review_id: String,
+@@ -74,6 +69,8 @@ pub(crate) fn decode(name: &str, raw: &[u8]) -> Result<Command, BridgeError> {
+         return Ok(Command::Status);
+     }
+     if name == "version_reserve_review" {
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if v.get("intent").is_some(){return crate::asset_session::decode_agent_version_reserve_review_start(v).map(Command::AgentReview)}
+         let input: Review = serde_json::from_value(v).map_err(|_| BridgeError::invalid())?;
+         return if input.valid() {
+             Ok(Command::Review(input))
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+index 79d83e8c..d2a24cfc 100644
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -56,6 +56,8 @@ mod service_metadata_text_requests;
+ #[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
+ #[path="../src/service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
++#[path="../src/service_version_reserve_review_protocol.rs"] mod service_version_reserve_review_protocol;
++#[path="../src/service_version_reserve_review_requests.rs"] mod service_version_reserve_review_requests;
+ #[path="../src/service_store_protocol.rs"]
+ mod service_store_protocol;
+ #[path="../src/service_store_prepare_protocol.rs"]
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+index 69c1f34b..931a0641 100644
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -798,6 +798,7 @@ export function App() {
+     const service = pathService.current, selected = workspaceRef.current.selectedId;
+     return { port: service.api?.mode === 'native' ? service.api.versionReserve ?? null : null,
+       cliAccessPort: service.api?.mode === 'native' ? service.api.agentVersionReserveAccess ?? null : null,
++      reviewPort:service.api?.mode==='native'?service.api.versionReserveReview??null:null,
+       nativeSession: service.api?.mode === 'native' ? service : null,
+       projectId: selected && !connectionPicking.current && Object.hasOwn(workspaceRef.current.projects, selected) ? selected : null,
+       preview: service.api?.mode === 'preview', blockedReason: versionReserveAdmission.current(), editor: versionEditControllerRef.current };
+diff --git a/desktop/src/agentVersionReserveAccess.ts b/desktop/src/agentVersionReserveAccess.ts
+index 94906c44..7a8a3b22 100644
+--- a/desktop/src/agentVersionReserveAccess.ts
++++ b/desktop/src/agentVersionReserveAccess.ts
+@@ -4,6 +4,7 @@ import { reserveId, reserveProject } from './versionReserve.ts';
+ // Permission/comparison DATA only. These identifiers are not source, Store,
+ // candidate, native finality or permission to apply a version-file edit.
+ export interface AgentVersionReserveAccess {
++  readonly allowRevision: string; // MAIN-issued comparison, never a CLI grant.
+   readonly serviceInstance: string | null;
+   readonly projectId: string | null; // Native service ID, NOT the runtime project ID.
+   readonly grantId: string | null;
+@@ -17,14 +18,15 @@ export interface AgentVersionReserveAccess {
+ }
+ export interface AgentVersionReserveAccessPort {
+   status(): Promise<unknown>;
+-  allow(projectId: string, reviewId: string, expectedReserveRevision: number): Promise<unknown>;
++  allow(projectId: string, reviewId: string, expectedReserveRevision: number, expectedAllowRevision: string): Promise<unknown>;
+   revoke(): Promise<unknown>;
+ }
+ export const AGENT_VERSION_RESERVE_CONSENT = 'agent-version-reserve-once-v1';
+ export const AGENT_VERSION_RESERVE_MAX_MS = 120_000;
+ export const AGENT_VERSION_RESERVE_SCOPE = 'Let a local CLI or AI tool reserve this one reviewed candidate. It cannot choose different source or Store inputs, edit your version file, build or publish a release.';
+ 
+-const fields = ['serviceInstance', 'projectId', 'grantId', 'reviewId', 'reviewRevision', 'enabled', 'remainingMs', 'consumed', 'requestId', 'completedOperationId'] as const;
++const fields = ['allowRevision', 'serviceInstance', 'projectId', 'grantId', 'reviewId', 'reviewRevision', 'enabled', 'remainingMs', 'consumed', 'requestId', 'completedOperationId'] as const;
++export const validAllowRevision = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{16}$(?![\s\S])/.test(v) && v !== 'ffffffffffffffff';
+ const integer = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0) && v >= 0 && v <= max;
+ export const reserveReviewRevision = (v: unknown): v is number => integer(v, 0xffff_fffe) && v > 0;
+ 
+@@ -33,20 +35,20 @@ export function parseAgentVersionReserveAccess(raw: unknown): AgentVersionReserv
+     const v = copyBoundedComparisonData(raw, 2048, 32);
+     if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length !== fields.length || !fields.every((k) => Object.hasOwn(v, k))) return null;
+     const d = v as Record<string, unknown>;
+-    if (typeof d.enabled !== 'boolean' || typeof d.consumed !== 'boolean' || !integer(d.remainingMs, AGENT_VERSION_RESERVE_MAX_MS) ||
++    if (!validAllowRevision(d.allowRevision) || typeof d.enabled !== 'boolean' || typeof d.consumed !== 'boolean' || !integer(d.remainingMs, AGENT_VERSION_RESERVE_MAX_MS) ||
+         !(d.requestId === null || reserveId(d.requestId)) || !(d.completedOperationId === null || reserveId(d.completedOperationId)) ||
+         d.consumed !== (d.requestId !== null) || d.enabled && (d.consumed || d.remainingMs === 0) || !d.enabled && d.remainingMs !== 0 ||
+         d.completedOperationId !== null && !d.consumed) return null;
+     if (d.grantId === null) {
+       if (d.serviceInstance !== null || d.projectId !== null || d.reviewId !== null || d.reviewRevision !== null ||
+           d.enabled || d.remainingMs !== 0 || d.consumed || d.requestId !== null || d.completedOperationId !== null) return null;
+-      return Object.freeze({ serviceInstance: null, projectId: null, grantId: null, reviewId: null, reviewRevision: null,
++      return Object.freeze({ allowRevision: d.allowRevision, serviceInstance: null, projectId: null, grantId: null, reviewId: null, reviewRevision: null,
+         enabled: false, remainingMs: 0, consumed: false, requestId: null, completedOperationId: null });
+     }
+     if (!reserveId(d.serviceInstance) || !reserveId(d.projectId) || !reserveId(d.grantId) || !reserveId(d.reviewId) || !reserveReviewRevision(d.reviewRevision)) return null;
+     // Native reports a rounded-zero remainder as disabled. The UI never starts
+     // a new deadline or renews that original review from this observation.
+-    return Object.freeze({ serviceInstance: d.serviceInstance, projectId: d.projectId, grantId: d.grantId, reviewId: d.reviewId,
++    return Object.freeze({ allowRevision: d.allowRevision, serviceInstance: d.serviceInstance, projectId: d.projectId, grantId: d.grantId, reviewId: d.reviewId,
+       reviewRevision: d.reviewRevision, enabled: d.enabled, remainingMs: d.remainingMs, consumed: d.consumed,
+       requestId: d.requestId, completedOperationId: d.completedOperationId });
+   } catch { return null; } // No getters, toJSON, raw errors or secret projection.
+@@ -60,8 +62,8 @@ export function createAgentVersionReserveAccessPort(invoke: (command: string, bo
+   };
+   return Object.freeze({
+     status: () => send('agent_version_reserve_access', {}),
+-    allow: (projectId: string, reviewId: string, expectedReserveRevision: number) => reserveProject(projectId) && reserveId(reviewId) && reserveReviewRevision(expectedReserveRevision) ?
+-      send('allow_agent_version_reserve', { projectId, reviewId, expectedReserveRevision, consentVersion: AGENT_VERSION_RESERVE_CONSENT }) : invalid(),
++    allow: (projectId: string, reviewId: string, expectedReserveRevision: number, expectedAllowRevision: string) => reserveProject(projectId) && reserveId(reviewId) && reserveReviewRevision(expectedReserveRevision) && validAllowRevision(expectedAllowRevision) ?
++      send('allow_agent_version_reserve', { projectId, reviewId, expectedReserveRevision, expectedAllowRevision, consentVersion: AGENT_VERSION_RESERVE_CONSENT }) : invalid(),
+     revoke: () => send('revoke_agent_version_reserve', {}),
+   });
+ }
+diff --git a/desktop/src/agentVersionReserveAccessController.ts b/desktop/src/agentVersionReserveAccessController.ts
+index 450296e5..12ddb033 100644
+--- a/desktop/src/agentVersionReserveAccessController.ts
++++ b/desktop/src/agentVersionReserveAccessController.ts
+@@ -28,6 +28,7 @@ interface Work {
+   completion: Promise<void>; finish(): void;
+ }
+ interface Binding { context: AgentVersionReserveContext; review: AgentVersionReserveReview; access: AgentVersionReserveAccess }
++interface CheckedAllow { context: AgentVersionReserveContext; review: AgentVersionReserveReview; revision: string }
+ const missingOptions = Object.freeze({ reference: '', increment: 'build' as const, newCandidate: false, acknowledgeLimitations: false });
+ const missingEpoch = {};
+ const absent = (): AgentVersionReserveContext => ({ port: null, nativeSession: null, projectId: null, preview: false,
+@@ -48,7 +49,8 @@ export class AgentVersionReserveAccessController {
+   private generation: object = {};
+   private normal: Work | null = null;
+   private revocation: Work | null = null;
+-  private consent: { context: AgentVersionReserveContext; review: AgentVersionReserveReview } | null = null;
++  private checkedAllow: CheckedAllow | null = null;
++  private consent: { context: AgentVersionReserveContext; review: AgentVersionReserveReview; checked: CheckedAllow } | null = null;
+   private attemptedReview: AgentVersionReserveReview | null = null;
+   private binding: Binding | null = null;
+   private completed: AgentVersionReserveCompletion | null = null;
+@@ -95,7 +97,7 @@ export class AgentVersionReserveAccessController {
+     this.context = c;
+     const newReview = !!c.review && this.binding !== null && c.review !== this.binding.review;
+     if (changed || newReview) { this.binding = null; this.completed = null; }
+-    if (changed || reviewChanged) this.consent = null;
++    if (changed || reviewChanged) { this.consent = null; this.checkedAllow = null; }
+     if (changed || displayChanged) this.patch({ review: c.review, acknowledged: this.consent !== null, ...(changed || newReview ? { stale: true } : {}),
+       ...(reviewChanged && c.review && c.review !== this.attemptedReview && !this.state.unknown ? { issue: null } : {}) });
+   }
+@@ -106,17 +108,19 @@ export class AgentVersionReserveAccessController {
+     const c = this.readContext();
+     return this.disposed ? 'This permission controller is retired.' : this.ownerReason() ?? nativeReason(c) ?? c.blockedReason ??
+       (!c.enabled || !c.projectId || !c.review ? 'Review the exact version choices in this app first.' :
+-        c.review === this.attemptedReview ? 'Review again before allowing another one-use request. Permission is never renewed automatically.' : null);
++        c.review === this.attemptedReview ? 'Review again before allowing another one-use request. Permission is never renewed automatically.' :
++          !this.checkedAllow || this.checkedAllow.review !== c.review || !this.sameContext(this.checkedAllow.context, c) ?
++            'Check CLI permission before confirming this reviewed reservation.' : null);
+   }
+   allowReason(): string | null {
+     const c = this.readContext(), consent = this.consent;
+-    return this.consentReason() ?? (!consent || consent.review !== c.review || !this.sameContext(consent.context, c) ?
++    return this.consentReason() ?? (!consent || consent.review !== c.review || consent.checked !== this.checkedAllow || !this.sameContext(consent.context, c) ?
+       'Confirm permission for this one reviewed reservation.' : null);
+   }
+   setAcknowledged(value: boolean): boolean {
+     this.syncContext();
+     if (typeof value !== 'boolean' || this.disposed || this.normal || this.revocation || value && this.consentReason()) return false;
+-    const c = this.readContext(); this.consent = value && c.review ? { context: c, review: c.review } : null;
++    const c = this.readContext(); this.consent = value && c.review && this.checkedAllow ? { context: c, review: c.review, checked: this.checkedAllow } : null;
+     this.patch({ acknowledged: this.consent !== null }); return true;
+   }
+   revokeReason(): string | null { return this.disposed ? 'This permission controller is retired.' : nativeReason(this.controls()) ??
+@@ -137,7 +141,9 @@ export class AgentVersionReserveAccessController {
+   private begin(kind: Work['kind'], context: AgentVersionReserveContext): Work {
+     if (kind === 'revoke') this.generation = {}; // Fence old Allow/status before callbacks or native handoff.
+     this.completed = null;
+-    if (kind !== 'status') this.consent = null;
++    // An explicit new Check is not a refresh of earlier acknowledgement.
++    this.consent = null;
++    this.checkedAllow = null;
+     let finish!: () => void; const completion = new Promise<void>((resolve) => { finish = resolve; });
+     const w: Work = { kind, context, generation: this.generation, sent: false, original: null, startedAt: this.now(), completion, finish };
+     this.originalContext = context;
+@@ -150,7 +156,7 @@ export class AgentVersionReserveAccessController {
+     this.patch(); w.finish();
+   }
+   private delivery(w: Work): boolean { return !this.disposed && w.generation === this.generation && this.originalContext !== null && this.sameHost(w.context, this.originalContext); }
+-  private unknown(): void { this.completed = null; this.consent = null; this.patch({ unknown: true, stale: true, acknowledged: false, issue: uncertain }); }
++  private unknown(): void { this.completed = null; this.consent = null; this.checkedAllow = null; this.patch({ unknown: true, stale: true, acknowledged: false, issue: uncertain }); }
+   private failed(w: Work, error: unknown): void {
+     if (!this.delivery(w)) return;
+     let refused = false;
+@@ -176,7 +182,14 @@ export class AgentVersionReserveAccessController {
+     const old = this.state.access;
+     if (old?.grantId && old.grantId === s.grantId && (!sameGrant(old, s) || old.consumed && (!s.consumed || old.requestId !== s.requestId) ||
+         old.completedOperationId !== null && s.completedOperationId !== null && old.completedOperationId !== s.completedOperationId)) { this.unknown(); return; }
+-    const current = this.isCurrent(w.context);
++    const currentContext = this.readContext();
++    if (!this.delivery(w)) return; // A context callback may revoke this exact Check.
++    const current = !this.disposed && this.sameContext(w.context, currentContext) && nativeReason(w.context) === null;
++    // Only this actual returned explicit Check can supply the stamp for a
++    // later acknowledgement. Neither Allow nor Revoke replies renew intent.
++    if (w.kind === 'status' && current && !this.state.unknown && w.context.review && currentContext.review === w.context.review) {
++      this.checkedAllow = { context: w.context, review: w.context.review, revision: s.allowRevision };
++    }
+     if (w.kind === 'allow' && current && !this.state.unknown && w.context.review) this.binding = { context: w.context, review: w.context.review, access: s };
+     if (this.binding && !sameGrant(this.binding.access, s)) this.binding = null;
+     this.completed = w.kind === 'status' && !this.state.unknown && current && s.completedOperationId && this.binding &&
+@@ -187,15 +200,16 @@ export class AgentVersionReserveAccessController {
+   }
+   private async ordinary(kind: 'status' | 'allow'): Promise<boolean> {
+     this.syncContext(); if ((kind === 'allow' ? this.allowReason() : this.statusReason()) !== null) return false;
+-    const context = kind === 'allow' ? this.readContext() : this.controls(), consent = this.consent;
++    const context = kind === 'allow' ? this.readContext() : this.controls(), consent = this.consent, checked = this.checkedAllow;
+     const w = this.begin(kind, context);
+     try {
+       const c = this.readContext();
+       if (!this.delivery(w) || this.revocation || kind === 'allow' && (!this.isCurrent(context) || c.blockedReason || !context.projectId ||
+-          !context.review || c.review !== context.review || !consent || consent.review !== context.review || !this.sameContext(consent.context, c))) return false;
++          !context.review || c.review !== context.review || !consent || consent.review !== context.review || !checked || consent.checked !== checked ||
++          checked.review !== context.review || !this.sameContext(checked.context, c) || !this.sameContext(consent.context, c))) return false;
+       w.sent = true;
+       if (kind === 'allow') this.attemptedReview = context.review;
+-      w.original = kind === 'status' ? context.port!.status() : context.port!.allow(context.projectId!, context.review!.id, context.review!.revision);
++      w.original = kind === 'status' ? context.port!.status() : context.port!.allow(context.projectId!, context.review!.id, context.review!.revision, checked!.revision);
+       if (!w.original || typeof w.original.then !== 'function') { this.unknown(); return true; }
+       this.accept(w, await w.original);
+     } catch (error) { this.failed(w, error); }
+@@ -216,5 +230,5 @@ export class AgentVersionReserveAccessController {
+     finally { this.end(w); }
+     return w.sent;
+   }
+-  dispose(): void { this.disposed = true; this.generation = {}; this.binding = null; this.completed = null; this.consent = null; this.listeners.clear(); }
++  dispose(): void { this.disposed = true; this.generation = {}; this.binding = null; this.completed = null; this.consent = null; this.checkedAllow = null; this.listeners.clear(); }
+ }
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+index 1d5e50c2..c0a9796b 100644
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -101,6 +101,7 @@ import { createGitHubDeviceApi } from './githubDeviceConnectionProtocol.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createVersionReservePort } from './versionReserve.ts';
++import { createReserveReviewPort } from './versionReserveReview.ts';
+ import { createAgentUploadKeyAccessPort } from './agentUploadKeyAccess.ts';
+ import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
+ import { createApplePreparationPort } from './agentApplePreparation.ts';
+@@ -117,7 +118,7 @@ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+ 
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'mrk:agent-version-reserve-review' | 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+ 
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -435,6 +436,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
+     githubDevice: createGitHubDeviceApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
+     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
++    versionReserveReview:mode==='native'&&listen?createReserveReviewPort((command,bytes)=>invoke<unknown>(command,bytes),listen):null,
+     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentGithubAction: mode === 'native' ? createAgentGithubActionPort((command,bytes)=>invoke<unknown>(command,bytes)) : null,
+diff --git a/desktop/src/components/VersionReservePanel.tsx b/desktop/src/components/VersionReservePanel.tsx
+index d4a3a684..c96ab1d2 100644
+--- a/desktop/src/components/VersionReservePanel.tsx
++++ b/desktop/src/components/VersionReservePanel.tsx
+@@ -4,6 +4,7 @@ import type { VersionIncrement } from '../versionReserve.ts';
+ import { versionReserveHelp } from '../versionReserve.ts';
+ import { FutureVersionTagFields } from './FutureVersionTagFields.tsx';
+ import { AgentVersionReserveAccess } from './AgentVersionReserveAccess.tsx';
++import { VersionReserveReview } from './VersionReserveReview.tsx';
+ 
+ // No effect/mount API calls. Root retains this original controller on navigation.
+ export function VersionReservePanel({ controller, compact = false }: { controller: VersionReserveController; compact?: boolean }) {
+@@ -64,6 +65,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
+     {!compact && state.enabled && <p className="toolbar-reason">{busy ?? (status?.phase === 'reserved' ? controller.editReason() : status?.phase === 'reviewed' ? controller.reserveReason() : controller.reviewReason()) ??
+       'The original reservation has a short, fixed deadline. Open the editor promptly, then review and confirm its separate Save.'}</p>}
+     {state.editHandedOff && <p>Continue in the saved-version editor below. Its original status and recovery controls own the file operation.</p>}
++    {!compact&&<VersionReserveReview controller={controller.cliReview} />}
+     <AgentVersionReserveAccess controller={controller.cliAccess} check={controller.checkCliAccess} compact={compact} />
+   </section>;
+ }
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+index 906062d5..8ca73b5e 100644
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -439,6 +439,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
++  readonly versionReserveReview?: import('./versionReserveReview.ts').ReserveReviewPort | null;
+   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
+   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
+   readonly agentGithubAction?: import('./agentGithubActionAccess.ts').AgentGithubActionPort | null;
+diff --git a/desktop/src/versionReserveController.ts b/desktop/src/versionReserveController.ts
+index fe13abc3..632c012c 100644
+--- a/desktop/src/versionReserveController.ts
++++ b/desktop/src/versionReserveController.ts
+@@ -1,3 +1,5 @@
++import { VersionReserveReviewController } from './versionReserveReviewController.ts';
++import type { ReserveReviewPort, ReserveReviewStatus } from './versionReserveReview.ts';
+ import { parseReserveOptions, parseVersionReserveStatus, reserveActive, reserveProject } from './versionReserve.ts';
+ import type { ReservedVersion, VersionReserveOptions, VersionReservePort, VersionReserveStatus } from './versionReserve.ts';
+ import { AgentVersionReserveAccessController } from './agentVersionReserveAccessController.ts';
+@@ -8,6 +10,7 @@ export interface VersionReserveContext {
+   port: VersionReservePort | null; nativeSession: object | null; projectId: string | null; preview: boolean;
+   blockedReason: string | null; // OTHER owners only. Native still admits every action.
+   cliAccessPort?: AgentVersionReserveAccessPort | null;
++  reviewPort?: ReserveReviewPort | null;
+   editor: { reservedOpenReason(): string | null; openReserved(value: ReservedVersion): boolean } | null;
+ }
+ export interface VersionReserveView {
+@@ -17,7 +20,7 @@ export interface VersionReserveView {
+ }
+ type Kind = 'review' | 'reserve' | 'status' | 'cancel';
+ interface Work {
+-  kind: Kind; context: VersionReserveContext; epoch: object; options: VersionReserveOptions; operationId: string | null;
++  kind: Kind; context: VersionReserveContext; epoch: object; options: VersionReserveOptions; form: VersionReserveOptions; operationId: string | null;
+   sent: boolean; original: Promise<unknown> | null; completion: Promise<void>; finish(): void;
+   cliCompletion: AgentVersionReserveCompletion | null;
+ }
+@@ -29,14 +32,17 @@ const unknownReason = 'The original reservation is unconfirmed. Keep it and chec
+ const busyReason = 'The original reservation operation is still finishing. Check its status or request Stop.';
+ 
+ // One finite native interaction and separate original status/STOP promises.
+-// No timer, automatic read/bump/retry, token, path or replacement native owner.
++// No automatic allocation/bump/retry, token, path or replacement native owner.
++// The bounded CLI child only reconciles its own read metadata.
+ export class VersionReserveController {
+   readonly cliAccess: AgentVersionReserveAccessController;
++  readonly cliReview: VersionReserveReviewController;
++  private proposed: VersionReserveOptions | null = null;
+   private readonly currentContext: () => VersionReserveContext;
+   private context: VersionReserveContext = absent();
+   private originalContext: VersionReserveContext | null = null;
+   private epoch: object = {};
+-  private reviewed: { epoch: object; id: string; options: VersionReserveOptions; cli: AgentVersionReserveReview } | null = null;
++  private reviewed: { epoch: object; id: string; options: VersionReserveOptions; delegated:boolean; cli: AgentVersionReserveReview } | null = null;
+   private reserved: { epoch: object; id: string; cliCompletion?: AgentVersionReserveCompletion } | null = null;
+   private work: Work | null = null;
+   private query: Work | null = null;
+@@ -50,21 +56,24 @@ export class VersionReserveController {
+     this.currentContext = options.current;
+     this.cliAccess = new AgentVersionReserveAccessController({ current: () => {
+       const c = this.readContext(), s = this.state.status, r = this.reviewed;
+-      const review = !this.state.stale && !this.state.unknown && r?.epoch === this.epoch && r.options === this.state.options &&
++      const review = !this.state.stale && !this.state.unknown && r?.epoch === this.epoch && r.options === this.effectiveOptions() && (!r.delegated || this.cliReview?.supports(r.id,r.cli.revision)) &&
+         s?.phase === 'reviewed' && s.projectId === c.projectId && s.review?.id === r.id && s.revision === r.cli.revision &&
+         s.review.reference === r.options.reference && s.review.increment === r.options.increment && s.review.newCandidate === r.options.newCandidate && s.review.futureTag === r.options.futureTag ? r.cli : null;
+       return { port: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: c.projectId, preview: c.preview,
+-        epoch: this.epoch, options: this.state.options, enabled: this.state.enabled, review,
++        epoch: this.epoch, options: this.effectiveOptions(), enabled: this.state.enabled, review,
+         blockedReason: this.nativeOwnerReason() ?? unavailable(c) ?? c.blockedReason };
+     } });
+     this.cliAccess.subscribe(() => this.patch());
++    this.cliReview=new VersionReserveReviewController({current:()=>{const c=this.readContext();return {port:c.reviewPort??null,nativeSession:c.nativeSession,projectId:c.projectId,epoch:this.epoch,enabled:this.state.enabled,preview:c.preview};},start:(s,p)=>this.reviewFromCli(s,p)});
++    this.cliReview.subscribe(()=>this.patch());
+     this.syncContext();
+   }
+   getSnapshot = (): VersionReserveView => this.state;
+   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+-  whenSettled = (): Promise<void> => Promise.all([this.work?.completion, this.query?.completion, this.stopping?.completion, this.cliAccess.whenSettled()]).then(() => undefined);
++  whenSettled = (): Promise<void> => Promise.all([this.work?.completion, this.query?.completion, this.stopping?.completion, this.cliAccess.whenSettled(), this.cliReview.whenSettled()]).then(() => undefined);
+   ownerReason = (): string | null => this.nativeOwnerReason() ?? this.cliAccess.ownerReason();
+-  private nativeOwnerReason = (): string | null => this.state.unknown || this.state.status?.phase === 'cleanup-unknown' ? unknownReason :
++  private nativeOwnerReason = (): string | null => this.nativeWorkReason() ?? this.cliReview?.ownerReason() ?? null;
++  private nativeWorkReason = (): string | null => this.state.unknown || this.state.status?.phase === 'cleanup-unknown' ? unknownReason :
+     this.work || this.query || this.stopping || reserveActive(this.state.status) ? busyReason : null;
+   private readContext(): VersionReserveContext {
+     try {
+@@ -72,28 +81,29 @@ export class VersionReserveController {
+       if (typeof c.preview !== 'boolean' || c.nativeSession !== null && typeof c.nativeSession !== 'object' ||
+           c.blockedReason !== null && typeof c.blockedReason !== 'string') return absent();
+       return { port: p && ['status', 'review', 'reserve', 'cancel'].every((k) => typeof p[k as keyof VersionReservePort] === 'function') ? p : null,
+-        cliAccessPort: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: reserveProject(c.projectId) ? c.projectId : null, preview: c.preview,
++        reviewPort:c.reviewPort??null,cliAccessPort: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: reserveProject(c.projectId) ? c.projectId : null, preview: c.preview,
+         blockedReason: c.blockedReason, editor: c.editor && typeof c.editor.openReserved === 'function' && typeof c.editor.reservedOpenReason === 'function' ? c.editor : null };
+     } catch { return absent(); }
+   }
+   private sameHost(a: VersionReserveContext, b: VersionReserveContext): boolean {
+-    return a.port === b.port && a.nativeSession === b.nativeSession && a.preview === b.preview && a.editor === b.editor && a.cliAccessPort === b.cliAccessPort;
++    return a.port === b.port && a.nativeSession === b.nativeSession && a.preview === b.preview && a.editor === b.editor && a.cliAccessPort === b.cliAccessPort && a.reviewPort===b.reviewPort;
+   }
+   private sameContext(a: VersionReserveContext, b: VersionReserveContext): boolean { return this.sameHost(a, b) && a.projectId === b.projectId; }
+-  private current(work: Work): boolean { return !this.disposed && work.epoch === this.epoch && this.sameContext(work.context, this.readContext()); }
++  private current(work: Work): boolean { return !this.disposed && work.epoch === this.epoch && work.form===this.state.options && this.sameContext(work.context, this.readContext()); }
+   private patch(patch: Partial<VersionReserveView> = {}): void {
+     this.state = Object.freeze({ ...this.state, ...patch, pending: this.work?.kind === 'reserve' ? 'reserve' : this.work ? 'review' : null,
+       checking: this.query !== null, stopping: this.stopping !== null });
+     this.cliAccess?.syncContext();
+     if (!this.disposed) for (const callback of [...this.listeners]) { try { callback(); } catch { /* Delivery cannot free an original. */ } }
+   }
+-  beforeContextIntent = (): void => { this.epoch = {}; this.reviewed = null; this.reserved = null; this.patch({ stale: true }); };
++  beforeContextIntent = (): void => { this.epoch = {}; this.proposed=null; this.reviewed = null; this.reserved = null; this.patch({ stale: true }); };
+   syncContext(): void {
+     if (this.disposed) return;
+     const c = this.readContext(), changed = !this.sameContext(c, this.context), display = c.blockedReason !== this.context.blockedReason;
+     this.context = c;
+-    if (changed) { this.epoch = {}; this.reviewed = null; this.reserved = null; }
++    if (changed) { this.epoch = {}; this.proposed=null; this.reviewed = null; this.reserved = null; }
+     if (changed || display) this.patch(changed ? { stale: true } : {});
++    this.cliReview?.syncContext();
+   }
+   setEnabled(enabled: boolean): boolean {
+     if (this.disposed || this.ownerReason() || typeof enabled !== 'boolean' || enabled === this.state.enabled) return false;
+@@ -118,10 +128,12 @@ export class VersionReserveController {
+       (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native Android or iOS project.' : c.blockedReason) ??
+       (!parseReserveOptions(this.state.options) ? 'Enter the exact checked-out branch, any selected future full tag, and acknowledge the Store limits.' : null);
+   }
++  private effectiveOptions():VersionReserveOptions{return this.proposed??this.state.options}
++  private readyReason():string|null{const c=this.readContext();return this.disposed?'This controller is retired.':this.ownerReason()??unavailable(c)??(!this.state.enabled?'Manual versions are selected.':!c.projectId?'Choose a saved native project.':c.blockedReason)}
+   reserveReason(): string | null {
+     const s = this.state.status;
+-    return this.reviewReason() ?? (this.state.stale || s?.phase !== 'reviewed' || s.projectId !== this.readContext().projectId ||
+-      this.reviewed?.epoch !== this.epoch || this.reviewed.id !== s.review?.id || this.reviewed.options !== this.state.options ?
++    return this.readyReason() ?? (this.state.stale || s?.phase !== 'reviewed' || s.projectId !== this.readContext().projectId ||
++      this.reviewed?.epoch !== this.epoch || this.reviewed.id !== s.review?.id || this.reviewed.options !== this.effectiveOptions() || this.reviewed.delegated&&!this.cliReview.supports(this.reviewed.id,this.reviewed.cli.revision) ?
+       'Review these exact choices first. A status read cannot replace that review.' : null);
+   }
+   editReason(): string | null {
+@@ -148,12 +160,12 @@ export class VersionReserveController {
+       (!this.state.status?.operationId || this.work && this.work.operationId !== this.state.status.operationId ? 'Check status to identify the original operation first.' :
+         !reserveActive(this.state.status) && !this.work ? 'No pending reservation operation was reported.' : null);
+   }
+-  private begin(kind: Kind, context: VersionReserveContext): Work {
++  private begin(kind: Kind, context: VersionReserveContext, proposed?:VersionReserveOptions): Work {
+     const reset = this.originalContext !== null && !this.sameHost(context, this.originalContext);
+     this.originalContext = context;
+     let finish!: () => void;
+     const completion = new Promise<void>((resolve) => { finish = resolve; });
+-    const work: Work = { kind, context, epoch: this.epoch, options: this.state.options, operationId: kind === 'cancel' ? this.state.status?.operationId ?? null : null,
++    const work: Work = { kind, context, epoch: this.epoch, options: proposed??this.effectiveOptions(), form:this.state.options, operationId: kind === 'cancel' ? this.state.status?.operationId ?? null : null,
+       sent: false, original: null, completion, finish, cliCompletion: kind === 'status' ? this.cliAccess.checkedCompletion() : null };
+     if (kind === 'status') this.query = work;
+     else if (kind === 'cancel') this.stopping = work;
+@@ -190,7 +202,7 @@ export class VersionReserveController {
+     // Descriptor parsing can invoke Proxy traps: rematch original epoch/API
+     // afterwards. Stale replies remain original DATA, never a new intent.
+     const current = this.current(work) && (s.phase !== 'reserved' || s.reservation!.futureTag === work.options.futureTag) && (s.projectId === null || s.projectId === work.context.projectId) && !this.state.unknown;
+-    if (work.kind === 'review' && s.phase === 'reviewed' && current) this.reviewed = { epoch: work.epoch, id: s.review!.id, options: work.options,
++    if (work.kind === 'review' && s.phase === 'reviewed' && current) this.reviewed = { epoch: work.epoch, id: s.review!.id, options: work.options, delegated:this.proposed===work.options,
+       cli: Object.freeze({ id: s.review!.id, revision: s.revision, options: work.options }) };
+     else if (s.phase !== 'reviewed') this.reviewed = null;
+     if (work.kind === 'reserve' && s.phase === 'reserved' && current) this.reserved = { epoch: work.epoch, id: s.reservation!.id };
+@@ -214,15 +226,28 @@ export class VersionReserveController {
+   private async action(kind: 'review' | 'reserve'): Promise<boolean> {
+     this.syncContext(); if ((kind === 'review' ? this.reviewReason() : this.reserveReason()) !== null) return false;
+     const review = kind === 'reserve' ? this.state.status!.review!.id : null;
+-    const work = this.begin(kind, this.readContext());
++    if(kind==='review')this.proposed=null;
++    const work = this.begin(kind, this.readContext(),kind==='review'?this.state.options:undefined);
+     try {
+-      if (!this.current(work) || this.stopping || this.cliAccess.ownerReason() || this.readContext().blockedReason !== null || !work.context.projectId || work.options !== this.state.options || !this.state.enabled) return false;
++      if (!this.current(work) || this.stopping || this.cliAccess.ownerReason() || this.readContext().blockedReason !== null || !work.context.projectId || work.form !== this.state.options || !this.state.enabled) return false;
+       work.sent = true;
+       work.original = kind === 'review' ? work.context.port!.review(work.context.projectId, work.options) : work.context.port!.reserve(work.context.projectId, review!);
+       this.accept(work, await work.original);
+     } catch (e) { this.fail(work, e); } finally { this.end(work); }
+     return work.sent;
+   }
++  private async reviewFromCli(status:ReserveReviewStatus,port:ReserveReviewPort):Promise<boolean>{
++    this.syncContext();const c=this.readContext();
++    if(this.disposed||this.nativeWorkReason()||this.cliAccess.ownerReason()||unavailable(c)||c.reviewPort!==port||!this.state.enabled||c.blockedReason||c.projectId!==status.runtimeProjectId||this.reviewed||status.phase!=='queued')return false;
++    const options=parseReserveOptions(status.options);if(!options)return false;
++    this.proposed=options;
++    const work=this.begin('review',c,options);let admitted=true;
++    try{
++      if(!this.current(work)||this.stopping||this.cliAccess.ownerReason()||this.readContext().blockedReason||!this.state.enabled||this.proposed!==options)return false;
++      work.sent=true;work.original=port.review(status.origin);this.accept(work,await work.original);
++    }catch(e){this.fail(work,e);if(!this.state.unknown)admitted=false}finally{this.end(work)}
++    return work.sent&&admitted;
++  }
+   review = (): Promise<boolean> => this.action('review');
+   reserve = (): Promise<boolean> => this.action('reserve');
+   private async control(kind: 'status' | 'cancel'): Promise<boolean> {
+@@ -246,5 +271,5 @@ export class VersionReserveController {
+     return sent && !access.stale && !access.unknown && access.access?.consumed ? this.check() : sent;
+   };
+   stop = (): Promise<boolean> => this.control('cancel');
+-  dispose(): void { this.disposed = true; this.beforeContextIntent(); this.cliAccess.dispose(); this.listeners.clear(); }
++  dispose(): void { this.disposed = true; this.beforeContextIntent(); this.cliAccess.dispose(); this.cliReview.dispose(); this.listeners.clear(); }
+ }
+diff --git a/desktop/tests/agent-version-reserve-access.test.mjs b/desktop/tests/agent-version-reserve-access.test.mjs
+index e8595690..63550bbe 100644
+--- a/desktop/tests/agent-version-reserve-access.test.mjs
++++ b/desktop/tests/agent-version-reserve-access.test.mjs
+@@ -6,12 +6,13 @@ import { parseAgentVersionReserveAccess, createAgentVersionReserveAccessPort, ag
+ import { VersionReserveController } from '../src/versionReserveController.ts';
+ 
+ const REVIEW = 'a'.repeat(32), OP = 'b'.repeat(32), SERVICE = '1'.repeat(32), PROJECT = '2'.repeat(32), GRANT = '3'.repeat(32), REQUEST = '4'.repeat(32);
++const CHECKED_REVISION = '0000000000000000', CLAIMED_REVISION = '0000000000000001';
+ const options = { reference: 'refs/heads/main', increment: 'patch', newCandidate: false, acknowledgeLimitations: true };
+ const reservation = { id: OP, candidateId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: '1.2.4', build: 8 };
+-const access = (extra = {}) => ({ serviceInstance: SERVICE, projectId: PROJECT, grantId: GRANT, reviewId: REVIEW, reviewRevision: 1,
++const access = (extra = {}) => ({ allowRevision: CLAIMED_REVISION, serviceInstance: SERVICE, projectId: PROJECT, grantId: GRANT, reviewId: REVIEW, reviewRevision: 1,
+   enabled: true, remainingMs: 90_000, consumed: false, requestId: null, completedOperationId: null, ...extra });
+-const none = () => ({ serviceInstance: null, projectId: null, grantId: null, reviewId: null, reviewRevision: null,
+-  enabled: false, remainingMs: 0, consumed: false, requestId: null, completedOperationId: null });
++const none = (extra = {}) => ({ allowRevision: CHECKED_REVISION, serviceInstance: null, projectId: null, grantId: null, reviewId: null, reviewRevision: null,
++  enabled: false, remainingMs: 0, consumed: false, requestId: null, completedOperationId: null, ...extra });
+ const consumed = (completed = false, extra = {}) => access({ enabled: false, remainingMs: 0, consumed: true, requestId: REQUEST,
+   completedOperationId: completed ? OP : null, ...extra });
+ const status = (phase, revision = 1, extra = {}) => ({ schemaVersion: 1, revision, projectId: 'project-1',
+@@ -32,7 +33,11 @@ function harness() {
+   return { c, calls, edits, cliAccessPort, port, last: (kind) => calls.filter((v) => v.kind === kind).at(-1),
+     set: (v) => { context = { ...context, ...v }; }, ready: () => { c.setEnabled(true); c.configure(options); } };
+ }
+-async function reviewed(h) { h.ready(); const p = h.c.review(); h.last('review').resolve(status('reviewed')); await p; }
++async function permissionChecked(h, revision = CHECKED_REVISION) {
++  const p = h.c.cliAccess.check(); h.last('access').resolve(none({ allowRevision: revision })); await p;
++}
++// Fixture explicitly clicks Check AFTER the real Review, not an automatic production read.
++async function reviewed(h) { h.ready(); const p = h.c.review(); h.last('review').resolve(status('reviewed')); await p; await permissionChecked(h); }
+ async function allowed(h) { await reviewed(h); assert.equal(h.c.cliAccess.setAcknowledged(true), true);
+   const p = h.c.cliAccess.allow(); h.last('allow').resolve(access()); await p; }
+ async function checked(h, a, native = null) {
+@@ -46,7 +51,10 @@ test('closed permission DTO rejects malformed authority, IDs, omissions and acce
+     const parsed = parseAgentVersionReserveAccess(v); assert.deepEqual(parsed, v); assert.ok(Object.isFrozen(parsed));
+   }
+   const missing = access(); delete missing.completedOperationId;
+-  for (const v of [missing, access({ source: {} }), access({ grantId: '0'.repeat(32) }), access({ projectId: 'project-1' }),
++  const noStamp = access(); delete noStamp.allowRevision;
++  for (const v of [missing, noStamp, access({ allowRevision: null }), access({ allowRevision: 0 }), access({ allowRevision: '0' }),
++    access({ allowRevision: '000000000000000A' }), access({ allowRevision: '0000000000000000\n' }), access({ allowRevision: 'ffffffffffffffff' }),
++    access({ source: {} }), access({ grantId: '0'.repeat(32) }), access({ projectId: 'project-1' }),
+     access({ serviceInstance: SERVICE.toUpperCase().replace('1', 'A') }), access({ reviewRevision: 0 }), access({ reviewRevision: 0xffff_ffff }),
+     access({ remainingMs: -0 }), access({ remainingMs: 0 }), access({ remainingMs: 120001 }), access({ remainingMs: 0.5 }), access({ enabled: false }),
+     access({ consumed: true }), access({ completedOperationId: OP }), consumed(true, { requestId: null }),
+@@ -61,11 +69,12 @@ test('only the three RAW bounded commands are emitted; CLI help contains exact o
+     assert.ok(bytes instanceof Uint8Array); assert.ok(bytes.length + 96 <= 1024);
+     calls.push([command, JSON.parse(new TextDecoder().decode(bytes))]); return none();
+   });
+-  await port.status(); await port.allow('project-1', REVIEW, 12); await port.revoke();
++  await port.status(); await port.allow('project-1', REVIEW, 12, CHECKED_REVISION); await port.revoke();
+   assert.deepEqual(calls, [['agent_version_reserve_access', {}], ['allow_agent_version_reserve', {
+-    projectId: 'project-1', reviewId: REVIEW, expectedReserveRevision: 12, consentVersion: 'agent-version-reserve-once-v1',
++    projectId: 'project-1', reviewId: REVIEW, expectedReserveRevision: 12, expectedAllowRevision: CHECKED_REVISION, consentVersion: 'agent-version-reserve-once-v1',
+   }], ['revoke_agent_version_reserve', {}]]);
+-  for (const args of [['../project', REVIEW, 1], ['project-1', '0'.repeat(32), 1], ['project-1', REVIEW, 0xffff_ffff]]) await assert.rejects(port.allow(...args));
++  for (const args of [['../project', REVIEW, 1, CHECKED_REVISION], ['project-1', '0'.repeat(32), 1, CHECKED_REVISION], ['project-1', REVIEW, 0xffff_ffff, CHECKED_REVISION],
++    ['project-1', REVIEW, 1], ['project-1', REVIEW, 1, '0000000000000000\n'], ['project-1', REVIEW, 1, 'ffffffffffffffff']]) await assert.rejects(port.allow(...args));
+   assert.equal(calls.length, 3);
+   assert.deepEqual(agentVersionReserveCommands(access()), [`mrk version-reserve-submit ${PROJECT} ${SERVICE} ${GRANT} ${REVIEW} --reviewed`]);
+   assert.deepEqual(agentVersionReserveCommands(consumed()), [`mrk version-reserve-status ${PROJECT} ${SERVICE} ${REQUEST}`, `mrk version-reserve-cancel ${PROJECT} ${SERVICE} ${REQUEST}`]);
+@@ -77,8 +86,9 @@ test('manual default and status-shaped review never allow CLI; explicit original
+   h.ready(); let p = h.c.check(); h.last('version-status').resolve(status('reviewed')); await p;
+   assert.equal(h.c.cliAccess.setAcknowledged(true), false); assert.equal(await h.c.cliAccess.allow(), false);
+   p = h.c.review(); h.last('review').resolve(status('reviewed', 2)); await p;
+-  assert.equal(await h.c.cliAccess.allow(), false); assert.equal(h.c.cliAccess.setAcknowledged(true), true);
+-  p = h.c.cliAccess.allow(); assert.deepEqual(h.last('allow').args, ['project-1', REVIEW, 2]);
++  assert.equal(await h.c.cliAccess.allow(), false); assert.equal(h.c.cliAccess.setAcknowledged(true), false);
++  await permissionChecked(h); assert.equal(h.c.cliAccess.setAcknowledged(true), true);
++  p = h.c.cliAccess.allow(); assert.deepEqual(h.last('allow').args, ['project-1', REVIEW, 2, CHECKED_REVISION]);
+   h.last('allow').resolve(access({ reviewRevision: 2 })); await p;
+   assert.equal(h.c.cliAccess.getSnapshot().acknowledged, false); assert.ok(h.c.ownerReason());
+   assert.equal(await h.c.reserve(), false); assert.equal(h.calls.filter((c) => c.kind === 'reserve').length, 0);
+@@ -99,6 +109,8 @@ test('Allow rechecks private review, context ABA and peer admission after synchr
+ test('immediate original Revoke overtakes pending Allow without dropping either promise or accepting its late grant', async () => {
+   const h = harness(); await reviewed(h); h.c.cliAccess.setAcknowledged(true);
+   const allow = h.c.cliAccess.allow(); const oldAllow = h.last('allow');
++  assert.deepEqual(oldAllow.args, ['project-1', REVIEW, 1, CHECKED_REVISION]);
++  assert.equal(h.calls.filter(c => c.kind === 'access').length, 1); // No renewal at Allow.
+   h.set({ projectId: 'project-2', cliAccessPort: { status() { throw Error('new port'); }, allow() { throw Error('new port'); }, revoke() { throw Error('new port'); } }, nativeSession: {} });
+   h.c.beforeContextIntent(); h.c.syncContext();
+   const revoke = h.c.cliAccess.revoke(); assert.ok(h.last('revoke')); h.last('revoke').resolve(none()); await revoke;
+@@ -168,7 +180,7 @@ test('only source-confirmed pre-grant Allow refusals remain retryable by a new e
+   for (const code of ['version_reserve_refused', 'cli_access_busy', 'cli_access_changed']) {
+     const h = harness(); await reviewed(h); h.c.cliAccess.setAcknowledged(true);
+     const p = h.c.cliAccess.allow(); h.last('allow').reject({ code, message: 'not displayed' }); await p;
+-    assert.equal(h.c.cliAccess.getSnapshot().unknown, false); assert.equal(h.c.cliAccess.getSnapshot().access, null);
++    assert.equal(h.c.cliAccess.getSnapshot().unknown, false); assert.deepEqual(h.c.cliAccess.getSnapshot().access, none());
+     assert.equal(h.c.cliAccess.getSnapshot().stale, true); assert.equal(h.c.ownerReason(), null);
+     assert.equal(await h.c.cliAccess.allow(), false); assert.equal(h.edits.length, 0);
+   }
+@@ -176,6 +188,42 @@ test('only source-confirmed pre-grant Allow refusals remain retryable by a new e
+   assert.equal(h.c.cliAccess.getSnapshot().unknown, true); // That Allow-only proof is not a read/Stop receipt.
+ });
+ 
++test('explicit Check is bound before acknowledgement; a later Check clears rather than refreshes that intent', async () => {
++  const h = harness(); await reviewed(h);
++  assert.equal(h.c.cliAccess.setAcknowledged(true), true);
++  const check = h.c.cliAccess.check();
++  assert.equal(h.c.cliAccess.getSnapshot().acknowledged, false);
++  assert.equal(h.c.cliAccess.setAcknowledged(true), false);
++  h.last('access').resolve(none({ allowRevision: '0000000000000007' })); await check;
++  assert.equal(await h.c.cliAccess.allow(), false); // The old acknowledgement was not rebound.
++  assert.equal(h.c.cliAccess.setAcknowledged(true), true);
++  const allow = h.c.cliAccess.allow();
++  assert.deepEqual(h.last('allow').args, ['project-1', REVIEW, 1, '0000000000000007']);
++  assert.equal(h.calls.filter(c => c.kind === 'access').length, 2);
++  h.last('allow').resolve(access({ allowRevision: '0000000000000008' })); await allow;
++  assert.equal(h.calls.filter(c => c.kind === 'allow').length, 1);
++});
++
++test('Revoke before a Check reply and during acknowledgement cannot recycle its MAIN revision', async () => {
++  const h = harness(); await reviewed(h);
++  const check = h.c.cliAccess.check(), oldCheck = h.last('access');
++  const revoke = h.c.cliAccess.revoke(); h.last('revoke').resolve(none({ allowRevision: '0000000000000004' })); await revoke;
++  oldCheck.resolve(none()); await check;
++  assert.equal(h.c.cliAccess.setAcknowledged(true), false);
++  assert.equal(await h.c.cliAccess.allow(), false);
++  assert.equal(h.calls.filter(c => c.kind === 'allow').length, 0);
++  await permissionChecked(h, '0000000000000004'); // A new explicit user Check, not the Revoke reply.
++  let stop;
++  h.c.cliAccess.subscribe(() => {
++    if (!stop && h.c.cliAccess.getSnapshot().acknowledged) { stop = true; stop = h.c.cliAccess.revoke(); }
++  });
++  h.c.cliAccess.setAcknowledged(true);
++  assert.equal(await h.c.cliAccess.allow(), false);
++  assert.equal(h.calls.filter(c => c.kind === 'allow').length, 0);
++  h.last('revoke').resolve(none({ allowRevision: '0000000000000005' })); await stop;
++  assert.equal(h.c.cliAccess.setAcknowledged(true), false);
++});
++
+ test('known failed consumed request is not busy merely because permission was used; native Unknown still blocks', async () => {
+   const h = harness(); await allowed(h); await checked(h, consumed(), status('refused', 2));
+   assert.equal(h.c.cliAccess.ownerReason(), null); assert.equal(h.c.ownerReason(), null); assert.equal(h.c.edit(), false);

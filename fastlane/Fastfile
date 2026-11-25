@@ -15,6 +15,7 @@ require_relative "apple_create_retry"
 require_relative "ios_upload_validation"
 require_relative "android_upload_validation"
 require_relative "store_document"
+require_relative "store_lane_runtime"
 
 PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
 IOS_PLATFORM = Spaceship::ConnectAPI::Platform::IOS
@@ -73,7 +74,18 @@ rescue MobileReleaseKit::ContractError => e
 end
 
 def metadata_root
+  if MobileReleaseKit::StoreLaneRuntime.local_stage_context
+    return MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_metadata_root!
+  end
   safe_app_path(config_value("metadata", "root"))
+end
+
+def local_stage_context(stage)
+  local = MobileReleaseKit::StoreLaneRuntime.local_stage_context
+  if local && local.fetch(:stage) != stage
+    UI.user_error!("Local Store stage differs from its original lane")
+  end
+  local
 end
 
 def store_mode
@@ -87,12 +99,16 @@ def prepare_mode?
 end
 
 def operation_intent
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
   return @operation_intent if @operation_intent
-
+  if local
+    payload,digest=local.fetch(:payload),local.fetch(:digest)
+  else
   payload, digest = MobileReleaseKit.operation_intent(
     app_root,
     required_env("MOBILE_RELEASE_OPERATION_INTENT_PATH"),
   )
+  end
   expected_operation = required_env("MOBILE_RELEASE_OPERATION")
   unless payload["stage"].to_s != "" && payload["platform"] == required_env("MOBILE_RELEASE_PLATFORM")
     UI.user_error!("Operation intent stage/platform is invalid")
@@ -136,6 +152,17 @@ def require_operation_intent!(operation, platform)
     path_value = ENV[environment].to_s
     UI.user_error!("Operation-intent artifact is missing from Store execution") if path_value.empty?
     path = safe_app_path(path_value)
+    local=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+    if local && platform=="ios" && artifact["logicalName"]=="ios-archive"
+      # Exact local directory descriptor was decoded by the admitted Runtime;
+      # the same core candidate reader retains and POSTs its full inventory.
+      # Never reinterpret a directory commitment as a ZIP/file hash.
+      unless artifact.keys.sort==%w[bytes directory entries kind logicalName platform sha256] &&
+        artifact["kind"]=="xcarchive" && File.directory?(path) && !File.symlink?(path) && File.basename(path)==artifact["directory"]
+        UI.user_error!("Local retained archive does not match the original candidate descriptor")
+      end
+      next
+    end
     unless File.size(path) == artifact["size"] && Digest::SHA256.file(path).hexdigest == artifact["sha256"]
       UI.user_error!("Store input artifact differs from the authenticated operation intent")
     end
@@ -183,6 +210,7 @@ end
 def write_receipt(operation:, platform:, identity:, result:, extra:)
   intent = operation_intent
   version = release_version
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
   receipt = {
     schemaVersion: 3,
     operation: operation,
@@ -193,11 +221,50 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
     observedAt: Time.now.utc.iso8601,
     result: result,
     operationIntentSha256: intent.fetch(:digest),
-    authorizedBy: intent.fetch(:payload).fetch("authorizedBy"),
-    executedBy: MobileReleaseKit.execution_authority(ENV),
+    authorizedBy: local ? nil : intent.fetch(:payload).fetch("authorizedBy"),
+    executedBy: local ? local.fetch(:authority) : MobileReleaseKit.execution_authority(ENV),
   }.merge(extra)
+  if local
+    payload=local.fetch(:payload)
+    receipt.delete(:authorizedBy)
+    receipt.merge!(schemaVersion:1,documentType:"local-store-execution-receipt",origin:"local-desktop",
+      project:payload.fetch("project"),operationId:payload.fetch("operationId"),candidateSha256:payload.fetch("candidateSha256"),
+      preparedBy:payload.fetch("preparedBy"),executedBy:local.fetch(:authority))
+    if payload.fetch("stage") != "candidate"
+      UI.user_error!("Local promotion requires its original first accepted mutation") unless result == "accepted"
+      receipt.merge!(stage:payload.fetch("stage"),candidateOperationId:payload.fetch("candidateOperationId"))
+    end
+  end
   MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
   atomic_store_document(receipt, label: "a Store receipt")
+end
+
+# Only the fixed readonly branch calls this writer. The complete second Store
+# snapshot was classified against the same original intent; no third GET or
+# mutation-shaped execution receipt is used to manufacture readiness/finality.
+def write_external_readiness(context, current)
+  payload=context.fetch(:payload)
+  unless context.equal?(MobileReleaseKit::StoreLaneRuntime.local_readiness_context)
+    UI.user_error!("External readiness lost its original Runtime")
+  end
+  external=current.fetch("external")
+  value={
+    documentType:"local-store-external-readiness-receipt",schemaVersion:1,origin:"local-desktop",
+    operation:"ios_testflight_external",platform:"ios",stage:"external-testing",
+    project:payload.fetch("project"),operationId:payload.fetch("operationId"),
+    candidateOperationId:payload.fetch("candidateOperationId"),candidateSha256:payload.fetch("candidateSha256"),
+    operationIntentSha256:context.fetch(:digest),executionReceiptSha256:context.fetch(:execution_receipt_sha256),
+    preparedBy:payload.fetch("preparedBy"),observedBy:context.fetch(:authority),
+    appIdentity:payload.fetch("application").fetch("id"),appStoreAppId:payload.fetch("application").fetch("storeAppId"),
+    marketingVersion:payload.fetch("version").fetch("marketing"),buildNumber:payload.fetch("version").fetch("build"),
+    observedAt:Time.now.utc.iso8601,result:"ready",state:"available-to-testers",
+    buildResourceId:current.fetch("build").fetch("id"),processingState:current.fetch("build").fetch("processingState"),
+    externalGroup:external.fetch("groupName"),autoNotifyEnabled:external.fetch("autoNotifyEnabled"),
+    betaReviewState:external.fetch("betaReviewState"),priorExecutionFinality:"not-established",
+  }
+  UI.user_error!("External readiness receipt exceeds its fixed bound") if JSON.pretty_generate(value).bytesize+1>64*1024
+  MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
+  atomic_store_document(value,label:"an external readiness observation")
 end
 
 def play_service
@@ -486,6 +553,9 @@ def play_operation_snapshot(stage)
     if stage == "candidate" && (target_present || bundles.any? { |bundle| bundle["versionCode"] == code })
       UI.user_error!("Version code #{code} already exists; refusing candidate adoption")
     end
+    if MobileReleaseKit::StoreLaneRuntime.local_stage_context && target_present
+      UI.user_error!("Local promotion cannot adopt an existing Play target")
+    end
     if stage == "production-submit" && target_present
       UI.user_error!("Production draft already exists without an authenticated operation intent")
     end
@@ -668,6 +738,10 @@ end
 # THIS process dispatched. Adoption always additionally proves the complete
 # authenticated intent target and the Store bundle digest in a fresh edit.
 def play_prior_execution?
+  # This first local action cannot adopt an old target/bundle from a copied
+  # diagnostic. Same-invocation commit ambiguity is reconciled by the existing
+  # uploader's own guarded readback, not this prior-invocation predicate.
+  return false if MobileReleaseKit::StoreLaneRuntime.local_execution_context
   authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
   executed = MobileReleaseKit.execution_authority(ENV)
   return true if authorized["runId"] != executed["runId"] || authorized["attempt"] != executed["attempt"]
@@ -947,7 +1021,11 @@ def ios_app_store_id
 end
 
 def validate_current_ios_upload!(ipa)
-  MobileReleaseKit::IosUploadValidation.current!(
+  local=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  UI.user_error!("Local iOS validation requires original Execute consent") if local &&
+    (local.fetch(:authority).fetch("purpose")!="execute" || local.fetch(:payload).fetch("platform")!="ios")
+  adapter=local ? :current_local! : :current!
+  MobileReleaseKit::IosUploadValidation.public_send(adapter,
     python: required_env("MOBILE_RELEASE_VALIDATION_PYTHON"),
     module_root: required_env("MOBILE_RELEASE_VALIDATION_MODULE_ROOT"),
     app_root: app_root, config_path: required_env("MOBILE_RELEASE_CONFIG_PATH"),
@@ -960,7 +1038,10 @@ rescue MobileReleaseKit::ContractError => e
 end
 
 def validate_current_android_upload!(aab)
-  MobileReleaseKit::AndroidUploadValidation.current!(
+  local=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  UI.user_error!("Local reconciliation cannot validate a new upload") if local && local.fetch(:authority).fetch("purpose") == "recover"
+  adapter=local ? :current_local! : :current!
+  MobileReleaseKit::AndroidUploadValidation.public_send(adapter,
     python: required_env("MOBILE_RELEASE_VALIDATION_PYTHON"),
     module_root: required_env("MOBILE_RELEASE_VALIDATION_MODULE_ROOT"),
     app_root: app_root, config_path: required_env("MOBILE_RELEASE_CONFIG_PATH"),
@@ -1367,6 +1448,18 @@ rescue ArgumentError
 end
 
 def apple_prior_execution?
+  if MobileReleaseKit::StoreLaneRuntime.local_execution_context
+    runtime=MobileReleaseKit::StoreLaneRuntime.current_runtime!
+    context=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+    if context.fetch(:payload).fetch("stage")=="candidate"
+      runtime.local_ios_transport!
+    else
+      runtime.local_stage_execution_context!(context.fetch(:payload).fetch("stage"))
+    end
+    path=apple_state_journal_path
+    UI.user_error!("Local first send cannot adopt an existing Apple attempt") if File.exist?(path)||File.symlink?(path)
+    return false
+  end
   authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
   current = MobileReleaseKit.execution_authority(ENV)
   return true if authorized.fetch("runId") != current.fetch("runId") || authorized.fetch("attempt") != current.fetch("attempt")
@@ -1382,6 +1475,7 @@ def apple_prior_execution?
 end
 
 def require_ios_candidate_retry_confirmation!
+  UI.user_error!("Local iOS retry is not authorized") if MobileReleaseKit::StoreLaneRuntime.local_execution_context
   ipa = operation_intent.fetch(:payload).fetch("artifacts").find { |item| item["logicalName"] == "ios-ipa" }
   expected = "retry-ios-candidate-upload:#{operation_intent.fetch(:digest)}:#{ipa.fetch('sha256')}"
   authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
@@ -1408,6 +1502,12 @@ def apple_current_execution_claimed?
 end
 
 def apple_create_guard(stage, build)
+  if local_stage_context(stage)
+    UI.user_error!("Local Apple promotion cannot resume an earlier attempt") if apple_prior_execution?
+    return MobileReleaseKit::AppleCreateRetry.local_first_send(
+      runtime:MobileReleaseKit::StoreLaneRuntime.current_runtime!,stage:stage,build_id:build.id.to_s,
+      journal:method(:write_apple_state_journal))
+  end
   MobileReleaseKit::AppleCreateRetry.new(
     intent_sha256: operation_intent.fetch(:digest), stage: stage,
     bundle_id: ios_identity, app_id: ios_app_store_id, version: release_version.fetch(:marketing),
@@ -1416,6 +1516,29 @@ def apple_create_guard(stage, build)
     authorized_by: operation_intent.fetch(:payload).fetch("authorizedBy"),
     environment: ENV, journal: method(:write_apple_state_journal), prior_claim: apple_current_execution_claimed?,
   )
+end
+
+# Fresh observation only. Never call the candidate finisher: it can PATCH.
+def local_reconciled_ios_build!(app, snapshot)
+  original = nil
+  2.times do
+    build = ios_build(app)
+    require_intent_ios_build!(app, build, snapshot, readback_server_time: asc_server_time(app))
+    value = normalized_ios_build(build)
+    details = build.build_beta_detail
+    unless value.fetch("processingState") == "VALID" &&
+           value.fetch("usesNonExemptEncryption") == uses_non_exempt_encryption &&
+           value.fetch("autoNotifyEnabled") == false && details &&
+           %w[READY_FOR_BETA_TESTING IN_BETA_TESTING].include?(details.internal_build_state.to_s)
+      UI.user_error!("Local reconciliation requires the complete internal TestFlight build; no retry is authorized")
+    end
+    if original
+      UI.user_error!("Current TestFlight build identity changed") unless original.fetch("id") == value.fetch("id")
+      MobileReleaseKit::AppleStore.require_build!(original, value, expected_encryption: uses_non_exempt_encryption)
+    end
+    original = value
+  end
+  original
 end
 
 def finish_ios_candidate!(app, build, snapshot)
@@ -1470,6 +1593,7 @@ def finish_ios_candidate!(app, build, snapshot)
 end
 
 def require_ios_candidate_recovery_confirmation!(build)
+  UI.user_error!("Local first send cannot adopt a visible App Store Connect build") if MobileReleaseKit::StoreLaneRuntime.local_execution_context
   recovery_run_id = ENV["MOBILE_RELEASE_RECOVERY_RUN_ID"].to_s
   UI.user_error!("A visible iOS candidate can only be adopted by an explicit recovery dispatch") if recovery_run_id.empty?
   expected = "recover-ios-candidate:#{operation_intent.fetch(:digest)}:#{build.id}"
@@ -1593,12 +1717,19 @@ def classify_ios_external!(intent_snapshot, current)
           localizations_final && value["autoNotifyEnabled"] == false &&
           value.fetch("usesNonExemptEncryption") == expected_encryption &&
           current.fetch("privatePhase") == :target && !final_state.nil?
-  prepared_final = before.fetch("assigned") &&
+  prepared_final = ios_external_prepared_final?(intent_snapshot, commitments:operation_intent.fetch(:payload).fetch("privateStateCommitments"))
+  { final: final, prepared_final: prepared_final, normalized_state: final_state, states: states }
+end
+
+def ios_external_prepared_final?(snapshot, commitments:snapshot.fetch("privateStateCommitments"))
+  before=snapshot.fetch("external")
+  expected_encryption=uses_non_exempt_encryption
+  before.fetch("assigned") &&
                    before.fetch("localizations").map { |item| item.slice("locale", "whatsNew") } == before.fetch("targetLocalizations") &&
                    before.fetch("usesNonExemptEncryption") == expected_encryption &&
                    before["autoNotifyEnabled"] == false &&
-                   operation_intent.fetch(:payload).dig("privateStateCommitments", "domains", "beta-review", "before") ==
-                     operation_intent.fetch(:payload).dig("privateStateCommitments", "domains", "beta-review", "target") &&
+                   commitments.dig("domains", "beta-review", "before") ==
+                     commitments.dig("domains", "beta-review", "target") &&
                    !begin
                      normalized_external_state(
                        assigned: before.fetch("assigned"),
@@ -1608,7 +1739,6 @@ def classify_ios_external!(intent_snapshot, current)
                    rescue FastlaneCore::Interface::FastlaneError
                      nil
                    end.nil?
-  { final: final, prepared_final: prepared_final, normalized_state: final_state, states: states }
 end
 
 def beta_locale_locator(value)
@@ -1733,7 +1863,15 @@ lane :android_internal_upload do
   end
   intent_snapshot = require_operation_intent!("android_internal_upload", "android")
   classified = classify_play_intent_state("candidate", intent_snapshot)
-  if classified.fetch(:phase) == :target
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  if local && local.fetch(:authority).fetch("purpose") == "recover"
+    # A new readback action, NOT the ordinary recovery branch below: that
+    # branch may replay mapping and the :before branch may upload/commit.
+    # Classification has already positively deleted its own temporary edit.
+    UI.user_error!("Local reconciliation requires the complete authenticated internal target") unless classified.fetch(:phase) == :target
+    result = "reconciled"
+    state_evidence = play_intent_state_evidence("candidate", intent_snapshot, classified, mode: "recovery")
+  elsif classified.fetch(:phase) == :target
     require_play_recovery_dispatch!
     replay_recovered_play_mapping!(intent_snapshot)
     classified = classify_play_intent_state("candidate", intent_snapshot)
@@ -1833,6 +1971,9 @@ lane :android_external_promote do
   end
   intent_snapshot = require_operation_intent!("android_external_promote", "android")
   classified = classify_play_intent_state("external-testing", intent_snapshot)
+  if local_stage_context("external-testing") && (intent_snapshot.fetch("targetPresent") || classified.fetch(:phase)!=:before)
+    UI.user_error!("Local Play promotion requires the original before-state, not target adoption")
+  end
   if intent_snapshot.fetch("targetPresent")
     UI.user_error!("Pre-existing Play target changed after authorization") unless classified.fetch(:phase) == :before
     result = "already_present"
@@ -1900,6 +2041,9 @@ lane :android_production_draft do
   intent_snapshot = require_operation_intent!("android_production_draft", "android")
   notes = validated_play_release_notes(intent_snapshot)
   classified = classify_play_intent_state("production-submit", intent_snapshot)
+  if local_stage_context("production-submit") && classified.fetch(:phase)!=:before
+    UI.user_error!("Local Play production requires the original before-state, not target adoption")
+  end
   if classified.fetch(:phase) == :target
     require_play_recovery_dispatch!
     result = "reconciled"
@@ -1946,6 +2090,11 @@ end
 
 desc "Upload one signed IPA to internal TestFlight without external distribution"
 lane :ios_testflight_internal do
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  recovering = local && local.fetch(:authority).fetch("purpose") == "recover"
+  if local && !recovering
+    MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_ios_transport!
+  end
   api_key = asc_api_key
   app = verified_ios_app
   version = release_version
@@ -1961,6 +2110,15 @@ lane :ios_testflight_internal do
     next
   end
   intent_snapshot = require_operation_intent!("ios_testflight_internal", "ios")
+  if recovering
+    # Same sealed Invocation, but no upload tools or mutation/retry branch.
+    current = local_reconciled_ios_build!(app, intent_snapshot)
+    write_receipt(operation: "ios_testflight_internal", platform: "ios", identity: ios_identity,
+      result: "reconciled", extra: { appStoreAppId: ios_app_store_id,
+        buildResourceId: current.fetch("id"), processingState: current.fetch("processingState"),
+        autoNotifyEnabled: false, state: "processed" })
+    next
+  end
   prior_execution = apple_prior_execution?
   existing = ios_exact_builds(app)
   build = existing.first
@@ -2099,9 +2257,13 @@ lane :ios_testflight_external do
   asc_api_key
   app = verified_ios_app
   if prepare_mode?
+    snapshot=ios_external_snapshot(app)
+    if local_stage_context("external-testing") && ios_external_prepared_final?(snapshot)
+      UI.user_error!("Local TestFlight promotion cannot adopt an existing external target")
+    end
     write_precondition(
       operation: "ios_testflight_external", platform: "ios", identity: ios_identity,
-      snapshot: ios_external_snapshot(app),
+      snapshot: snapshot,
     )
     next
   end
@@ -2136,8 +2298,30 @@ lane :ios_testflight_external do
     current
   end
   current = read.call
+  if (readiness=MobileReleaseKit::StoreLaneRuntime.local_readiness_context)
+    # No prior-execution marker, create inventory/guard, mutation loop or retry
+    # may be entered for this purpose. Both complete GET snapshots must match
+    # the authenticated original target AND each other; approval alone is not
+    # readiness. Existing original Runtime/metadata checks bracket both reads.
+    classified=classify_ios_external!(intent_snapshot,current)
+    unless classified.fetch(:final) && classified.fetch(:normalized_state)=="available-to-testers"
+      UI.user_error!("TestFlight external target is not available to testers")
+    end
+    MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_metadata_root!
+    observed=read.call
+    classified=classify_ios_external!(intent_snapshot,observed)
+    unless observed==current && classified.fetch(:final) && classified.fetch(:normalized_state)=="available-to-testers"
+      UI.user_error!("TestFlight external target changed during readiness readback")
+    end
+    MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_metadata_root!
+    write_external_readiness(readiness,observed)
+    next
+  end
   resuming = apple_prior_execution?
   initial = classify_ios_external!(intent_snapshot, current)
+  if local_stage_context("external-testing") && (resuming || initial.fetch(:prepared_final) || initial.fetch(:final))
+    UI.user_error!("Local TestFlight promotion requires a new first mutation")
+  end
   unless resuming || initial.fetch(:prepared_final)
     # Only server-driven review progress is allowed between authorization and
     # first dispatch; a newly applied public/private change is not our write.
@@ -2287,10 +2471,16 @@ lane :ios_app_store_submit do
   ios_build_state(build)
   if prepare_mode?
     snapshot = ios_production_adapter(app, build).prepare(server_time: asc_server_time(app))
+    if local_stage_context("production-submit") && snapshot["production"]
+      UI.user_error!("Local App Review cannot adopt an existing production version")
+    end
     write_precondition(operation: "ios_app_store_submit", platform: "ios", identity: ios_identity, snapshot: snapshot)
     next
   end
   snapshot = require_operation_intent!("ios_app_store_submit", "ios")
+  if local_stage_context("production-submit") && snapshot["production"]
+    UI.user_error!("Local App Review requires its original absent production version")
+  end
   result = ios_production_adapter(app, build, create_guard: apple_create_guard("production-submit", build)).execute(
     snapshot, resuming: apple_prior_execution?,
   )

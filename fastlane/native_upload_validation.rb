@@ -15,6 +15,44 @@ module MobileReleaseKit
 
     module_function
 
+    # Only origin selection shared by the fixed iOS/Android adapters. This is
+    # not runtime authentication or a new capture/lifetime owner. Installed ZIP
+    # bytes and every ancestor remain in the caller's original signed Book.
+    def module_origin!(python:, module_root:, tooling_directory:, adapter_directory:, platform:)
+      unless %w[ios android].include?(platform) && module_root.is_a?(String) &&
+             module_root.start_with?(File::SEPARATOR) && !module_root.match?(/[\x00-\x1f\x7f]/) && !File.symlink?(module_root)
+        raise ContractError, "Current-upload validation requires the pinned toolkit module root"
+      end
+      trusted = File.realpath(module_root)
+      if File.directory?(module_root)
+        source_root = File.expand_path("../src", tooling_directory)
+        if File.directory?(File.join(source_root, "mobile_release")) && trusted != File.realpath(source_root)
+          raise ContractError, "Current-upload validation module differs from the pinned source checkout"
+        end
+        module_file = MobileReleaseKit.safe_path(trusted, "mobile_release/#{platform}_upload_validation.py")
+        raise ContractError, "Pinned current-upload validator module is missing" unless File.file?(module_file)
+        return trusted
+      end
+      # No generic ZIP support: the actual currently loaded adapter and selected
+      # interpreter must belong to this exact fixed Desktop runtime layout.
+      adapter = File.realpath(adapter_directory)
+      tooling = File.realpath(tooling_directory)
+      runtime = File.expand_path("../../..", adapter)
+      expected_python = File.join(runtime, "python/bin/python3")
+      expected_archive = File.join(runtime, "core.zip")
+      unless adapter == File.join(runtime, "store/tooling/fastlane") && tooling == adapter &&
+             tooling_directory == tooling && adapter_directory == adapter &&
+             module_root == trusted && trusted == expected_archive && File.file?(trusted) &&
+             python == expected_python && File.realpath(python) == python && File.file?(python) && File.executable?(python)
+        raise ContractError, "Current-upload validation requires the original paired Desktop runtime"
+      end
+      # The unchanged isolated runpy bootstrap accepts ZIP sys.path entries.
+      # Missing/invalid members fail the original bounded capture, never upload.
+      trusted
+    rescue SystemCallError, ArgumentError, TypeError
+      raise ContractError, "Current-upload validation requires the original toolkit origin", cause: nil
+    end
+
     def capture(environment, argv, tooling_directory, max_seconds:, max_output_bytes:, label:, failure_message:, store_binding: nil)
       binding = StoreLaneLifetime.admit_native_capture!(store_binding,
         environment: environment, argv: argv, tooling_directory: tooling_directory)

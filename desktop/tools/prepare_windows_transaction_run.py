@@ -1,0 +1,147 @@
+"""Disposable Windows CI producer: exact source -> runtime -> binaries -> MSI.
+No signing/publication/installation. All commands keep original bounded logs.
+"""
+from __future__ import annotations
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import build_windows_transaction as native
+import prepare_windows_msi as msi
+import prepare_windows_embedded_payload as embedded
+from windows_build_command import run_owned
+import windows_compiler_evidence as compiler_evidence
+
+def source_asset_admission(source,logs):
+ """Observe exact public source asset bytes; never normalize or repair them."""
+ rows=[]
+ for name,size,pin in ((embedded.GITHUB_CA_SOURCE,embedded.GITHUB_CA_BYTES,embedded.GITHUB_CA_SHA256),
+                       (embedded.NOTICE_SOURCE,embedded.NOTICE_BYTES,embedded.NOTICE_SHA256)):
+  raw=embedded.runtime_preparation.read_checked(source/name,limit=256*1024)
+  actual=hashlib.sha256(raw).hexdigest()
+  rows.append({'path':name,'expectedBytes':size,'expectedSha256':pin,'actualBytes':len(raw),
+               'actualSha256':actual,'crlfCount':raw.count(b'\r\n'),'lfCount':raw.count(b'\n'),
+               'matched':len(raw)==size and actual==pin})
+ (logs/'source-asset-bytes.json').write_text(json.dumps({'schema':1,'assets':rows},indent=2)+'\n')
+ msi.need(all(row['matched'] for row in rows),'source asset bytes differ; original measurements retained in source-asset-bytes.json')
+
+def main():
+ p=argparse.ArgumentParser(description=__doc__)
+ for name in ('source','source-commit','source-tree','output'):p.add_argument('--'+name,required=True)
+ a=p.parse_args();source=Path(a.source).resolve();out=Path(a.output).absolute()
+ msi.need(os.name=='nt' and os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and os.environ.get('GITHUB_REPOSITORY')=='Apdelrahman1911/mobile-release-kit' and os.environ.get('GITHUB_WORKFLOW_SHA')==os.environ.get('GITHUB_SHA')==a.source_commit and os.environ.get('GITHUB_EVENT_NAME')=='push' and os.environ.get('GITHUB_REF')=='refs/heads/verify/desktop-windows-installer-candidate-014' and os.environ.get('GITHUB_RUN_ATTEMPT')=='1','exact disposable Windows source/run admission required')
+ msi.need(not out.exists() and out!=source and source not in out.parents,'fresh disjoint output required')
+ def git(*args):return subprocess.check_output(['git','-C',str(source),*args],text=True).strip()
+ msi.need(git('rev-parse','HEAD')==a.source_commit and git('rev-parse','HEAD^{tree}')==a.source_tree,'reviewed source identity')
+ msi.need(not git('status','--porcelain','--untracked-files=no'),'tracked source must be clean')
+ out.mkdir();logs=out/'logs';logs.mkdir()
+ source_asset_admission(source,logs)
+ # Early, read-only check: the MSI step re-reads every bound source with the
+ # strict reader after the long compile. Refuse now, with field evidence.
+ probe={'python':sys.version,'files':{}}
+ for rel in sorted(msi.SOURCE_REQUIRED|native.REQUIRED|{'desktop/tools/prepare_windows_transaction_run.py'}):
+  try:msi.read(source/rel,4*1024*1024);probe['files'][rel]='ok'
+  except msi.Refused as error:probe['files'][rel]=str(error)
+ # Compiled inputs are .exe files; by-name stat treats that suffix specially.
+ sample=logs/'strict-reader-probe.exe';sample.write_bytes(b'MZ probe only, never executed\n')
+ try:msi.read(sample,64);probe['files']['<probe>.exe']='ok'
+ except msi.Refused as error:probe['files']['<probe>.exe']=str(error)
+ sample.unlink()
+ (logs/'source-reader-probe.json').write_text(json.dumps(probe,indent=2,sort_keys=True)+'\n')
+ refused=[k for k,v in probe['files'].items() if v!='ok']
+ msi.need(not refused,'strict source reader refused before compile: '+'; '.join(k+' '+probe['files'][k] for k in refused[:5]))
+ env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',VSCMD_SKIP_SENDTELEMETRY='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
+ def run(name,args,cwd=source,timeout=1800):
+  return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)
+ # Early native toolchain check: same generator, toolset, SDK and strict flags
+ # as the MSI custom-action DLL, on a tiny library, before the long compile.
+ vs=native.visual_studio();(logs/'visual-studio.json').write_text(json.dumps(vs,indent=2)+'\n')
+ toolprobe=out/'native-toolchain-probe';toolprobe.mkdir()
+ (toolprobe/'CMakeLists.txt').write_text('cmake_minimum_required(VERSION 3.24)\nproject(MrkToolchainProbe LANGUAGES CXX)\nadd_library(MrkToolchainProbe SHARED probe.cpp)\ntarget_compile_features(MrkToolchainProbe PRIVATE cxx_std_17)\ntarget_compile_options(MrkToolchainProbe PRIVATE /W4 /WX /guard:cf /sdl)\ntarget_link_options(MrkToolchainProbe PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)\nset_property(TARGET MrkToolchainProbe PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)\n')
+ (toolprobe/'probe.cpp').write_text('#include <windows.h>\nextern "C" __declspec(dllexport) DWORD MrkProbe(void) { return GetCurrentProcessId() != 0 ? 0u : 1u; }\n')
+ # Evidence helper: processes alive on this disposable runner.
+ def processes():
+  raw=subprocess.run(['powershell','-NoProfile','-Command','Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress'],capture_output=True,timeout=120).stdout
+  return {row['ProcessId']:row for row in json.loads(raw or b'[]')}
+ before=processes()
+ # Runs 43661519964/43674399134: the MSVC compiler starts VCTIP.EXE (telemetry)
+ # and it outlives the compiler, holding the owned job until its deadline. The
+ # compiler reuses an already running instance, so start one OUTSIDE every
+ # owned job immediately before native C++ work and record it. The owned-job
+ # rule itself is unchanged.
+ def prestart_vctip(stage,every=False):
+  # link.exe spawns VCTIP.EXE telemetry, which idles ~900 s; inside an owned
+  # command it holds the job open (measured: +900 s on each cargo stage of
+  # run 43723424305). A detached instance started first is reused instead.
+  # rustc may pick a newer toolset than CMake, so cargo stages start each one.
+  candidates=sorted(Path(vs['installationPath']).glob('VC/Tools/MSVC/*/bin/HostX64/x64/vctip.exe'))
+  chosen=[c for c in candidates if c.parent.parent.parent.parent.name.startswith(('14.3','14.4'))] or candidates
+  picks=candidates if every else chosen[-1:]
+  record={'stage':stage,'candidates':[str(c) for c in candidates],'started':None,'all':[]}
+  for pick in picks:
+   proc=subprocess.Popen([str(pick)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=0x00000008|0x00000200)
+   time.sleep(2);started={'path':str(pick),'pid':proc.pid,'running':proc.poll() is None}
+   record['all'].append(started);record['started']=record['started'] or started
+  with (logs/'vctip-prestart.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
+ prestart_vctip('probe')
+ snapshot=threading.Timer(60,lambda:(logs/'toolchain-probe-during.json').write_text(json.dumps({'all':list(processes().values())},indent=1)+'\n'));snapshot.daemon=True;snapshot.start()
+ try:
+  run('native-toolchain-configure',native.configure_args(vs,toolprobe,toolprobe/'build'),cwd=out,timeout=180)
+  run('native-toolchain-build',['cmake','--build',str(toolprobe/'build'),'--config','Release','--parallel','1'],cwd=out,timeout=180)
+ except RuntimeError:
+  # Evidence only: which processes outlived the probe's owned command.
+  # Run 43661519964: a lingering VCTIP.EXE (compiler telemetry) held the job.
+  after=processes();(logs/'toolchain-probe-lingering.json').write_text(json.dumps({'new':[after[k] for k in after if k not in before]},indent=2)+'\n')
+  raise
+ msi.need((toolprobe/'build/Release/MrkToolchainProbe.dll').is_file(),'native toolchain probe produced no DLL')
+ archive=out/embedded.ZIP_NAME;request=urllib.request.Request(embedded.ZIP_URL,headers={'User-Agent':'MRK-disposable-native-validation/1'})
+ with urllib.request.urlopen(request,timeout=60) as incoming,archive.open('xb') as target:
+  count=0;h=hashlib.sha256()
+  while True:
+   chunk=incoming.read(65536)
+   if not chunk:break
+   count+=len(chunk);msi.need(count<=embedded.ZIP_BYTES,'archive bound');h.update(chunk);target.write(chunk)
+ msi.need(count==embedded.ZIP_BYTES and h.hexdigest()==embedded.ZIP_SHA256,'public archive pin')
+ runtime=out/'runtime';prepared=embedded.prepare(source,archive,runtime)
+ (out/'runtime-prepared.json').write_text(json.dumps(prepared,indent=2)+'\n')
+ env.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=prepared['manifestSha256'],MRK_BUNDLED_PROTOCOL_SHA256=prepared['protocolSha256'])
+ run('npm-ci',['npm.cmd','ci','--ignore-scripts'],source/'desktop',600)
+ run('frontend-build',['npm.cmd','run','build'],source/'desktop',600)
+ manifest=str(source/'desktop/src-tauri/Cargo.toml')
+ # Hosted windows-2025 runners have 4 cores and 16 GiB; the jobs=1 limit applies
+ # to local Mac compiles only. Parallel rustc cuts the release compiles ~3x.
+ CARGO_JOBS=str(max(1,min(4,os.cpu_count() or 1)))
+ # Actual release builds below perform typechecking and linking; no duplicate check-only build.
+ prestart_vctip('publisher-data-tests',every=True)
+ run('publisher-data-tests',['cargo','test','--locked','--release','--jobs',CARGO_JOBS,'--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
+ run('shell-metadata',['cargo','metadata','--locked','--format-version','1','--filter-platform',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol'])
+ selected={}
+ for role,binary,features in [('publisher',msi.PUBLISHER.removesuffix('.exe'),'windows-runtime-publisher'),('shell',msi.SHELL.removesuffix('.exe'),'desktop-shell,custom-protocol')]:
+  # Hosted release compile allowance: publisher measured 909.8 s (43037225823);
+  # full shell check alone measured 1132.3 s (43030604535), so its optimized
+  # release build receives a larger bounded deadline. Output/job limits unchanged.
+  prestart_vctip(role+'-compile',every=True)
+  run(role+'-compile',['cargo','build','--locked','--release','--jobs',CARGO_JOBS,'--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'],timeout=1800 if role=='publisher' else 5400)
+  selected[role]=compiler_evidence.selected_artifact((logs/(role+'-compile.stdout')).read_bytes(),role=role,source=source,output=out)
+ compiler_evidence.retain_normal(source,out,selected['shell'])
+ inputs=out/'inputs';inputs.mkdir();shutil.copytree(runtime,inputs/'runtime')
+ for role,name in (('shell',msi.SHELL),('publisher',msi.PUBLISHER)):
+  original=Path(selected[role]['path']);msi.need(hashlib.sha256(original.read_bytes()).hexdigest()==selected[role]['sha256'],'compiler-selected original changed');shutil.copyfile(original,inputs/name)
+ paths=msi.SOURCE_REQUIRED|native.REQUIRED|{'desktop/tools/prepare_windows_transaction_run.py'}
+ files={p.relative_to(inputs).as_posix():{'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in inputs.rglob('*') if p.is_file()}
+ b={'schema':1,'sourceCommit':a.source_commit,'sourceTree':a.source_tree,'version':json.loads((source/'desktop/src-tauri/tauri.conf.json').read_text())['version'],
+    'target':msi.TARGET,'manifestSha256':prepared['manifestSha256'],'protocolSha256':prepared['protocolSha256'],
+    'sourceFiles':{p:hashlib.sha256((source/p).read_bytes()).hexdigest() for p in sorted(paths)},'files':files}
+ binding=out/'binding.json';raw=(json.dumps(b,sort_keys=True,indent=2)+'\n').encode();binding.write_bytes(raw)
+ prestart_vctip('native-and-msi')
+ run('native-and-msi',['python',str(source/'desktop/tools/build_windows_transaction.py'),'--source',str(source),'--inputs',str(inputs),'--binding',str(binding),'--binding-sha256',hashlib.sha256(raw).hexdigest(),'--output',str(out/'msi'),'--compile'],timeout=1200)
+ # Builds may create ignored outputs, but cannot change any tracked source.
+ msi.need(not git('status','--porcelain','--untracked-files=no'),'tracked source changed while building')
+if __name__=='__main__':main()

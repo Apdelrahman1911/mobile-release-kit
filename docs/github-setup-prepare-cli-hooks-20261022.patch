@@ -1,0 +1,797 @@
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,13 +10,14 @@
+   "scripts": {
+     "test:github-pr-mode": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/github-pull-request-mode.test.mjs",
+     "test:github-activity-delegation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/github-activity-delegation.test.mjs tests/github-dispatch-delegation.test.mjs",
++    "test:github-setup-prepare-delegation": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/github-setup-prepare-delegation.test.mjs",
+     "test:github-dispatch-delegation": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/github-dispatch-delegation.test.mjs",
+     "test:agent-github-actions": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-github-actions.test.mjs",
+     "test:agent-store-release": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-release.test.mjs",
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/agent-local-history-prepare.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/service-metadata-images-prepare.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/agent-local-history-prepare.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/service-metadata-images-prepare.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-setup-prepare-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build",
+     "test:agent-store-preparation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-preparation.test.mjs"
+   },
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -645,11 +645,11 @@
+   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
+   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
+     syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();githubPreflightControllerRef.current?.syncContext();githubReleaseControllerRef.current?.syncContext();githubPublicationControllerRef.current?.syncCounterSource();},
+-    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile'||r.kind==='counter-prepare'||r.kind==='counter-create'||r.kind==='publication-pending'||r.kind==='counter-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('preflight-')?githubPreflightControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('release-')?githubReleaseControllerRef.current?.delegatePrepared(r)??null:null,
++    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile'||r.kind==='setup-prepare'||r.kind==='counter-prepare'||r.kind==='counter-create'||r.kind==='publication-pending'||r.kind==='counter-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('preflight-')?githubPreflightControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('release-')?githubReleaseControllerRef.current?.delegatePrepared(r)??null:null,
+     current:()=>{const service=pathService.current;return {
+       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
+       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
+-      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile'),githubPreflightControllerRef.current?.agentSelection('preflight-prepare'),githubPreflightControllerRef.current?.agentSelection('preflight-dispatch'),githubPreflightControllerRef.current?.agentSelection('preflight-pending'),githubPreflightControllerRef.current?.agentSelection('preflight-observe'),githubReleaseControllerRef.current?.agentSelection('release-prepare'),githubReleaseControllerRef.current?.agentSelection('release-dispatch'),githubReleaseControllerRef.current?.agentSelection('release-pending'),githubReleaseControllerRef.current?.agentSelection('release-observe'),githubPublicationControllerRef.current?.dispatchSelection('counter-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-create'),githubPublicationControllerRef.current?.dispatchSelection('publication-pending'),githubPublicationControllerRef.current?.dispatchSelection('counter-reconcile')].filter((r):r is GithubActionSelection=>!!r),
++      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile'),githubPreflightControllerRef.current?.agentSelection('preflight-prepare'),githubPreflightControllerRef.current?.agentSelection('preflight-dispatch'),githubPreflightControllerRef.current?.agentSelection('preflight-pending'),githubPreflightControllerRef.current?.agentSelection('preflight-observe'),githubReleaseControllerRef.current?.agentSelection('release-prepare'),githubReleaseControllerRef.current?.agentSelection('release-dispatch'),githubReleaseControllerRef.current?.agentSelection('release-pending'),githubReleaseControllerRef.current?.agentSelection('release-observe'),githubPublicationControllerRef.current?.dispatchSelection('setup-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-create'),githubPublicationControllerRef.current?.dispatchSelection('publication-pending'),githubPublicationControllerRef.current?.dispatchSelection('counter-reconcile')].filter((r):r is GithubActionSelection=>!!r),
+       blockedReason:agentGithubActionAdmission.current(),
+     };},
+   }));
+--- a/desktop/src/agentGithubActionAccess.ts
++++ b/desktop/src/agentGithubActionAccess.ts
+@@ -59,7 +59,7 @@
+   return 'consentId'in a&&'consentId'in b&&a.sessionId===b.sessionId&&a.consentId===b.consentId&&a.expectedRevision===b.expectedRevision;
+ }
+ export const sameGithubActionReview=(a:GithubActionReview|null,b:GithubActionReview|null):boolean=>!!a&&!!b&&same(a,b);
+-const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-','activity-overview':'github-activity-','preflight-prepare':'github-preflight-','preflight-dispatch':'github-preflight-','preflight-pending':'github-preflight-','preflight-observe':'github-preflight-','release-prepare':'github-release-','release-dispatch':'github-release-','release-pending':'github-release-','release-observe':'github-release-','counter-prepare':'github-publication-','counter-create':'github-publication-','publication-pending':'github-publication-','counter-reconcile':'github-publication-'};
++const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-','activity-overview':'github-activity-','preflight-prepare':'github-preflight-','preflight-dispatch':'github-preflight-','preflight-pending':'github-preflight-','preflight-observe':'github-preflight-','release-prepare':'github-release-','release-dispatch':'github-release-','release-pending':'github-release-','release-observe':'github-release-','setup-prepare':'github-publication-','counter-prepare':'github-publication-','counter-create':'github-publication-','publication-pending':'github-publication-','counter-reconcile':'github-publication-'};
+ function operation(v:unknown,k:GithubActionKind):v is string {
+   if(typeof v!=='string'||!v.startsWith(prefixes[k]))return false;const n=v.slice(prefixes[k].length);
+   return /^[1-9][0-9]{0,19}$/.test(n)&&BigInt(n)<=18446744073709551615n;
+@@ -101,7 +101,7 @@
+     return freeze(v) as unknown as AgentGithubActionAccess;
+   }catch{return null;}
+ }
+-const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1','activity-overview':'agent-activity-overview-once-v1','preflight-prepare':'agent-preflight-prepare-once-v1','preflight-dispatch':'agent-preflight-dispatch-once-v1','preflight-pending':'agent-preflight-pending-once-v1','preflight-observe':'agent-preflight-observe-once-v1','release-prepare':'agent-release-prepare-once-v1','release-dispatch':'agent-release-dispatch-once-v1','release-pending':'agent-release-pending-once-v1','release-observe':'agent-release-observe-once-v1','counter-prepare':'agent-counter-prepare-once-v1','counter-create':'agent-counter-create-once-v1','publication-pending':'agent-publication-pending-once-v1','counter-reconcile':'agent-counter-reconcile-once-v1'};
++const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1','activity-overview':'agent-activity-overview-once-v1','preflight-prepare':'agent-preflight-prepare-once-v1','preflight-dispatch':'agent-preflight-dispatch-once-v1','preflight-pending':'agent-preflight-pending-once-v1','preflight-observe':'agent-preflight-observe-once-v1','release-prepare':'agent-release-prepare-once-v1','release-dispatch':'agent-release-dispatch-once-v1','release-pending':'agent-release-pending-once-v1','release-observe':'agent-release-observe-once-v1','setup-prepare':'agent-setup-prepare-once-v1','counter-prepare':'agent-counter-prepare-once-v1','counter-create':'agent-counter-create-once-v1','publication-pending':'agent-publication-pending-once-v1','counter-reconcile':'agent-counter-reconcile-once-v1'};
+ export function createAgentGithubActionPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentGithubActionPort {
+   const send=(name:string,body:object,limit=1024)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));if(bytes.length>limit)throw new Error('Invalid GitHub delegation DATA');return invoke(name,bytes);};
+   return Object.freeze({access:()=>send('agent_github_action_access',{}),revoke:()=>send('revoke_agent_github_action',{}),allow:(raw:GithubActionSelection,revision:string)=>{
+--- a/desktop/src/components/AgentGithubActionAccess.tsx
++++ b/desktop/src/components/AgentGithubActionAccess.tsx
+@@ -3,7 +3,7 @@
+ import type { AgentGithubActionAccessController } from '../agentGithubActionAccessController.ts';
+ import { GITHUB_ACTION_KINDS, githubActionCommands } from '../agentGithubActionAccess.ts';
+ import type { GithubActionKind } from '../agentGithubActionAccess.ts';
+-const labels:Readonly<Record<GithubActionKind,string>>={'repository-create':'Create the reviewed empty repository','draft-pr-create':'Create the reviewed draft pull request','pr-create':'Create the reviewed ready-for-review pull request','failed-jobs-retry':'Retry the reviewed failed and dependent jobs','setup-publish':'Publish the exact five-file setup review','setup-reconcile':'GET-only reconcile the selected original setup intent','activity-overview':'Read a fresh GitHub Activity overview once','preflight-prepare':'Prepare the selected preflight options','preflight-dispatch':'Dispatch the reviewed preflight once','preflight-pending':'Load original preflight intents','preflight-observe':'Observe the selected original preflight run','release-prepare':'Prepare the selected protected release options','release-dispatch':'Dispatch the reviewed protected release once','release-pending':'Load original release intents','release-observe':'Observe the selected original release run','counter-prepare':'Prepare FIRST counter from saved inputs','counter-create':'Create the reviewed FIRST counter','publication-pending':'Load original setup/counter intents','counter-reconcile':'GET-only reconcile the selected Counter intent'};
++const labels:Readonly<Record<GithubActionKind,string>>={'repository-create':'Create the reviewed empty repository','draft-pr-create':'Create the reviewed draft pull request','pr-create':'Create the reviewed ready-for-review pull request','failed-jobs-retry':'Retry the reviewed failed and dependent jobs','setup-publish':'Publish the exact five-file setup review','setup-reconcile':'GET-only reconcile the selected original setup intent','activity-overview':'Read a fresh GitHub Activity overview once','preflight-prepare':'Prepare the selected preflight options','preflight-dispatch':'Dispatch the reviewed preflight once','preflight-pending':'Load original preflight intents','preflight-observe':'Observe the selected original preflight run','release-prepare':'Prepare the selected protected release options','release-dispatch':'Dispatch the reviewed protected release once','release-pending':'Load original release intents','release-observe':'Observe the selected original release run','setup-prepare':'Prepare the ordinary five-file setup review','counter-prepare':'Prepare FIRST counter from saved inputs','counter-create':'Create the reviewed FIRST counter','publication-pending':'Load original setup/counter intents','counter-reconcile':'GET-only reconcile the selected Counter intent'};
+ const effects:Readonly<Record<GithubActionKind,string>>={
+   'activity-overview':GITHUB_ACTIVITY_NOTICE,
+   'repository-create':'Creates only the exact reviewed empty GitHub repository with its displayed owner and visibility. No local initialization, files, commit or push.',
+@@ -20,6 +20,7 @@
+   'release-dispatch':'One protected workflow POST that can SIGN, UPLOAD, PROMOTE or SUBMIT using repository privileges. The original stage, destination and typed confirmation are unchanged. Accepted is not successful release or finality of a prior attempt.',
+   'release-pending':'Load original local release intents only, without dispatch or changing a release.',
+   'release-observe':'GET-only Track or Reconcile of one explicitly selected original release record/run. Historical status grants no retry or promotion.',
++  'setup-prepare':'Read the actual saved configuration and four canonical callers against the selected remote base. No publication, local workflow editing or Counter setup. A separate exact five-file Publish review and permission are required.',
+   'counter-prepare':'Prepare FIRST Counter using the actual current saved configuration/version and native Host state. May create the existing private local state location. Saved numeric version is NOT a verified Store floor.',
+   'counter-create':'Create only the reviewed FIRST counter on the fixed NEW branch. Known prior counters refuse and competing refs cannot be overwritten. Existing repository automation may run. No allocation, protection change, enrollment, reset or Store request.',
+   'publication-pending':'Read the actual mixed setup/counter journal. No token-based provider request, new intent, publication or Counter authority.',
+--- a/desktop/src/githubDispatchDelegation.ts
++++ b/desktop/src/githubDispatchDelegation.ts
+@@ -4,22 +4,23 @@
+ import { connectionKeys as keys, connectionNumericId as numericId, sameConnectionData as same } from './githubConnectionProtocol.ts';
+ import { githubPreflightRequestFits } from './githubPreflightProtocol.ts';
+ import { githubReleaseRequestFits } from './githubReleaseProtocol.ts';
+-import { publicationRequestFits } from './githubPublicationProtocol.ts';
++import { publicationRequestFits, publicationPrepared } from './githubPublicationProtocol.ts';
+ import type { GitHubPreflightPrepare, GitHubPreflightDispatch, GitHubPreflightControl, GitHubPreflightPrepared, GitHubPreflightRecord } from './githubPreflightTypes.ts';
+ import type { GitHubReleasePrepare, GitHubReleaseDispatch, GitHubReleaseControl, GitHubReleasePrepared, GitHubReleaseRecord } from './githubReleaseTypes.ts';
+ import type { CounterPrepared } from './versionCounterSetup.ts';
+-import type { PublicationPending } from './githubPublicationTypes.ts';
+-export const GITHUB_DISPATCH_KINDS=['preflight-prepare','preflight-dispatch','preflight-pending','preflight-observe','release-prepare','release-dispatch','release-pending','release-observe','counter-prepare','counter-create','publication-pending','counter-reconcile'] as const;
++import type { PublicationPending, PublicationPrepared } from './githubPublicationTypes.ts';
++export const GITHUB_DISPATCH_KINDS=['preflight-prepare','preflight-dispatch','preflight-pending','preflight-observe','release-prepare','release-dispatch','release-pending','release-observe','setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'] as const;
+ export type GithubDispatchKind=typeof GITHUB_DISPATCH_KINDS[number];
+ interface Original {readonly sessionId:string;readonly expectedRevision:number}
+ export interface WorkflowObserveSelection extends Original {readonly kind:'preflight-observe'|'release-observe';readonly marker:string;readonly observe:'track'|'reconcile';readonly runId:string|null}
+ export type GithubDispatchSelection=
+  ({readonly kind:'preflight-prepare'}&GitHubPreflightPrepare)|({readonly kind:'preflight-dispatch'}&GitHubPreflightDispatch)|({readonly kind:'preflight-pending'}&GitHubPreflightControl)|
+  ({readonly kind:'release-prepare'}&GitHubReleasePrepare)|({readonly kind:'release-dispatch'}&GitHubReleaseDispatch)|({readonly kind:'release-pending'}&GitHubReleaseControl)|WorkflowObserveSelection|
++ ({readonly kind:'setup-prepare';readonly expectedConnectionRevision:number;readonly base:string}&Original)|
+  ({readonly kind:'counter-prepare';readonly expectedConnectionRevision:number;readonly base:string;readonly purpose:'version-counter'}&Original)|
+  ({readonly kind:'counter-create';readonly consentId:string;readonly confirm:true}&Original)|
+  ({readonly kind:'publication-pending';readonly expectedConnectionRevision:number}&Original)|({readonly kind:'counter-reconcile';readonly marker:string}&Original);
+-export type GithubDispatchReference=(Original&{readonly kind:'preflight-prepare'|'preflight-pending'|'release-prepare'|'release-pending'|'counter-prepare'|'publication-pending';readonly requestSha256:string})|
++export type GithubDispatchReference=(Original&{readonly kind:'preflight-prepare'|'preflight-pending'|'release-prepare'|'release-pending'|'setup-prepare'|'counter-prepare'|'publication-pending';readonly requestSha256:string})|
+  (Original&{readonly kind:'preflight-dispatch'|'release-dispatch'|'counter-create';readonly consentId:string;readonly preparedSha256:string})|
+  (WorkflowObserveSelection&{readonly recordSha256:string})|(Original&{readonly kind:'counter-reconcile';readonly marker:string;readonly recordSha256:string});
+ export type GithubDispatchSnapshot={readonly type:'prepared';readonly marker:string;readonly preparedSha256:string;readonly sourceSha:string;readonly platform:'android'|'ios'|'both'|null;readonly stage:'candidate'|'external-testing'|'production-submit'|null}|
+@@ -37,7 +38,8 @@
+ /** Reconstruct only the fixed native Args declaration order used by its hash. */
+ function orderedInput(v:GithubDispatchSelection):GithubDispatchSelection {
+  const names=['kind','sessionId','expectedRevision'];
+- if(v.kind.endsWith('-prepare'))names.push('expectedConnectionRevision',v.kind==='counter-prepare'?'base':'branch',...(v.kind==='counter-prepare'?['purpose']:['platform',...(v.kind==='release-prepare'?['selection']:[])]));
++ if(v.kind==='setup-prepare')names.push('expectedConnectionRevision','base');
++ else if(v.kind.endsWith('-prepare'))names.push('expectedConnectionRevision',v.kind==='counter-prepare'?'base':'branch',...(v.kind==='counter-prepare'?['purpose']:['platform',...(v.kind==='release-prepare'?['selection']:[])]));
+  else if(v.kind==='publication-pending')names.push('expectedConnectionRevision');
+  else if(v.kind==='counter-create'||v.kind.endsWith('-dispatch'))names.push('consentId','confirm',...(v.kind==='release-dispatch'?['confirmation']:[]));
+  else if(v.kind.endsWith('-observe'))names.push('marker','observe','runId');
+@@ -57,6 +59,7 @@
+  case 'release-pending':valid=githubReleaseRequestFits('github_release_pending',a);break;
+  case 'preflight-observe':case 'release-observe':valid=keys(a,['sessionId','expectedRevision','marker','observe','runId'])&&original(a)&&hex(a.marker,32)&&
+    (a.observe==='track'&&numericId(a.runId)||a.observe==='reconcile'&&a.runId===null);break;
++ case 'setup-prepare':valid=keys(a,['sessionId','expectedRevision','expectedConnectionRevision','base'])&&publicationRequestFits('github_setup_publication_prepare',a);break;
+  case 'counter-prepare':valid=a.purpose==='version-counter'&&publicationRequestFits('github_setup_publication_prepare',a);break;
+  case 'counter-create':valid=publicationRequestFits('github_setup_publication_publish',a);break;
+  case 'publication-pending':valid=publicationRequestFits('github_setup_publication_pending',a);break;
+@@ -80,8 +83,12 @@
+ // Small bounded SHA-256 comparison, not a credential/signature/provenance issuer.
+ // Fixed 64-word working schedule; input is already closed copied native DATA.
+ const K=Uint32Array.from([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+-export function githubDispatchHash(v:unknown):string {
+- const data=new TextEncoder().encode(JSON.stringify(v));if(data.length>16384)throw new Error('Comparison limit');
++export function githubDispatchHash(v:unknown):string { return boundedHash(v,16384); }
++// Only the validated ordinary five-file comparator below uses its existing
++//384KiB review bound. Every original dispatch hash keeps its16KiB bound.
++function boundedHash(v:unknown,limit:number):string {
++ const json=JSON.stringify(v);if(json.length>limit)throw new Error('Comparison limit');
++ const data=new TextEncoder().encode(json);if(data.length>limit)throw new Error('Comparison limit');
+  const padded=new Uint8Array(Math.ceil((data.length+9)/64)*64);padded.set(data);padded[data.length]=128;
+  new DataView(padded.buffer).setUint32(padded.length-4,data.length*8);const w=new Uint32Array(64),h=Uint32Array.from([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const rotate=(n:number,b:number)=>(n>>>b)|(n<<(32-b));
+@@ -108,7 +115,7 @@
+ export function parseGithubDispatchSnapshot(v:unknown,k:GithubDispatchKind):GithubDispatchSnapshot|null{
+  try{const c=copyBoundedComparisonData(v,8192,540) as Record<string,unknown>|null;if(!c||typeof c!=='object'||!('type'in c))return null;let valid=false;
+  switch(c.type){case 'prepared':valid=keys(c,['type','marker','preparedSha256','sourceSha','platform','stage'])&&hex(c.marker,32)&&hex(c.preparedSha256,64)&&hex(c.sourceSha,40)&&
+- (k==='counter-prepare'?c.platform===null&&c.stage===null:k==='preflight-prepare'?['android','ios','both'].includes(String(c.platform))&&c.stage===null:
++ (k==='setup-prepare'||k==='counter-prepare'?c.platform===null&&c.stage===null:k==='preflight-prepare'?['android','ios','both'].includes(String(c.platform))&&c.stage===null:
+  k==='release-prepare'&&['android','ios'].includes(String(c.platform))&&['candidate','external-testing','production-submit'].includes(String(c.stage)));break;
+  case 'pending':valid=keys(c,['type','rows'])&&Array.isArray(c.rows)&&c.rows.length<=64&&['preflight-pending','release-pending','publication-pending'].includes(k)&&c.rows.every((r,i,rows)=>keys(r,['marker','runId','purpose'])&&hex(r.marker,32)&&!rows.slice(0,i).some(x=>x.marker===r.marker)&&(r.runId===null||numericId(r.runId))&&
+  (k==='preflight-pending'?r.purpose==='preflight':k==='release-pending'?r.purpose==='release':r.runId===null&&['setup','counter'].includes(String(r.purpose))));break;
+@@ -117,6 +124,17 @@
+  case 'counter':valid=keys(c,['type','marker','commitSha','ledgerId','genesisSha256'])&&['counter-create','counter-reconcile'].includes(k)&&hex(c.marker,32)&&hex(c.commitSha,40)&&typeof c.ledgerId==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(c.ledgerId)&&hex(c.genesisSha256,64);break;}
+  return valid?freeze(c) as unknown as GithubDispatchSnapshot:null;
+  }catch{return null;}
++}
++/** Ordinary native Prepared declaration order. Large file strings are only
++ * borrowed into this fixed shallow projection; JSON/UTF8/padding scratch are
++ * bounded by384KiB each (UTF16 JSON <=768KiB), never retained in a service row.
++ * This comparison neither creates nor refreshes native publication authority. */
++export function githubSetupPreparedHash(p:PublicationPrepared):string {
++ if(!publicationPrepared(p))throw new Error('Invalid ordinary setup review');
++ const target=pick(p.target as unknown as Record<string,unknown>,['projectBinding','repository','accountId','repositoryId','base','toolingRepository','toolingSha','marker']);
++ const o=pick(p as unknown as Record<string,unknown>,['protocol','target','baseCommit','baseTree','desiredTree','files','head','confirmation']);
++ o.target=target;o.files=p.files.map(f=>pick(f as unknown as Record<string,unknown>,['path','before','after']));
++ return boundedHash(o,384*1024);
+ }
+ const targetKeys=['projectBinding','repository','accountId','repositoryId','branch','toolingRepository','toolingSha','platform','marker'];
+ function workflowPrepared(p:GitHubPreflightPrepared|GitHubReleasePrepared):unknown{
+--- a/desktop/src/githubPublicationController.ts
++++ b/desktop/src/githubPublicationController.ts
+@@ -1,11 +1,11 @@
+-import { parseGithubDispatchSelection, githubDispatchPreparedHash, githubDispatchRecordHash } from './githubDispatchDelegation.ts';
++import { parseGithubDispatchSelection, githubSetupPreparedHash, githubDispatchPreparedHash, githubDispatchRecordHash } from './githubDispatchDelegation.ts';
+ import type { GithubDispatchKind, GithubDispatchSelection } from './githubDispatchDelegation.ts';
+ import { COUNTER_BRANCH, COUNTER_PURPOSE, counterPrepared, counterSummary, counterSourceMatches, publicationPurpose, sameCounterSaved, type CounterSavedWitness, type PublicationPurpose, type CounterSummary } from './versionCounterSetup.ts';
+ // Coordinates the original native publication only: no token, HTTP, polling,
+ // write retry, local Git mutation or renderer-created consent.
+ import { sameConnectionData as same } from './githubConnectionProtocol.ts';
+ import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
+-import { PUBLICATION_HELP, publicationError, parsePublicationStatus } from './githubPublicationProtocol.ts';
++import { PUBLICATION_HELP, publicationPrepared, publicationError, parsePublicationStatus } from './githubPublicationProtocol.ts';
+ import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
+ import type { GithubActionDelegate, GithubActionSelection, GithubActionStatus } from './agentGithubActionAccess.ts';
+ import type { GithubPublicationAction, GithubPublicationSelection } from './githubPublicationDelegation.ts';
+@@ -283,7 +283,7 @@
+     return null;
+   }
+   agentSelected(selection: GithubActionSelection): boolean {
+-    if(['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.dispatchAgent?sameGithubActionSelection(this.dispatchAgent.selection,selection)&&this.dispatchCurrent(this.dispatchAgent):sameGithubActionSelection(this.dispatchSelection(selection.kind as GithubDispatchKind),selection);
++    if(['setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.dispatchAgent?sameGithubActionSelection(this.dispatchAgent.selection,selection)&&this.dispatchCurrent(this.dispatchAgent):sameGithubActionSelection(this.dispatchSelection(selection.kind as GithubDispatchKind),selection);
+     const d = this.delegated;
+     return d ? sameGithubActionSelection(d.selection, selection) && this.delegatedCurrent(d) :
+       (selection.kind === 'setup-publish' || selection.kind === 'setup-reconcile') && sameGithubActionSelection(this.agentSelection(selection.kind), selection);
+@@ -296,7 +296,7 @@
+       this.pendingRead === d.read && !!d.row && this.selectedPendingForAgent() === d.row;
+   }
+   delegatePrepared(selection: GithubActionSelection): GithubActionDelegate | null {
+-    if(['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.delegateDispatch(selection);
++    if(['setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.delegateDispatch(selection);
+     if (selection.kind !== 'setup-publish' && selection.kind !== 'setup-reconcile' ||
+         !sameGithubActionSelection(this.agentSelection(selection.kind), selection)) return null;
+     const o = this.observer!, r = selection.kind === 'setup-publish' ? this.review : null;
+@@ -355,9 +355,10 @@
+   }
+   dispatchSelection(kind:GithubDispatchKind):GithubDispatchSelection|null {
+     const o=this.observer,s=o?.accepted,c=context(this.connection());
+-    if(!['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(kind)||this.disposed||this.delegated||this.dispatchAgent||this.blocked||this.state.uncertain||this.pending||this.discard||this.retired||this.cancelObserver||
++    if(!['setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(kind)||this.disposed||this.delegated||this.dispatchAgent||this.blocked||this.state.uncertain||this.pending||this.discard||this.retired||this.cancelObserver||
+       !o?.active||o.api!==this.api||o.reading||!c||!s?.available||s.sessionId!==c.sessionId||s.reason!=='none'||s.operation&&s.operation.phase!=='settled')return null;
+     const base={kind,sessionId:c.sessionId,expectedRevision:s.revision};
++    if(kind==='setup-prepare')return !s.consent&&this.state.purpose==='setup-pr'?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision,base:this.state.base}):null;
+     if(kind==='counter-prepare')return !s.consent&&this.state.purpose===COUNTER_PURPOSE&&this.counterSource()&&this.state.base!==COUNTER_BRANCH?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision,base:this.state.base,purpose:COUNTER_PURPOSE}):null;
+     if(kind==='publication-pending')return !s.consent?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision}):null;
+     if(kind==='counter-create'){const consent=this.currentConsent();return consent&&counterPrepared(consent.prepared)&&this.state.confirmed?parseGithubDispatchSelection({...base,consentId:consent.id,confirm:true}):null;}
+@@ -366,6 +367,7 @@
+   private dispatchCurrent(d:DispatchAgent):boolean {
+     if(this.dispatchAgent!==d||d.unknown||this.disposed||this.blocked||this.pending||this.delegated||this.discard||this.retired||this.cancelObserver||d.observer!==this.observer||!d.observer.active||d.observer.api!==this.api||d.observer.reading||
+       d.epoch!==this.epoch||!same(d.context,context(this.connection()))||d.observer.accepted?.revision!==d.selection.expectedRevision||d.saved&&!sameCounterSaved(d.saved,this.counterSource()))return false;
++    if(d.selection.kind==='setup-prepare')return this.state.purpose==='setup-pr'&&this.state.base===d.selection.base&&d.saved===null&&!this.currentConsent();
+     if(d.selection.kind==='counter-prepare')return this.state.purpose===COUNTER_PURPOSE&&this.state.base===d.selection.base&&!!d.saved&&!this.currentConsent();
+     if(d.selection.kind==='counter-create')return !!d.review&&this.review===d.review&&this.currentConsent()===d.review.consent;
+     if(d.selection.kind==='counter-reconcile')return !!d.row&&this.pendingRead===d.read&&this.currentCounterRecord(d.row.summary.target.marker)===d.row;
+@@ -390,11 +392,13 @@
+       !same(s,d.observer.accepted)||s.sessionId!==d.selection.sessionId||s.reason==='cleanup-unknown'||s.operation&&s.operation.phase!=='settled')return;
+     let adopt=false,loaded=false;
+     if(f?.settlement==='settled'&&!f.neverAdmitted){
+-      const kind=d.selection.kind==='counter-prepare'?'prepare':d.selection.kind==='counter-create'?'publish':d.selection.kind==='publication-pending'?'pending':'reconcile',op=s.operation;
+-      if(!op||op.id!==f.operationId||op.kind!==kind||op.effect!==f.effect||op.purpose!==(kind==='pending'?undefined:COUNTER_PURPOSE))return;
++      const kind=d.selection.kind==='setup-prepare'||d.selection.kind==='counter-prepare'?'prepare':d.selection.kind==='counter-create'?'publish':d.selection.kind==='publication-pending'?'pending':'reconcile',op=s.operation;
++      if(!op||op.id!==f.operationId||op.kind!==kind||op.effect!==f.effect||op.purpose!==(kind==='pending'||d.selection.kind==='setup-prepare'?undefined:COUNTER_PURPOSE))return;
+       if(f.state==='complete'){
+         if(op.reason!=='none')return;const result=f.result;
+-        if(d.selection.kind==='counter-prepare'){const c=s.consent;if(!c||!counterPrepared(c.prepared)||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||!d.saved||!counterSourceMatches(c.prepared,d.saved)||
++        if(d.selection.kind==='setup-prepare'){const c=s.consent;if(!c||!publicationPrepared(c.prepared)||d.saved!==null||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||
++          result.marker!==c.id||result.preparedSha256!==githubSetupPreparedHash(c.prepared)||result.sourceSha!==c.prepared.baseCommit)return;adopt=true;}
++        else if(d.selection.kind==='counter-prepare'){const c=s.consent;if(!c||!counterPrepared(c.prepared)||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||!d.saved||!counterSourceMatches(c.prepared,d.saved)||
+           result.marker!==c.id||result.preparedSha256!==githubDispatchPreparedHash(c.prepared)||result.sourceSha!==c.prepared.baseCommit)return;adopt=true;}
+         else if(d.selection.kind==='publication-pending'){if(!result||result.type!=='pending'||!same(result.rows,s.pending.map(r=>({marker:r.summary.target.marker,runId:null,purpose:counterSummary(r.summary)?'counter':'setup'}))))return;loaded=true;}
+         else {const counter=s.counter,original=d.selection.kind==='counter-create'?d.review?.consent.prepared:d.row?.summary;
+@@ -407,7 +411,8 @@
+     else return;
+     d.released=true;this.dispatchAgent=null;this.review=null;this.pendingRead=null;this.agentPending=null;this.counterAgentRow=null;
+     const current=d.epoch===this.epoch&&d.observer.api===this.api&&same(d.context,context(this.connection()));
+-    if(current&&adopt&&s.consent&&d.saved&&sameCounterSaved(d.saved,this.counterSource()))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:d.saved,consent:s.consent};
++    if(current&&adopt&&s.consent&&d.selection.kind==='setup-prepare'&&d.saved===null&&this.state.purpose==='setup-pr'&&this.state.base===d.selection.base&&publicationPrepared(s.consent.prepared))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:null,consent:s.consent};
++    else if(current&&adopt&&s.consent&&d.selection.kind==='counter-prepare'&&d.saved&&sameCounterSaved(d.saved,this.counterSource()))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:d.saved,consent:s.consent};
+     if(current&&loaded&&s.operation)this.pendingRead={observer:d.observer,context:d.context,epoch:d.epoch,operationId:s.operation.id,rows:s.pending};
+     this.update({confirmed:false});this.retireConsent();
+   }
+--- a/desktop/src/githubPublicationProtocol.ts
++++ b/desktop/src/githubPublicationProtocol.ts
+@@ -63,6 +63,8 @@
+     v.head === `mrk/setup-${v.target.marker}` && v.confirmation === PUBLICATION_CONFIRMATION && Array.isArray(v.files) && v.files.length === 5 &&
+     v.files.every((f, i) => keys(f, ['path', 'before', 'after']) && f.path === PUBLICATION_PATHS[i] && text(f.after, i ? 16384 : 65536) && (f.before === null || text(f.before, i ? 16384 : 65536))) && bounded(v, 384 * 1024, 256, 8);
+ }
++// Shared bounded ordinary-review validator, not a native consent constructor.
++export { prepared as publicationPrepared };
+ function fingerprint(v: unknown, limit: number): boolean { return keys(v, ['bytes', 'sha256']) && typeof v.bytes === 'number' && Number.isInteger(v.bytes) && v.bytes > 0 && v.bytes <= limit && hex(v.sha256, 64); }
+ function pending(v: unknown): v is PublicationPending {
+   if (!keys(v, ['summary', 'claimed', 'confirmed'])) return false;
+--- a/desktop/src-tauri/src/github_counter_delegation.rs
++++ b/desktop/src-tauri/src/github_counter_delegation.rs
+@@ -1,4 +1,5 @@
+-//! Counter-only sibling of the existing publication delegation. The SAME Facet,
++//! Ordinary Prepare and Counter sibling of the existing publication delegation.
++//! Ordinary Prepare never enters the Counter Facet. The SAME Facet,
+ //! PendingRead, source/Host proof, Supervisor and journal remain authoritative.
+ use super::*;
+ use action_delegation::dispatch as d;
+@@ -48,7 +49,7 @@
+         let input = &capture.input;
+         let mut end = (now + Duration::from_millis(wire::INTENT_MS)).min(capture.credential_end);
+         let (identity, data) = match input {
+-            d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
++            d::Input::SetupPrepare(_) | d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
+                 if st.consent.is_some() {
+                     return Err(no());
+                 }
+@@ -59,7 +60,9 @@
+                 };
+                 (
+                     st.agent_identity.clone(),
+-                    if matches!(input, d::Input::CounterPrepare(_)) {
++                    if matches!(input, d::Input::SetupPrepare(_)) {
++                        wire::Review::SetupPrepare(v)
++                    } else if matches!(input, d::Input::CounterPrepare(_)) {
+                         wire::Review::CounterPrepare(v)
+                     } else {
+                         wire::Review::PublicationPending(v)
+@@ -146,7 +149,7 @@
+         }
+         let capture = review.dispatch.ok_or_else(no)?;
+         match &capture.input {
+-            d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
++            d::Input::SetupPrepare(_) | d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
+                 if !Arc::ptr_eq(&self.publication.agent_identity, &review.identity) {
+                     return Err(no());
+                 }
+@@ -302,6 +305,17 @@
+         let no = || refused(p::Reason::ResponseInvalid);
+         let v = &self.publication.view;
+         Ok(Some(match review.kind() {
++            wire::Kind::SetupPrepare => {
++                let c = v.consent.as_ref().ok_or_else(no)?;
++                let review = c.prepared.setup().ok_or_else(no)?;
++                Snapshot::Prepared {
++                    marker: Hex::parse(&c.id).ok_or_else(no)?,
++                    prepared_sha256: Hex::parse(&d::hash(&c.prepared)?).ok_or_else(no)?,
++                    source_sha: Hex::parse(&review.base_commit).ok_or_else(no)?,
++                    platform: None,
++                    stage: None,
++                }
++            }
+             wire::Kind::CounterPrepare => {
+                 let c = v.consent.as_ref().ok_or_else(no)?;
+                 let review = c.prepared.counter().ok_or_else(no)?;
+@@ -352,6 +366,7 @@
+ impl d::Input {
+     pub(crate) fn counter_command(&self) -> Result<p::Command, BridgeError> {
+         Ok(match self {
++            Self::SetupPrepare(v) => p::Command::Prepare(v.command_args()),
+             Self::CounterPrepare(v) => p::Command::Prepare(v.clone()),
+             Self::CounterCreate(v) => p::Command::Publish(v.clone()),
+             Self::PublicationPending(v) => p::Command::Pending(v.clone()),
+@@ -361,6 +376,7 @@
+     }
+     fn matches_counter(&self, c: &p::Command) -> bool {
+         match (self, c) {
++            (Self::SetupPrepare(a), p::Command::Prepare(b)) => a.command_args() == *b,
+             (Self::CounterPrepare(a), p::Command::Prepare(b)) => a == b,
+             (Self::CounterCreate(a), p::Command::Publish(b)) => a == b,
+             (Self::PublicationPending(a), p::Command::Pending(b)) => a == b,
+@@ -369,3 +385,7 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++#[path = "github_setup_prepare_delegation_tests.rs"]
++mod setup_prepare_tests;
+--- a/desktop/src-tauri/src/github_dispatch_delegation.rs
++++ b/desktop/src-tauri/src/github_dispatch_delegation.rs
+@@ -48,6 +48,37 @@
+                 .run_id
+                 .as_ref()
+                 .is_none_or(|id| crate::github_connection_protocol::numeric_id(id))
++    }
++}
++/// MAIN comparison input is purpose-absent. Do not serialize PrepareArgs
++/// here: its unchanged optional purpose serializes null. Only the final command
++/// conversion below constructs that existing native type.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub(crate) struct OrdinarySetupPrepare {
++    pub(crate) session_id: String,
++    pub(crate) expected_revision: u32,
++    pub(crate) expected_connection_revision: u32,
++    pub(crate) base: String,
++}
++impl OrdinarySetupPrepare {
++    pub(crate) fn command_args(&self) -> publication::PrepareArgs {
++        publication::PrepareArgs {
++            session_id: self.session_id.clone(),
++            expected_revision: self.expected_revision,
++            expected_connection_revision: self.expected_connection_revision,
++            base: self.base.clone(),
++            purpose: None,
++        }
++    }
++    fn valid(&self) -> bool {
++        // Same original scalar/branch policy, no provider or new source claim.
++        crate::protocol::valid_id(&self.session_id)
++            && self.expected_revision > 0
++            && self.expected_revision <= publication::LAST_REVISION
++            && self.expected_connection_revision > 0
++            && self.expected_connection_revision <= publication::LAST_REVISION
++            && crate::github_preflight_protocol::branch(&self.base)
+     }
+ }
+ #[derive(Deserialize)]
+@@ -68,6 +99,7 @@
+     ReleaseDispatch(rl::DispatchArgs),
+     ReleasePending(rl::ControlArgs),
+     ReleaseObserve(ObserveSelection),
++    SetupPrepare(OrdinarySetupPrepare),
+     CounterPrepare(publication::PrepareArgs),
+     CounterCreate(publication::PublishArgs),
+     PublicationPending(publication::PendingArgs),
+@@ -106,6 +138,7 @@
+             Self::ReleaseDispatch(v) => Input::ReleaseDispatch(v.clone()),
+             Self::ReleasePending(v) => Input::ReleasePending(v.clone()),
+             Self::ReleaseObserve(v) => Input::ReleaseObserve(v.clone()),
++            Self::SetupPrepare(v) => Input::SetupPrepare(v.clone()),
+             Self::CounterPrepare(v) => Input::CounterPrepare(v.clone()),
+             Self::CounterCreate(v) => Input::CounterCreate(v.clone()),
+             Self::PublicationPending(v) => Input::PublicationPending(v.clone()),
+@@ -130,6 +163,7 @@
+             Self::ReleaseDispatch(_) => p::Kind::ReleaseDispatch,
+             Self::ReleasePending(_) => p::Kind::ReleasePending,
+             Self::ReleaseObserve(_) => p::Kind::ReleaseObserve,
++            Self::SetupPrepare(_) => p::Kind::SetupPrepare,
+             Self::CounterPrepare(_) => p::Kind::CounterPrepare,
+             Self::CounterCreate(_) => p::Kind::CounterCreate,
+             Self::PublicationPending(_) => p::Kind::PublicationPending,
+@@ -144,6 +178,7 @@
+         let bytes = match self {
+             Self::PreflightPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.branch.capacity()]),
+             Self::ReleasePrepare(v) => release_input_heap(v),
++            Self::SetupPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.base.capacity()]),
+             Self::CounterPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.base.capacity()]),
+             Self::PreflightDispatch(v) => sum_capacities(&[v.session_id.capacity(),v.consent_id.capacity()]),
+             Self::ReleaseDispatch(v) => sum_capacities(&[v.session_id.capacity(),v.consent_id.capacity(),v.confirmation.capacity()]),
+@@ -160,7 +195,7 @@
+     pub(crate) fn limit(&self) -> usize {
+         if matches!(
+             self,
+-            Self::PreflightPrepare(_) | Self::ReleasePrepare(_) | Self::CounterPrepare(_)
++            Self::PreflightPrepare(_) | Self::ReleasePrepare(_) | Self::SetupPrepare(_) | Self::CounterPrepare(_)
+         ) {
+             4096
+         } else {
+@@ -179,6 +214,7 @@
+     ReleaseDispatch(rl::DispatchArgs),
+     ReleasePending(rl::ControlArgs),
+     ReleaseObserve(ObserveSelection),
++    SetupPrepare(OrdinarySetupPrepare),
+     CounterPrepare(publication::PrepareArgs),
+     CounterCreate(publication::PublishArgs),
+     PublicationPending(publication::PendingArgs),
+@@ -195,6 +231,7 @@
+             Self::ReleaseDispatch(_) => p::Kind::ReleaseDispatch,
+             Self::ReleasePending(_) => p::Kind::ReleasePending,
+             Self::ReleaseObserve(_) => p::Kind::ReleaseObserve,
++            Self::SetupPrepare(_) => p::Kind::SetupPrepare,
+             Self::CounterPrepare(_) => p::Kind::CounterPrepare,
+             Self::CounterCreate(_) => p::Kind::CounterCreate,
+             Self::PublicationPending(_) => p::Kind::PublicationPending,
+@@ -211,6 +248,7 @@
+             Self::ReleaseDispatch(v) => &v.session_id,
+             Self::ReleasePending(v) => &v.session_id,
+             Self::ReleaseObserve(v) => &v.session_id,
++            Self::SetupPrepare(v) => &v.session_id,
+             Self::CounterPrepare(v) => &v.session_id,
+             Self::CounterCreate(v) => &v.session_id,
+             Self::PublicationPending(v) => &v.session_id,
+@@ -227,6 +265,7 @@
+             Self::ReleaseDispatch(v) => v.expected_revision,
+             Self::ReleasePending(v) => v.expected_revision,
+             Self::ReleaseObserve(v) => v.expected_revision,
++            Self::SetupPrepare(v) => v.expected_revision,
+             Self::CounterPrepare(v) => v.expected_revision,
+             Self::CounterCreate(v) => v.expected_revision,
+             Self::PublicationPending(v) => v.expected_revision,
+@@ -237,6 +276,7 @@
+         match self {
+             Self::PreflightPrepare(v) => Some(v.expected_connection_revision),
+             Self::ReleasePrepare(v) => Some(v.expected_connection_revision),
++            Self::SetupPrepare(v) => Some(v.expected_connection_revision),
+             Self::CounterPrepare(v) => Some(v.expected_connection_revision),
+             Self::PublicationPending(v) => Some(v.expected_connection_revision),
+             _ => None,
+@@ -252,6 +292,7 @@
+             Self::ReleaseDispatch(v) => v.valid(),
+             Self::ReleasePending(v) => v.valid(),
+             Self::ReleaseObserve(v) => v.valid(),
++            Self::SetupPrepare(v) => v.valid(),
+             Self::CounterPrepare(v) => {
+                 v.valid() && v.purpose == Some(publication::counter::Purpose::Counter)
+             }
+@@ -273,6 +314,7 @@
+             Self::ReleaseDispatch(v) => v.session_id.capacity(),
+             Self::ReleasePending(v) => v.session_id.capacity(),
+             Self::ReleaseObserve(v) => v.session_id.capacity(),
++            Self::SetupPrepare(v) => v.session_id.capacity(),
+             Self::CounterPrepare(v) => v.session_id.capacity(),
+             Self::CounterCreate(v) => v.session_id.capacity(),
+             Self::PublicationPending(v) => v.session_id.capacity(),
+@@ -306,6 +348,7 @@
+                     .checked_add(v.marker.capacity())?
+                     .checked_add(v.run_id.as_ref().map_or(0, String::capacity))?
+             }
++            Self::SetupPrepare(v) => n = n.checked_add(v.base.capacity())?,
+             Self::CounterPrepare(v) => n = n.checked_add(v.base.capacity())?,
+             Self::CounterCreate(v) => n = n.checked_add(v.consent_id.capacity())?,
+             Self::CounterReconcile(v) => n = n.checked_add(v.marker.capacity())?,
+--- a/desktop/src-tauri/src/github_dispatch_delegation_tests.rs
++++ b/desktop/src-tauri/src/github_dispatch_delegation_tests.rs
+@@ -83,11 +83,13 @@
+ 
+ #[test]
+ fn actual_capture_requires_selected_account_repo_generation_and_original_clock() {
++    for selection in [selections()[0].clone(), json!({"kind":"setup-prepare","sessionId":"github-session-1",
++        "expectedRevision":1,"expectedConnectionRevision":3,"base":"main"})] {
+     let at=Instant::now();let mut s=state(at);let root=root();let binding="a".repeat(64);
+-    let mut v=selections()[0].clone();v["expectedConnectionRevision"]=json!(s.status.revision);
++    let mut v=selection;v["expectedConnectionRevision"]=json!(s.status.revision);
+     let i=input(v);let c=s.dispatch_capture(i.clone(),2,&root,&binding,at).unwrap();assert!(c.retained_fits());
+     assert!(s.dispatch_capture(i.clone(),3,&root,&binding,at).is_err());
+-    let mut stale=i.clone();if let Input::PreflightPrepare(v)=&mut stale{v.expected_connection_revision+=1;}
++    let mut stale=i.clone();match &mut stale {Input::PreflightPrepare(v)=>v.expected_connection_revision+=1, Input::SetupPrepare(v)=>v.expected_connection_revision+=1, _=>unreachable!()}
+     assert!(s.dispatch_capture(stale,2,&root,&binding,at).is_err());
+     assert!(s.dispatch_capture(i.clone(),2,&root,&binding,c.credential_end).is_err());
+     s.status.account.value.as_mut().unwrap().id="12".into();assert!(s.dispatch_capture(i.clone(),2,&root,&binding,at).is_err());
+@@ -98,6 +100,7 @@
+     let mut changed=root.clone();changed.path.push("changed");
+     assert!(s.dispatch_capture(i,2,&changed,&binding,at).unwrap()!=c); // full exact root equality retained
+     let mut excessive=c;excessive.root.path.reserve(ROOT_BACKING+1);assert!(!excessive.retained_fits());
++    }
+ }
+ 
+ #[test]
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -336,10 +336,10 @@
+                 "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
+                 "dispatchAcknowledgementIsTagReceipt":false,"nativeAvailabilityChecked":false},
+             "githubActions":{"scope":"one-desktop-approved-github-action-or-activity-read","commands":github_action::COMMANDS,
+-                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile","activity-overview","preflight-prepare","preflight-dispatch","preflight-pending","preflight-observe","release-prepare","release-dispatch","release-pending","release-observe","counter-prepare","counter-create","publication-pending","counter-reconcile"],"defaultEnabled":false,"oneUse":true,
++                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile","activity-overview","preflight-prepare","preflight-dispatch","preflight-pending","preflight-observe","release-prepare","release-dispatch","release-pending","release-observe","setup-prepare","counter-prepare","counter-create","publication-pending","counter-reconcile"],"defaultEnabled":false,"oneUse":true,
+                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresExactDesktopConsent":true,
+                 "mutating":true,"readOnlyKinds":["setup-reconcile","activity-overview","preflight-pending","preflight-observe","release-pending","release-observe","publication-pending","counter-reconcile"],"counterSetup":true,"firstCounterOnly":true,"counterPrepareMayCreateLocalState":true,"cliPendingLoad":true,
+-                "cliPrepare":true,"prepareKinds":["preflight-prepare","release-prepare","counter-prepare"],"prepareAuthorizesDispatch":false,"privateArguments":false,"readGrantAuthorizesWrites":false,
++                "cliPrepare":true,"prepareKinds":["preflight-prepare","release-prepare","counter-prepare","setup-prepare"],"prepareAuthorizesDispatch":false,"privateArguments":false,"readGrantAuthorizesWrites":false,
+                 "normalPrCreation":true,"merge":false,"workflowDispatch":true,"dispatchMayRunProjectCode":true,"automaticRetry":false,"nativeAvailabilityChecked":false,"freshActivityOverview":true,"activityReadRequiresSeparateConsent":true,"activityRowsPerSection":30,"activityIncludesHeadsJobsLogsArtifacts":false},
+             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+@@ -424,7 +424,7 @@
+         text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Candidate-upload preparation requires the original reviewed intent, current credential and native tools; a fresh separate Store Start permission authorizes the internal upload. Later Execute and current/recovery/readiness Reconcile preparation also retain the exact original intent and credentials, without HTTP; a fresh separate Start approves only the reviewed promotion/draft/submission or readback/checkpoint. Checkpoints do not prove earlier finality or permit retry. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+-        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop review for empty repository creation, draft PR, failed-job retry, five-file setup Publish or GET-only original-intent Reconcile. Load/Prepare remain explicit Desktop actions; Counter setup is excluded. No token/URL/CLI Prepare; uncertain requests must not be replayed.\n");
++        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop permission and IDs only. Prepare ordinary five-file setup, preflight/release or FIRST Counter through the original owner; separately approve Publish, Dispatch or Create. Pending/Observe/Reconcile never resend. No token/URL/file payloads; remote settings and local workflow editing remain Desktop-only. Uncertain requests must not be replayed.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+--- a/desktop/src-tauri/src/installed_cli_github_action_tests.rs
++++ b/desktop/src-tauri/src/installed_cli_github_action_tests.rs
+@@ -88,28 +88,25 @@
+     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+     let v = &value["githubActions"];
+     assert_eq!(v["commands"], serde_json::json!(COMMANDS));
+-    assert_eq!(
+-        v["kinds"],
+-        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview"])
+-    );
+-    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile", "activity-overview"]));
+-    assert_eq!(v["counterSetup"], false);
+-    assert_eq!(v["normalPrCreation"], true);
+-    assert_eq!(v["cliPendingLoad"], false);
+-    for key in ["oneUse", "mutating", "requiresExactDesktopConsent"] {
+-        assert_eq!(v[key], true);
++    assert_eq!(v["kinds"], serde_json::json!([
++        "repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview",
++        "preflight-prepare", "preflight-dispatch", "preflight-pending", "preflight-observe",
++        "release-prepare", "release-dispatch", "release-pending", "release-observe",
++        "setup-prepare", "counter-prepare", "counter-create", "publication-pending", "counter-reconcile"
++    ]));
++    assert_eq!(v["readOnlyKinds"], serde_json::json!([
++        "setup-reconcile", "activity-overview", "preflight-pending", "preflight-observe",
++        "release-pending", "release-observe", "publication-pending", "counter-reconcile"
++    ]));
++    assert_eq!(v["prepareKinds"], serde_json::json!(["preflight-prepare", "release-prepare", "counter-prepare", "setup-prepare"]));
++    for key in ["oneUse", "mutating", "requiresExactDesktopConsent", "requiresRunningDesktop", "requiresProjectReadGrant",
++        "normalPrCreation", "counterSetup", "firstCounterOnly", "counterPrepareMayCreateLocalState", "cliPendingLoad",
++        "cliPrepare", "workflowDispatch", "dispatchMayRunProjectCode"] {
++        assert_eq!(v[key], true, "{key}");
+     }
+-    for key in [
+-        "cliPrepare",
+-        "privateArguments",
+-        "readGrantAuthorizesWrites",
+-
+-        "merge",
+-        "workflowDispatch",
+-        "automaticRetry",
+-        "nativeAvailabilityChecked",
+-    ] {
+-        assert_eq!(v[key], false);
++    for key in ["defaultEnabled", "privateArguments", "readGrantAuthorizesWrites", "prepareAuthorizesDispatch",
++        "merge", "automaticRetry", "nativeAvailabilityChecked"] {
++        assert_eq!(v[key], false, "{key}");
+     }
+ }
+ 
+--- a/desktop/src-tauri/src/service_github_action_native.rs
++++ b/desktop/src-tauri/src/service_github_action_native.rs
+@@ -74,7 +74,7 @@
+         let available = match a.kind() {
+             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_status(supervisor.github_preflight_profile_available(),now,gate).available,
+             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_status(supervisor.github_release_profile_available(),now,gate).available,
+-            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.publication_status(supervisor.github_publication_profile_available(),now,gate).available,
++            p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.publication_status(supervisor.github_publication_profile_available(),now,gate).available,
+ 
+             p::Kind::ActivityOverview => s.github.github_activity_status(supervisor.github_activity_profile_available(), now, gate).available,
+             p::Kind::RepositoryCreate => {
+@@ -123,7 +123,7 @@
+         let review = match a.kind() {
+             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+-            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
++            p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+ 
+             p::Kind::ActivityOverview => s.github.github_activity_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root,
+                 &github_setup_project_binding(&root)?, &edit, now),
+@@ -273,7 +273,7 @@
+         let installed = match review.data.kind() {
+             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_allow(review,&scope),
+             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_allow(review,&scope),
+-            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_allow(review,&scope),
++            p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_allow(review,&scope),
+ 
+             p::Kind::ActivityOverview => s.github.github_activity_agent_allow(review, &scope),
+             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
+@@ -318,7 +318,7 @@
+             match scope.review.kind() {
+                 p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_revoke(scope),
+                 p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_revoke(scope),
+-                p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_revoke(scope),
++                p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_revoke(scope),
+ 
+                 p::Kind::ActivityOverview => s.github.github_activity_agent_revoke(scope),
+                 p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(scope),
+@@ -378,7 +378,7 @@
+         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
+         let v = &scope.review;
+         match v.kind() {
+-            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => self.github_dispatch_agent_start(entry,app_data)?,
++            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => self.github_dispatch_agent_start(entry,app_data)?,
+             p::Kind::ActivityOverview => {
+                 let p::Review::ActivityOverview(r) = v else { return Err(BridgeError::invalid()); };
+                 self.github_activity_execute(crate::github_activity_protocol::Command::Read(crate::github_activity_protocol::ReadArgs {
+--- a/desktop/src-tauri/src/service_github_action_native_tests.rs
++++ b/desktop/src-tauri/src/service_github_action_native_tests.rs
+@@ -131,6 +131,19 @@
+     if let native::dispatch::Selection::ReleasePrepare(v)=&mut args.selection {v.branch.reserve_exact(4096);}
+     assert!(!args.selection.retained_fits());
+     assert!(decode_allow(br#"{"selection":{"kind":"release-prepare","kind":"preflight-prepare"}}"#).is_err());
++    let ordinary=serde_json::json!({"selection":{"kind":"setup-prepare","sessionId":"session-a",
++        "expectedRevision":1,"expectedConnectionRevision":2,"base":"release/setup"},
++        "consentVersion":"agent-setup-prepare-once-v1","expectedPermissionRevision":"0"});
++    let mut bytes=serde_json::to_vec(&ordinary).unwrap();bytes.resize(4096,b' ');
++    let parsed=decode_allow(&bytes).unwrap();
++    assert_eq!(parsed.selection.kind(),p::Kind::SetupPrepare);
++    assert!(decode::<Allow>(&bytes).is_err()); // only this existing MAIN route accepts4KiB
++    bytes.push(b' ');assert!(decode_allow(&bytes).is_err());
++    for purpose in [serde_json::json!(null),serde_json::json!("version-counter")] {
++        let mut wrong=ordinary.clone();wrong["selection"]["purpose"]=purpose;
++        assert!(decode_allow(&serde_json::to_vec(&wrong).unwrap()).is_err());
++    }
++
+ }
+ 
+ #[test]
+--- a/desktop/src-tauri/src/service_github_action_protocol.rs
++++ b/desktop/src-tauri/src/service_github_action_protocol.rs
+@@ -43,14 +43,15 @@
+     ReleaseDispatch,
+     ReleasePending,
+     ReleaseObserve,
++    SetupPrepare,
+     CounterPrepare,
+     CounterCreate,
+     PublicationPending,
+     CounterReconcile,
+ }
+ impl Kind {
+-    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
+-    pub(crate) fn mutation(self)->bool { !matches!(self, Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
++    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
++    pub(crate) fn mutation(self)->bool { !matches!(self, Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
+     pub(crate) fn prefix(self) -> &'static str {
+         match self {
+             Self::ActivityOverview => "github-activity-",
+@@ -62,6 +63,7 @@
+             Self::ReleaseDispatch => "github-release-",
+             Self::ReleasePending => "github-release-",
+             Self::ReleaseObserve => "github-release-",
++            Self::SetupPrepare => "github-publication-",
+             Self::CounterPrepare => "github-publication-",
+             Self::CounterCreate => "github-publication-",
+             Self::PublicationPending => "github-publication-",
+@@ -84,6 +86,7 @@
+             Self::ReleaseDispatch => "agent-release-dispatch-once-v1",
+             Self::ReleasePending => "agent-release-pending-once-v1",
+             Self::ReleaseObserve => "agent-release-observe-once-v1",
++            Self::SetupPrepare => "agent-setup-prepare-once-v1",
+             Self::CounterPrepare => "agent-counter-prepare-once-v1",
+             Self::CounterCreate => "agent-counter-create-once-v1",
+             Self::PublicationPending => "agent-publication-pending-once-v1",
+@@ -108,6 +111,7 @@
+             Self::ReleaseDispatch => crate::service_protocol::Action::GitHubReleaseDispatch,
+             Self::ReleasePending => crate::service_protocol::Action::GitHubReleasePending,
+             Self::ReleaseObserve => crate::service_protocol::Action::GitHubReleaseObserve,
++            Self::SetupPrepare => crate::service_protocol::Action::GitHubSetupPrepare,
+             Self::CounterPrepare => crate::service_protocol::Action::GitHubCounterPrepare,
+             Self::CounterCreate => crate::service_protocol::Action::GitHubCounterCreate,
+             Self::PublicationPending => crate::service_protocol::Action::GitHubPublicationPending,
+@@ -175,6 +179,7 @@
+     ReleaseDispatch(PreparedReference),
+     ReleasePending(dispatch::RequestReference),
+     ReleaseObserve(dispatch::RecordReference),
++    SetupPrepare(dispatch::RequestReference),
+     CounterPrepare(dispatch::RequestReference),
+     CounterCreate(PreparedReference),
+     PublicationPending(dispatch::RequestReference),
+@@ -217,6 +222,7 @@
+             Self::ReleaseDispatch(_) => Kind::ReleaseDispatch,
+             Self::ReleasePending(_) => Kind::ReleasePending,
+             Self::ReleaseObserve(_) => Kind::ReleaseObserve,
++            Self::SetupPrepare(_) => Kind::SetupPrepare,
+             Self::CounterPrepare(_) => Kind::CounterPrepare,
+             Self::CounterCreate(_) => Kind::CounterCreate,
+             Self::PublicationPending(_) => Kind::PublicationPending,
+@@ -240,7 +246,7 @@
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+             Self::ActivityOverview(v) => v.valid(),
+-            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
++            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
+             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.valid(),
+             Self::SetupReconcile(v) | Self::CounterReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
+             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
+@@ -250,7 +256,7 @@
+         // Same exact three string-allocation bounds as the original profile.
+         match self {
+             Self::ActivityOverview(v) => v.retained_fits(),
+-            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
++            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
+             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.retained_fits(),
+             Self::SetupReconcile(v) | Self::CounterReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
+             _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),
+--- a/desktop/src-tauri/src/service_github_dispatch_native.rs
++++ b/desktop/src-tauri/src/service_github_dispatch_native.rs
+@@ -19,7 +19,8 @@
+                 K::ReleasePrepare | K::ReleaseDispatch | K::ReleasePending | K::ReleaseObserve => {
+                     s.github.release_agent_input(entry)
+                 }
+-                K::CounterPrepare
++                K::SetupPrepare
++                | K::CounterPrepare
+                 | K::CounterCreate
+                 | K::PublicationPending
+                 | K::CounterReconcile => s.github.counter_agent_input(entry),
+@@ -39,13 +40,13 @@
+             K::ReleasePrepare | K::ReleaseDispatch | K::ReleasePending | K::ReleaseObserve => {
+                 self.github_release_execute(input.release_command()?, Some(entry.clone()))?;
+             }
+-            K::CounterPrepare | K::CounterCreate | K::PublicationPending | K::CounterReconcile => {
++            K::SetupPrepare | K::CounterPrepare | K::CounterCreate | K::PublicationPending | K::CounterReconcile => {
+                 if matches!(kind, K::CounterPrepare | K::CounterCreate) && app_data.is_none() {
+                     return Err(BridgeError::invalid());
+                 }
+                 self.github_publication_execute(
+                     input.counter_command()?,
+-                    app_data,
++                    if kind == K::SetupPrepare { None } else { app_data },
+                     Some(entry.clone()),
+                 )?;
+             }
+--- a/desktop/src-tauri/src/service_github_dispatch_protocol.rs
++++ b/desktop/src-tauri/src/service_github_dispatch_protocol.rs
+@@ -294,7 +294,7 @@
+                 Kind::ReleasePrepare => {
+                     matches!(platform, Some(Platform::Android | Platform::Ios)) && stage.is_some()
+                 }
+-                Kind::CounterPrepare => platform.is_none() && stage.is_none(),
++                Kind::SetupPrepare | Kind::CounterPrepare => platform.is_none() && stage.is_none(),
+                 _ => false,
+             },
+             Self::Pending { rows } => {
+--- a/desktop/src-tauri/src/service_github_dispatch_protocol_tests.rs
++++ b/desktop/src-tauri/src/service_github_dispatch_protocol_tests.rs
+@@ -111,7 +111,7 @@
+     assert!(!s.valid_for(Kind::ReleasePending)); // len1 cannot hide backing for1025
+     let v=json!({"type":"prepared","marker":"a".repeat(32),"preparedSha256":"b".repeat(64),
+         "sourceSha":"c".repeat(40),"platform":null,"stage":null});
+-    let s:Snapshot=serde_json::from_value(v.clone()).unwrap();assert!(s.valid_for(Kind::CounterPrepare));
++    let s:Snapshot=serde_json::from_value(v.clone()).unwrap();assert!(s.valid_for(Kind::CounterPrepare));assert!(s.valid_for(Kind::SetupPrepare));
+     assert!(!s.valid_for(Kind::PreflightPrepare));
+     let mut b=v;b.as_object_mut().unwrap().remove("stage");assert!(serde_json::from_value::<Snapshot>(b).is_err());
+     assert!(serde_json::from_str::<Snapshot>(r#"{"type":"pending","rows":[],"url":"inert"}"#).is_err());
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -109,6 +109,7 @@
+     GitHubReleaseDispatch,
+     GitHubReleasePending,
+     GitHubReleaseObserve,
++    GitHubSetupPrepare,
+     GitHubCounterPrepare,
+     GitHubCounterCreate,
+     GitHubPublicationPending,
+--- a/desktop/tests/github-dispatch-delegation.test.mjs
++++ b/desktop/tests/github-dispatch-delegation.test.mjs
+@@ -47,7 +47,7 @@
+ }
+ 
+ test('twelve exact MAIN selections preserve separate confirmation and hashes; no CLI/private argument widening',async()=>{
+- assert.deepEqual(selections.map(s=>s.kind),[...GITHUB_DISPATCH_KINDS]);const calls=[];const port=createAgentGithubActionPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;});
++ assert.deepEqual(selections.map(s=>s.kind),GITHUB_DISPATCH_KINDS.filter(k=>k!=='setup-prepare'));const calls=[];const port=createAgentGithubActionPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;});
+  for(const s of selections){assert.ok(parseGithubDispatchSelection(s),s.kind);await port.allow(s,'0');const sent=calls.at(-1)[1];assert.equal(sent.consentVersion,`agent-${s.kind}-once-v1`);assert.equal(sent.expectedPermissionRevision,'0');
+   for(const k of ['token','root','ledgerId','projectId','workflow','force','url'])assert.equal(parseGithubDispatchSelection({...s,[k]:'INERT'}),null);}
+  const r=reference(selections[0]);assert.ok(parseGithubDispatchReference(r));assert.equal(parseGithubDispatchSelection(r),null);assert.equal(parseGithubDispatchReference(selections[0]),null);

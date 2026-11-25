@@ -1,0 +1,15 @@
+diff --git a/src/mobile_release/_desktop_github_setup_engine.py b/src/mobile_release/_desktop_github_setup_engine.py
+--- a/src/mobile_release/_desktop_github_setup_engine.py
++++ b/src/mobile_release/_desktop_github_setup_engine.py
+@@ -86,6 +86,11 @@
+             end = started + 60.0
+             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+             request = None
++        elif type(header) is dict and header.get("protocol") == "mrk-version-allocation-source/1":
++            from .version_allocation_source import run_owned
++            end = started + 60.0
++            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
++            request = None
+         else:
+             end = started + READ_SECONDS
+             request = policy.parse_initial(initial)

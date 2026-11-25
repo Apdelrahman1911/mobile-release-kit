@@ -1,0 +1,229 @@
+--- a/src/mobile_release/_desktop_git_local_protocol.py
++++ b/src/mobile_release/_desktop_git_local_protocol.py
+@@ -12,6 +12,7 @@
+ import re
+ 
+ from . import _desktop_git_read_protocol as source_fields
++from . import _desktop_git_branches as branch
+ from . import git_repository_local as local
+ from . import git_repository_read as read
+ from . import git_service as core
+@@ -49,7 +50,9 @@
+                 {"name": self.identity.name, "email": self.identity.email}}
+ 
+ 
+-def action(value) -> Action:
++def action(value) -> Action | branch.Action:
++    if type(value) is dict and value.get("kind") == "branch-create":
++        return branch.action(value)
+     row = source_fields._keys(value, ("kind", "expectedRevision", "paths", "message", "identity"))
+     require(type(row["kind"]) is str and row["kind"] in ("stage", "unstage", "commit"))
+     revision = source_fields._hex(row["expectedRevision"])
+@@ -73,7 +76,7 @@
+ class Request:
+     id: str
+     phase: str
+-    action: Action
++    action: Action | branch.Action
+     review_digest: str | None
+     journal_revision: int | None
+     project_id: str  # Runtime context alias; NOT the durable service project ID.
+@@ -142,7 +145,9 @@
+     return b"MRK-GIT-LOCAL-GO/1 " + request.digest.encode("ascii") + b"\n"
+ 
+ 
+-def matches_review(request: Request, review: local.LocalReview) -> None:
++def matches_review(request: Request, review: local.LocalReview | branch.BranchReview) -> None:
++    if type(request) is Request and type(request.action) is branch.Action:
++        return branch.matches_review(request, review)
+     require(type(request) is Request and type(review) is local.LocalReview and type(review.plan) is core.GitPlan
+             and review.digest == local._review_digest(review.plan))
+     plan = review.plan
+@@ -156,12 +161,15 @@
+ @dataclass(frozen=True, slots=True, repr=False)
+ class Candidate:
+     request: Request
+-    intent: core.PublicationIntent
++    intent: core.PublicationIntent | branch.BranchIntent
+     raw: bytes
+     digest: str
+ 
+ 
+-def candidate(request: Request, review: local.LocalReview, intent: core.PublicationIntent) -> Candidate:
++def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
++              intent: core.PublicationIntent | branch.BranchIntent) -> Candidate:
++    if type(request) is Request and type(request.action) is branch.Action:
++        return branch.candidate(request, review, intent)
+     matches_review(request, review)
+     require(request.phase == "apply" and type(intent) is core.PublicationIntent)
+     before = review.plan._snapshot
+@@ -192,11 +200,15 @@
+     return revision
+ 
+ 
+-def terminal(request: Request, status: str, *, reason: str | None, review: local.LocalReview | None = None,
++def terminal(request: Request, status: str, *, reason: str | None,
++             review: local.LocalReview | branch.BranchReview | None = None,
+              diff: core.Diff | None = None, result: core.MutationResult | None = None,
+              publication: str = "not-reported", first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
+-    require(type(request) is Request and status in STATUSES and (reason is None or reason in core._REASONS)
+-            and publication in ("not-reported", "index-returned", "ref-returned"))
++    is_branch = type(request) is Request and type(request.action) is branch.Action
++    require(type(request) is Request and status in STATUSES
++            and (reason is None or (branch.valid_reason(reason) if is_branch else reason in core._REASONS))
++            and publication in (("not-reported", branch.PUBLICATION) if is_branch else
++                                ("not-reported", "index-returned", "ref-returned")))
+     try:
+         source_fields._integer(cleanup_end_ns, 1, request.hard_end_ns)
+         if first_failure_ns is not None:
+@@ -205,7 +217,10 @@
+     except source_fields.ProtocolError:
+         raise ProtocolError(_ERROR) from None
+     data = None
+-    if status == "ok":
++    if is_branch:
++        data = branch.terminal_data(request, status, reason=reason, review=review, diff=diff,
++            result=result, publication=publication, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
++    elif status == "ok":
+         require(reason is None)
+         if request.phase == "prepare":
+             require(result is None and publication == "not-reported" and first_failure_ns is None
+--- a/src/mobile_release/desktop_git_local.py
++++ b/src/mobile_release/desktop_git_local.py
+@@ -16,6 +16,7 @@
+ import time
+ 
+ from . import _desktop_git_local_protocol as wire
++from . import _desktop_git_branches as branch
+ from . import _desktop_git_read_protocol as source_fields
+ from . import git_repository_local as local
+ from . import git_service as core
+@@ -159,7 +160,9 @@
+                      and type(output_limit) is int and 0 < output_limit <= core.MAX_GIT_BYTES
+                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
+         sessions = self.repository._active_sessions
+-        wire.require(len(sessions) == 1 and type(sessions[0]) is local._LocalSession
++        wire.require(len(sessions) == 1
++                     and (branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
++                          type(sessions[0]) is local._LocalSession)
+                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
+         session = sessions[0]
+         wire.require(type(argv) is list and all(type(arg) is str for arg in argv) and type(environ) is dict)
+@@ -215,20 +218,28 @@
+         self.source_post(hash_files=True)
+         wire.require(self.source.go_returned and not self.entered)
+         self.entered = True
+-        self.repository = local.GitLocalRepository(self.request.root, git_executable=wire.TOOL_PATH,
++        action = self.request.action
++        repository_type = branch.GitBranchesRepository if type(action) is branch.Action else local.GitLocalRepository
++        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
+             work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
+-        action = self.request.action
+         try:
+             # Apply performs a genuine fresh prepare from the retained exact
+             # input, not reconstruction of a serialized/core plan capability.
+-            self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
+-                paths=action.paths, message=action.message, identity=action.identity)
++            if type(action) is branch.Action:
++                self.review = self.repository.prepare_branch(action.name, expected_revision=action.expected_revision,
++                    expected_reference_revision=action.expected_reference_revision)
++            else:
++                self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
++                    paths=action.paths, message=action.message, identity=action.identity)
+             wire.matches_review(self.request, self.review)
+-            if self.request.phase == "prepare":
++            if self.request.phase == "prepare" and type(action) is not branch.Action:
+                 self.diff = self.repository.diff(self.review.plan.paths, staged=action.kind != "stage",
+                                                 expected_revision=action.expected_revision)
+-            else:
+-                self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
++            elif self.request.phase == "apply":
++                if type(action) is branch.Action:
++                    self.result = self.repository.apply_branch(self.review, self, expected_digest=self.request.review_digest)
++                else:
++                    self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
+                 if self.result.state != "succeeded":
+                     self.source.failure_observed()
+             wire.require(not self.repository._unknown and not self.repository._active_sessions
+@@ -243,6 +254,8 @@
+             raise
+ 
+     def publication(self) -> str:
++        if type(self.request.action) is branch.Action:
++            return branch.publication(self)
+         if self._publication() is not None:
+             return "index-returned"
+         transaction = None if self.repository is None else self.repository._transaction
+--- a/src/mobile_release/_desktop_git_read_protocol.py
++++ b/src/mobile_release/_desktop_git_read_protocol.py
+@@ -129,7 +129,7 @@
+ 
+ def action(value: Any) -> Action:
+     row = _keys(value, ("kind", "expectedRevision", "paths", "staged"))
+-    require(type(row["kind"]) is str and row["kind"] in ("observe", "diff", "history")
++    require(type(row["kind"]) is str and row["kind"] in ("observe", "diff", "history", "branches")
+             and type(row["staged"]) is bool and type(row["paths"]) is list)
+     revision = row["expectedRevision"]
+     require(revision is None if row["kind"] == "observe" else type(revision) is str)
+@@ -244,7 +244,9 @@
+         _integer(first_failure_ns, 1, cleanup_end_ns)
+         require(cleanup_end_ns - first_failure_ns <= 10_000_000_000)
+     if status == "ok":
+-        expected_type = {"observe": read.ReadObservation, "diff": core.Diff, "history": read.History}[request.action.kind]
++        from .git_repository_branches import Branches
++        expected_type = {"observe": read.ReadObservation, "diff": core.Diff, "history": read.History,
++                         "branches": Branches}[request.action.kind]
+         require(type(result) is expected_type and reason is None and first_failure_ns is None
+                 and cleanup_end_ns == request.hard_end_ns)
+         if request.action.kind != "observe":
+--- a/src/mobile_release/desktop_git_read.py
++++ b/src/mobile_release/desktop_git_read.py
+@@ -15,6 +15,7 @@
+ import time
+ 
+ from . import _desktop_git_read_protocol as wire
++from . import _desktop_git_branches as branch
+ from . import git_repository_read as read
+ from . import git_service as core
+ from ._desktop_git_read_control import GitReadInput
+@@ -56,7 +57,7 @@
+         self.calls = 0
+         self.pending: _Command | None = None
+         self.repository: read.GitReadRepository | None = None
+-        self.result: read.ReadObservation | core.Diff | read.History | None = None
++        self.result: read.ReadObservation | core.Diff | read.History | branch.Branches | None = None
+         source.bind_operation(self)  # Before any acquisition can lose its return.
+ 
+     def checkpoint(self) -> None:
+@@ -140,7 +141,9 @@
+                      and type(output_limit) is int and 0 < output_limit <= core.MAX_GIT_BYTES
+                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
+         sessions = self.repository._active_sessions
+-        wire.require(len(sessions) == 1 and type(sessions[0]) is read._ReadSession
++        wire.require(len(sessions) == 1
++                     and (branch.read_session(self, sessions[0]) if self.request.action.kind == "branches" else
++                          type(sessions[0]) is read._ReadSession)
+                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
+         session = sessions[0]
+         wire.require(type(argv) is list and all(type(arg) is str for arg in argv))
+@@ -178,15 +181,18 @@
+         self.source_post(hash_files=True)
+         wire.require(self.source.go_returned and not self.entered)
+         self.entered = True
+-        self.repository = read.GitReadRepository(self.request.root, git_executable=wire.TOOL_PATH,
++        action = self.request.action
++        repository_type = branch.GitBranchesRepository if action.kind == "branches" else read.GitReadRepository
++        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
+             work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
+         wire.require(self.repository.root == self.request.root)
+-        action = self.request.action
+         try:
+             if action.kind == "observe":
+                 result = self.repository.observe()
+             elif action.kind == "diff":
+                 result = self.repository.diff(action.paths, staged=action.staged, expected_revision=action.expected_revision)
++            elif action.kind == "branches":
++                result = self.repository.branches(expected_revision=action.expected_revision)
+             else:
+                 wire.require(action.kind == "history")
+                 result = self.repository.history(expected_revision=action.expected_revision)

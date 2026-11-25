@@ -1,0 +1,2465 @@
+//! Closed Android build comparison, transport and redacted projection DATA.
+//!
+//! Version 3 binds optional private local-upload-key signing; schemaVersion:1 remains
+//! the closed envelope/result shape within this explicitly versioned wire.
+//! No owner, launch, file access, tool admission, permit or qualification here.
+//! A parsed core terminal and a settled frame decoder NEVER establish native
+//! finality: the original runtime/process/pipe/close/join owners must still settle.
+pub(crate) use mrk_android_catalogue_schema::{MAC_TOOLCHAIN_PROFILE, MAC_X64_TOOLCHAIN_PROFILE};
+use std::{fmt, path::Path};
+use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error::BridgeError,
+    protocol::valid_id};
+
+pub(crate) const PROTOCOL: &str = "mrk-android-build/3";
+pub(crate) const CONSENT: &str = "saved-android-build-inspect-v3";
+pub(crate) const SIGNED_CONSENT: &str = "saved-android-local-sign-v1";
+pub(crate) const CANDIDATE_PROTOCOL: &str = "mrk-android-candidate-inputs/1";
+pub(crate) const CANDIDATE_CONSENT: &str = "local-android-candidate-inputs-v1";
+pub(crate) const EVENT: &str = "android-build-state-changed";
+pub(crate) const SCOPE: &str = "local-post-build-artifact-observation";
+pub(crate) const TOOLCHAIN_PROFILE: &str = "android-local-linux-gnu-x86_64-v1";
+pub(crate) const MAC_TOOLCHAIN_PREFIX: &str = "/Library/Application Support/MobileReleaseKit/android";
+pub(crate) const IPC_LIMIT: usize = 8 * 1024;
+pub(crate) const REQUEST_LIMIT: usize = 32 * 1024;
+pub(crate) const RESPONSE_LIMIT: usize = 64 * 1024;
+pub(crate) const STATUS_LIMIT: usize = 64 * 1024;
+pub(crate) const MAX_FRAMES: usize = 8;
+pub(crate) const MAX_FINDINGS: usize = 128;
+pub(crate) const MAX_ARTIFACTS: usize = 1;
+pub(crate) const INTENT_SECONDS: u64 = 300;
+pub(crate) const WORK_SECONDS: u64 = 3000;
+pub(crate) const FINALITY_SECONDS: u64 = 3010;
+const CONFIG_LIMIT: u32 = 512 * 1024;
+const VERSION_LIMIT: u32 = 64 * 1024;
+const AAB_LIMIT: u64 = 1024 * 1024 * 1024;
+const DEPTH_LIMIT: usize = 16;
+const NODE_LIMIT: usize = 8192;
+const STRING_LIMIT: usize = 4096;
+const SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+pub(crate) fn invalid() -> BridgeError {
+    BridgeError::new("android_build_invalid", "The saved Android-build request is invalid.")
+}
+fn protocol_error() -> BridgeError {
+    BridgeError::new("android_build_protocol", "The original Android-build response did not satisfy its fixed contract.")
+}
+fn keys(value: &Value, expected: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| object.len() == expected.len()
+        && expected.iter().all(|key| object.contains_key(*key)))
+}
+fn sha(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+// Serde performs JSON parsing. This small lexical check only excludes EVERY
+// floating-point/exponent spelling, including 1e0: inspecting a parsed number
+// alone would lose that distinction. Python admits integer -0 as zero, whereas
+// serde_json visits it as f64; the bounded visitor handles that one spelling.
+fn integer_lexemes(bytes: &[u8]) -> bool {
+    let (mut index, mut string, mut escaped) = (0usize, false, false);
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if string {
+            if escaped { escaped = false; }
+            else if byte == b'\\' { escaped = true; }
+            else if byte == b'"' { string = false; }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' { string = true; index += 1; continue; }
+        if byte == b'-' || byte.is_ascii_digit() {
+            let start = index;
+            if byte == b'-' { index += 1; }
+            let digits = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() { index += 1; }
+            if index == digits || index - digits > 16 { return false; }
+            if index < bytes.len() && !matches!(bytes[index], b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}') {
+                return false;
+            }
+            let Ok(text) = std::str::from_utf8(&bytes[start..index]) else { return false; };
+            if !text.parse::<i64>().is_ok_and(|n| (-SAFE_INTEGER..=SAFE_INTEGER).contains(&n)) { return false; }
+            continue;
+        }
+        index += 1;
+    }
+    true
+}
+
+struct Seed<'a> { nodes: &'a mut usize, depth: usize }
+impl<'de> DeserializeSeed<'de> for Seed<'_> {
+    type Value = Value;
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        *self.nodes += 1;
+        if *self.nodes > NODE_LIMIT || self.depth > DEPTH_LIMIT {
+            return Err(de::Error::custom("Android JSON bounds"));
+        }
+        deserializer.deserialize_any(self)
+    }
+}
+impl<'de> Visitor<'de> for Seed<'_> {
+    type Value = Value;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("bounded Android DATA") }
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Value, E> { Ok(Value::Bool(value)) }
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
+        if !(-SAFE_INTEGER..=SAFE_INTEGER).contains(&value) { return Err(E::custom("Android integer bound")); }
+        Ok(Value::Number(value.into()))
+    }
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
+        if value > SAFE_INTEGER as u64 { return Err(E::custom("Android integer bound")); }
+        Ok(Value::Number(value.into()))
+    }
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
+        // integer_lexemes has already excluded decimal/exponent forms.
+        if value == 0.0 && value.is_sign_negative() { Ok(Value::Number(0.into())) }
+        else { Err(E::custom("Android integers only")) }
+    }
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {
+        if value.len() > STRING_LIMIT { return Err(E::custom("Android string bound")); }
+        Ok(Value::String(value.to_owned()))
+    }
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
+        if value.len() > STRING_LIMIT { return Err(E::custom("Android string bound")); }
+        Ok(Value::String(value))
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
+    fn visit_none<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut values = Map::new();
+        while let Some(key) = map.next_key_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })? {
+            let Value::String(key) = key else { return Err(de::Error::custom("Android object key")); };
+            if values.contains_key(&key) { return Err(de::Error::custom("Android duplicate key")); }
+            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })?;
+            values.insert(key, value);
+        }
+        Ok(Value::Object(values))
+    }
+}
+pub(crate) fn strict_data(bytes: &[u8], limit: usize, framed: bool) -> Result<Value, BridgeError> {
+    if bytes.is_empty() || bytes.len() > limit || bytes.starts_with(&[0xef, 0xbb, 0xbf])
+        || framed && (!bytes.ends_with(b"\n") || bytes.iter().filter(|b| **b == b'\n').count() != 1)
+        || !integer_lexemes(bytes) { return Err(protocol_error()); }
+    std::str::from_utf8(bytes).map_err(|_| protocol_error())?;
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let mut nodes = 0;
+    let value = Seed { nodes: &mut nodes, depth: 0 }.deserialize(&mut decoder).map_err(|_| protocol_error())?;
+    decoder.end().map_err(|_| protocol_error())?;
+    Ok(value)
+}
+pub(crate) fn structure(value: &Value) -> bool {
+    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+        *nodes += 1;
+        if *nodes > NODE_LIMIT || depth > DEPTH_LIMIT { return false; }
+        match value {
+            Value::Null | Value::Bool(_) => true,
+            Value::Number(n) => n.as_i64().is_some_and(|n| (-SAFE_INTEGER..=SAFE_INTEGER).contains(&n)),
+            Value::String(text) => text.len() <= STRING_LIMIT,
+            Value::Array(values) => values.iter().all(|value| visit(value, depth + 1, nodes)),
+            Value::Object(values) => values.iter().all(|(key, value)| {
+                *nodes += 1; // Keys, too, are nodes at depth+1 in the Python ABI.
+                *nodes <= NODE_LIMIT && depth < DEPTH_LIMIT && key.len() <= STRING_LIMIT
+                    && visit(value, depth + 1, nodes)
+            }),
+        }
+    }
+    visit(value, 0, &mut 0)
+}
+/// Only the original InvokeBody::Raw bytes may enter here, before DTO copying.
+pub(crate) fn raw_request(bytes: &[u8]) -> Result<Value, BridgeError> {
+    strict_data(bytes, IPC_LIMIT, false).map_err(|_| invalid())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Content { pub(crate) bytes: u32, pub(crate) sha256: String }
+impl Content {
+    pub(crate) fn valid(&self, maximum: u32) -> bool { (1..=maximum).contains(&self.bytes) && sha(&self.sha256) }
+}
+
+// Deliberately the existing release_version_protocol::relative_display_path
+// TRANSPORT convention, not a second source-admission policy. The original core
+// alone applies NFC/full-casefold/private-tree/source rules before any effect.
+// Never normalize this comparison or use it as a Rust/native filesystem path.
+fn relative_display_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > 512 { return false; }
+    let mut count = 0;
+    for part in path.split('/') {
+        count += 1;
+        if count > 12 || part.is_empty() || part.len() > 255 || part.starts_with('.')
+            || part.ends_with(['.', ' ']) || part.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}' || "\\:<>\"|?*".contains(c)) {
+            return false;
+        }
+        let lower = part.to_lowercase();
+        if ["private", "secrets", "credentials", "review", "testflight", "build", "deriveddata", "pods",
+            "node_modules", "venv", "dist", "target", "__pycache__"].contains(&lower.as_str()) { return false; }
+        let stem = lower.split('.').next().unwrap_or("");
+        if ["con", "prn", "aux", "nul"].contains(&stem)
+            || stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.as_bytes()[3].is_ascii_digit() {
+            return false;
+        }
+    }
+    true
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SavedVersion {
+    pub(crate) source: String, pub(crate) bytes: u32, pub(crate) sha256: String,
+    pub(crate) name: String, pub(crate) build: u32,
+}
+impl SavedVersion {
+    pub(crate) fn valid(&self) -> bool {
+        relative_display_path(&self.source) && (1..=VERSION_LIMIT).contains(&self.bytes) && sha(&self.sha256)
+            && !self.name.is_empty() && self.name.len() <= 64
+            && self.name.bytes().all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
+            && (1..=2_100_000_000).contains(&self.build)
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ValidationMode { StructureAndVersion, UploadSignature }
+// A nullable field is still REQUIRED. Bare Option would silently admit an
+// omitted fingerprint in basic mode inside nested Context/result objects.
+fn nullable<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
+where D: de::Deserializer<'de>, T: Deserialize<'de> { Option::<T>::deserialize(decoder) }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ArtifactValidation {
+    pub(crate) mode: ValidationMode,
+    #[serde(deserialize_with = "nullable")]
+    pub(crate) upload_certificate_sha256: Option<String>,
+}
+impl ArtifactValidation {
+    fn valid(&self) -> bool { match self.mode {
+        ValidationMode::StructureAndVersion => self.upload_certificate_sha256.is_none(),
+        ValidationMode::UploadSignature => self.upload_certificate_sha256.as_ref().is_some_and(|value|
+            (1..=95).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b':')),
+    } }
+    fn maximum_commands(&self) -> u32 { if self.mode == ValidationMode::UploadSignature { 4 } else { 2 } }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Platform { Android }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Operation { AndroidBuildInspect, AndroidBuildSign, AndroidCandidateInputs }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all="lowercase")]
+pub(crate) enum CreateAction { Create }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SigningMode { LocalUploadKey }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SigningAssignment {
+    pub(crate) kind: String, pub(crate) record_id: String,
+    pub(crate) record_revision: u32, pub(crate) context_revision: u32,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SigningSelection { pub(crate) mode: SigningMode, pub(crate) assignments: Vec<SigningAssignment> }
+impl SigningSelection {
+    fn valid(&self) -> bool {
+        (1..=2).contains(&self.assignments.len()) && self.assignments.iter().enumerate().all(|(index, row)|
+            row.kind == ["android-keystore", "android-firebase"][index] && token(&row.record_id)
+            && (1..u32::MAX).contains(&row.record_revision) && (1..u32::MAX).contains(&row.context_revision)
+            && row.context_revision == self.assignments[0].context_revision)
+            && (self.assignments.len() < 2 || self.assignments[0].record_id != self.assignments[1].record_id)
+    }
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        self.assignments.iter().try_fold(self.assignments.capacity().checked_mul(std::mem::size_of::<SigningAssignment>())?,
+            |bytes, row| bytes.checked_add(row.kind.capacity())?.checked_add(row.record_id.capacity()))
+    }
+}
+// Missing is allowed for closed optional extensions; explicit null is not.
+fn present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
+where D: de::Deserializer<'de>, T: Deserialize<'de> { T::deserialize(decoder).map(Some) }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Context {
+    pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
+    pub(crate) saved_config: Content, pub(crate) saved_version: SavedVersion, pub(crate) artifact_validation: ArtifactValidation,
+    pub(crate) platform: Platform, pub(crate) operation: Operation,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) action: Option<CreateAction>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) signing: Option<SigningSelection>,
+}
+impl Context {
+    pub(crate) fn candidate(&self) -> bool { self.operation == Operation::AndroidCandidateInputs }
+    pub(crate) fn signed(&self) -> bool { matches!(self.operation, Operation::AndroidBuildSign | Operation::AndroidCandidateInputs) }
+    pub(crate) fn frame_limit(&self) -> usize { if self.candidate() { 14 } else if self.signed() { 10 } else { MAX_FRAMES } }
+    fn stage_valid(&self, stage: Stage) -> bool {
+        self.signed() || !matches!(stage, Stage::ValidatingSigning | Stage::Signing | Stage::RestoringInputs)
+    }
+    fn maximum_commands(&self) -> u32 { if self.candidate() { 18 } else if self.signed() { 6 } else { self.artifact_validation.maximum_commands() } }
+    fn valid(&self) -> bool {
+        valid_id(&self.project_id) && self.draft_revision < u32::MAX && self.baseline_generation < u32::MAX
+            && self.saved_config.valid(CONFIG_LIMIT) && self.saved_version.valid() && self.artifact_validation.valid()
+            && self.candidate() == self.action.is_some()
+            && self.signed() == self.signing.is_some() && self.signing.as_ref().is_none_or(|s|
+                s.valid() && self.artifact_validation.mode == ValidationMode::UploadSignature)
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Prepare {
+    pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
+    pub(crate) saved_config: Content, pub(crate) saved_version: SavedVersion, pub(crate) artifact_validation: ArtifactValidation,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) signing: Option<SigningSelection>,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) operation: Option<Operation>,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) action: Option<CreateAction>,
+}
+impl Prepare {
+    pub(crate) fn context(&self) -> Context {
+        Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
+            baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
+            saved_version: self.saved_version.clone(), artifact_validation: self.artifact_validation.clone(), platform: Platform::Android,
+            operation: self.operation.unwrap_or(if self.signing.is_some() { Operation::AndroidBuildSign } else { Operation::AndroidBuildInspect }),
+            action:self.action, signing: self.signing.clone() }
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Start {
+    pub(crate) operation_id: String, pub(crate) owner_generation: String, consent_version: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
+pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
+    let mut fields = vec!["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion", "artifactValidation"];
+    if value.get("signing").is_some() { fields.push("signing"); }
+    if value.get("operation").is_some() || value.get("action").is_some() { fields.extend(["operation","action"]); }
+    if !structure(value) || !keys(value, &fields) { return Err(invalid()); }
+    let input = Prepare::deserialize(value).map_err(|_| invalid())?;
+    if !input.context().valid() || input.operation.is_some_and(|operation| operation!=Operation::AndroidCandidateInputs) { return Err(invalid()); }
+    bounded(value, IPC_LIMIT - 1).map_err(|_| invalid())?;
+    Ok(input)
+}
+pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
+    if !structure(value) || !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
+    let input = Start::deserialize(value).map_err(|_| invalid())?;
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(), CONSENT | SIGNED_CONSENT | CANDIDATE_CONSENT) { return Err(invalid()); }
+    Ok(input)
+}
+impl Start {
+    pub(crate) fn consent_matches(&self, context: &Context) -> bool {
+        self.consent_version == if context.candidate() { CANDIDATE_CONSENT } else if context.signed() { SIGNED_CONSENT } else { CONSENT }
+    }
+}
+pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
+    if !structure(value) || !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
+    let input = Cancel::deserialize(value).map_err(|_| invalid())?;
+    if !token(&input.operation_id) || !token(&input.owner_generation) { return Err(invalid()); }
+    Ok(input)
+}
+pub(crate) fn status_request(value: &Value) -> Result<(), BridgeError> {
+    if keys(value, &[]) { Ok(()) } else { Err(invalid()) }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub(crate) enum Profile {
+    #[serde(rename = "linux-gnu-x86_64")] LinuxX64,
+    #[serde(rename = "macos-arm64")] MacArm64,
+    #[serde(rename = "macos-x86_64")] MacX64,
+}
+impl Profile {
+    /// Host shape only; this is NEVER native/runtime/toolchain qualification.
+    pub(crate) fn current() -> Option<Self> {
+        if cfg!(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64")) { Some(Self::LinuxX64) }
+        else if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Some(Self::MacArm64) }
+        else if cfg!(all(target_os = "macos", target_arch = "x86_64", target_pointer_width = "64")) { Some(Self::MacX64) }
+        else { None }
+    }
+    fn toolchain_profile(self) -> &'static str { match self {
+        Self::LinuxX64 => TOOLCHAIN_PROFILE,
+        Self::MacArm64 => MAC_TOOLCHAIN_PROFILE,
+        Self::MacX64 => MAC_X64_TOOLCHAIN_PROFILE,
+    } }
+}
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct RootIdentity {
+    pub(crate) device: String, pub(crate) inode: String,
+    pub(crate) mode: u32, pub(crate) uid: u32, pub(crate) gid: u32,
+}
+fn decimal(value: &str) -> bool {
+    !value.is_empty() && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok()
+}
+impl RootIdentity {
+    pub(crate) fn valid(&self) -> bool {
+        decimal(&self.device) && decimal(&self.inode) && self.inode != "0" && self.mode & 0o170000 == 0o040000
+    }
+}
+pub(crate) fn native_path(path: &Path) -> Option<&str> {
+    let text = path.to_str()?;
+    if text.len() > 4096 || !text.starts_with('/') { return None; }
+    if text != "/" {
+        let mut count = 0;
+        for part in text[1..].split('/') {
+            count += 1;
+            if count > 128 || part.is_empty() || matches!(part, "." | "..") || part.len() > 255
+                || part.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}' || c == '\\' || c == ':') { return None; }
+        }
+    }
+    Some(text)
+}
+/// Closed comparison DATA copied from the original native catalog selection.
+/// Parsing it does not register, inspect, select or authorize a tool instance.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MacToolchainSelection {
+    pub(crate) instance: String, pub(crate) owner_uid: u32, pub(crate) catalog_generation: u32,
+    pub(crate) record_sha256: String, pub(crate) inventory_sha256: String, pub(crate) os_provider_sha256: String,
+}
+impl MacToolchainSelection {
+    pub(crate) fn valid(&self) -> bool {
+        token(&self.instance) && self.owner_uid != 0 && self.owner_uid != u32::MAX
+            && (1..u32::MAX).contains(&self.catalog_generation)
+            && sha(&self.record_sha256) && sha(&self.inventory_sha256) && sha(&self.os_provider_sha256)
+    }
+    pub(crate) fn root_data(&self) -> std::path::PathBuf {
+        Path::new(MAC_TOOLCHAIN_PREFIX).join(self.owner_uid.to_string()).join(&self.instance)
+    }
+}
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolchainBinding {
+    schema_version: u32, profile: String, root: String, root_identity: RootIdentity, inventory_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection: Option<MacToolchainSelection>,
+}
+impl ToolchainBinding {
+    /// Native-owned caller supplies the original binding. This validates DATA
+    /// only: no Deserialize/renderer constructor, filesystem operation or permit.
+    /// Hashes and identity fields are NOT continuous tool/runtime custody.
+    pub(crate) fn new_data(root: &Path, identity: RootIdentity, inventory_sha256: &str) -> Result<Self, BridgeError> {
+        if !identity.valid() || !sha(inventory_sha256) { return Err(invalid()); }
+        Ok(Self { schema_version: 1, profile: TOOLCHAIN_PROFILE.into(), root: native_path(root).ok_or_else(invalid)?.into(),
+            root_identity: identity, inventory_sha256: inventory_sha256.into(), selection: None })
+    }
+    pub(crate) fn new_macos_data(profile: Profile, root: &Path, identity: RootIdentity, selected: &MacToolchainSelection) -> Result<Self, BridgeError> {
+        if !matches!(profile, Profile::MacArm64 | Profile::MacX64) || !selected.valid()
+            || root != selected.root_data() || !identity.valid() || identity.uid != 0
+            || identity.gid != 0 || identity.mode & 0o7777 != 0o555 { return Err(invalid()); }
+        Ok(Self { schema_version: 2, profile: profile.toolchain_profile().into(),
+            root: native_path(root).ok_or_else(invalid)?.into(), root_identity: identity,
+            inventory_sha256: selected.inventory_sha256.clone(), selection: Some(selected.clone()) })
+    }
+    fn valid(&self) -> bool {
+        if !self.root_identity.valid() || !sha(&self.inventory_sha256) || native_path(Path::new(&self.root)).is_none() { return false; }
+        match self.profile.as_str() {
+            TOOLCHAIN_PROFILE => self.schema_version == 1 && self.selection.is_none(),
+            MAC_TOOLCHAIN_PROFILE | MAC_X64_TOOLCHAIN_PROFILE => self.schema_version == 2 && self.root_identity.uid == 0 && self.root_identity.gid == 0
+                && self.root_identity.mode & 0o7777 == 0o555 && self.selection.as_ref().is_some_and(|s|
+                    s.valid() && s.inventory_sha256 == self.inventory_sha256 && s.root_data() == Path::new(&self.root)),
+            _ => false,
+        }
+    }
+    fn matches_profile(&self, profile: Profile) -> bool {
+        self.valid() && self.profile == profile.toolchain_profile()
+    }
+    /// Read-only comparison of an already native-bound Mac record. Not a grant.
+    pub(crate) fn matches_selection(&self,profile:Profile,selected:&MacToolchainSelection)->bool{
+        matches!(profile,Profile::MacArm64|Profile::MacX64)&&self.matches_profile(profile)
+            &&selected.valid()&&self.selection.as_ref()==Some(selected)
+    }
+}
+/// Only an actual registered native project and a native-selected tool binding
+/// enter this encoder. No savedVersion.source is used as a native path.
+pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
+    project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding) -> Result<Vec<u8>, BridgeError> {
+    request_selected(operation, generation, context, profile, project, cwd, toolchain, None, None)
+}
+pub(crate) fn request_signed(operation: &str, generation: &str, context: &Context, profile: Profile,
+    project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding, signing: &Content) -> Result<Vec<u8>, BridgeError> {
+    request_selected(operation, generation, context, profile, project, cwd, toolchain, Some(signing), None)
+}
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct CandidateNative {pub(crate) home:String,pub(crate) lease_fd:u32,pub(crate) nonce:String,pub(crate) clock:CandidateClock}
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct CandidateClock {pub(crate) work_end_ns:String,pub(crate) hard_end_ns:String}
+impl CandidateNative {
+    fn valid(&self)->bool{
+        native_path(Path::new(&self.home)).is_some() && (3..=255).contains(&self.lease_fd) && token(&self.nonce)
+            && self.nonce!="0".repeat(32) && decimal(&self.clock.work_end_ns) && decimal(&self.clock.hard_end_ns)
+            && self.clock.work_end_ns.parse::<u64>().is_ok_and(|w|w>0 && self.clock.hard_end_ns.parse::<u64>()
+                .is_ok_and(|h|h.checked_sub(w).is_some_and(|gap|gap<=10_000_000_000)))
+    }
+}
+pub(crate) fn request_candidate(operation:&str,generation:&str,context:&Context,profile:Profile,
+    project:&RegisteredRoot,cwd:&Path,toolchain:&ToolchainBinding,signing:&Content,candidate:&CandidateNative)->Result<Vec<u8>,BridgeError>{
+    request_selected(operation,generation,context,profile,project,cwd,toolchain,Some(signing),Some(candidate))
+}
+fn request_selected(operation: &str, generation: &str, context: &Context, profile: Profile,
+    project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding, signing: Option<&Content>, candidate:Option<&CandidateNative>) -> Result<Vec<u8>, BridgeError> {
+    if !token(operation) || !token(generation) || !context.valid() || !toolchain.matches_profile(profile)
+        || context.candidate()!=candidate.is_some() || candidate.is_some_and(|v|!v.valid()||!candidate_id(operation))
+        || context.signed() != signing.is_some() || signing.is_some_and(|s|
+            !matches!(profile, Profile::MacArm64 | Profile::MacX64) || !s.valid(CONFIG_LIMIT)) {
+        return Err(invalid());
+    }
+    // Existing native identity projection is DATA; no offline permit is reused.
+    let observed = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
+    let identity = RootIdentity { device: observed.device, inode: observed.inode, mode: observed.mode,
+        uid: observed.uid, gid: observed.gid };
+    if !identity.valid() { return Err(invalid()); }
+    let mut value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
+        "native":{"profile":profile,"projectRoot":native_path(&project.path).ok_or_else(invalid)?,
+            "rootIdentity":identity,"cwd":native_path(cwd).ok_or_else(invalid)?,"toolchain":toolchain}});
+    if let Some(signing) = signing { value["native"]["signingContext"] = json!(signing); }
+    if let Some(candidate)=candidate{value["protocol"]=json!(CANDIDATE_PROTOCOL);value["native"]["candidateHistory"]=json!(candidate);}
+    if !structure(&value) { return Err(invalid()); }
+    let mut bytes = bounded(&value, REQUEST_LIMIT - 1).map_err(|_| invalid())?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Outcome { Complete, Refused, Failed, Cancelled, TimedOut, Unknown }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Reason {
+    None, Cancelled, ContextChanged, DocumentLost, Shutdown, TimedOut, ProtocolError, RuntimeUnavailable,
+    IntentExpired, StaleIntent, SavedConfigMissing, SavedConfigInvalid, SavedConfigChanged, SavedConfigSensitive,
+    SavedConfigUnsafe, SavedConfigTooLarge, SavedVersionMissing, SavedVersionInvalid, SavedVersionChanged,
+    SavedVersionSensitive, SavedVersionUnsafe, SavedVersionTooLarge, PlatformDisabled, ModuleRequired,
+    ToolchainUnavailable, ToolchainMismatch, ProjectAdmissionRefused, CommandFailed, CommandIncomplete,
+    ArtifactMissing, ArtifactAmbiguous, ArtifactUnsafe, ArtifactChanged, InputLimit, ResultLimit, WorkRetained, CleanupUnknown,
+    SigningInputMissing, SigningInputInvalid, SigningValidationFailed, SigningCommandFailed, BuildInputsUnrestored,
+    JournalUnavailable, RecoveryRequired, CandidateInputsUnavailable,
+}
+impl Reason {
+    fn candidate_only(self)->bool{matches!(self,Self::JournalUnavailable|Self::RecoveryRequired|Self::CandidateInputsUnavailable)}
+}
+/// Candidate IDs retain the existing32hex envelope but use actual UUID4 bits.
+/// This is checked on EVERY public/private status, never just successful rows.
+pub(crate) fn candidate_id(value:&str)->bool{
+    token(value) && value.as_bytes()[12]==b'4' && matches!(value.as_bytes()[16],b'8'|b'9'|b'a'|b'b')
+}
+pub(crate) fn candidate_uuid(value:&str)->Option<String>{
+    candidate_id(value).then(||format!("{}-{}-{}-{}-{}",&value[..8],&value[8..12],&value[12..16],&value[16..20],&value[20..]))
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Stage { Accepted, InputsBound, ValidatingSigning, Building, Capturing, Signing, RestoringInputs, Inspecting, DisposingWork }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CommandOutcome { NotDispatched, Exited, Unknown }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CommandData { pub(crate) outcome: CommandOutcome, pub(crate) exit_code: Option<i32> }
+impl CommandData {
+    fn valid(&self) -> bool { (self.outcome == CommandOutcome::Exited) == self.exit_code.is_some() }
+    fn zero(&self) -> bool { self.outcome == CommandOutcome::Exited && self.exit_code == Some(0) }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Selection {
+    pub(crate) module: String, pub(crate) variant: String, pub(crate) application_id: String, pub(crate) task: String,
+}
+impl Selection {
+    fn valid(&self) -> bool {
+        fn label(text: &str, maximum: usize, punctuation: &[u8]) -> bool {
+            !text.is_empty() && text.len() <= maximum && text.bytes().all(|b| b.is_ascii_alphanumeric() || punctuation.contains(&b))
+        }
+        let mut parts = self.application_id.split('.');
+        let mut count = 0;
+        let id = self.application_id.len() <= 255 && parts.all(|part| {
+            count += 1;
+            part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        }) && count >= 2;
+        self.module.starts_with(':') && label(&self.module, 512, b"_.:-")
+            && label(&self.variant, 128, b"_-") && id
+            && self.task.len() >= 2 && self.task.starts_with(':') && label(&self.task, 648, b"_.:-")
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum CoreStatus { Pass, Fail, Missing, Blocked, Invalid, Skip, Manual, Configured, NotApplicable }
+const CORE_STATUSES: [CoreStatus; 9] = [CoreStatus::Pass, CoreStatus::Fail, CoreStatus::Missing, CoreStatus::Blocked,
+    CoreStatus::Invalid, CoreStatus::Skip, CoreStatus::Manual, CoreStatus::Configured, CoreStatus::NotApplicable];
+impl CoreStatus {
+    fn failure(self) -> bool { matches!(self, Self::Fail | Self::Missing | Self::Blocked | Self::Invalid) }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CheckId { AabStructure, AabManifest, ApplicationId, BuildNumber, VersionName, ReleaseFlags, Signature, Signer, CoreLifecycle, OtherCoreFinding }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Finding { pub(crate) ordinal: u32, pub(crate) check: CheckId, pub(crate) status: CoreStatus }
+/// The wire still contains a map of the same nine closed enum keys. Missing
+/// keys stay absent (not zero); there is no opaque BTree node allocation behind
+/// an otherwise stable terminal retained by the Android owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CoreCounts([Option<u32>; 9]);
+impl CoreCounts {
+    fn index(status: CoreStatus) -> usize { match status {
+        CoreStatus::Pass => 0, CoreStatus::Fail => 1, CoreStatus::Missing => 2,
+        CoreStatus::Blocked => 3, CoreStatus::Invalid => 4, CoreStatus::Skip => 5,
+        CoreStatus::Manual => 6, CoreStatus::Configured => 7, CoreStatus::NotApplicable => 8,
+    } }
+    fn len(&self) -> usize { self.0.iter().filter(|value| value.is_some()).count() }
+    fn observed_zero() -> Self { Self([Some(0); 9]) }
+    fn increment(&mut self, status: CoreStatus) -> Option<()> {
+        let value = self.0[Self::index(status)].as_mut()?;
+        *value = value.checked_add(1)?; Some(())
+    }
+}
+impl Serialize for CoreCounts {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.len()))?;
+        // This is the former BTreeMap<CoreStatus, _> enum/Ord order, not a new
+        // alphabetic ordering of public labels.
+        for status in CORE_STATUSES {
+            if let Some(value) = self.0[Self::index(status)] { map.serialize_entry(&status, &value)?; }
+        }
+        map.end()
+    }
+}
+impl<'de> Deserialize<'de> for CoreCounts {
+    fn deserialize<D: de::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        struct CountsVisitor;
+        impl<'de> Visitor<'de> for CountsVisitor {
+            type Value = CoreCounts;
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("the closed Android core-status count map")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut result = CoreCounts([None; 9]);
+                while let Some((status, count)) = map.next_entry::<CoreStatus, u32>()? {
+                    let slot = &mut result.0[CoreCounts::index(status)];
+                    if slot.is_some() { return Err(de::Error::custom("duplicate core-status count")); }
+                    *slot = Some(count);
+                }
+                Ok(result)
+            }
+        }
+        decoder.deserialize_map(CountsVisitor)
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Summary {
+    pub(crate) total: u32, pub(crate) shown: u32, pub(crate) omitted: u32, pub(crate) counts: CoreCounts,
+}
+fn inspection(findings: &[Finding], summary: &Summary) -> bool {
+    if findings.len() > MAX_FINDINGS || summary.total as usize != findings.len() || summary.shown != summary.total
+        || summary.omitted != 0 || summary.counts.len() != CORE_STATUSES.len() { return false; }
+    let mut observed = CoreCounts::observed_zero();
+    for (ordinal, row) in findings.iter().enumerate() {
+        if row.ordinal as usize != ordinal || observed.increment(row.status).is_none() { return false; }
+    }
+    observed == summary.counts
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Activity {
+    pub(crate) stage: Stage, pub(crate) selection: Option<Selection>, pub(crate) command: CommandData,
+    pub(crate) findings: Vec<Finding>, pub(crate) summary: Summary,
+}
+impl Activity {
+    fn valid(&self) -> bool {
+        if !self.command.valid() || self.selection.as_ref().is_some_and(|s| !s.valid()) || !inspection(&self.findings, &self.summary) {
+            return false;
+        }
+        if matches!(self.stage, Stage::InputsBound | Stage::ValidatingSigning | Stage::Building | Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting) && self.selection.is_none() {
+            return false;
+        }
+        if matches!(self.stage, Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting) && !self.command.zero() { return false; }
+        if self.command.outcome != CommandOutcome::NotDispatched && (self.selection.is_none()
+            || !matches!(self.stage, Stage::ValidatingSigning | Stage::Building | Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting | Stage::DisposingWork)) { return false; }
+        if self.findings.iter().any(|r| !matches!(r.check, CheckId::CoreLifecycle | CheckId::OtherCoreFinding))
+            && (!self.command.zero() || !matches!(self.stage, Stage::Inspecting | Stage::DisposingWork)) { return false; }
+        true
+    }
+}
+fn activity_shape(value: &Value) -> bool {
+    keys(value, &["stage", "selection", "command", "findings", "summary"])
+        && value.get("command").is_some_and(|v| keys(v, &["outcome", "exitCode"]))
+}
+
+// Declaration order equals the Python ABI's lexicographically sorted ABI list.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Abi {
+    #[serde(rename = "arm64-v8a")] Arm64V8a,
+    #[serde(rename = "armeabi")] Armeabi,
+    #[serde(rename = "armeabi-v7a")] ArmeabiV7a,
+    #[serde(rename = "mips")] Mips,
+    #[serde(rename = "mips64")] Mips64,
+    #[serde(rename = "x86")] X86,
+    #[serde(rename = "x86_64")] X86_64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Artifact {
+    logical_name: String, platform: Platform, kind: String, file_name: String, size: u64, sha256: String,
+    architectures: Vec<Abi>, unknown_abi: bool, freshness: String,
+}
+impl Artifact {
+    fn valid(&self) -> bool {
+        self.logical_name == "android-aab" && self.kind == "aab" && self.file_name == "app-release.aab"
+            && (1..=AAB_LIMIT).contains(&self.size) && sha(&self.sha256) && self.architectures.len() <= 7
+            && self.architectures.windows(2).all(|pair| pair[0] < pair[1]) && self.freshness == "not-established"
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum InspectionAssurance { Passed, Failed, NotChecked }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Assurances {
+    structure: InspectionAssurance, native_manifest: InspectionAssurance, application_version: String,
+    signature: String, signer: String, toolkit_signing: String, store_operation: String, source_binding: String, release_readiness: String,
+}
+fn assurances(findings: &[Finding], validation: &ArtifactValidation, signed: bool) -> Assurances {
+    let structure_rows: Vec<_> = findings.iter().filter(|r| r.check == CheckId::AabStructure).collect();
+    let structure = if structure_rows.len() == 1 && structure_rows[0].status == CoreStatus::Pass { InspectionAssurance::Passed }
+        else if structure_rows.iter().any(|r| r.status.failure()) { InspectionAssurance::Failed } else { InspectionAssurance::NotChecked };
+    let manifest: Vec<_> = findings.iter().filter(|r| matches!(r.check, CheckId::AabManifest | CheckId::ApplicationId
+        | CheckId::BuildNumber | CheckId::VersionName | CheckId::ReleaseFlags)).collect();
+    let unsupported = findings.iter().any(|r| matches!(r.check, CheckId::OtherCoreFinding | CheckId::CoreLifecycle));
+    let native = if structure == InspectionAssurance::Passed && !unsupported && manifest.len() == 1
+        && manifest[0].check == CheckId::AabManifest && manifest[0].status == CoreStatus::Pass { InspectionAssurance::Passed }
+        else if manifest.iter().any(|r| r.status.failure()) { InspectionAssurance::Failed } else { InspectionAssurance::NotChecked };
+    let signatures: Vec<_> = findings.iter().filter(|r| r.check == CheckId::Signature).map(|r| r.status).collect();
+    let signers: Vec<_> = findings.iter().filter(|r| r.check == CheckId::Signer).map(|r| r.status).collect();
+    let basic = validation.mode == ValidationMode::StructureAndVersion;
+    let signature = if basic { "not-inspected" }
+        else if structure == InspectionAssurance::Passed && !unsupported && signatures == [CoreStatus::Pass] { "passed" }
+        else if signatures.iter().any(|s| s.failure()) { "failed" } else { "not-checked" };
+    let signer = if basic { "not-inspected" }
+        else if signature == "passed" && signers == [CoreStatus::Pass] { "matches-saved-upload-certificate" }
+        else if signers.iter().any(|s| s.failure()) { "failed" } else { "not-checked" };
+    Assurances { structure, native_manifest: native,
+        application_version: if native == InspectionAssurance::Passed { "native-checked" } else { "not-established" }.into(),
+        signature: signature.into(), signer: signer.into(), toolkit_signing: if signed { "local-upload-key-verified" } else { "not-requested" }.into(), store_operation: "not-requested".into(),
+        source_binding: "not-established".into(), release_readiness: "not-assessed".into() }
+}
+fn inspection_mode(findings: &[Finding], validation: &ArtifactValidation) -> bool {
+    let signatures: Vec<_> = findings.iter().filter(|r| r.check == CheckId::Signature).map(|r| r.status).collect();
+    let signers: Vec<_> = findings.iter().filter(|r| r.check == CheckId::Signer).map(|r| r.status).collect();
+    if validation.mode == ValidationMode::StructureAndVersion {
+        return signatures.is_empty() && signers.iter().all(|s| *s == CoreStatus::Skip);
+    }
+    matches!(signatures.as_slice(), [] | [CoreStatus::Pass] | [CoreStatus::Fail])
+        && (signers.is_empty() || signatures == [CoreStatus::Pass]
+            && (signers == [CoreStatus::Pass] || signers.iter().all(|s| *s == CoreStatus::Fail)))
+}
+// Exact reachable completed inspection prefixes; these values confer no native
+// command authority. Manifest policy failure does not skip signature work.
+fn inspection_commands(findings: &[Finding], validation: &ArtifactValidation) -> Option<u32> {
+    if !inspection_mode(findings, validation) { return None; }
+    let structures: Vec<_> = findings.iter().filter(|r| r.check == CheckId::AabStructure).map(|r| r.status).collect();
+    let manifest = findings.iter().any(|r| matches!(r.check, CheckId::AabManifest | CheckId::ApplicationId
+        | CheckId::BuildNumber | CheckId::VersionName | CheckId::ReleaseFlags));
+    let signatures: Vec<_> = findings.iter().filter(|r| r.check == CheckId::Signature).map(|r| r.status).collect();
+    let signers: Vec<_> = findings.iter().filter(|r| r.check == CheckId::Signer).map(|r| r.status).collect();
+    if structures == [CoreStatus::Fail] {
+        return (!manifest && signatures.is_empty() && signers.is_empty()).then_some(1);
+    }
+    if structures != [CoreStatus::Pass] || !manifest { return None; }
+    if validation.mode == ValidationMode::StructureAndVersion { return (signers == [CoreStatus::Skip]).then_some(2); }
+    if signatures == [CoreStatus::Fail] { return signers.is_empty().then_some(3); }
+    (signatures == [CoreStatus::Pass] && !signers.is_empty()).then_some(4)
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Limitation {
+    SavedInputsNotAtomic, ProjectCodeEffectsPossible, NotNetworkIsolated, PostRunBytesMayBeIncrementalReusedOrStale,
+    SourceBindingNotEstablished, ArtifactSignerNotInspected, UploadSignatureCheckNotStoreEnrollment, ToolkitSigningNotRequested, LocalSigningNotStoreEnrollment, StoreOperationNotRequested,
+    ReleaseReadinessNotAssessed, LocalOutputObservationNotCurrentFileAuthority, CoreTerminalRequiresOriginalNativeFinality,
+}
+const LIMITATIONS: [Limitation; 11] = [Limitation::SavedInputsNotAtomic, Limitation::ProjectCodeEffectsPossible,
+    Limitation::NotNetworkIsolated, Limitation::PostRunBytesMayBeIncrementalReusedOrStale, Limitation::SourceBindingNotEstablished,
+    Limitation::ArtifactSignerNotInspected, Limitation::ToolkitSigningNotRequested, Limitation::StoreOperationNotRequested,
+    Limitation::ReleaseReadinessNotAssessed, Limitation::LocalOutputObservationNotCurrentFileAuthority,
+    Limitation::CoreTerminalRequiresOriginalNativeFinality];
+fn limitations(validation: &ArtifactValidation, signed: bool) -> [Limitation; 11] {
+    let mut result = LIMITATIONS;
+    if validation.mode == ValidationMode::UploadSignature { result[5] = Limitation::UploadSignatureCheckNotStoreEnrollment; }
+    if signed { result[6] = Limitation::LocalSigningNotStoreEnrollment; }
+    result
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ResultData {
+    schema_version: u32, scope: String, used_config: Content, used_version: SavedVersion, artifact_validation: ArtifactValidation, selection: Selection,
+    toolchain_profile: String,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    signing: Option<SigningMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toolchain_selection: Option<MacToolchainSelection>,
+    command: CommandData, findings: Vec<Finding>, summary: Summary,
+    artifacts: Vec<Artifact>, assurances: Assurances, limitations: Vec<Limitation>,
+}
+impl ResultData {
+    fn toolchain_valid(&self) -> bool { match self.toolchain_profile.as_str() {
+        TOOLCHAIN_PROFILE => self.schema_version == 1 && self.toolchain_selection.is_none(),
+        MAC_TOOLCHAIN_PROFILE | MAC_X64_TOOLCHAIN_PROFILE => self.schema_version == 2 && self.toolchain_selection.as_ref().is_some_and(MacToolchainSelection::valid),
+        _ => false,
+    } }
+    fn matches_toolchain(&self, expected: Option<&(Profile, MacToolchainSelection)>) -> bool {
+        self.toolchain_valid() && match expected {
+            Some((profile, selected)) => self.toolchain_profile == profile.toolchain_profile()
+                && self.toolchain_selection.as_ref() == Some(selected),
+            None => self.toolchain_profile == TOOLCHAIN_PROFILE && self.toolchain_selection.is_none(),
+        }
+    }
+    fn valid(&self) -> bool {
+        self.toolchain_valid() && (self.signing.is_none() || matches!(self.toolchain_profile.as_str(), MAC_TOOLCHAIN_PROFILE | MAC_X64_TOOLCHAIN_PROFILE)
+            && self.artifact_validation.mode == ValidationMode::UploadSignature
+            && self.assurances.structure == InspectionAssurance::Passed && self.assurances.native_manifest == InspectionAssurance::Passed
+            && self.assurances.signature == "passed" && self.assurances.signer == "matches-saved-upload-certificate"
+            && self.findings.iter().all(|row| matches!(row.status, CoreStatus::Pass | CoreStatus::NotApplicable))) && self.scope == SCOPE && self.used_config.valid(CONFIG_LIMIT) && self.used_version.valid()
+            && self.artifact_validation.valid() && inspection_commands(&self.findings, &self.artifact_validation).is_some()
+            && self.selection.valid() && self.command.zero()
+            && inspection(&self.findings, &self.summary) && self.findings.iter().any(|r| r.check == CheckId::AabStructure)
+            && self.findings.iter().all(|r| r.check != CheckId::CoreLifecycle) && self.artifacts.len() == MAX_ARTIFACTS
+            && self.artifacts.iter().all(Artifact::valid) && self.assurances == assurances(&self.findings, &self.artifact_validation, self.signing.is_some())
+            && self.limitations.as_slice() == limitations(&self.artifact_validation, self.signing.is_some())
+    }
+    fn matches(&self, context: &Context, activity: &Activity) -> bool {
+        self.used_config == context.saved_config && self.used_version == context.saved_version && self.artifact_validation == context.artifact_validation
+            && self.signing.is_some() == context.signed()
+            && activity.selection.as_ref() == Some(&self.selection) && self.command == activity.command
+            && self.findings == activity.findings && self.summary == activity.summary
+    }
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct CandidateResult {
+    schema_version:u32,scope:String,head_sequence:u32,
+    candidate_inputs:crate::local_release_history_protocol::CandidateInputs,build:ResultData,
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(untagged)]
+pub(crate) enum ResultValue { Candidate(CandidateResult), Build(ResultData) }
+impl ResultValue {
+    fn build(&self)->&ResultData{match self{Self::Build(build)=>build,Self::Candidate(value)=>&value.build}}
+    fn valid(&self)->bool{
+        self.build().valid() && match self {
+            Self::Build(_)=>true,
+            Self::Candidate(value)=>value.schema_version==1 && value.scope=="local-android-candidate-inputs"
+                &&(3..=513).contains(&value.head_sequence) &&value.build.signing==Some(SigningMode::LocalUploadKey)
+                &&value.candidate_inputs.matches_build(&value.build.selection.application_id,&value.build.used_version.name,
+                    value.build.used_version.build,value.build.artifacts[0].size,&value.build.artifacts[0].sha256),
+        }
+    }
+    fn matches(&self,context:&Context,activity:&Activity)->bool{
+        matches!(self,Self::Candidate(_))==context.candidate() && self.build().matches(context,activity)
+    }
+    fn matches_operation(&self,operation:&str)->bool{match self{
+        Self::Build(_)=>true,Self::Candidate(value)=>candidate_uuid(operation).is_some_and(|id|value.candidate_inputs.valid(&id)),
+    }}
+    fn matches_toolchain(&self,expected:Option<&(Profile,MacToolchainSelection)>)->bool{self.build().matches_toolchain(expected)}
+    fn retained_heap_bytes(&self)->Option<usize>{
+        self.build().retained_heap_bytes()?.checked_add(match self{Self::Build(_)=>0,
+            Self::Candidate(value)=>value.scope.capacity().checked_add(value.candidate_inputs.retained_heap_bytes()?)?})
+    }
+}
+fn result_value_shape(value:&Value)->bool{
+    if value.get("scope").and_then(Value::as_str)==Some("local-android-candidate-inputs"){
+        keys(value,&["schemaVersion","scope","headSequence","candidateInputs","build"])
+            &&value.get("build").is_some_and(result_shape)
+    }else{result_shape(value)}
+}
+fn result_shape(value: &Value) -> bool {
+    let mut common = vec!["schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile", "command",
+        "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation"];
+    if value.get("signing").is_some() { common.push("signing"); }
+    let shape = if matches!(value.get("toolchainProfile").and_then(Value::as_str), Some(MAC_TOOLCHAIN_PROFILE | MAC_X64_TOOLCHAIN_PROFILE)) {
+        let mut selected = common.to_vec(); selected.push("toolchainSelection");
+        keys(value, &selected) && value.get("toolchainSelection").is_some_and(|s| keys(s,
+            &["instance", "ownerUid", "catalogGeneration", "recordSha256", "inventorySha256", "osProviderSha256"]))
+    } else { keys(value, &common) };
+    shape && value.get("command").is_some_and(|v| keys(v, &["outcome", "exitCode"]))
+}
+pub(crate) fn result(value: &Value) -> Result<ResultData, BridgeError> {
+    if !structure(value) || !result_shape(value) { return Err(protocol_error()); }
+    let result = ResultData::deserialize(value).map_err(|_| protocol_error())?;
+    if !result.valid() { return Err(protocol_error()); }
+    bounded(value, RESPONSE_LIMIT - 1).map_err(|_| protocol_error())?;
+    Ok(result)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WorkDisposition { NotCreated, Removed, RetainedWork, Unknown }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ArtifactDisposition { NotCreated, Removed, RetainedLocalResult, RetainedIncomplete, Unknown }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Disposition { pub(crate) work: WorkDisposition, pub(crate) artifacts: ArtifactDisposition }
+impl Disposition {
+    fn known(&self) -> bool { self.work != WorkDisposition::Unknown && self.artifacts != ArtifactDisposition::Unknown }
+    fn complete(&self) -> bool { self.work == WorkDisposition::Removed && self.artifacts == ArtifactDisposition::RetainedLocalResult }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CoreStop { None, Cancelled, TimedOut }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Lifetime {
+    pub(crate) complete: bool, pub(crate) fatal: bool, pub(crate) contained: bool,
+    pub(crate) command_dispatched: Option<bool>, pub(crate) commands: u32, pub(crate) profile_calls: u32,
+    pub(crate) input_closed: bool, pub(crate) handlers_restored: bool, pub(crate) invocation_closed: bool,
+    pub(crate) artifacts_closed: bool, pub(crate) tools_closed: bool, pub(crate) namespace_closed: bool,
+    pub(crate) stop_observed: CoreStop,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) build_inputs_closed: Option<bool>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) material_retired: Option<bool>,
+    #[serde(default,deserialize_with="present",skip_serializing_if="Option::is_none")]
+    pub(crate) candidate_inputs_closed:Option<bool>,
+    #[serde(default,deserialize_with="present",skip_serializing_if="Option::is_none")]
+    pub(crate) journal_closed:Option<bool>,
+    #[serde(default,deserialize_with="present",skip_serializing_if="Option::is_none")]
+    pub(crate) lease_closed:Option<bool>,
+}
+impl Lifetime {
+    fn valid(&self) -> bool {
+        self.commands <= (if self.candidate_inputs_closed.is_some() {18} else if self.build_inputs_closed.is_some() { 6 } else { 4 })
+            && self.candidate_inputs_closed.is_some()==self.journal_closed.is_some()
+            && self.candidate_inputs_closed.is_some()==self.lease_closed.is_some()
+            && (self.candidate_inputs_closed.is_none() || self.build_inputs_closed.is_some()) && self.profile_calls == 0
+            && self.build_inputs_closed.is_some() == self.material_retired.is_some()
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.valid() && self.complete && !self.fatal && self.contained && self.command_dispatched.is_some()
+            && self.input_closed && self.handlers_restored && self.invocation_closed && self.artifacts_closed
+            && self.tools_closed && self.namespace_closed
+            && self.build_inputs_closed.is_none_or(|closed| closed) && self.material_retired.is_none_or(|closed| closed)
+            && self.candidate_inputs_closed.is_none_or(|closed|closed) &&self.journal_closed.is_none_or(|closed|closed)&&self.lease_closed.is_none_or(|closed|closed)
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Terminal {
+    schema_version: u32, context: Context, pub(crate) outcome: Outcome, pub(crate) reason: Reason,
+    pub(crate) activity: Activity, pub(crate) disposition: Disposition, pub(crate) result: Option<ResultValue>,
+    pub(crate) lifetime: Lifetime,
+}
+// Pure finite app-owned DATA census. Inline values are charged by the owner;
+// these methods count only their actual String/Vec backing. They neither
+// serialize/clone nor interpret a terminal as original native finality.
+fn retained_strings<const N: usize>(values: [&String; N]) -> Option<usize> {
+    values.into_iter().try_fold(0usize, |bytes, value| bytes.checked_add(value.capacity()))
+}
+fn retained_version(value: &SavedVersion) -> Option<usize> {
+    retained_strings([&value.source, &value.sha256, &value.name])
+}
+fn retained_validation(value: &ArtifactValidation) -> usize {
+    value.upload_certificate_sha256.as_ref().map_or(0, String::capacity)
+}
+fn retained_inputs(project_id: &String, content: &Content, version: &SavedVersion,
+    validation: &ArtifactValidation) -> Option<usize> {
+    retained_strings([project_id, &content.sha256])?.checked_add(retained_version(version)?)?
+        .checked_add(retained_validation(validation))
+}
+impl Prepare {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)?
+            .checked_add(self.signing.as_ref().map_or(Some(0), SigningSelection::retained_heap_bytes)?)
+    }
+}
+impl Context {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)?
+            .checked_add(self.signing.as_ref().map_or(Some(0), SigningSelection::retained_heap_bytes)?)
+    }
+}
+impl MacToolchainSelection {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.instance, &self.record_sha256, &self.inventory_sha256, &self.os_provider_sha256])
+    }
+}
+impl Selection {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.module, &self.variant, &self.application_id, &self.task])
+    }
+}
+impl Activity {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        self.findings.capacity().checked_mul(std::mem::size_of::<Finding>())?
+            .checked_add(self.selection.as_ref().map_or(Some(0), Selection::retained_heap_bytes)?)
+    }
+}
+impl Artifact {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.logical_name, &self.kind, &self.file_name, &self.sha256, &self.freshness])?
+            .checked_add(self.architectures.capacity().checked_mul(std::mem::size_of::<Abi>())?)
+    }
+}
+impl Assurances {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.application_version, &self.signature, &self.signer, &self.toolkit_signing,
+            &self.store_operation, &self.source_binding, &self.release_readiness])
+    }
+}
+impl ResultData {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        let bytes = retained_strings([&self.scope, &self.used_config.sha256, &self.toolchain_profile])?
+            .checked_add(retained_version(&self.used_version)?)?.checked_add(retained_validation(&self.artifact_validation))?
+            .checked_add(self.selection.retained_heap_bytes()?)?
+            .checked_add(self.toolchain_selection.as_ref().map_or(Some(0), MacToolchainSelection::retained_heap_bytes)?)?
+            .checked_add(self.findings.capacity().checked_mul(std::mem::size_of::<Finding>())?)?
+            .checked_add(self.artifacts.capacity().checked_mul(std::mem::size_of::<Artifact>())?)?
+            .checked_add(self.assurances.retained_heap_bytes()?)?
+            .checked_add(self.limitations.capacity().checked_mul(std::mem::size_of::<Limitation>())?)?;
+        self.artifacts.iter().try_fold(bytes, |bytes, artifact| bytes.checked_add(artifact.retained_heap_bytes()?))
+    }
+}
+impl Terminal {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        self.context.retained_heap_bytes()?.checked_add(self.activity.retained_heap_bytes()?)?
+            .checked_add(self.result.as_ref().map_or(Some(0), ResultValue::retained_heap_bytes)?)
+    }
+}
+
+fn artifact_reason(reason: Reason) -> bool {
+    matches!(reason, Reason::ArtifactMissing | Reason::ArtifactAmbiguous | Reason::ArtifactUnsafe | Reason::ArtifactChanged)
+}
+fn failure_facts(outcome: Outcome, reason: Reason, activity: &Activity, disposition: &Disposition) -> bool {
+    if outcome == Outcome::Refused && activity.command.outcome != CommandOutcome::NotDispatched { return false; }
+    if reason == Reason::CommandFailed && (outcome != Outcome::Failed || activity.command.outcome != CommandOutcome::Exited
+        || activity.command.exit_code == Some(0)) { return false; }
+    if reason == Reason::CommandIncomplete && (outcome != Outcome::Failed || activity.command.outcome == CommandOutcome::Exited) {
+        return false;
+    }
+    if artifact_reason(reason) && (outcome != Outcome::Failed || activity.selection.is_none() || !activity.command.zero()
+        || !matches!(activity.stage, Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting | Stage::DisposingWork)) { return false; }
+    if reason == Reason::WorkRetained && (outcome != Outcome::Failed || disposition.work != WorkDisposition::RetainedWork) { return false; }
+    disposition.work != WorkDisposition::RetainedWork || matches!(outcome, Outcome::Failed | Outcome::Unknown)
+}
+impl Terminal {
+    /// Core ledger/disposition predicate ONLY. Original native joins remain
+    /// mandatory; this method cannot authorize publication or resource release.
+    pub(crate) fn settled(&self) -> bool { self.lifetime.settled() && self.disposition.known() }
+    fn valid(&self, context: &Context) -> bool {
+        if self.schema_version != 1 || &self.context != context || !context.valid() || !self.activity.valid() || !self.lifetime.valid()
+            || !context.candidate() && self.reason.candidate_only() {
+            return false;
+        }
+        if context.candidate(){return self.valid_candidate(context);}
+        if self.lifetime.candidate_inputs_closed.is_some(){return false;}
+        let life = &self.lifetime;
+        let validation = &context.artifact_validation;
+        let signed = context.signed();
+        let offset = if signed { 2 } else { 0 };
+        if !context.stage_valid(self.activity.stage) || life.build_inputs_closed.is_some() != signed
+            || life.material_retired.is_some() != signed || life.commands > context.maximum_commands()
+            || !inspection_mode(&self.activity.findings, validation)
+            || !self.activity.command.zero() && life.commands > (if signed { 2 } else { 1 })
+            || life.commands > (if signed { 3 } else { 1 }) && !matches!(self.activity.stage, Stage::Inspecting | Stage::DisposingWork)
+            || signed && life.commands == 3 && !matches!(self.activity.stage, Stage::Signing | Stage::RestoringInputs | Stage::Inspecting | Stage::DisposingWork) { return false; }
+        if self.activity.findings.iter().any(|r| !matches!(r.check, CheckId::CoreLifecycle | CheckId::OtherCoreFinding))
+            && inspection_commands(&self.activity.findings, validation).map(|count| count + offset) != Some(life.commands) { return false; }
+        match self.activity.command.outcome {
+            CommandOutcome::NotDispatched if life.command_dispatched != Some(false) || life.commands > 1 => return false,
+            CommandOutcome::Exited if life.command_dispatched != Some(true) || life.commands < 1 => return false,
+            _ => {},
+        }
+        if self.outcome == Outcome::Complete {
+            return self.settled() && life.stop_observed == CoreStop::None && self.reason == Reason::None
+                && self.activity.stage == Stage::DisposingWork && self.disposition.complete()
+                && self.result.as_ref().is_some_and(|r| r.valid() && r.matches(context, &self.activity)
+                    && inspection_commands(&r.build().findings, validation).map(|count| count + offset) == Some(life.commands));
+        }
+        if self.result.is_some() || self.reason == Reason::None || self.disposition.artifacts == ArtifactDisposition::RetainedLocalResult {
+            return false;
+        }
+        if self.outcome == Outcome::Unknown {
+            if self.reason != Reason::CleanupUnknown || self.settled() { return false; }
+        } else if !self.settled() || self.reason == Reason::CleanupUnknown { return false; }
+        match self.outcome {
+            Outcome::Cancelled if self.reason != Reason::Cancelled || life.stop_observed != CoreStop::Cancelled => return false,
+            Outcome::TimedOut if self.reason != Reason::TimedOut || life.stop_observed != CoreStop::TimedOut => return false,
+            Outcome::Refused if life.command_dispatched != Some(false) => return false,
+            _ => {},
+        }
+        if matches!(self.reason, Reason::Cancelled | Reason::ContextChanged | Reason::DocumentLost | Reason::Shutdown)
+            && life.stop_observed != CoreStop::Cancelled { return false; }
+        if self.reason == Reason::TimedOut && life.stop_observed != CoreStop::TimedOut { return false; }
+        failure_facts(self.outcome, self.reason, &self.activity, &self.disposition)
+    }
+    fn valid_candidate(&self,context:&Context)->bool{
+        let life=&self.lifetime;
+        if !life.valid() || life.candidate_inputs_closed.is_none() || life.build_inputs_closed.is_none()
+            ||!inspection_mode(&self.activity.findings,&context.artifact_validation)
+            ||life.command_dispatched==Some(false)&&life.commands!=0{return false;}
+        if self.outcome==Outcome::Complete{
+            return self.settled()&&self.reason==Reason::None&&life.commands==14&&life.command_dispatched==Some(true)
+                &&life.stop_observed==CoreStop::None&&self.activity.stage==Stage::DisposingWork&&self.activity.command.zero()
+                &&self.disposition.complete()&&self.result.as_ref().is_some_and(|r|r.valid()&&r.matches(context,&self.activity));
+        }
+        if self.result.is_some()||self.reason==Reason::None||self.disposition.artifacts==ArtifactDisposition::RetainedLocalResult{return false;}
+        if self.outcome==Outcome::Unknown {
+            if self.reason!=Reason::CleanupUnknown||self.settled(){return false;}
+        }else if !self.settled()||self.reason==Reason::CleanupUnknown{return false;}
+        if matches!(self.reason,Reason::Cancelled|Reason::ContextChanged|Reason::DocumentLost|Reason::Shutdown)
+            &&life.stop_observed!=CoreStop::Cancelled ||self.reason==Reason::TimedOut&&life.stop_observed!=CoreStop::TimedOut
+            ||!failure_facts(self.outcome,self.reason,&self.activity,&self.disposition){return false;}
+        match self.outcome {
+            Outcome::Cancelled=>self.reason==Reason::Cancelled&&life.stop_observed==CoreStop::Cancelled,
+            Outcome::TimedOut=>self.reason==Reason::TimedOut&&life.stop_observed==CoreStop::TimedOut,
+            Outcome::Refused=>self.activity.command.outcome==CommandOutcome::NotDispatched,
+            _=>true,
+        }
+    }
+
+}
+fn terminal_shape(value: &Value) -> bool {
+    let mut life_fields = vec!["complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved",
+        "inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"];
+    if value.get("context").and_then(|v| v.get("signing")).is_some() { life_fields.extend(["buildInputsClosed", "materialRetired"]); }
+    if value.get("context").and_then(|v|v.get("operation")).and_then(Value::as_str)==Some("android-candidate-inputs"){life_fields.extend(["candidateInputsClosed","journalClosed","leaseClosed"]);}
+    keys(value, &["schemaVersion", "context", "outcome", "reason", "activity", "disposition", "result", "lifetime"])
+        && value.get("activity").is_some_and(activity_shape)
+        && value.get("lifetime").is_some_and(|v| keys(v, &life_fields))
+        && value.get("result").is_some_and(|v| v.is_null() || result_value_shape(v))
+}
+pub(crate) fn terminal(value: &Value, context: &Context) -> Result<Terminal, BridgeError> {
+    if !structure(value) || !terminal_shape(value) { return Err(protocol_error()); }
+    let terminal = Terminal::deserialize(value).map_err(|_| protocol_error())?;
+    if !terminal.valid(context) { return Err(protocol_error()); }
+    bounded(value, RESPONSE_LIMIT - 1).map_err(|_| protocol_error())?;
+    Ok(terminal)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Accepted { schema_version: u32, context: Context }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Progress { schema_version: u32, stage: Stage }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Envelope { protocol: String, operation_id: String, owner_generation: String, sequence: u32, kind: String, payload: Value,
+    #[serde(default,deserialize_with="present")]nonce:Option<String>,#[serde(default,deserialize_with="present")]request_sha256:Option<String> }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Frame { Accepted, Progress(Stage), Candidate(CandidateEvent), Terminal(Terminal) }
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateHead {pub(crate) sequence:u32,pub(crate) sha256:String}
+impl CandidateHead {fn valid(&self)->bool{(1..=513).contains(&self.sequence)&&sha(&self.sha256)}}
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub(crate) enum CandidateEvent {LeaseReady,HistoryHead(CandidateHead),InputsPending(CandidateHead),InputsReady(CandidateHead)}
+struct CandidateDecode {nonce:String,digest:String,phases:u8,head:Option<CandidateHead>}
+
+
+/// One finite decoder belongs in the original stdout reader. It owns only DATA,
+/// not a pipe, timeout, owner or retry permit. The native reader must separately
+/// charge ALL stdout/stderr bytes, reject ANY stderr, drain originals on error,
+/// and preserve their actual EOF/close records even after this decoder fails.
+pub(crate) struct FrameDecoder {
+    operation: String, generation: String, context: Context,
+    expected_macos: Option<(Profile, MacToolchainSelection)>,
+    frames: usize, bytes: usize, stage: Stage, terminal: bool, failed: bool,candidate:Option<CandidateDecode>,
+}
+impl FrameDecoder {
+    pub(crate) fn new(operation: &str, generation: &str, context: &Context) -> Result<Self, BridgeError> {
+        if !token(operation) || !token(generation) || !context.valid() || context.candidate() { return Err(protocol_error()); }
+        Ok(Self { operation: operation.into(), generation: generation.into(), context: context.clone(),
+            expected_macos: None, frames: 0, bytes: 0, stage: Stage::Accepted, terminal: false, failed: false,candidate:None })
+    }
+    /// Called from the original Session snapshot, before either reader starts.
+    /// There is no setter: an inspected/failed stream cannot change its binding.
+    pub(crate) fn new_macos(operation: &str, generation: &str, context: &Context,
+        profile: Profile, selected: &MacToolchainSelection) -> Result<Self, BridgeError> {
+        if !matches!(profile, Profile::MacArm64 | Profile::MacX64) || !selected.valid() { return Err(protocol_error()); }
+        let mut decoder = Self::new(operation, generation, context)?;
+        decoder.expected_macos = Some((profile, selected.clone())); Ok(decoder)
+    }
+    pub(crate) fn new_candidate(operation:&str,generation:&str,context:&Context,profile:Profile,selected:&MacToolchainSelection,
+        nonce:&str,digest:&str)->Result<Self,BridgeError>{
+        if !context.candidate()||!context.valid()||!candidate_id(operation)||!token(generation)||!token(nonce)||!sha(digest)
+            ||!matches!(profile,Profile::MacArm64|Profile::MacX64)||!selected.valid(){return Err(protocol_error());}
+        Ok(Self{operation:operation.into(),generation:generation.into(),context:context.clone(),expected_macos:Some((profile,selected.clone())),
+            frames:0,bytes:0,stage:Stage::Accepted,terminal:false,failed:false,
+            candidate:Some(CandidateDecode{nonce:nonce.into(),digest:digest.into(),phases:0,head:None})})
+    }
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
+        self.bytes = self.bytes.saturating_add(bytes.len());
+        let result = self.push_original(bytes);
+        if result.is_err() { self.failed = true; }
+        result
+    }
+    fn push_original(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
+        if self.failed || self.terminal || self.frames >= self.context.frame_limit() || self.bytes > RESPONSE_LIMIT { return Err(protocol_error()); }
+        let value = strict_data(bytes, RESPONSE_LIMIT, true)?;
+        let envelope = Envelope::deserialize(&value).map_err(|_| protocol_error())?;
+        if envelope.protocol != if self.context.candidate(){CANDIDATE_PROTOCOL}else{PROTOCOL} || envelope.operation_id != self.operation || envelope.owner_generation != self.generation
+            || envelope.sequence as usize != self.frames { return Err(protocol_error()); }
+        if let Some(candidate)=&self.candidate{
+            if envelope.nonce.as_deref()!=Some(candidate.nonce.as_str())||envelope.request_sha256.as_deref()!=Some(candidate.digest.as_str())
+                ||bytes.len()>if envelope.kind=="terminal"{32768}else{4096}{return Err(protocol_error());}
+        }else if envelope.nonce.is_some()||envelope.request_sha256.is_some(){return Err(protocol_error());}
+
+        let frame = match envelope.kind.as_str() {
+            "accepted" if self.frames == 0 => {
+                let accepted = Accepted::deserialize(&envelope.payload).map_err(|_| protocol_error())?;
+                if accepted.schema_version != 1 || accepted.context != self.context || !accepted.context.valid() { return Err(protocol_error()); }
+                Frame::Accepted
+            },
+            "progress" if self.frames>=1 && (self.context.candidate() || (1..=if self.context.signed(){8}else{5}).contains(&self.frames)) => {
+                let progress = Progress::deserialize(&envelope.payload).map_err(|_| protocol_error())?;
+                if progress.schema_version != 1 || progress.stage <= self.stage || !self.context.stage_valid(progress.stage)
+                    ||self.candidate.as_ref().is_some_and(|c|progress.stage>Stage::InputsBound&&c.phases<3) { return Err(protocol_error()); }
+                Frame::Progress(progress.stage)
+            },
+            kind @ ("lease-ready"|"history-head"|"inputs-pending"|"inputs-ready") if self.frames>=1=>{
+                let c=self.candidate.as_mut().ok_or_else(protocol_error)?;
+                if c.phases>=4 || kind!=["lease-ready","history-head","inputs-pending","inputs-ready"][c.phases as usize]
+                    ||self.stage<Stage::InputsBound{return Err(protocol_error());}
+                let event=if c.phases==0 {
+                    if !keys(&envelope.payload,&[]){return Err(protocol_error());}CandidateEvent::LeaseReady
+                }else{
+                    let head=CandidateHead::deserialize(&envelope.payload).map_err(|_|protocol_error())?;
+                    if !head.valid()||c.phases==1&&head.sequence>511||c.phases>1&&c.head.as_ref().is_none_or(|last|head.sequence!=last.sequence+1)
+                        ||c.phases==3&&self.stage!=Stage::DisposingWork{return Err(protocol_error());}
+                    c.head=Some(head.clone());match c.phases{1=>CandidateEvent::HistoryHead(head),2=>CandidateEvent::InputsPending(head),_=>CandidateEvent::InputsReady(head)}
+                };c.phases+=1;Frame::Candidate(event)
+            },
+            "terminal" if self.frames >= 1 => {
+                let terminal = terminal(&envelope.payload, &self.context)?;
+                if terminal.activity.stage < self.stage || terminal.result.as_ref().is_some_and(|r|
+                    !r.matches_toolchain(self.expected_macos.as_ref())||!r.matches_operation(&self.operation)) { return Err(protocol_error()); }
+                if terminal.outcome==Outcome::Complete && self.candidate.as_ref().is_some_and(|c|c.phases!=4
+                    ||!matches!(terminal.result.as_ref(),Some(ResultValue::Candidate(result)) if c.head.as_ref().is_some_and(|head|result.head_sequence==head.sequence))) {return Err(protocol_error());}
+                Frame::Terminal(terminal)
+            },
+            _ => return Err(protocol_error()),
+        };
+        self.frames += 1;
+        match &frame {
+            Frame::Progress(stage) => self.stage = *stage,
+            Frame::Terminal(_) => self.terminal = true,
+            Frame::Accepted | Frame::Candidate(_) => {},
+        }
+        Ok(frame)
+    }
+    /// Called on observed original EOF; this does not observe or close IO itself.
+    pub(crate) fn finish(&mut self) -> Result<(), BridgeError> {
+        if !self.settled() { self.failed = true; Err(protocol_error()) } else { Ok(()) }
+    }
+    pub(crate) fn settled(&self) -> bool { !self.failed && self.terminal && (2..=self.context.frame_limit()).contains(&self.frames) }
+    pub(crate) fn frames(&self) -> usize { self.frames }
+    pub(crate) fn bytes(&self) -> usize { self.bytes }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Phase { AwaitingConsent, Starting, Running, Stopping, Terminal, Unknown }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Availability { Available, Busy, Shutdown, CleanupUnknown, DocumentLost, UnsupportedPlatform, RuntimeUnqualified, ToolchainUnqualified }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Projection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_android_build: Option<crate::agent_android_build::Query>,
+    pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) context: Context,
+    pub(crate) phase: Phase, pub(crate) intent_usable: bool, pub(crate) outcome: Option<Outcome>, pub(crate) reason: Reason,
+    pub(crate) stage: Option<Stage>, pub(crate) activity: Option<Activity>, pub(crate) disposition: Option<Disposition>,
+    pub(crate) result: Option<ResultValue>,
+}
+impl Projection {
+    fn valid(&self) -> bool {
+        if self.agent_android_build.is_some() && !self.context.agent_context() { return false; }
+        if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
+            || self.context.candidate() && !candidate_id(&self.operation_id)
+            || !self.context.candidate() && self.reason.candidate_only()
+            || self.stage.is_some_and(|stage| !self.context.stage_valid(stage))
+            || self.activity.as_ref().is_some_and(|a| !self.context.stage_valid(a.stage)) { return false; }
+        if self.activity.as_ref().is_some_and(|activity| !inspection_mode(&activity.findings, &self.context.artifact_validation)
+            || activity.findings.iter().any(|r| !matches!(r.check, CheckId::CoreLifecycle | CheckId::OtherCoreFinding))
+                && inspection_commands(&activity.findings, &self.context.artifact_validation).is_none()) { return false; }
+        let empty_pair = self.activity.is_none() && self.disposition.is_none();
+        match self.phase {
+            Phase::AwaitingConsent => self.outcome.is_none() && self.reason == Reason::None && self.stage.is_none()
+                && self.result.is_none() && empty_pair,
+            Phase::Starting | Phase::Running | Phase::Stopping => !self.intent_usable && self.outcome.is_none()
+                && self.result.is_none() && empty_pair && (self.phase != Phase::Starting || self.stage.is_none()),
+            Phase::Unknown => !self.intent_usable && self.outcome == Some(Outcome::Unknown) && self.reason == Reason::CleanupUnknown
+                && self.result.is_none() && empty_pair,
+            Phase::Terminal => {
+                if self.intent_usable { return false; }
+                let Some(outcome) = self.outcome else { return false; };
+                if outcome == Outcome::Unknown || (self.reason == Reason::None) != (outcome == Outcome::Complete) { return false; }
+                if outcome == Outcome::Complete {
+                    return self.stage == Some(Stage::DisposingWork)
+                        && self.activity.as_ref().is_some_and(|activity| activity.valid() && activity.stage == Stage::DisposingWork
+                            && self.result.as_ref().is_some_and(|result| result.valid() && result.matches(&self.context, activity) && result.matches_operation(&self.operation_id)))
+                        && self.disposition.as_ref().is_some_and(Disposition::complete);
+                }
+                // Original native retirement preserves its first reason. This
+                // is deliberately broader than the Python/Core Terminal rule:
+                // changing a prepared context may retire without any core run.
+                if self.result.is_some() || self.reason == Reason::CleanupUnknown
+                    || outcome == Outcome::Cancelled && !matches!(self.reason,
+                        Reason::Cancelled | Reason::ContextChanged | Reason::DocumentLost | Reason::Shutdown)
+                    || outcome == Outcome::TimedOut && self.reason != Reason::TimedOut { return false; }
+                match (&self.activity, &self.disposition) {
+                    (Some(activity), Some(disposition)) => activity.valid() && self.stage == Some(activity.stage)
+                        && disposition.known() && disposition.artifacts != ArtifactDisposition::RetainedLocalResult
+                        && failure_facts(outcome, self.reason, activity, disposition),
+                    (None, None) => !matches!(self.reason, Reason::CommandFailed | Reason::CommandIncomplete | Reason::WorkRetained)
+                        && !artifact_reason(self.reason),
+                    _ => false,
+                }
+            },
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Status {
+    pub(crate) schema_version: u32, pub(crate) status_revision: u32, pub(crate) availability: Availability,
+    pub(crate) operation: Option<Projection>,
+}
+fn projection_shape(value: &Value) -> bool {
+    (keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result"])
+        || keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result", "agentAndroidBuild"]) && value.get("agentAndroidBuild").is_some_and(|v| !v.is_null()))
+        && value.get("activity").is_some_and(|v| v.is_null() || activity_shape(v))
+        && value.get("result").is_some_and(|v| v.is_null() || result_value_shape(v))
+}
+/// Status is native projection DATA, not the core terminal and not a renderer
+/// acknowledgment. No method here decides when native joins permit publication.
+pub(crate) fn status(value: &Value) -> Result<Status, BridgeError> {
+    if !structure(value) || !keys(value, &["schemaVersion", "statusRevision", "availability", "operation"])
+        || !value.get("operation").is_some_and(|v| v.is_null() || projection_shape(v)) { return Err(protocol_error()); }
+    let status = Status::deserialize(value).map_err(|_| protocol_error())?;
+    if status.schema_version != 1 || status.status_revision == u32::MAX || status.operation.as_ref().is_some_and(|p| !p.valid()) {
+        return Err(protocol_error());
+    }
+    bounded(value, STATUS_LIMIT).map_err(|_| protocol_error())?;
+    Ok(status)
+}
+pub(crate) fn status_bytes(value: &Status) -> Result<Vec<u8>, BridgeError> {
+    // Bound serialization BEFORE allocating a second tree. Even trusted native
+    // code must not accidentally materialize an unbounded status projection.
+    let bytes = bounded(value, STATUS_LIMIT).map_err(|_| protocol_error())?;
+    let data = strict_data(&bytes, STATUS_LIMIT, false)?;
+    status(&data)?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    // These fixtures are invented predicate DATA, never file/process/cleanup
+    // evidence or qualification. No filesystem, native runtime or owner is used.
+    use super::*;
+
+    fn prepare_value() -> Value {
+        json!({"projectId":"inert-android","draftRevision":2,"baselineGeneration":3,
+            "savedConfig":{"bytes":512,"sha256":"c".repeat(64)},
+            "savedVersion":{"source":"release/version.properties","bytes":41,"sha256":"d".repeat(64),"name":"1.2.3","build":42},
+            "artifactValidation":{"mode":"structure-and-version","uploadCertificateSha256":null}})
+    }
+    pub(crate) fn context() -> Context { prepare(&prepare_value()).unwrap().context() }
+    pub(crate) fn upload_context() -> Context {
+        let mut value = prepare_value();
+        value["artifactValidation"] = json!({"mode":"upload-signature","uploadCertificateSha256":"Aa".repeat(32)});
+        prepare(&value).unwrap().context()
+    }
+    pub(crate) fn signed_context() -> Context {
+        let mut value = prepare_value();
+        value["artifactValidation"] = json!({"mode":"upload-signature","uploadCertificateSha256":"Aa".repeat(32)});
+        value["signing"] = json!({"mode":"local-upload-key","assignments":[
+            {"kind":"android-keystore","recordId":"e".repeat(32),"recordRevision":1,"contextRevision":2}]});
+        prepare(&value).unwrap().context()
+    }
+    fn selection() -> Value {
+        json!({"module":":app","variant":"release","applicationId":"org.example.app","task":":app:bundleRelease"})
+    }
+    fn rows(entries: &[(&str, &str)]) -> (Value, Value) {
+        let mut counts = json!({"PASS":0,"FAIL":0,"MISSING":0,"BLOCKED":0,"INVALID":0,"SKIP":0,
+            "MANUAL":0,"CONFIGURED":0,"NOT_APPLICABLE":0});
+        let findings: Vec<_> = entries.iter().enumerate().map(|(ordinal, (check, status))| {
+            counts[*status] = json!(counts[*status].as_u64().unwrap() + 1);
+            json!({"ordinal":ordinal,"check":check,"status":status})
+        }).collect();
+        (json!(findings), json!({"total":entries.len(),"shown":entries.len(),"omitted":0,"counts":counts}))
+    }
+    fn complete() -> Value {
+        let context = context();
+        let (findings, summary) = rows(&[("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signer", "SKIP")]);
+        let command = json!({"outcome":"exited","exitCode":0});
+        let activity = json!({"stage":"disposing-work","selection":selection(),"command":command,
+            "findings":findings,"summary":summary});
+        let result = json!({"schemaVersion":1,"scope":SCOPE,"usedConfig":context.saved_config,"usedVersion":context.saved_version,"artifactValidation":context.artifact_validation,
+            "selection":selection(),"toolchainProfile":TOOLCHAIN_PROFILE,"command":command,"findings":findings,"summary":summary,
+            "artifacts":[{"logicalName":"android-aab","platform":"android","kind":"aab","fileName":"app-release.aab",
+                "size":1024,"sha256":"f".repeat(64),"architectures":["arm64-v8a"],"unknownAbi":false,"freshness":"not-established"}],
+            "assurances":{"structure":"passed","nativeManifest":"passed","applicationVersion":"native-checked","signature":"not-inspected","signer":"not-inspected",
+                "toolkitSigning":"not-requested","storeOperation":"not-requested","sourceBinding":"not-established","releaseReadiness":"not-assessed"},
+            "limitations":["saved-inputs-not-atomic","project-code-effects-possible","not-network-isolated",
+                "post-run-bytes-may-be-incremental-reused-or-stale","source-binding-not-established","artifact-signer-not-inspected",
+                "toolkit-signing-not-requested","store-operation-not-requested","release-readiness-not-assessed",
+                "local-output-observation-not-current-file-authority","core-terminal-requires-original-native-finality"]});
+        json!({"schemaVersion":1,"context":context,"outcome":"complete","reason":"none","activity":activity,
+            "disposition":{"work":"removed","artifacts":"retained-local-result"},"result":result,
+            "lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":true,"commands":2,"profileCalls":0,
+                "inputClosed":true,"handlersRestored":true,"invocationClosed":true,"artifactsClosed":true,"toolsClosed":true,
+                "namespaceClosed":true,"stopObserved":"none"}})
+    }
+    fn set_rows(value: &mut Value, entries: &[(&str, &str)], structure: &str, native: &str) {
+        let (findings, summary) = rows(entries);
+        value["activity"]["findings"] = findings.clone();
+        value["activity"]["summary"] = summary.clone();
+        if !value["result"].is_null() {
+            value["result"]["findings"] = findings;
+            value["result"]["summary"] = summary;
+            value["result"]["assurances"]["structure"] = json!(structure);
+            value["result"]["assurances"]["nativeManifest"] = json!(native);
+            value["result"]["assurances"]["applicationVersion"] = json!(if native == "passed" { "native-checked" } else { "not-established" });
+        }
+    }
+    fn failed(code: i32) -> Value {
+        let mut value = complete();
+        value["outcome"] = json!("failed"); value["reason"] = json!("command-failed"); value["result"] = Value::Null;
+        value["activity"]["command"]["exitCode"] = json!(code);
+        set_rows(&mut value, &[], "not-checked", "not-checked");
+        value["disposition"]["artifacts"] = json!("not-created"); value["lifetime"]["commands"] = json!(1);
+        value
+    }
+    // Reused by the shared-owner INERT tests so they need not invent a second
+    // Android ABI fixture. These return DATA, never an ownership/cleanup receipt.
+    pub(crate) fn complete_terminal() -> Value { complete() }
+    pub(crate) fn negative_terminal(exit_code: i32) -> Value { failed(exit_code) }
+    pub(crate) fn complete_with_failed_inspection() -> Value {
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "FAIL")], "failed", "not-checked");
+        value["lifetime"]["commands"] = json!(1);
+        value
+    }
+    fn refused() -> Value {
+        let mut value = failed(7);
+        value["outcome"] = json!("refused"); value["reason"] = json!("toolchain-unavailable");
+        value["activity"]["stage"] = json!("accepted"); value["activity"]["selection"] = Value::Null;
+        value["activity"]["command"] = json!({"outcome":"not-dispatched","exitCode":null});
+        value["disposition"]["work"] = json!("not-created");
+        value["lifetime"]["commandDispatched"] = json!(false); value["lifetime"]["commands"] = json!(0);
+        value
+    }
+    fn unknown() -> Value {
+        let mut value = failed(7);
+        value["outcome"] = json!("unknown"); value["reason"] = json!("cleanup-unknown");
+        value["activity"]["command"] = json!({"outcome":"unknown","exitCode":null});
+        value["lifetime"]["commandDispatched"] = Value::Null; value["lifetime"]["complete"] = json!(false);
+        value["disposition"]["work"] = json!("unknown");
+        value
+    }
+    fn parse_terminal(value: &Value) -> Result<Terminal, BridgeError> { terminal(value, &context()) }
+    fn frame(sequence: u32, kind: &str, payload: Value) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(&json!({"protocol":PROTOCOL,"operationId":"a".repeat(32),
+            "ownerGeneration":"b".repeat(32),"sequence":sequence,"kind":kind,"payload":payload})).unwrap();
+        bytes.push(b'\n'); bytes
+    }
+    fn accepted() -> Vec<u8> { frame(0, "accepted", json!({"schemaVersion":1,"context":context()})) }
+    fn progress(sequence: u32, stage: &str) -> Vec<u8> { frame(sequence, "progress", json!({"schemaVersion":1,"stage":stage})) }
+    fn decoder() -> FrameDecoder { FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &context()).unwrap() }
+    fn native_complete() -> Value {
+        let core = complete();
+        json!({"schemaVersion":1,"statusRevision":7,"availability":"available","operation":{
+            "operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"context":core["context"],"phase":"terminal",
+            "intentUsable":false,"outcome":"complete","reason":"none","stage":"disposing-work",
+            "activity":core["activity"],"disposition":core["disposition"],"result":core["result"]}})
+    }
+    fn upload_complete() -> Value {
+        let mut value = complete(); let context = upload_context();
+        value["context"] = json!(context);
+        value["result"]["artifactValidation"] = json!(context.artifact_validation);
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signature", "PASS"), ("signer", "PASS")], "passed", "passed");
+        value["result"]["assurances"]["signature"] = json!("passed");
+        value["result"]["assurances"]["signer"] = json!("matches-saved-upload-certificate");
+        value["result"]["limitations"][5] = json!("upload-signature-check-not-store-enrollment");
+        value["lifetime"]["commands"] = json!(4);
+        value
+    }
+
+    #[test]
+    fn upload_choice_is_required_literal_comparison_data_and_v1_is_not_accepted() {
+        let basic = prepare_value();
+        for literal in ["Aa".repeat(32), format!("{}AA", "AA:".repeat(31)), "0".repeat(64)] {
+            let mut value = basic.clone();
+            value["artifactValidation"] = json!({"mode":"upload-signature","uploadCertificateSha256":literal});
+            assert_eq!(prepare(&value).unwrap().artifact_validation.upload_certificate_sha256.as_deref(), Some(literal.as_str()));
+            // Transport only. The original saved config parser still rejects
+            // colons, placeholders and anything other than 64 valid hex chars.
+        }
+        for choice in [Value::Null, json!({"mode":"structure-and-version"}),
+            json!({"mode":"structure-and-version","uploadCertificateSha256":"Aa".repeat(32)}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":null}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":""}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":"A".repeat(96)}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":"Ｇ"}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":"a-b"}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":"AA","override":true}),
+            json!({"mode":"signed","uploadCertificateSha256":null})] {
+            let mut value = basic.clone(); value["artifactValidation"] = choice;
+            assert!(prepare(&value).is_err());
+        }
+        let mut value = basic; value.as_object_mut().unwrap().remove("artifactValidation");
+        assert!(prepare(&value).is_err());
+        let mut terminal_value = complete();
+        terminal_value["context"]["artifactValidation"].as_object_mut().unwrap().remove("uploadCertificateSha256");
+        assert!(parse_terminal(&terminal_value).is_err());
+        let mut terminal_value = complete();
+        terminal_value["result"]["artifactValidation"].as_object_mut().unwrap().remove("uploadCertificateSha256");
+        assert!(parse_terminal(&terminal_value).is_err());
+        assert!(start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),
+            "consentVersion":"saved-android-build-inspect-v1"})).is_err());
+        let old = String::from_utf8(accepted()).unwrap().replace(PROTOCOL, "mrk-android-build/1");
+        assert!(decoder().push(old.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn upload_signature_and_saved_match_require_exact_completed_command_prefixes() {
+        let context = upload_context();
+        for (signature, signer, expected, signature_assurance, signer_assurance) in [
+            ("PASS", Some("PASS"), 4, "passed", "matches-saved-upload-certificate"),
+            ("PASS", Some("FAIL"), 4, "passed", "failed"),
+            ("FAIL", None, 3, "failed", "not-checked"),
+        ] {
+            let mut value = upload_complete();
+            let mut entries = vec![("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signature", signature)];
+            if let Some(signer) = signer { entries.push(("signer", signer)); }
+            set_rows(&mut value, &entries, "passed", "passed");
+            value["result"]["assurances"]["signature"] = json!(signature_assurance);
+            value["result"]["assurances"]["signer"] = json!(signer_assurance);
+            for commands in 0..=5 {
+                value["lifetime"]["commands"] = json!(commands);
+                assert_eq!(terminal(&value, &context).is_ok(), commands == expected);
+            }
+            value["lifetime"]["commands"] = json!(expected);
+            assert_eq!(terminal(&value, &context).unwrap().outcome, Outcome::Complete);
+        }
+        // Manifest policy failure does not skip either signature inspector.
+        let mut value = upload_complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "FAIL"),
+            ("signature", "PASS"), ("signer", "PASS")], "passed", "failed");
+        assert!(terminal(&value, &context).is_ok());
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "FAIL"), ("aab-manifest", "FAIL"),
+            ("signature", "PASS"), ("signer", "FAIL"), ("signer", "FAIL")], "passed", "failed");
+        value["result"]["assurances"]["signer"] = json!("failed");
+        assert!(terminal(&value, &context).is_ok()); // Existing common parser failure rows.
+        let mut value = upload_complete();
+        set_rows(&mut value, &[("aab-structure", "FAIL")], "failed", "not-checked");
+        value["result"]["assurances"]["signature"] = json!("not-checked");
+        value["result"]["assurances"]["signer"] = json!("not-checked");
+        for commands in 0..=5 {
+            value["lifetime"]["commands"] = json!(commands);
+            assert_eq!(terminal(&value, &context).is_ok(), commands == 1);
+        }
+    }
+
+    #[test]
+    fn missing_skipped_contradictory_or_unsupported_signature_facts_cannot_be_promoted() {
+        let context = upload_context();
+        for suffix in [vec![("signer", "PASS")], vec![("signature", "SKIP"), ("signer", "PASS")],
+            vec![("signature", "PASS")], vec![("signature", "PASS"), ("signer", "SKIP")],
+            vec![("signature", "FAIL"), ("signer", "PASS")],
+            vec![("signature", "PASS"), ("signature", "FAIL"), ("signer", "PASS")],
+            vec![("signature", "PASS"), ("signature", "PASS"), ("signer", "PASS")],
+            vec![("signature", "PASS"), ("signer", "PASS"), ("signer", "FAIL")]] {
+            let mut value = upload_complete();
+            let mut entries = vec![("aab-structure", "PASS"), ("aab-manifest", "PASS")]; entries.extend(suffix);
+            set_rows(&mut value, &entries, "passed", "passed");
+            assert!(terminal(&value, &context).is_err());
+        }
+        let mut value = upload_complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "PASS"),
+            ("signature", "PASS"), ("signer", "PASS"), ("other-core-finding", "SKIP")], "passed", "not-checked");
+        assert!(terminal(&value, &context).is_err());
+        value["result"]["assurances"]["signature"] = json!("not-checked");
+        value["result"]["assurances"]["signer"] = json!("not-checked");
+        assert!(terminal(&value, &context).is_ok());
+        for check in ["signature", "signer"] {
+            let mut basic = complete();
+            set_rows(&mut basic, &[("aab-structure", "PASS"), ("aab-manifest", "PASS"), (check, "PASS")], "passed", "passed");
+            assert!(parse_terminal(&basic).is_err());
+        }
+    }
+
+    #[test]
+    fn upload_mode_and_literal_fingerprint_stay_bound_through_frames_and_native_projection() {
+        let context = upload_context(); let good = upload_complete();
+        let first = frame(0, "accepted", json!({"schemaVersion":1,"context":context}));
+        let mut stream = FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &context).unwrap();
+        stream.push(&first).unwrap(); stream.push(&frame(1, "terminal", good.clone())).unwrap();
+        assert!(stream.finish().is_ok()); // Only core DATA, not native joins.
+        for changed in [json!({"mode":"structure-and-version","uploadCertificateSha256":null}),
+            json!({"mode":"upload-signature","uploadCertificateSha256":"aa".repeat(32)})] {
+            let mut value = good.clone(); value["context"]["artifactValidation"] = changed.clone();
+            let mut stream = FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &context).unwrap();
+            stream.push(&first).unwrap(); assert!(stream.push(&frame(1, "terminal", value)).is_err());
+            let mut value = good.clone(); value["result"]["artifactValidation"] = changed;
+            assert!(terminal(&value, &context).is_err());
+        }
+        let mut native = native_complete();
+        for field in ["context", "activity", "disposition", "result"] { native["operation"][field] = good[field].clone(); }
+        assert!(status(&native).is_ok());
+        for phase in ["running", "stopping", "unknown"] {
+            let mut value = native.clone(); value["operation"]["phase"] = json!(phase);
+            assert!(status(&value).is_err());
+        }
+        native["operation"]["context"]["artifactValidation"]["uploadCertificateSha256"] = json!("aa".repeat(32));
+        assert!(status(&native).is_err());
+        let mut unknown = good; unknown["lifetime"]["toolsClosed"] = json!(false);
+        assert!(terminal(&unknown, &context).is_err());
+        unknown["outcome"] = json!("unknown"); unknown["reason"] = json!("cleanup-unknown"); unknown["result"] = Value::Null;
+        unknown["disposition"]["artifacts"] = json!("retained-incomplete");
+        assert!(!terminal(&unknown, &context).unwrap().settled());
+    }
+
+    #[test]
+    fn fixed_domain_and_limits_do_not_admit_offline_or_extra_artifacts() {
+        assert_eq!(PROTOCOL, "mrk-android-build/3");
+        assert_eq!(CONSENT, "saved-android-build-inspect-v3");
+        assert_eq!(EVENT, "android-build-state-changed");
+        assert_eq!((IPC_LIMIT, REQUEST_LIMIT, RESPONSE_LIMIT, STATUS_LIMIT), (8192, 32768, 65536, 65536));
+        assert_eq!((MAX_FRAMES, MAX_FINDINGS, MAX_ARTIFACTS), (8, 128, 1));
+        assert_eq!((INTENT_SECONDS, WORK_SECONDS, FINALITY_SECONDS), (300, 3000, 3010));
+        assert_eq!(serde_json::to_value(Profile::LinuxX64).unwrap(), json!("linux-gnu-x86_64"));
+        let good = complete();
+        assert_eq!(serde_json::to_value(LIMITATIONS).unwrap(), good["result"]["limitations"]);
+        assert_eq!(parse_terminal(&good).unwrap().outcome, Outcome::Complete);
+        let mut other = good;
+        other["context"]["operation"] = json!("offline-preflight"); assert!(parse_terminal(&other).is_err());
+    }
+
+    #[test]
+    fn original_raw_limits_duplicates_encoding_and_numeric_spellings_are_strict() {
+        let mut boundary = vec![b' '; IPC_LIMIT - 2]; boundary.extend_from_slice(b"{}");
+        assert!(status_request(&raw_request(&boundary).unwrap()).is_ok());
+        boundary.push(b' '); assert!(raw_request(&boundary).is_err());
+        for raw in [b"".as_slice(), b"{\"PRIVATE\":1,\"PRIVATE\":2}", b"{\"x\":{\"a\":1,\"a\":2}}",
+            b"{\"x\":1.0}", b"{\"x\":1e0}", b"{\"x\":-0.0}", b"{\"x\":NaN}", b"{\"x\":Infinity}",
+            b"{\"x\":9007199254740992}", b"{\"x\":-9007199254740992}", b"{\"x\":000}",
+            b"\xef\xbb\xbf{}", b"{\"x\":\"\\ud800\"}", b"{} trailing", &[0xff]] {
+            let error = raw_request(raw).unwrap_err();
+            assert_eq!(error, invalid()); assert!(!error.to_string().contains("PRIVATE"));
+        }
+        // A negative-zero INTEGER is exactly Python's int(\"-0\") == 0;
+        // fractional/exponent spellings above never reach this conversion.
+        assert_eq!(raw_request(b"{\"x\":-0}").unwrap(), json!({"x":0}));
+        assert_eq!(raw_request(b"{\"x\":9007199254740991}").unwrap(), json!({"x":SAFE_INTEGER}));
+        assert_eq!(raw_request(b"{\"x\":\"123e4\"}").unwrap(), json!({"x":"123e4"}));
+    }
+
+    #[test]
+    fn json_depth_keys_nodes_and_utf8_bytes_are_charged_before_retention() {
+        let mut nested = Value::Null;
+        for _ in 0..DEPTH_LIMIT { nested = json!([nested]); }
+        assert!(strict_data(&serde_json::to_vec(&nested).unwrap(), RESPONSE_LIMIT, false).is_ok());
+        nested = json!([nested]);
+        assert!(strict_data(&serde_json::to_vec(&nested).unwrap(), RESPONSE_LIMIT, false).is_err());
+        let values = json!(vec![0; NODE_LIMIT - 1]);
+        assert!(strict_data(&serde_json::to_vec(&values).unwrap(), RESPONSE_LIMIT, false).is_ok());
+        let values = json!(vec![0; NODE_LIMIT]);
+        assert!(strict_data(&serde_json::to_vec(&values).unwrap(), RESPONSE_LIMIT, false).is_err());
+        for (value, allowed) in [(json!("x".repeat(STRING_LIMIT)), true), (json!("x".repeat(STRING_LIMIT + 1)), false),
+            (json!("é".repeat(STRING_LIMIT / 2)), true), (json!("é".repeat(STRING_LIMIT / 2 + 1)), false)] {
+            assert_eq!(strict_data(&serde_json::to_vec(&value).unwrap(), RESPONSE_LIMIT, false).is_ok(), allowed);
+        }
+        let mut object = Map::new(); object.insert("x".repeat(STRING_LIMIT + 1), Value::Null);
+        assert!(strict_data(&serde_json::to_vec(&object).unwrap(), RESPONSE_LIMIT, false).is_err());
+    }
+
+    #[test]
+    fn prepare_is_saved_comparison_data_not_draft_native_selection_or_version_policy() {
+        let good = prepare_value(); assert!(prepare(&good).is_ok());
+        for field in ["native", "root", "argv", "environment", "module", "variant", "signed", "toolchain", "draft"] {
+            let mut bad = good.clone(); bad[field] = json!("PRIVATE"); assert!(prepare(&bad).is_err());
+        }
+        for field in ["draftRevision", "baselineGeneration"] {
+            for bad in [json!(true), json!(-1), json!(u32::MAX), json!(2.0), json!("2")] {
+                let mut value = good.clone(); value[field] = bad; assert!(prepare(&value).is_err());
+            }
+        }
+        for source in ["/PRIVATE", "../version.properties", "release//version.properties", "release/.env", "release/credentials/v",
+            "release/COM0.properties", "release/aux.txt", "release/name.", "release/name ", "release/a:b", "release/a\\b"] {
+            let mut bad = good.clone(); bad["savedVersion"]["source"] = json!(source); assert!(prepare(&bad).is_err());
+        }
+        for (field, bad) in [("bytes", json!(0)), ("bytes", json!(VERSION_LIMIT + 1)), ("sha256", json!("D".repeat(64))),
+            ("build", json!(0)), ("build", json!(2_100_000_001u64)), ("build", json!(true)), ("name", json!("x".repeat(65)))] {
+            let mut value = good.clone(); value["savedVersion"][field] = bad; assert!(prepare(&value).is_err());
+        }
+        let mut value = good;
+        value["savedVersion"]["name"] = json!("not-a-marketing-version");
+        // Native performs no release policy and never normalizes the source.
+        let source = "release/e\u{301}.properties";
+        value["savedVersion"]["source"] = json!(source);
+        assert_eq!(prepare(&value).unwrap().saved_version.source, source);
+        assert_eq!(prepare(&value).unwrap().saved_version.name, "not-a-marketing-version");
+    }
+
+    #[test]
+    fn start_and_cancel_are_closed_ids_not_an_execution_or_one_use_receipt() {
+        let good = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":CONSENT});
+        // Parsing twice is deliberately only DATA; the original owner must burn consent.
+        assert!(start(&good).is_ok()); assert!(start(&good).is_ok());
+        let mut wrong = good.clone(); wrong["consentVersion"] = json!("saved-offline-android-v1"); assert!(start(&wrong).is_err());
+        for id in ["a".repeat(31), "A".repeat(32), "a".repeat(33), "../PRIVATE".into()] {
+            let mut wrong = good.clone(); wrong["operationId"] = json!(id); assert!(start(&wrong).is_err());
+        }
+        assert!(cancel(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32)})).is_ok());
+        assert!(cancel(&good).is_err()); assert!(status_request(&json!({"projectId":"inert-android"})).is_err());
+    }
+
+    #[test]
+    fn native_tool_binding_encodes_only_data_and_never_reuses_a_fixture_permit() {
+        let identity = RootIdentity { device: "1".into(), inode: "2".into(), mode: 0o40700, uid: 123, gid: 123 };
+        let tool = ToolchainBinding::new_data(Path::new("/PRIVATE_TOOLS"), identity.clone(), &"e".repeat(64)).unwrap();
+        // Existing synthetic identity is used ONLY as a serialization predicate;
+        // no fixture registration, permit, native open or launch is invoked.
+        let project = RegisteredRoot { path: "/PRIVATE_PROJECT".into(),
+            identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let bytes = request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
+            &project, Path::new("/PRIVATE_CWD"), &tool).unwrap();
+        let value = strict_data(&bytes, REQUEST_LIMIT, true).unwrap();
+        assert_eq!(value["native"]["projectRoot"], "/PRIVATE_PROJECT");
+        assert_eq!(value["native"]["cwd"], "/PRIVATE_CWD");
+        assert_eq!(value["native"]["toolchain"], json!({"schemaVersion":1,"profile":TOOLCHAIN_PROFILE,
+            "root":"/PRIVATE_TOOLS","rootIdentity":{"device":"1","inode":"2","mode":0o40700,"uid":123,"gid":123},
+            "inventorySha256":"e".repeat(64)}));
+        assert!(bytes.len() <= REQUEST_LIMIT && bytes.ends_with(b"\n"));
+        assert!(!value["native"].as_object().unwrap().contains_key("qualified"));
+        let mut windows = project.clone();
+        windows.identity = crate::asset_source::ProjectIdentity::Windows { volume: u64::MAX, file_id: [0xff; 16] };
+        assert!(request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
+            &windows, Path::new("/PRIVATE_CWD"), &tool).is_err());
+        assert!(ToolchainBinding::new_data(Path::new("../PRIVATE"), identity.clone(), &"e".repeat(64)).is_err());
+        for path in ["/a//b", "/a/../b", "/a/./b", "/a\\b", "/a:b", "/a\nb"] {
+            assert!(ToolchainBinding::new_data(Path::new(path), identity.clone(), &"e".repeat(64)).is_err());
+        }
+        for (device, inode, mode) in [("01", "2", 0o40700), ("1", "0", 0o40700),
+            ("18446744073709551616", "2", 0o40700), ("1", "2", 0o100600)] {
+            let bad = RootIdentity { device: device.into(), inode: inode.into(), mode, uid: 123, gid: 123 };
+            assert!(ToolchainBinding::new_data(Path::new("/PRIVATE_TOOLS"), bad, &"e".repeat(64)).is_err());
+        }
+        let mut bad = tool; bad.profile = "other-profile".into();
+        assert!(request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
+            &project, Path::new("/PRIVATE_CWD"), &bad).is_err());
+    }
+
+    #[test]
+    fn complete_binds_both_exact_byte_pairs_source_and_displayed_version() {
+        let good = complete(); assert!(parse_terminal(&good).is_ok());
+        for (container, field, changed) in [("usedConfig", "bytes", json!(513)), ("usedConfig", "sha256", json!("a".repeat(64))),
+            ("usedVersion", "bytes", json!(42)), ("usedVersion", "sha256", json!("a".repeat(64))),
+            ("usedVersion", "source", json!("release/other.properties")), ("usedVersion", "name", json!("1.2.4")),
+            ("usedVersion", "build", json!(43))] {
+            let mut value = good.clone(); value["result"][container][field] = changed; assert!(parse_terminal(&value).is_err());
+        }
+        for field in ["module", "variant", "applicationId", "task"] {
+            let mut value = good.clone(); value["result"]["selection"][field] = json!("different"); assert!(parse_terminal(&value).is_err());
+        }
+        let mut value = good; value["context"]["baselineGeneration"] = json!(4); assert!(parse_terminal(&value).is_err());
+    }
+
+    #[test]
+    fn every_original_close_and_ledger_fact_vetoes_core_complete() {
+        for field in ["complete", "contained", "inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"] {
+            let mut value = complete(); value["lifetime"][field] = json!(false); assert!(parse_terminal(&value).is_err());
+            value["outcome"] = json!("unknown"); value["reason"] = json!("cleanup-unknown"); value["result"] = Value::Null;
+            value["disposition"]["artifacts"] = json!("retained-incomplete");
+            assert!(!parse_terminal(&value).unwrap().settled());
+        }
+        for (field, bad) in [("fatal", json!(true)), ("commands", json!(3)), ("profileCalls", json!(1)),
+            ("commandDispatched", Value::Null), ("commandDispatched", json!(false)), ("stopObserved", json!("cancelled"))] {
+            let mut value = complete(); value["lifetime"][field] = bad; assert!(parse_terminal(&value).is_err());
+        }
+        let mut value = complete(); value["lifetime"]["commands"] = json!(1);
+        assert!(parse_terminal(&value).is_err()); // Native-manifest PASS needs actual second command.
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "SKIP"), ("signer", "SKIP")], "passed", "not-checked");
+        assert!(parse_terminal(&value).is_err()); // Manifest findings cannot invent a missing original bundletool return.
+        value["lifetime"]["commands"] = json!(2); assert!(parse_terminal(&value).is_ok());
+    }
+
+    #[test]
+    fn command_failure_refusal_and_unknown_preserve_actual_known_outcomes() {
+        assert!(parse_terminal(&failed(7)).unwrap().settled());
+        assert!(parse_terminal(&failed(-9)).is_ok());
+        assert!(parse_terminal(&failed(0)).is_err());
+        assert!(parse_terminal(&refused()).unwrap().settled());
+        assert!(!parse_terminal(&unknown()).unwrap().settled());
+        let mut value = failed(7); value["activity"]["command"]["exitCode"] = Value::Null;
+        assert!(parse_terminal(&value).is_err());
+        let mut value = unknown(); value["activity"]["command"]["exitCode"] = json!(7);
+        assert!(parse_terminal(&value).is_err());
+        let mut value = failed(7); value["reason"] = json!("command-incomplete"); assert!(parse_terminal(&value).is_err());
+        value["activity"]["command"] = json!({"outcome":"unknown","exitCode":null});
+        assert!(parse_terminal(&value).is_ok()); // Settled lifetime, no inferred command return.
+        let mut value = failed(7); value["outcome"] = json!("refused"); assert!(parse_terminal(&value).is_err());
+    }
+
+    #[test]
+    fn capture_reasons_require_original_zero_return_and_reached_capture_stage() {
+        for reason in ["artifact-missing", "artifact-ambiguous", "artifact-unsafe", "artifact-changed"] {
+            let mut value = failed(0); value["reason"] = json!(reason); value["activity"]["stage"] = json!("capturing");
+            assert!(parse_terminal(&value).is_ok());
+            let mut bad = value.clone(); bad["activity"]["command"]["exitCode"] = json!(7); assert!(parse_terminal(&bad).is_err());
+            let mut bad = value.clone(); bad["activity"]["stage"] = json!("building"); assert!(parse_terminal(&bad).is_err());
+            let mut bad = value.clone(); bad["activity"]["selection"] = Value::Null; assert!(parse_terminal(&bad).is_err());
+            let mut bad = value; bad["outcome"] = json!("refused"); assert!(parse_terminal(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn known_retained_work_is_failed_even_after_stop_not_cancelled_clean_or_unknown() {
+        let mut value = failed(7); value["disposition"]["work"] = json!("retained-work");
+        assert!(parse_terminal(&value).unwrap().settled());
+        value["lifetime"]["stopObserved"] = json!("cancelled");
+        assert_eq!(parse_terminal(&value).unwrap().reason, Reason::CommandFailed); // Earlier primary survives later stop.
+        value["reason"] = json!("cancelled"); assert!(parse_terminal(&value).is_ok());
+        value["outcome"] = json!("cancelled"); assert!(parse_terminal(&value).is_err());
+        value["outcome"] = json!("failed"); value["reason"] = json!("timed-out"); value["lifetime"]["stopObserved"] = json!("timed-out");
+        assert!(parse_terminal(&value).is_ok());
+        value["outcome"] = json!("timed-out"); assert!(parse_terminal(&value).is_err());
+        value["outcome"] = json!("failed"); value["reason"] = json!("work-retained"); assert!(parse_terminal(&value).is_ok());
+        value["disposition"]["work"] = json!("removed"); assert!(parse_terminal(&value).is_err());
+        let mut value = unknown(); value["disposition"]["work"] = json!("retained-work");
+        assert!(!parse_terminal(&value).unwrap().settled());
+    }
+
+    #[test]
+    fn stop_reasons_require_observed_stop_and_unknown_disposition_vetoes_settlement() {
+        for (outcome, reason, stop) in [("cancelled", "cancelled", "cancelled"), ("timed-out", "timed-out", "timed-out"),
+            ("failed", "context-changed", "cancelled"), ("failed", "document-lost", "cancelled"), ("failed", "shutdown", "cancelled")] {
+            let mut value = failed(7); value["outcome"] = json!(outcome); value["reason"] = json!(reason);
+            assert!(parse_terminal(&value).is_err());
+            value["lifetime"]["stopObserved"] = json!(stop); assert!(parse_terminal(&value).is_ok());
+        }
+        let mut value = complete(); value["disposition"]["work"] = json!("unknown"); assert!(parse_terminal(&value).is_err());
+        value["outcome"] = json!("unknown"); value["reason"] = json!("cleanup-unknown"); value["result"] = Value::Null;
+        value["disposition"]["artifacts"] = json!("retained-incomplete");
+        let decoded = parse_terminal(&value).unwrap();
+        assert!(decoded.lifetime.settled()); assert!(!decoded.settled()); // Unknown disposition is an independent veto.
+        value["disposition"]["work"] = json!("removed"); assert!(parse_terminal(&value).is_err());
+    }
+
+    #[test]
+    fn failed_inspection_can_complete_without_promoting_native_or_signer_assurance() {
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "FAIL")], "failed", "not-checked");
+        value["lifetime"]["commands"] = json!(1);
+        assert_eq!(parse_terminal(&value).unwrap().outcome, Outcome::Complete);
+        let mut wrong = value.clone(); wrong["result"]["assurances"]["structure"] = json!("passed"); assert!(parse_terminal(&wrong).is_err());
+        value["lifetime"]["commands"] = json!(1); assert!(parse_terminal(&value).is_ok());
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("application-id", "PASS"), ("version-name", "PASS"),
+            ("build-number", "PASS"), ("release-flags", "PASS"), ("signer", "SKIP")], "passed", "not-checked");
+        assert!(parse_terminal(&value).is_ok()); // Separate findings are not the one native manifest success row.
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signer", "SKIP"), ("other-core-finding", "SKIP")], "passed", "not-checked");
+        assert!(parse_terminal(&value).is_ok());
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-structure", "PASS"), ("aab-manifest", "PASS")], "not-checked", "not-checked");
+        assert!(parse_terminal(&value).is_err()); // No real completed inspection has contradictory structure rows.
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "FAIL"), ("signer", "SKIP")], "passed", "failed");
+        assert!(parse_terminal(&value).is_ok());
+    }
+
+    #[test]
+    fn artifacts_findings_limits_and_public_assurances_are_not_extensible() {
+        for (field, bad) in [("logicalName", json!("mapping")), ("platform", json!("ios")), ("kind", json!("apk")),
+            ("fileName", json!("../PRIVATE.aab")), ("size", json!(0)), ("size", json!(AAB_LIMIT + 1)),
+            ("sha256", json!("F".repeat(64))), ("freshness", json!("fresh")), ("unknownAbi", json!(1)),
+            ("architectures", json!(["x86", "arm64-v8a"])), ("architectures", json!(["x86", "x86"])),
+            ("architectures", json!(["PRIVATE_ABI"]))] {
+            let mut value = complete(); value["result"]["artifacts"][0][field] = bad; assert!(parse_terminal(&value).is_err());
+        }
+        let mut value = complete(); let extra = value["result"]["artifacts"][0].clone();
+        value["result"]["artifacts"].as_array_mut().unwrap().push(extra); assert!(parse_terminal(&value).is_err());
+        for field in ["signature", "signer", "toolkitSigning", "storeOperation", "sourceBinding", "releaseReadiness", "applicationVersion"] {
+            let mut value = complete(); value["result"]["assurances"][field] = json!("verified"); assert!(parse_terminal(&value).is_err());
+        }
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signer", "PASS")], "passed", "passed");
+        assert!(parse_terminal(&value).is_err());
+        let mut value = complete();
+        set_rows(&mut value, &[("aab-structure", "PASS"), ("core-lifecycle", "SKIP")], "passed", "not-checked");
+        assert!(parse_terminal(&value).is_err());
+        let mut many = vec![("other-core-finding", "SKIP"); MAX_FINDINGS]; many[0] = ("aab-structure", "PASS");
+        many[1] = ("aab-manifest", "PASS"); many[2] = ("signer", "SKIP");
+        let mut value = complete(); set_rows(&mut value, &many, "passed", "not-checked"); assert!(parse_terminal(&value).is_ok());
+        many.push(("aab-manifest", "FAIL")); set_rows(&mut value, &many, "passed", "failed"); assert!(parse_terminal(&value).is_err());
+        let mut value = complete(); value["result"]["limitations"].as_array_mut().unwrap().reverse(); assert!(parse_terminal(&value).is_err());
+    }
+
+    #[test]
+    fn fixed_core_counts_preserve_map_bytes_absence_and_rejection() {
+        let legacy: std::collections::BTreeMap<CoreStatus, u32> =
+            CORE_STATUSES.into_iter().map(|status| (status, 0)).collect();
+        let fixed = CoreCounts::observed_zero();
+        assert_eq!(serde_json::to_vec(&fixed).unwrap(), serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(serde_json::from_slice::<CoreCounts>(&serde_json::to_vec(&legacy).unwrap()).unwrap(), fixed);
+        let mut absent = serde_json::to_value(&fixed).unwrap();
+        absent.as_object_mut().unwrap().remove("SKIP");
+        let missing: CoreCounts = serde_json::from_value(absent).unwrap();
+        assert_eq!(missing.len(), 8);
+        assert_ne!(missing, fixed);
+        assert!(!inspection(&[], &Summary { total: 0, shown: 0, omitted: 0, counts: missing }));
+        for bad in [r#"{"PASS":0,"PASS":0}"#, r#"{"NEW":0}"#, r#"{"PASS":4294967296}"#,
+            r#"{"PASS":-1}"#, r#"{"PASS":1.5}"#, r#"[]"#] {
+            assert!(serde_json::from_str::<CoreCounts>(bad).is_err());
+        }
+        let mut overflow = fixed;
+        overflow.0[CoreCounts::index(CoreStatus::Pass)] = Some(u32::MAX);
+        assert!(overflow.increment(CoreStatus::Pass).is_none());
+    }
+    #[test]
+    fn stable_terminal_census_counts_spare_backing_without_serialization_or_disposal() {
+        let data = complete();
+        let context: Context = serde_json::from_value(data["context"].clone()).unwrap();
+        let mut terminal = parse_terminal(&data).unwrap();
+        let first = terminal.retained_heap_bytes().unwrap();
+        let capacity = terminal.activity.findings.capacity();
+        terminal.activity.findings.reserve_exact(17);
+        let extra = (terminal.activity.findings.capacity() - capacity) * std::mem::size_of::<Finding>();
+        assert_eq!(terminal.retained_heap_bytes(), Some(first + extra));
+        assert_eq!(terminal.context, context);
+        assert_eq!(terminal.activity.findings.len(), data["activity"]["findings"].as_array().unwrap().len());
+        assert!(terminal.result.is_some());
+    }
+
+    #[test]
+    fn required_nullable_fields_exact_counts_and_unknown_private_keys_are_rejected() {
+        for field in ["result", "activity", "disposition", "lifetime"] {
+            let mut value = complete(); value.as_object_mut().unwrap().remove(field); assert!(parse_terminal(&value).is_err());
+        }
+        for (parent, field) in [("activity", "selection"), ("lifetime", "commandDispatched")] {
+            let mut value = complete(); value[parent].as_object_mut().unwrap().remove(field); assert!(parse_terminal(&value).is_err());
+        }
+        let mut value = refused(); value["activity"]["command"].as_object_mut().unwrap().remove("exitCode");
+        assert!(parse_terminal(&value).is_err());
+        for (parent, field) in [("activity", "stdout"), ("lifetime", "exception"), ("result", "argv"), ("disposition", "root")] {
+            let mut value = complete(); value[parent][field] = json!("PRIVATE_SECRET");
+            let error = parse_terminal(&value).unwrap_err(); assert_eq!(error, protocol_error());
+            assert!(!error.to_string().contains("PRIVATE_SECRET"));
+        }
+        let mut value = complete(); value["activity"]["findings"][0]["message"] = json!("PRIVATE_MESSAGE");
+        assert!(parse_terminal(&value).is_err());
+        let mut value = complete(); value["activity"]["findings"][0]["ordinal"] = json!(1); assert!(parse_terminal(&value).is_err());
+        let mut value = complete(); value["activity"]["summary"]["counts"]["PASS"] = json!(1); assert!(parse_terminal(&value).is_err());
+        let mut value = complete(); value["activity"]["summary"]["omitted"] = json!(1); assert!(parse_terminal(&value).is_err());
+    }
+
+    #[test]
+    fn stream_is_contiguous_monotone_optional_and_terminal_is_not_native_finality() {
+        let mut stream = decoder(); assert!(matches!(stream.push(&accepted()).unwrap(), Frame::Accepted));
+        assert!(matches!(stream.push(&frame(1, "terminal", complete())).unwrap(), Frame::Terminal(_)));
+        assert!(stream.finish().is_ok()); assert!(stream.settled()); assert_eq!(stream.frames(), 2);
+        let mut stream = decoder(); stream.push(&accepted()).unwrap();
+        for (index, stage) in ["inputs-bound", "building", "capturing", "inspecting", "disposing-work"].iter().enumerate() {
+            assert!(matches!(stream.push(&progress(index as u32 + 1, stage)).unwrap(), Frame::Progress(_)));
+        }
+        stream.push(&frame(6, "terminal", complete())).unwrap(); assert!(stream.finish().is_ok()); assert_eq!(stream.frames(), 7);
+        assert!(stream.push(&frame(7, "terminal", complete())).is_err()); assert!(!stream.settled());
+        let mut stream = decoder(); stream.push(&accepted()).unwrap();
+        stream.push(&progress(1, "inspecting")).unwrap(); // Intermediate stages may be omitted.
+        stream.push(&frame(2, "terminal", complete())).unwrap(); assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn failed_stream_step_identity_change_or_eof_cannot_rearm_original_decoder() {
+        for bad in [progress(0, "building"), frame(0, "terminal", complete()), frame(1, "accepted", json!({"schemaVersion":1,"context":context()}))] {
+            let mut stream = decoder(); assert!(stream.push(&bad).is_err()); assert!(stream.push(&accepted()).is_err());
+        }
+        for bad in [progress(2, "building"), progress(1, "accepted"), accepted()] {
+            let mut stream = decoder(); stream.push(&accepted()).unwrap(); assert!(stream.push(&bad).is_err());
+            assert!(stream.push(&progress(1, "building")).is_err()); assert!(stream.finish().is_err());
+        }
+        for stage in ["building", "inputs-bound"] {
+            let mut stream = decoder(); stream.push(&accepted()).unwrap(); stream.push(&progress(1, "building")).unwrap();
+            assert!(stream.push(&progress(2, stage)).is_err());
+        }
+        let mut stream = decoder(); stream.push(&accepted()).unwrap(); stream.push(&progress(1, "inspecting")).unwrap();
+        let mut earlier = failed(7); earlier["activity"]["stage"] = json!("building");
+        assert!(stream.push(&frame(2, "terminal", earlier)).is_err());
+        let mut stream = decoder(); stream.push(&accepted()).unwrap(); assert!(stream.finish().is_err());
+        assert!(stream.push(&frame(1, "terminal", complete())).is_err());
+        for (field, bad) in [("protocol", json!("mrk-offline-preflight/1")), ("operationId", json!("c".repeat(32))),
+            ("ownerGeneration", json!("d".repeat(32)))] {
+            let mut value: Value = serde_json::from_slice(&accepted()).unwrap(); value[field] = bad;
+            let mut bytes = serde_json::to_vec(&value).unwrap(); bytes.push(b'\n');
+            let mut stream = decoder(); assert!(stream.push(&bytes).is_err());
+        }
+        let mut value = complete(); value["context"]["savedVersion"]["name"] = json!("1.2.4");
+        let mut stream = decoder(); stream.push(&accepted()).unwrap(); assert!(stream.push(&frame(1, "terminal", value)).is_err());
+    }
+
+    #[test]
+    fn frame_framing_duplicate_keys_and_aggregate_budget_veto_positive_terminal() {
+        let first = accepted(); let last = frame(1, "terminal", complete());
+        let mut padded = vec![b' '; RESPONSE_LIMIT - first.len() - last.len()]; padded.extend_from_slice(&first);
+        let mut stream = decoder(); stream.push(&padded).unwrap(); stream.push(&last).unwrap();
+        assert_eq!(stream.bytes(), RESPONSE_LIMIT); assert!(stream.finish().is_ok());
+        padded.insert(0, b' ');
+        let mut stream = decoder(); stream.push(&padded).unwrap(); assert!(stream.push(&last).is_err()); assert!(!stream.settled());
+        let mut missing_newline = first.clone(); missing_newline.pop();
+        let mut extra_newline = first.clone(); extra_newline.push(b'\n');
+        let duplicate = String::from_utf8(first.clone()).unwrap().replacen("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1", 1).into_bytes();
+        for bytes in [missing_newline, extra_newline, duplicate] {
+            let mut stream = decoder(); assert!(stream.push(&bytes).is_err()); assert!(stream.push(&first).is_err());
+        }
+        let mut stream = decoder(); stream.frames = MAX_FRAMES; assert!(stream.push(&last).is_err());
+    }
+
+    #[test]
+    fn native_status_hides_provisional_core_activity_artifacts_and_unknown_results() {
+        let good = native_complete();
+        let typed = status(&good).unwrap(); let bytes = status_bytes(&typed).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), good);
+        for private in ["PRIVATE_PROJECT", "PRIVATE_TOOLS", "PRIVATE_CWD", "inventorySha256", "lifetime", "stdout", "argv"] {
+            assert!(!String::from_utf8(bytes.clone()).unwrap().contains(private));
+        }
+        for phase in ["starting", "running", "stopping", "unknown"] {
+            let mut value = good.clone(); value["operation"]["phase"] = json!(phase); assert!(status(&value).is_err());
+        }
+        let mut pending = good.clone(); pending["operation"]["phase"] = json!("running");
+        pending["operation"]["outcome"] = Value::Null; pending["operation"]["activity"] = Value::Null;
+        pending["operation"]["disposition"] = Value::Null; pending["operation"]["result"] = Value::Null;
+        assert!(status(&pending).is_ok()); // Reached stage, not a current completed result.
+        pending["operation"]["phase"] = json!("starting"); assert!(status(&pending).is_err());
+        pending["operation"]["stage"] = Value::Null; assert!(status(&pending).is_ok());
+        pending["operation"]["phase"] = json!("awaiting-consent"); pending["operation"]["intentUsable"] = json!(true);
+        assert!(status(&pending).is_ok()); pending["operation"]["intentUsable"] = json!(false); assert!(status(&pending).is_ok());
+        pending["operation"]["phase"] = json!("unknown"); pending["operation"]["outcome"] = json!("unknown");
+        pending["operation"]["reason"] = json!("cleanup-unknown"); pending["operation"]["stage"] = json!("building");
+        pending["availability"] = json!("cleanup-unknown"); assert!(status(&pending).is_ok());
+        pending["operation"]["activity"] = good["operation"]["activity"].clone(); assert!(status(&pending).is_err());
+    }
+
+    #[test]
+    fn native_status_preserves_negative_work_facts_without_a_core_or_native_receipt() {
+        let mut value = native_complete(); let core = failed(7);
+        value["operation"]["outcome"] = json!("failed"); value["operation"]["reason"] = json!("command-failed");
+        value["operation"]["result"] = Value::Null; value["operation"]["activity"] = core["activity"].clone();
+        value["operation"]["disposition"] = core["disposition"].clone();
+        value["operation"]["disposition"]["work"] = json!("retained-work"); assert!(status(&value).is_ok());
+        value["operation"]["reason"] = json!("cancelled"); assert!(status(&value).is_ok());
+        value["operation"]["outcome"] = json!("cancelled"); assert!(status(&value).is_err());
+        value["operation"]["outcome"] = json!("failed"); value["operation"]["reason"] = json!("protocol-error");
+        value["operation"]["activity"] = Value::Null; value["operation"]["disposition"] = Value::Null;
+        assert!(status(&value).is_ok()); // Original native failure after progress, no invented command facts.
+        for reason in ["command-failed", "command-incomplete", "artifact-missing", "artifact-ambiguous", "artifact-unsafe", "artifact-changed", "work-retained"] {
+            value["operation"]["reason"] = json!(reason); assert!(status(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn native_retirement_preserves_first_cancellation_reason_without_inventing_core_facts() {
+        for reason in ["cancelled", "context-changed", "document-lost", "shutdown"] {
+            let mut value = native_complete();
+            value["operation"]["outcome"] = json!("cancelled"); value["operation"]["reason"] = json!(reason);
+            value["operation"]["stage"] = Value::Null; value["operation"]["activity"] = Value::Null;
+            value["operation"]["disposition"] = Value::Null; value["operation"]["result"] = Value::Null;
+            assert!(status(&value).is_ok()); // Original prepared intent retired, no core command/cleanup claim.
+            value["operation"]["stage"] = json!("building");
+            assert!(status(&value).is_ok()); // Reached stage still is not checked core activity.
+            let mut core = failed(7);
+            core["outcome"] = json!("cancelled"); core["reason"] = json!(reason);
+            core["lifetime"]["stopObserved"] = json!("cancelled");
+            assert_eq!(parse_terminal(&core).is_ok(), reason == "cancelled"); // Python/Core stays strict.
+            value["operation"]["stage"] = core["activity"]["stage"].clone();
+            value["operation"]["activity"] = core["activity"].clone();
+            value["operation"]["disposition"] = core["disposition"].clone();
+            assert!(status(&value).is_ok());
+            value["operation"]["disposition"]["work"] = json!("retained-work");
+            assert!(status(&value).is_err()); // A cancellation reason cannot hide known retained work.
+        }
+        for reason in ["protocol-error", "timed-out", "runtime-unavailable", "cleanup-unknown"] {
+            let mut value = native_complete(); value["operation"]["outcome"] = json!("cancelled");
+            value["operation"]["reason"] = json!(reason); value["operation"]["activity"] = Value::Null;
+            value["operation"]["disposition"] = Value::Null; value["operation"]["result"] = Value::Null;
+            assert!(status(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn native_status_required_nullables_counters_and_closed_availability_fail_cleanly() {
+        let good = native_complete();
+        for field in ["outcome", "stage", "activity", "disposition", "result"] {
+            let mut bad = good.clone(); bad["operation"].as_object_mut().unwrap().remove(field); assert!(status(&bad).is_err());
+        }
+        for revision in [json!(u32::MAX), json!(-1), json!(true), json!(7.0)] {
+            let mut bad = good.clone(); bad["statusRevision"] = revision; assert!(status(&bad).is_err());
+        }
+        let unavailable = json!({"schemaVersion":1,"statusRevision":0,"availability":"toolchain-unqualified","operation":null});
+        assert!(status(&unavailable).is_ok()); // DATA availability, no code enables that profile.
+        let mut bad = unavailable.clone(); bad["qualified"] = json!(true); assert!(status(&bad).is_err());
+        let mut bad = unavailable; bad["availability"] = json!("qualified"); assert!(status(&bad).is_err());
+        let mut bad = good; bad["operation"]["result"]["usedVersion"]["build"] = json!(43); assert!(status(&bad).is_err());
+    }
+
+    pub(crate) fn candidate_context() -> Context {
+        let mut context=signed_context();context.operation=Operation::AndroidCandidateInputs;context.action=Some(CreateAction::Create);context
+    }
+    pub(crate) const CANDIDATE_ID:&str="33333333333343338333333333333333";
+    pub(crate) fn candidate_complete()->Value{
+        let mut value=signed_complete();value["context"]=json!(candidate_context());
+        value["lifetime"]["commands"]=json!(14);
+        for key in ["candidateInputsClosed","journalClosed","leaseClosed"]{value["lifetime"][key]=json!(true);}
+        let build=value["result"].take();
+        let summary=json!({"operationId":"33333333-3333-4333-8333-333333333333","candidateSha256":"a".repeat(64),
+            "sourceCommit":"b".repeat(40),"sourceTree":"c".repeat(40),"applicationId":build["selection"]["applicationId"],
+            "version":{"name":build["usedVersion"]["name"],"build":build["usedVersion"]["build"]},
+            "files":[{"fileName":"app-release.aab","bytes":build["artifacts"][0]["size"],"sha256":build["artifacts"][0]["sha256"]},
+                {"fileName":"store-metadata.zip","bytes":17,"sha256":"d".repeat(64)},
+                {"fileName":"validation-report.json","bytes":19,"sha256":"e".repeat(64)}],
+            "observation":"current-bundle-only","priorCreateFinality":"not-established"});
+        value["result"]=json!({"schemaVersion":1,"scope":"local-android-candidate-inputs","headSequence":3,"candidateInputs":summary,"build":build});value
+    }
+    fn candidate_frame(seq:usize,kind:&str,payload:Value)->Vec<u8>{
+        let mut bytes=serde_json::to_vec(&json!({"protocol":CANDIDATE_PROTOCOL,"operationId":CANDIDATE_ID,"ownerGeneration":"b".repeat(32),
+            "sequence":seq,"kind":kind,"payload":payload,"nonce":"c".repeat(32),"requestSha256":"d".repeat(64)})).unwrap();bytes.push(b'\n');bytes
+    }
+    fn candidate_decoder()->FrameDecoder{
+        let value=candidate_complete();let selected=MacToolchainSelection::deserialize(&value["result"]["build"]["toolchainSelection"]).unwrap();
+        FrameDecoder::new_candidate(CANDIDATE_ID,&"b".repeat(32),&candidate_context(),Profile::MacArm64,&selected,&"c".repeat(32),&"d".repeat(64)).unwrap()
+    }
+    fn candidate_prefix(decoder:&mut FrameDecoder){
+        decoder.push(&candidate_frame(0,"accepted",json!({"schemaVersion":1,"context":candidate_context()}))).unwrap();
+        decoder.push(&candidate_frame(1,"progress",json!({"schemaVersion":1,"stage":"inputs-bound"}))).unwrap();
+    }
+    #[test]
+    fn candidate_create_exact_consent_uuid_and_old_signed_domain(){
+        let context=candidate_context();assert!(context.valid());assert_eq!((context.frame_limit(),context.maximum_commands()),(14,18));
+        let mut value=serde_json::to_value(signed_context()).unwrap();value.as_object_mut().unwrap().remove("platform");
+        value["operation"]=json!("android-candidate-inputs");value["action"]=json!("create");
+        assert_eq!(prepare(&value).unwrap().context(),context);
+        for field in ["operation","action","signing"]{let mut bad=value.clone();bad.as_object_mut().unwrap().remove(field);assert!(prepare(&bad).is_err(),"{field}");}
+        let start=start(&json!({"operationId":CANDIDATE_ID,"ownerGeneration":"b".repeat(32),"consentVersion":CANDIDATE_CONSENT})).unwrap();
+        assert!(start.consent_matches(&context));assert!(!start.consent_matches(&signed_context()));
+        let mut projection=native_complete();let operation=&mut projection["operation"];
+        operation["context"]=json!(context);operation["operationId"]=json!(CANDIDATE_ID);operation["phase"]=json!("awaiting-consent");
+        operation["intentUsable"]=json!(true);operation["outcome"]=Value::Null;operation["reason"]=json!("none");
+        for field in ["stage","activity","disposition","result"]{operation[field]=Value::Null;}
+        assert!(status(&projection).is_ok());projection["operation"]["operationId"]=json!("a".repeat(32));assert!(status(&projection).is_err());
+        assert!(terminal(&signed_complete(),&signed_context()).is_ok());assert!(terminal(&candidate_complete(),&signed_context()).is_err());
+    }
+    #[test]
+    fn candidate_create_four_phases_fourteen_frames_match_original_selection(){
+        for (profile,toolchain) in [(Profile::MacArm64,MAC_TOOLCHAIN_PROFILE),(Profile::MacX64,MAC_X64_TOOLCHAIN_PROFILE)]{
+            let mut value=candidate_complete();value["result"]["build"]["toolchainProfile"]=json!(toolchain);
+            let selected=MacToolchainSelection::deserialize(&value["result"]["build"]["toolchainSelection"]).unwrap();
+            let mut decoder=FrameDecoder::new_candidate(CANDIDATE_ID,&"b".repeat(32),&candidate_context(),profile,&selected,&"c".repeat(32),&"d".repeat(64)).unwrap();
+            candidate_prefix(&mut decoder);
+            for (seq,kind,payload) in [(2,"lease-ready",json!({})),(3,"history-head",json!({"sequence":1,"sha256":"1".repeat(64)})),
+                (4,"inputs-pending",json!({"sequence":2,"sha256":"2".repeat(64)}))]{decoder.push(&candidate_frame(seq,kind,payload)).unwrap();}
+            for (index,stage) in [Stage::ValidatingSigning,Stage::Building,Stage::Capturing,Stage::Signing,Stage::RestoringInputs,Stage::Inspecting,Stage::DisposingWork].into_iter().enumerate(){
+                decoder.push(&candidate_frame(index+5,"progress",json!({"schemaVersion":1,"stage":stage}))).unwrap();
+            }
+            decoder.push(&candidate_frame(12,"inputs-ready",json!({"sequence":3,"sha256":"3".repeat(64)}))).unwrap();
+            decoder.push(&candidate_frame(13,"terminal",value)).unwrap();decoder.finish().unwrap();assert_eq!(decoder.frames(),14);
+        }
+        for field in ["commands","leaseClosed","journalClosed","candidateInputsClosed"]{
+            let mut value=candidate_complete();value["lifetime"][field]=if field=="commands"{json!(6)}else{json!(false)};
+            assert!(terminal(&value,&candidate_context()).is_err(),"{field}");
+        }
+        for (field,bad) in [("priorCreateFinality",json!("complete")),("sourceCommit",json!("a".repeat(39))),
+            ("files",json!([]))]{let mut value=candidate_complete();value["result"]["candidateInputs"][field]=bad;assert!(terminal(&value,&candidate_context()).is_err());}
+        let mut value=candidate_complete();value["result"]["candidateInputs"]["files"][0]["bytes"]=json!(99);assert!(terminal(&value,&candidate_context()).is_err());
+    }
+    #[test]
+    fn candidate_create_rejects_early_build_replayed_context_and_unfinished_success(){
+        let mut decoder=candidate_decoder();candidate_prefix(&mut decoder);
+        assert!(decoder.push(&candidate_frame(2,"progress",json!({"schemaVersion":1,"stage":"building"}))).is_err());
+        let mut decoder=candidate_decoder();candidate_prefix(&mut decoder);
+        assert!(decoder.push(&candidate_frame(2,"terminal",candidate_complete())).is_err());
+        for field in ["nonce","requestSha256"]{
+            let mut decoder=candidate_decoder();let mut frame:Value=serde_json::from_slice(&candidate_frame(0,"accepted",json!({"schemaVersion":1,"context":candidate_context()}))).unwrap();
+            frame[field]=json!("e".repeat(if field=="nonce"{32}else{64}));assert!(decoder.push(&serde_json::to_vec(&frame).unwrap()).is_err());
+        }
+        let mut decoder=candidate_decoder();candidate_prefix(&mut decoder);decoder.push(&candidate_frame(2,"lease-ready",json!({}))).unwrap();
+        decoder.push(&candidate_frame(3,"history-head",json!({"sequence":511,"sha256":"1".repeat(64)}))).unwrap();
+        assert!(decoder.push(&candidate_frame(4,"inputs-pending",json!({"sequence":511,"sha256":"2".repeat(64)}))).is_err());
+    }
+    #[test]
+    fn candidate_create_source_only_failure_and_stop_before_ready_keep_real_ledger(){
+        let mut value=candidate_complete();value["outcome"]=json!("refused");value["reason"]=json!("journal-unavailable");value["result"]=Value::Null;
+        value["activity"]["stage"]=json!("inputs-bound");value["activity"]["command"]=json!({"outcome":"not-dispatched","exitCode":null});
+        set_rows(&mut value,&[],"not-checked","not-checked");value["disposition"]=json!({"work":"not-created","artifacts":"not-created"});
+        value["lifetime"]["commands"]=json!(1);
+        for reason in ["cancelled","context-changed","document-lost","shutdown","timed-out","command-failed","command-incomplete","artifact-missing"]{
+            let mut bad=value.clone();bad["outcome"]=json!("failed");bad["reason"]=json!(reason);
+            if reason=="command-incomplete"{bad["activity"]["command"]=json!({"outcome":"exited","exitCode":0});}
+            assert!(terminal(&bad,&candidate_context()).is_err(),"{reason}");
+        }
+        assert!(terminal(&value,&candidate_context()).unwrap().settled());
+        let mut decoder=candidate_decoder();candidate_prefix(&mut decoder);decoder.push(&candidate_frame(2,"terminal",value.clone())).unwrap();decoder.finish().unwrap();
+        value["lifetime"]["commands"]=json!(18);assert!(terminal(&value,&candidate_context()).is_ok());
+        value["lifetime"]["commands"]=json!(19);assert!(terminal(&value,&candidate_context()).is_err());value["lifetime"]["commands"]=json!(1);
+        value["outcome"]=json!("cancelled");value["reason"]=json!("cancelled");value["lifetime"]["stopObserved"]=json!("cancelled");
+        let mut decoder=candidate_decoder();candidate_prefix(&mut decoder);decoder.push(&candidate_frame(2,"terminal",value.clone())).unwrap();decoder.finish().unwrap();
+        value["lifetime"]["journalClosed"]=json!(false);assert!(terminal(&value,&candidate_context()).is_err());
+        value["outcome"]=json!("unknown");value["reason"]=json!("cleanup-unknown");assert!(!terminal(&value,&candidate_context()).unwrap().settled());
+    }
+
+    pub(super) fn signed_complete() -> Value {
+        let mut value = upload_complete(); value["context"] = json!(signed_context());
+        value["result"]["schemaVersion"] = json!(2);
+        value["result"]["toolchainProfile"] = json!(MAC_TOOLCHAIN_PROFILE);
+        value["result"]["toolchainSelection"] = json!({"instance":"c".repeat(32),"ownerUid":501,"catalogGeneration":1,
+            "recordSha256":"d".repeat(64),"inventorySha256":"e".repeat(64),"osProviderSha256":"f".repeat(64)});
+        value["result"]["signing"] = json!("local-upload-key");
+        value["result"]["assurances"]["toolkitSigning"] = json!("local-upload-key-verified");
+        value["result"]["limitations"][6] = json!("local-signing-not-store-enrollment");
+        value["lifetime"]["commands"] = json!(6);
+        value["lifetime"]["buildInputsClosed"] = json!(true);
+        value["lifetime"]["materialRetired"] = json!(true);
+        value
+    }
+
+    #[test]
+    fn explicit_signing_requires_closed_assignments_and_the_matching_consent_domain() {
+        let context = signed_context(); assert!(context.signed());
+        assert_eq!(context.frame_limit(), 10); assert_eq!(context.maximum_commands(), 6);
+        for (consent, signed) in [(CONSENT, false), (SIGNED_CONSENT, true)] {
+            let start = start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent})).unwrap();
+            assert_eq!(start.consent_matches(&context), signed);
+            assert_eq!(start.consent_matches(&self::context()), !signed);
+        }
+        for old in ["saved-android-build-inspect-v1", "saved-android-build-inspect-v2"] {
+            assert!(start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":old})).is_err());
+        }
+        let mut unsigned = prepare_value(); unsigned["signing"] = Value::Null;
+        assert!(prepare(&unsigned).is_err());
+        for bad in [json!({"mode":"local-upload-key","assignments":[]}),
+            json!({"mode":"local-upload-key","assignments":[{"kind":"apple-p12","recordId":"e".repeat(32),"recordRevision":1,"contextRevision":2}]}),
+            json!({"mode":"local-upload-key","assignments":[{"kind":"android-keystore","recordId":"e".repeat(32),"recordRevision":0,"contextRevision":2}]}),
+            json!({"mode":"local-upload-key","assignments":context.signing.as_ref().unwrap().assignments,"password":"PRIVATE"})] {
+            let mut value = json!(context); value["signing"] = bad;
+            assert!(Context::deserialize(&value).map_or(true, |v| !v.valid()));
+        }
+        let mut wrong = context.clone(); wrong.operation = Operation::AndroidBuildInspect; assert!(!wrong.valid());
+        wrong = context; wrong.artifact_validation = self::context().artifact_validation; assert!(!wrong.valid());
+    }
+
+    #[test]
+    fn signed_completion_requires_all_six_commands_material_closes_and_final_passes() {
+        let context = signed_context(); let good = signed_complete();
+        assert!(terminal(&good, &context).unwrap().settled());
+        for field in ["buildInputsClosed", "materialRetired"] {
+            let mut bad = good.clone(); bad["lifetime"][field] = json!(false);
+            assert!(terminal(&bad, &context).is_err());
+            bad["lifetime"].as_object_mut().unwrap().remove(field); assert!(terminal(&bad, &context).is_err());
+        }
+        for count in [0, 4, 5, 7] { let mut bad = good.clone(); bad["lifetime"]["commands"] = json!(count); assert!(terminal(&bad, &context).is_err()); }
+        let mut fail = good.clone(); fail["result"]["findings"][3]["status"] = json!("FAIL");
+        fail["result"]["summary"]["counts"]["PASS"] = json!(3); fail["result"]["summary"]["counts"]["FAIL"] = json!(1);
+        fail["result"]["assurances"]["signer"] = json!("failed"); assert!(result(&fail["result"]).is_err());
+        let mut basic = good.clone(); basic["result"]["signing"] = Value::Null; assert!(result(&basic["result"]).is_err());
+        let mut early = good; early["result"] = Value::Null; early["outcome"] = json!("failed"); early["reason"] = json!("signing-validation-failed");
+        early["activity"]["stage"] = json!("validating-signing"); early["activity"]["command"] = json!({"outcome":"unknown","exitCode":null});
+        early["lifetime"]["commands"] = json!(1); early["disposition"]["artifacts"] = json!("not-created");
+        set_rows(&mut early, &[], "not-checked", "not-checked");
+        assert!(terminal(&early, &context).is_ok()); early["outcome"] = json!("refused"); assert!(terminal(&early, &context).is_err());
+    }
+
+    #[test]
+    fn original_signed_decoder_allows_eight_progress_stages_and_only_the_selected_mac_result() {
+        for (profile, toolchain) in [
+            (Profile::MacArm64, "android-registered-macos-arm64-v1"),
+            (Profile::MacX64, "android-registered-macos-x86_64-v1"),
+        ] {
+            let context = signed_context(); let mut complete = signed_complete();
+            complete["result"]["toolchainProfile"] = json!(toolchain);
+            let selected = MacToolchainSelection::deserialize(&complete["result"]["toolchainSelection"]).unwrap();
+            let mut decoder = FrameDecoder::new_macos(&"a".repeat(32), &"b".repeat(32), &context, profile, &selected).unwrap();
+            decoder.push(&frame(0, "accepted", json!({"schemaVersion":1,"context":context}))).unwrap();
+            for (index, stage) in [Stage::InputsBound, Stage::ValidatingSigning, Stage::Building, Stage::Capturing,
+                Stage::Signing, Stage::RestoringInputs, Stage::Inspecting, Stage::DisposingWork].into_iter().enumerate() {
+                decoder.push(&frame(index as u32 + 1, "progress", json!({"schemaVersion":1,"stage":stage}))).unwrap();
+            }
+            decoder.push(&frame(9, "terminal", complete)).unwrap(); decoder.finish().unwrap();
+            assert!(decoder.push(&frame(10, "progress", json!({"schemaVersion":1,"stage":"disposing-work"}))).is_err());
+        }
+        let mut ordinary = self::decoder(); ordinary.push(&accepted()).unwrap();
+        assert!(ordinary.push(&frame(1, "progress", json!({"schemaVersion":1,"stage":"validating-signing"}))).is_err());
+    }
+    #[test]
+    fn native_signing_request_binds_bounded_canonical_bytes_separately_from_raw_saved_config() {
+        let context = signed_context(); let complete = signed_complete();
+        let selected = MacToolchainSelection::deserialize(&complete["result"]["toolchainSelection"]).unwrap();
+        let project = crate::asset_source::RegisteredRoot { path: "/inert/project".into(),
+            identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let canonical = Content { bytes: 17, sha256: "a".repeat(64) }; assert_ne!(context.saved_config, canonical);
+        for (profile, native, toolchain) in [
+            (Profile::MacArm64, "macos-arm64", "android-registered-macos-arm64-v1"),
+            (Profile::MacX64, "macos-x86_64", "android-registered-macos-x86_64-v1"),
+        ] {
+            let binding = ToolchainBinding::new_macos_data(profile, &selected.root_data(),
+                RootIdentity { device: "1".into(), inode: "2".into(), mode: 0o040555, uid: 0, gid: 0 }, &selected).unwrap();
+            let encoded = request_signed(&"a".repeat(32), &"b".repeat(32), &context, profile,
+                &project, &project.path, &binding, &canonical).unwrap();
+            let value: Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(value["native"]["profile"], json!(native));
+            assert_eq!(value["native"]["toolchain"]["profile"], json!(toolchain));
+            assert_eq!(value["native"]["signingContext"], json!(canonical));
+            assert_eq!(value["context"]["savedConfig"], json!(context.saved_config));
+            for bad in [Content { bytes: 0, sha256: "a".repeat(64) }, Content { bytes: CONFIG_LIMIT + 1, sha256: "a".repeat(64) }] {
+                assert!(request_signed(&"a".repeat(32), &"b".repeat(32), &context, profile, &project, &project.path, &binding, &bad).is_err());
+            }
+            assert!(request(&"a".repeat(32), &"b".repeat(32), &context, profile, &project, &project.path, &binding).is_err());
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod mac_toolchain_contract_tests {
+    use super::*;
+    // Independent wire literals: never derive an oracle from production mapping.
+    const CASES: [(Profile, &str, &str, Profile, &str); 2] = [
+        (Profile::MacArm64, "macos-arm64", "android-registered-macos-arm64-v1",
+            Profile::MacX64, "android-registered-macos-x86_64-v1"),
+        (Profile::MacX64, "macos-x86_64", "android-registered-macos-x86_64-v1",
+            Profile::MacArm64, "android-registered-macos-arm64-v1"),
+    ];
+    fn selected() -> MacToolchainSelection {
+        MacToolchainSelection { instance: "c".repeat(32), owner_uid: 501, catalog_generation: 1,
+            record_sha256: "d".repeat(64), inventory_sha256: "e".repeat(64), os_provider_sha256: "f".repeat(64) }
+    }
+    fn completed(toolchain: &str, selected: &MacToolchainSelection) -> Value {
+        let mut value = super::tests::complete_terminal();
+        value["result"]["schemaVersion"] = json!(2);
+        value["result"]["toolchainProfile"] = json!(toolchain);
+        value["result"]["toolchainSelection"] = json!(selected);
+        value
+    }
+    fn frame(sequence: usize, kind: &str, payload: Value) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(&json!({"protocol":PROTOCOL,"operationId":"a".repeat(32),
+            "ownerGeneration":"b".repeat(32),"sequence":sequence,"kind":kind,"payload":payload})).unwrap();
+        bytes.push(b'\n'); bytes
+    }
+    fn decoder(profile: Profile, selected: &MacToolchainSelection) -> FrameDecoder {
+        let context = super::tests::context();
+        let mut value = FrameDecoder::new_macos(&"a".repeat(32), &"b".repeat(32), &context, profile, selected).unwrap();
+        value.push(&frame(0, "accepted", json!({"schemaVersion":1,"context":context}))).unwrap();
+        value
+    }
+    pub(super) fn mac_result_uses_a_closed_extension_not_a_second_accepted_string_data() {
+        let selected = selected();
+        for (_, _, toolchain, _, _) in CASES {
+            assert!(result(&completed(toolchain, &selected)["result"]).is_ok());
+            for field in ["instance", "ownerUid", "catalogGeneration", "recordSha256", "inventorySha256", "osProviderSha256"] {
+                let mut value = completed(toolchain, &selected);
+                value["result"]["toolchainSelection"].as_object_mut().unwrap().remove(field);
+                assert!(result(&value["result"]).is_err(), "{field}");
+            }
+            let mut value = completed(toolchain, &selected); value["result"]["schemaVersion"] = json!(1);
+            assert!(result(&value["result"]).is_err());
+            value["result"]["schemaVersion"] = json!(2);
+            value["result"]["toolchainProfile"] = json!("android-registered-macos-unknown-v1");
+            assert!(result(&value["result"]).is_err());
+        }
+        let mut value = super::tests::complete_terminal();
+        value["result"]["toolchainSelection"] = json!(selected);
+        assert!(result(&value["result"]).is_err()); // Linux key/schema exactness remains unchanged.
+    }
+    pub(super) fn original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data() {
+        let selected = selected();
+        for (profile, _, toolchain, _, opposite_toolchain) in CASES {
+            let mut ok = decoder(profile, &selected);
+            ok.push(&frame(1, "terminal", completed(toolchain, &selected))).unwrap();
+            ok.finish().unwrap();
+            let mut foreign = decoder(profile, &selected);
+            assert!(foreign.push(&frame(1, "terminal", super::tests::complete_terminal())).is_err());
+            // Identical six anchors are insufficient when the target differs.
+            let opposite = completed(opposite_toolchain, &selected);
+            assert!(result(&opposite["result"]).is_ok());
+            let mut original = decoder(profile, &selected);
+            assert!(original.push(&frame(1, "terminal", opposite)).is_err());
+            assert!(original.push(&frame(1, "terminal", completed(toolchain, &selected))).is_err());
+            assert!(original.finish().is_err());
+            for (field, replacement) in [
+                ("instance", json!("1".repeat(32))), ("ownerUid", json!(502)), ("catalogGeneration", json!(2)),
+                ("recordSha256", json!("1".repeat(64))), ("inventorySha256", json!("2".repeat(64))), ("osProviderSha256", json!("3".repeat(64))),
+            ] {
+                let mut value = completed(toolchain, &selected); value["result"]["toolchainSelection"][field] = replacement;
+                assert!(result(&value["result"]).is_ok()); // Well-shaped but from another selection.
+                let mut original = decoder(profile, &selected);
+                assert!(original.push(&frame(1, "terminal", value)).is_err(), "{field}");
+                assert!(original.push(&frame(1, "terminal", completed(toolchain, &selected))).is_err()); // Failure is latched.
+            }
+            let context = super::tests::context();
+            let mut linux = FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &context).unwrap();
+            linux.push(&frame(0, "accepted", json!({"schemaVersion":1,"context":context}))).unwrap();
+            assert!(linux.push(&frame(1, "terminal", completed(toolchain, &selected))).is_err());
+        }
+    }
+    pub(super) fn native_request_binding_rejects_host_root_and_selected_identity_mismatch_data() {
+        let selected = selected();
+        let root = selected.root_data();
+        let identity = RootIdentity { device: "1".into(), inode: "2".into(), mode: 0o040555, uid: 0, gid: 0 };
+        let context = super::tests::context();
+        let project = crate::asset_source::RegisteredRoot { path: "/inert/project".into(),
+            identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        for (profile, native, toolchain, opposite_profile, _) in CASES {
+            let mac = ToolchainBinding::new_macos_data(profile, &root, identity.clone(), &selected).unwrap();
+            assert!(mac.matches_profile(profile));
+            assert!(!mac.matches_profile(opposite_profile));
+            assert!(!mac.matches_profile(Profile::LinuxX64));
+            let encoded = request(&"a".repeat(32), &"b".repeat(32), &context, profile, &project, &project.path, &mac).unwrap();
+            let value: Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(value["native"]["profile"], json!(native));
+            assert_eq!(value["native"]["toolchain"]["profile"], json!(toolchain));
+            assert!(request(&"a".repeat(32), &"b".repeat(32), &context, opposite_profile, &project, &project.path, &mac).is_err());
+            assert!(ToolchainBinding::new_macos_data(profile, Path::new("/tmp/borrowed"), identity.clone(), &selected).is_err());
+            let mut writable = identity.clone(); writable.mode = 0o040755;
+            assert!(ToolchainBinding::new_macos_data(profile, &root, writable, &selected).is_err());
+        }
+        assert!(ToolchainBinding::new_macos_data(Profile::LinuxX64, &root, identity.clone(), &selected).is_err());
+        assert!(FrameDecoder::new_macos(&"a".repeat(32), &"b".repeat(32), &context, Profile::LinuxX64, &selected).is_err());
+        let linux = ToolchainBinding::new_data(Path::new("/opt/mobile-release-kit/android/existing"), identity, &"e".repeat(64)).unwrap();
+        assert!(linux.matches_profile(Profile::LinuxX64));
+        assert!(!linux.matches_profile(Profile::MacArm64));
+        assert!(!linux.matches_profile(Profile::MacX64));
+    }
+    #[test]
+    fn mac_result_uses_a_closed_extension_not_a_second_accepted_string() { mac_result_uses_a_closed_extension_not_a_second_accepted_string_data(); }
+
+    #[test]
+    fn original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux() { original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data(); }
+
+    #[test]
+    fn native_request_binding_rejects_host_root_and_selected_identity_mismatch() { native_request_binding_rejects_host_root_and_selected_identity_mismatch_data(); }
+
+}
+
+// Explicit harness=false DATA bridge; ordinary libtest wrappers use these same
+// inert bodies. No native custody, task, Prepare/Start or qualification is granted.
+#[cfg(test)]
+pub(crate) fn assert_macos_toolchain_data_contract() {
+    mac_toolchain_contract_tests::mac_result_uses_a_closed_extension_not_a_second_accepted_string_data();
+    mac_toolchain_contract_tests::original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data();
+    mac_toolchain_contract_tests::native_request_binding_rejects_host_root_and_selected_identity_mismatch_data();
+}
+
+#[path = "android_build_agent_signed_projection.rs"]
+mod agent_signed;
+#[path = "android_build_agent_candidate_projection.rs"]
+mod agent_candidate;

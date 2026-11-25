@@ -1,0 +1,345 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/components/GitBranches.tsx b/desktop/src/components/GitBranches.tsx
+--- a/desktop/src/components/GitBranches.tsx
++++ b/desktop/src/components/GitBranches.tsx
+@@ -2,8 +2,9 @@
+ import type { GitReadController } from '../gitReadController.ts';
+ import type { GitLocalController } from '../gitLocalController.ts';
+ import type { GitRepositoryController } from '../gitRepositoryController.ts';
+-import { gitLocalIssueHelp } from '../gitBranchesProtocol.ts';
++import { gitLocalIssueHelp } from '../gitLocalProtocol.ts';
+ import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
++import { GitBranchSwitch } from './GitBranchSwitch.tsx';
+
+ // Pure rendering subscriber. The same retained GitRead/GitLocal controllers
+ // own every original Promise; mounting or editing a draft sends no command.
+@@ -14,12 +15,12 @@
+   const writes = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+   const files = useSyncExternalStore(repository.subscribe, repository.getSnapshot, repository.getSnapshot);
+   const name = useId(), review = writes.review;
+-  const prepared = review && !('diff' in review.prepared) ? review.prepared : null;
++  const prepared = review?.prepared.review.action === 'branch-create' ? review.prepared.review : null;
+   const branches = reads.branchesProject === files.projectId ? reads.branches : null;
+   const fresh = !!branches && reads.branchesCurrent && !reads.stale && !files.stale && branches.revision === files.observation?.revision;
+   const readReason = reader.readReason(files.projectId), prepareReason = controller.prepareBranchReason(), reviewReason = controller.reviewReason();
+-  return <ProgressiveDisclosure title="Local branches" needsAttention={!!prepared}>
+-    <p>Create a named starting point at your current commit without switching branches. Your current branch and files stay unchanged. Nothing is pushed to GitHub.</p>
++  return <ProgressiveDisclosure title="Local branches" needsAttention={!!prepared || review?.prepared.review.action === 'branch-switch'}>
++    <p>Read branches on this computer, then review a clean switch or create a new starting point. Nothing is pushed to GitHub.</p>
+     <button type="button" className="button secondary" disabled={readReason !== null || !files.observation || files.stale}
+       onClick={() => { if (files.observation) void reader.readBranches(files.projectId, files.observation.revision); }}>Read local branches</button>
+     {readReason && <p className="save-note">{gitLocalIssueHelp(readReason)}</p>}
+@@ -29,8 +30,10 @@
+       <p>{branches.branch ? <>Current branch: <strong><bdi>{branches.branch.slice('refs/heads/'.length)}</bdi></strong>.</> : 'The checkout is detached; creating a branch will not attach or switch it.'}</p>
+       {branches.branches.length ? <ul>{branches.branches.map((b) => <li key={b.ref}><bdi>{b.ref.slice('refs/heads/'.length)}</bdi>
+         {b.ref === branches.branch ? ' · current' : ''} <code>{b.oid.slice(0, 12)}</code></li>)}</ul> : <p>No local branch commits were observed.</p>}
+-      <p className="save-note">Local references only; no fetch or online account check. Switch and rename are not included in this action.</p>
++      <p className="save-note">Local references only; no fetch or online account check. Renaming is not included.</p>
+     </>}
++    <GitBranchSwitch reader={reader} controller={controller} repository={repository} originalProjectName={originalProjectName} />
++    <h4>Create a new local branch without switching</h4>
+     <form onSubmit={(event) => { event.preventDefault(); void controller.prepareBranch(); }}>
+       <label htmlFor={name}>New local branch name</label>
+       <input id={name} maxLength={255} autoComplete="off" spellCheck={false} value={files.branchDraft.name}
+@@ -40,10 +43,10 @@
+       {prepareReason && !prepared && <p className="save-note">{gitLocalIssueHelp(prepareReason)}</p>}
+     </form>
+     {review && prepared && <section className="version-review" aria-label="Review new local branch">
+-      <h3>Create <bdi>{prepared.review.name}</bdi> locally</h3>
++      <h3>Create <bdi>{prepared.name}</bdi> locally</h3>
+       <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+-      <p>Starts at commit <code>{prepared.review.head}</code>.</p>
+-      <p>{prepared.review.branch ? <>The current branch stays <strong><bdi>{prepared.review.branch.slice('refs/heads/'.length)}</bdi></strong>.</> : 'The checkout stays detached.'}
++      <p>Starts at commit <code>{prepared.head}</code>.</p>
++      <p>{prepared.branch ? <>The current branch stays <strong><bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></strong>.</> : 'The checkout stays detached.'}
+         {' '}No files are staged, committed, checked out or changed by this branch action.</p>
+       {reviewReason && <p className="review-caution" role="status">{gitLocalIssueHelp(reviewReason)}</p>}
+       <label className="save-confirm-check"><input type="checkbox" checked={review.approved && reviewReason === null} disabled={reviewReason !== null}
+diff --git a/desktop/src/components/GitLocalChanges.tsx b/desktop/src/components/GitLocalChanges.tsx
+--- a/desktop/src/components/GitLocalChanges.tsx
++++ b/desktop/src/components/GitLocalChanges.tsx
+@@ -3,9 +3,10 @@
+ import type { GitRepositoryController } from '../gitRepositoryController.ts';
+ import { gitStagedPaths } from '../gitRepositoryProtocol.ts';
+ import type { GitDiff } from '../gitRepositoryProtocol.ts';
+-import { gitLocalIssueHelp } from '../gitBranchesProtocol.ts';
++import { gitLocalIssueHelp } from '../gitLocalProtocol.ts';
+ import type { GitLocalMutationResult } from '../gitLocalProtocol.ts';
+ import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
++import { GitSwitchRecovery } from './GitBranchSwitch.tsx';
+
+ function Difference({ diff }: { diff: GitDiff }) {
+   return <div className="version-raw"><h4>Reviewed differences</h4>
+@@ -27,13 +28,14 @@
+   const result = op?.phase === 'apply' && op.result ? op.result as GitLocalMutationResult : null;
+   const title = state.uncertain ? 'Git action needs attention' : state.recovery ? 'Git recovery is needed' : state.pending ? 'Waiting for the original Git request' :
+     state.review ? 'Review before changing Git' : active ? 'Git action is still running' : result?.state === 'succeeded' ?
+-      result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
++      result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
+         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
+   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
+     <div><h3>{title}</h3>
+       {state.projectId && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
+       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files. Do not repeat the action, reconnect to dismiss it, or remove Git lock files.</p>}
+       {state.recovery && <p className="review-caution" role="alert">Preserve the original task and project files. This screen cannot prove recovery or safely repeat the change.</p>}
++      {result?.action === 'branch-switch' && <GitSwitchRecovery result={result} />}
+       {state.issue && !state.uncertain && !state.recovery && <p className="review-caution" role="status">{gitLocalIssueHelp(state.issue)}</p>}
+       {result?.state === 'succeeded' && !active && <p>Your drafts are kept. Refresh changes explicitly to read the files again; nothing was pushed to GitHub.</p>}
+       {!active && (!state.status || !state.status.available) && <p className="save-note">{state.status ?
+diff --git a/desktop/src/gitLocalController.ts b/desktop/src/gitLocalController.ts
+--- a/desktop/src/gitLocalController.ts
++++ b/desktop/src/gitLocalController.ts
+@@ -9,13 +9,14 @@
+ import type { GitReadController } from './gitReadController.ts';
+ import { gitBranchName } from './gitBranchesProtocol.ts';
+ import type { GitBranchAction, GitBranches } from './gitBranchesProtocol.ts';
++import type { GitSwitchAction } from './gitSwitchProtocol.ts';
+
+ export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
+   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
+   readonly reader?: GitReadController | null }
+ interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation;
+   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
+-  readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string } }
++  readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string } }
+ interface HeldReview { readonly api: GitLocalApi; readonly binding: GitLocalBinding; readonly prepared: GitLocalPrepared; readonly capture: Capture | null;
+   stale: boolean; consumed: boolean; discardSent: boolean; discardConfirmed: boolean; uncertain: boolean }
+ interface Attempt { readonly binding: GitLocalBinding; readonly api: GitLocalApi; readonly request: GitLocalStartRequest;
+@@ -89,7 +90,8 @@
+     const now = this.current(), r = c.repository.getSnapshot();
+     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
+       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
+-      (c.action.kind === 'branch-create' ? r.branchDraft === c.branchDraft && this.branchList(now) === c.branches : r.selected === c.selected && r.draft === c.draft);
++      (c.action.kind === 'branch-switch' ? r.switchDraft === c.switchDraft && this.branchList(now) === c.branches :
++        c.action.kind === 'branch-create' ? r.branchDraft === c.branchDraft && this.branchList(now) === c.branches : r.selected === c.selected && r.draft === c.draft);
+   }
+   private branchList(binding: GitLocalBinding): GitBranches | null {
+     const read = binding.reader?.getSnapshot(), r = binding.repository?.getSnapshot();
+@@ -135,7 +137,7 @@
+     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action: input });
+     if (!raw) return this.report('invalid-input');
+     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation!, selected: r.selected, draft: r.draft, action,
+-      paths: Object.freeze([...(kind === 'commit' ? gitStagedPaths(r.observation!) : r.selected)].sort(gitReadPathOrder)), branches: null, branchDraft: r.branchDraft });
++      paths: Object.freeze([...(kind === 'commit' ? gitStagedPaths(r.observation!) : r.selected)].sort(gitReadPathOrder)), branches: null, branchDraft: r.branchDraft, switchDraft: r.switchDraft });
+     const attempt = this.newAttempt(binding, request, action, capture, null);
+     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+@@ -160,16 +162,46 @@
+     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
+     if (!raw) return this.report('invalid-input');
+     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
+-      branchDraft: r.branchDraft, action, branches, paths: Object.freeze([]) });
++      branchDraft: r.branchDraft, switchDraft: r.switchDraft, action, branches, paths: Object.freeze([]) });
+     const attempt = this.newAttempt(binding, request, action, capture, null);
+     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+   }
++  prepareSwitchReason(): GitLocalIssue | null {
++    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
++    const reason = this.currentReason(); if (reason) return reason;
++    const binding = this.current(), r = binding.repository!.getSnapshot(), branches = this.branchList(binding);
++    if (!branches) return 'branch-list-required';
++    if (!branches.head || !branches.branch) return 'switch-target';
++    if (r.observation!.changes.length) return 'switch-dirty';
++    if (!gitBranchName(r.switchDraft.name)) return 'switch-name-required';
++    const target = `refs/heads/${r.switchDraft.name}`;
++    return target === branches.branch || !branches.branches.some((b) => b.ref === target) ? 'switch-target' : null;
++  }
++  async prepareSwitch(): Promise<boolean> {
++    const reason = this.prepareSwitchReason(); if (reason) return this.report(reason);
++    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot(), branches = this.branchList(binding);
++    if (!branches || !r.observation) return this.report('branch-list-required');
++    const action: GitSwitchAction = Object.freeze({ kind: 'branch-switch', expectedRevision: r.observation.revision,
++      expectedReferenceRevision: branches.referenceRevision, name: r.switchDraft.name });
++    const request: GitLocalStartRequest = Object.freeze({ phase: 'prepare', projectId: binding.projectId!,
++      expectedDocumentRevision: this.state.status!.documentRevision, action, reviewId: null });
++    const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
++    if (!raw) return this.report('invalid-input');
++    const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
++      branchDraft: r.branchDraft, switchDraft: r.switchDraft, action, branches, paths: Object.freeze([]) });
++    const attempt = this.newAttempt(binding, request, action, capture, null);
++    this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
++    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
++  }
+   private preparedMatchesCapture(prepared: GitLocalPrepared, capture: Capture): boolean {
+     const r = prepared.review;
+     if (r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
++    if (capture.action.kind === 'branch-switch') return r.action === 'branch-switch' && r.name === capture.action.name && !!capture.branches &&
++      r.expectedReferenceRevision === capture.branches.referenceRevision &&
++      capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
+     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
+-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'branch-create' && samePaths(r.paths, capture.paths);
++      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'branch-create' && r.action !== 'branch-switch' && samePaths(r.paths, capture.paths);
+   }
+   reviewReason(): GitIssue | null {
+     const h = this.held;
+diff --git a/desktop/src/gitLocalProtocol.ts b/desktop/src/gitLocalProtocol.ts
+--- a/desktop/src/gitLocalProtocol.ts
++++ b/desktop/src/gitLocalProtocol.ts
+@@ -3,8 +3,10 @@
+ import { connectionBounded, connectionKeys } from './githubConnectionProtocol.ts';
+ import { GIT_REASONS, parseGitDiff, parseGitObservation } from './gitRepositoryProtocol.ts';
+ import { gitReadPathOrder } from './gitReadProtocol.ts';
+-import { branchIntentMatchesReview, isGitBranchAction, isGitBranchIntent, isGitBranchMutation, isGitBranchReason, isGitBranchReview } from './gitBranchesProtocol.ts';
++import { branchIntentMatchesReview, gitLocalIssueHelp as previousIssueHelp, isGitBranchAction, isGitBranchIntent, isGitBranchMutation, isGitBranchReason, isGitBranchReview } from './gitBranchesProtocol.ts';
+ import type { GitBranchAction, GitBranchIntent, GitBranchIssue, GitBranchMutationResult, GitBranchReason, GitBranchReview } from './gitBranchesProtocol.ts';
++import { gitSwitchIssueHelp, isGitSwitchAction, isGitSwitchIntent, isGitSwitchMutation, isGitSwitchReason, isGitSwitchReview, switchIntentMatchesReview } from './gitSwitchProtocol.ts';
++import type { GitSwitchAction, GitSwitchIntent, GitSwitchIssue, GitSwitchMutationResult, GitSwitchReason, GitSwitchReview } from './gitSwitchProtocol.ts';
+ import type { GitAction, GitDiff, GitIntent, GitMutationResult, GitReason, GitIssue } from './gitRepositoryProtocol.ts';
+ import type { GitReadContext } from './gitReadProtocol.ts';
+
+@@ -25,20 +27,20 @@
+     discard: (raw: Uint8Array) => call('discard', raw), status: (raw: Uint8Array) => call('status', raw), cancel: (raw: Uint8Array) => call('cancel', raw) });
+ }
+ export interface GitLocalFileAction { readonly kind: GitAction; readonly expectedRevision: string; readonly paths: readonly string[] }
+-export type GitLocalAction = GitLocalFileAction | GitBranchAction;
++export type GitLocalAction = GitLocalFileAction | GitBranchAction | GitSwitchAction;
+ export interface GitLocalFileInput extends GitLocalFileAction { readonly message: string | null; readonly identity: { readonly name: string; readonly email: string } | null }
+-export type GitLocalInput = GitLocalFileInput | GitBranchAction;
++export type GitLocalInput = GitLocalFileInput | GitBranchAction | GitSwitchAction;
+ export interface GitLocalFileReview { readonly action: GitAction; readonly expectedRevision: string; readonly paths: readonly string[];
+   readonly wholeIndex: boolean; readonly head: string | null; readonly branch: string | null; readonly expectedIndex: string; readonly reviewDigest: string }
+-export type GitLocalReview = GitLocalFileReview | GitBranchReview;
+-export type GitLocalIntent = GitIntent | GitBranchIntent;
+-export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult;
+-export type GitLocalReason = GitReason | GitBranchReason;
+-export type GitLocalIssue = GitIssue | GitBranchIssue;
+-export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview };
++export type GitLocalReview = GitLocalFileReview | GitBranchReview | GitSwitchReview;
++export type GitLocalIntent = GitIntent | GitBranchIntent | GitSwitchIntent;
++export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult | GitSwitchMutationResult;
++export type GitLocalReason = GitReason | GitBranchReason | GitSwitchReason;
++export type GitLocalIssue = GitIssue | GitBranchIssue | GitSwitchIssue;
++export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview } | { readonly review: GitSwitchReview };
+ export type GitLocalPrepared = { readonly reviewId: string; readonly context: GitReadContext } &
+   ({ readonly action: GitLocalFileAction; readonly review: GitLocalFileReview; readonly diff: GitDiff } |
+-   { readonly action: GitBranchAction; readonly review: GitBranchReview });
++   { readonly action: GitBranchAction; readonly review: GitBranchReview } | { readonly action: GitSwitchAction; readonly review: GitSwitchReview });
+ export interface GitLocalOperation { readonly operationId: string; readonly context: GitReadContext; readonly phase: 'prepare' | 'apply';
+   readonly action: GitLocalAction; readonly stage: 'starting' | 'running' | 'stopping' | 'settled' | 'cleanup-unknown';
+   readonly outcome: 'ok' | 'refused' | 'cancelled' | 'timed-out' | 'cleanup-unknown' | null; readonly reason: GitLocalReason | null;
+@@ -60,7 +62,7 @@
+ const kind = (v: unknown): v is GitAction => v === 'stage' || v === 'unstage' || v === 'commit';
+ const nullable = (v: unknown, check: (value: unknown) => boolean) => v === null || check(v);
+ const reason = (v: unknown, expected: GitLocalAction): v is GitLocalReason => typeof v === 'string' &&
+-  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'branch-create' && isGitBranchReason(v));
++  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'branch-create' && isGitBranchReason(v) || expected.kind === 'branch-switch' && isGitSwitchReason(v));
+ function text(v: unknown, max: number, multiline = false): v is string {
+   return typeof v === 'string' && v.length <= max && utf8.encode(v).length <= max && !/\p{Cs}/u.test(v) &&
+     !(multiline ? /[\x00-\x08\x0b-\x1f\x7f]/ : /[\x00-\x1f\x7f]/).test(v);
+@@ -79,9 +81,9 @@
+   return connectionKeys(v, ['kind', 'expectedRevision', 'paths']) && kind(v.kind) && digest(v.expectedRevision) &&
+     (v.kind === 'commit' ? Array.isArray(v.paths) && v.paths.length === 0 : paths(v.paths));
+ }
+-function action(v: unknown): v is GitLocalAction { return isGitBranchAction(v) || fileAction(v); }
++function action(v: unknown): v is GitLocalAction { return isGitBranchAction(v) || isGitSwitchAction(v) || fileAction(v); }
+ function input(v: unknown): v is GitLocalInput {
+-  if (isGitBranchAction(v)) return true;
++  if (isGitBranchAction(v) || isGitSwitchAction(v)) return true;
+   if (!connectionKeys(v, ['kind', 'expectedRevision', 'paths', 'message', 'identity']) ||
+       !fileAction({ kind: v.kind, expectedRevision: v.expectedRevision, paths: v.paths })) return false;
+   if (v.kind !== 'commit') return v.message === null && v.identity === null;
+@@ -97,12 +99,14 @@
+     (expected.kind !== 'commit' || v.branch !== null) && digest(v.expectedIndex) && digest(v.reviewDigest);
+ }
+ function reviewed(v: unknown, expected: GitLocalAction): boolean {
++  if (expected.kind === 'branch-switch') return connectionKeys(v, ['review']) && isGitSwitchReview(v.review, expected);
+   if (expected.kind === 'branch-create') return connectionKeys(v, ['review']) && isGitBranchReview(v.review, expected);
+   if (!connectionKeys(v, ['review', 'diff']) || !fileReview(v.review, expected)) return false;
+   const diff = parseGitDiff(v.diff);
+   return !!diff && diff.revision === expected.expectedRevision && diff.staged === (expected.kind !== 'stage') && samePaths(diff.paths, v.review.paths);
+ }
+ function intent(v: unknown, expected: GitLocalAction): v is GitLocalIntent {
++  if (expected.kind === 'branch-switch') return isGitSwitchIntent(v, expected);
+   if (expected.kind === 'branch-create') return isGitBranchIntent(v, expected);
+   if (!connectionKeys(v, ['action', 'expectedRevision', 'expectedRef', 'expectedHead', 'expectedIndex', 'candidateIndex', 'candidateCommit']) ||
+       v.action !== expected.kind || v.expectedRevision !== expected.expectedRevision || !nullable(v.expectedRef, branch) || !nullable(v.expectedHead, oid) ||
+@@ -111,6 +115,7 @@
+     (v.expectedHead === null || (v.expectedHead as string).length === v.candidateCommit.length) : digest(v.candidateIndex) && v.candidateCommit === null;
+ }
+ function mutation(v: unknown, expected: GitLocalAction, operationId: string): boolean {
++  if (expected.kind === 'branch-switch') return isGitSwitchMutation(v, expected, operationId);
+   if (expected.kind === 'branch-create') return isGitBranchMutation(v, expected, operationId);
+   if (!connectionKeys(v, ['operationId', 'action', 'state', 'settlement', 'reason', 'observation', 'intent']) || v.operationId !== operationId ||
+       v.action !== expected.kind || v.settlement !== 'settled' || !nullable(v.intent, (i) => intent(i, expected))) return false;
+@@ -132,16 +137,18 @@
+ }
+ function prepared(v: unknown): boolean {
+   if (connectionKeys(v, ['reviewId', 'context', 'action', 'review'])) return id(v.reviewId) && context(v.context) &&
+-    isGitBranchAction(v.action) && reviewed({ review: v.review }, v.action);
++    (isGitBranchAction(v.action) || isGitSwitchAction(v.action)) && reviewed({ review: v.review }, v.action);
+   return connectionKeys(v, ['reviewId', 'context', 'action', 'review', 'diff']) && id(v.reviewId) && context(v.context) && fileAction(v.action) &&
+     reviewed({ review: v.review, diff: v.diff }, v.action);
+ }
+ export function gitLocalPreparedResult(v: GitLocalPrepared): GitLocalPrepareResult {
+-  return 'diff' in v ? { review: v.review, diff: v.diff } : { review: v.review };
++  return 'diff' in v ? { review: v.review, diff: v.diff } :
++    v.review.action === 'branch-switch' ? { review: v.review } : { review: v.review };
+ }
+ export function gitLocalIntentMatchesReview(v: GitLocalIntent, r: GitLocalReview): boolean {
++  if (v.action === 'branch-switch') return r.action === 'branch-switch' && switchIntentMatchesReview(v, r);
+   if (v.action === 'branch-create') return r.action === 'branch-create' && branchIntentMatchesReview(v, r);
+-  return r.action !== 'branch-create' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
++  return r.action !== 'branch-create' && r.action !== 'branch-switch' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
+     v.expectedIndex === r.expectedIndex && v.expectedHead === r.head && v.expectedRef === r.branch;
+ }
+ function immutable<T>(v: unknown): T {
+@@ -182,9 +189,14 @@
+ }
+ export function samePaths(a: readonly string[], b: readonly string[]): boolean { return a.length === b.length && a.every((p, i) => p === b[i]); }
+ export function sameGitLocalAction(a: GitLocalAction, b: GitLocalAction): boolean {
++  if (a.kind === 'branch-switch') return b.kind === 'branch-switch' && a.expectedRevision === b.expectedRevision &&
++    a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+   if (a.kind === 'branch-create') return b.kind === 'branch-create' && a.expectedRevision === b.expectedRevision &&
+     a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+-  return b.kind !== 'branch-create' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
++  return b.kind !== 'branch-create' && b.kind !== 'branch-switch' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
++}
++export function gitLocalIssueHelp(issue: GitLocalIssue): string {
++  return gitSwitchIssueHelp(issue) ?? previousIssueHelp(issue as GitIssue | GitBranchIssue);
+ }
+ // Only finite decoded immutable DATA is passed here, never caller getters.
+ export function sameGitLocalData(a: unknown, b: unknown): boolean {
+diff --git a/desktop/src/gitRepositoryController.ts b/desktop/src/gitRepositoryController.ts
+--- a/desktop/src/gitRepositoryController.ts
++++ b/desktop/src/gitRepositoryController.ts
+@@ -46,6 +46,7 @@
+ export interface GitRepositoryView {
+   readonly projectId: string; readonly active: boolean; readonly observation: GitObservation | null;
+   readonly stale: boolean; readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly branchDraft: { readonly name: string };
++  readonly switchDraft: { readonly name: string };
+   readonly diff: GitDiff | null; readonly review: GitReview | null; readonly attempt: GitAttempt | null;
+   readonly busy: 'observe' | 'diff' | 'review' | 'discard' | 'apply' | null; readonly checkingStatus: boolean;
+   readonly issue: GitIssue | null; readonly blocked: 'unknown' | 'response-invalid' | 'recovery-required' | null;
+@@ -76,7 +77,7 @@
+   constructor(projectId: string, port: GitRepositoryPort | null) {
+     this.port = port?.projectId === projectId ? port : null;
+     this.state = freeze({ projectId, active: true, observation: null, stale: true, selected: freeze([]),
+-      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), diff: null, review: null, attempt: null,
++      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), switchDraft: freeze({ name: '' }), diff: null, review: null, attempt: null,
+       busy: null, checkingStatus: false, issue: port && !this.port ? 'authorization' : null, blocked: null });
+   }
+   getSnapshot = (): GitRepositoryView => this.state;
+@@ -109,6 +110,11 @@
+     if (!gitBranchDraftFits(value)) return this.report('limit');
+     if (this.state.branchDraft.name !== value) this.patch({ branchDraft: freeze({ name: value }) });
+     return true; // Original project-local draft; changed-and-restored is a new capture.
++  }
++  selectSwitchBranch(value: string): boolean {
++    if (!gitBranchDraftFits(value)) return this.report('limit');
++    if (this.state.switchDraft.name !== value) this.patch({ switchDraft: freeze({ name: value }) });
++    return true; // Selection only, never a checkout or an implicit new review.
+   }
+   select(path: string, selected: boolean): boolean {
+     if (!this.state.observation?.changes.some((row) => row.path === path)) return this.report('selection-changed');

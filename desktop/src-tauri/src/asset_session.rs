@@ -1,0 +1,10398 @@
+//! One real document gate, one retained native operation, session-only records.
+//! The asset capability intentionally remains false. Project selection has a
+//! separate fixed installed profile; it never grants a session. Pure tests do
+//! not qualify GTK, source custody, runtime IO, allocation bounds or assignment.
+use std::{future::Future, pin::Pin, sync::{Arc, Mutex, MutexGuard, Weak, atomic::{AtomicBool, Ordering}}, task::{Context as TaskContext, Poll, Waker}, time::{Duration, Instant}};
+use serde::{Serialize, Serializer};
+use serde_json::{Map, Value};
+use tokio::{sync::{Mutex as AsyncMutex, Notify, oneshot, watch}, task::JoinHandle};
+use crate::{asset_commands::{self as commands, AssetError, CommandError, Fields, Kind, Platform, Purpose, Reason, Stage}, asset_source::{self, OriginWitness, SourceBook},
+    bridge::{DesktopBridge, Project, ProjectRoster}, credential_assessment::{AssessmentRequest, AssessmentResult, assess_supplied}, credential_format::{self, FileObservation},
+    document_lifetime::{DocumentAction, DocumentLifetime}, error::BridgeError,
+    candidate_evidence_protocol::{self as evidence_wire, Problem as EvidenceProblem},
+    lifecycle_evidence_protocol as lifecycle_wire,
+    github_connection_protocol::{self as github_wire, Reason as GitHubReason},
+    github_connection_session::{self as github_session, ConnectionState}};
+
+#[path = "asset_session_project_identity.rs"]
+mod project_identity;
+#[path = "asset_session_saved_observation.rs"]
+mod saved_observation;
+use saved_observation::{SavedObservationLane, SavedInputBinding, AppleProvisioningSavedInput};
+#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_apple_provisioning.rs")]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_apple_windows_closed.rs")]
+pub(crate) mod apple_provisioning;
+pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path="asset_session_apple_profile.rs"]
+mod apple_profile;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "asset_session_apple_key.rs"]
+mod apple_key;
+pub(crate) use saved_observation::{SavedObservationCompletion, ToolDelegationSavedWitness,ValidatedSavedInput, UploadKeySavedInput};
+#[path = "asset_session_version_allocation.rs"]
+mod version_allocation;
+pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAllocationSourceCompletion};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_version_reserve.rs"]
+mod version_reserve;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use version_reserve::ReservedVersionEditGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use version_reserve::agent::review::{start_request as decode_agent_version_reserve_review_start,status_request as decode_agent_version_reserve_review_status};
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use version_reserve::agent::{ReserveRelay,decode_allow as decode_agent_version_reserve_allow,decode_empty as decode_agent_version_reserve_empty};
+#[path = "asset_session_version_enrollment.rs"]
+mod version_enrollment;
+pub(crate) use version_enrollment::VersionEnrollmentGoGate;
+pub(crate) use version_enrollment::agent::Capture as CounterEnrollmentCapture;
+#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_application_service.rs")]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_application_service_windows_data.rs")]
+pub(crate) mod application_service;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_repository_summary.rs"]
+mod repository_summary;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_agent_identity.rs"]
+pub(crate) mod agent_identity;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_agent_local_checks.rs"]
+pub(crate) mod agent_local_checks;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_upload_key.rs"]
+pub(crate) mod agent_upload_key;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_upload_key::{UploadKeyRelay,UploadKeyAgentRetired};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_agent_android_build.rs"]
+pub(crate) mod agent_android_build;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path = "asset_session_agent_ios_archive.rs"]
+pub(crate) mod agent_ios_archive;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_store.rs"]
+pub(crate) mod agent_store;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_local_history.rs"]
+pub(crate) mod agent_local_history;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_tool_setup.rs"]
+pub(crate) mod agent_tool_setup;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_git_document.rs"]
+pub(crate) mod agent_git_index;
+#[path = "asset_session_android_registration.rs"]
+mod android_registration;
+#[path = "asset_session_macos_maintenance.rs"]
+mod macos_maintenance;
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+#[path = "asset_session_macos_removal.rs"]
+pub(crate) mod macos_removal;
+use crate::saved_command_owner::{AndroidRegistrationPublisher as RegistrationPublisher,
+    AndroidRegistrationPublisherKind as RegistrationPublisherKind};
+fn finish_registration_publisher(publisher: RegistrationPublisher) {
+    if publisher.accepted() { publisher.finish(); } else { publisher.reject(); }
+}
+
+const MAIN: &str = "main";
+const WORK: Duration = Duration::from_secs(10);
+const CLEANUP: Duration = Duration::from_secs(2);
+const REVIEW: Duration = Duration::from_secs(300);
+#[path = "asset_session_prepared_reply.rs"]
+mod prepared_reply;
+const RECORD_LIMIT: usize = 32;
+const SESSION_BYTES: usize = 64 * 1024 * 1024;
+// Conservative per-record backing charge: bounded parser projection, native
+// origin/path/ancestry and record/field/control cells. This is inside, not in
+// addition to, the unchanged session quota. Shared Arc leases charge once.
+const RECORD_METADATA_BYTES: usize = 1024 * 1024;
+// Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
+const NATIVE_QUALIFIED: bool = false;
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "asset_session_vault.rs"]
+mod vault;
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+#[path="asset_session_vault_windows_closed.rs"]
+mod vault;
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+pub(crate) use vault::{AppleDistributionKeyDestination,AppleDistributionKeyLoan,AppleP12Destination,AppleProfileDestination};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::vault_keyring_linux as keyring;
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+use crate::vault_keyring_macos as keyring;
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[path = "asset_session_keyring_macos.rs"]
+mod keyring_macos;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) use vault::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleKeyInventoryPoint, AppleP12Destination, AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
+
+// A borrowed original session record is not a serialized credential or a new
+// credential owner. Only this document module can construct the signed loan.
+#[path = "asset_session_ios_signing.rs"]
+mod ios_signing;
+pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL_PREFIX, MATERIAL_SUFFIX as IOS_MATERIAL_SUFFIX};
+#[path = "asset_session_local_history.rs"]
+mod local_history;
+pub(crate) use local_history::LocalHistoryConsent;
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(crate) use local_history::LocalHistoryKeyGrant;
+#[path = "asset_session_store_preflight.rs"]
+mod store_preflight;
+#[path="asset_session_store_prepare.rs"]
+mod store_prepare;
+#[path="asset_session_store_reconcile.rs"]
+mod store_reconcile;
+#[path="asset_session_store_execute.rs"]
+mod store_execute;
+pub(crate) use store_execute::ExecuteMemoryAdmission;
+#[path = "asset_session_tool_memory.rs"]
+mod tool_memory;
+pub(crate) use tool_memory::ToolAcquisitionMemoryAdmission;
+#[path = "asset_session_tool_acquisition.rs"]
+mod tool_acquisition;
+pub(crate) use tool_acquisition::ToolAcquisitionDocumentInput;
+#[path = "asset_session_store_material.rs"]
+mod store_material;
+pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, P12Material, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
+#[path = "asset_session_github_secret.rs"]
+mod github_secret;
+pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+#[path = "asset_session_github_remote_delegation.rs"]
+mod github_remote_delegation;
+pub(crate) use github_remote_delegation::RemoteSetupVariablePins;
+#[path = "asset_session_github_variable.rs"]
+mod github_variable;
+#[path = "asset_session_gh_auth.rs"]
+mod gh_auth;
+#[path = "asset_session_git_read.rs"]
+mod git_read;
+pub(crate) use git_read::GitReadGate;
+#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_git_local.rs")]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_git_local_unavailable.rs")]
+mod git_local;
+pub(crate) use git_local::GitLocalGate;
+pub(crate) use gh_auth::{GitHubDeviceGoGate, GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
+#[path = "asset_session_github_publication.rs"]
+mod github_publication;
+pub(crate) use github_publication::GitHubPublicationGoGate;
+#[path="asset_session_version_counter_setup.rs"]
+mod version_counter_setup;
+pub(crate) use version_counter_setup::CounterStateProof;
+#[path = "asset_session_repository_create.rs"]
+mod repository_create;
+pub(crate) use repository_create::RepositoryCreateGoGate;
+#[path = "asset_session_github_browser.rs"]
+mod github_browser;
+#[path = "asset_session_github_activity.rs"]
+mod activity;
+pub(crate) use activity::GitHubActivityGoGate;
+#[path = "asset_session_github_pull_request.rs"]
+mod pull_request;
+pub(crate) use pull_request::GitHubPullRequestGoGate;
+#[path = "asset_session_github_actions_retry.rs"]
+mod actions_retry;
+pub(crate) use actions_retry::GitHubActionsRetryGoGate;
+#[path="asset_session_github_play_cleanup.rs"]
+mod play_cleanup;
+pub(crate) use play_cleanup::GitHubPlayCleanupGoGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_github_publication_native.rs"]
+mod service_github_publication;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_github_action_native.rs"]
+pub(crate) mod agent_github_action;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_play_cleanup_native.rs"]
+mod agent_play_cleanup;
+pub(crate) use github_variable::GitHubVariableMaterial;
+
+#[path = "asset_session_android_signing.rs"]
+mod android_signing;
+pub(crate) use android_signing::{AndroidSigningMaterial, MATERIAL_PREFIX as ANDROID_MATERIAL_PREFIX, MATERIAL_SUFFIX as ANDROID_MATERIAL_SUFFIX};
+
+// Public listing images share the original document/dialog/source owner but
+// never become credential records or private-vault material.
+#[path = "asset_session_images.rs"]
+mod images;
+#[path = "asset_session_installation.rs"]
+mod installation;
+#[path = "asset_session_installation_memory.rs"]
+mod installation_memory;
+pub(crate) use installation_memory::{AndroidRegistrationCensus,AndroidServiceSetupCensus};
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+pub(crate) use installation_memory::MacosMaintenanceCensus;
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+pub(crate) use installation_memory::catalogue_census_data;
+
+// Explicitly ignored component fixture only: no installed window, persistent
+// provider admission or renderer command is enabled by compiling this module.
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "asset_session_gnome_transport_fixture.rs"]
+mod gnome_transport_fixture;
+
+fn installed_evidence_profile(evidence_selection: bool, selected_method: bool) -> bool {
+    // An advertised development method or broad asset fixture is not authority
+    // for this separate installed, documents-only picker.
+    evidence_selection && selected_method
+}
+
+fn evidence_selection_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    idle(state).map_err(|_| evidence_wire::refused(EvidenceProblem::Busy))?;
+    if state.evidence.revoked { return Err(evidence_wire::refused(EvidenceProblem::StaleSelection)); }
+    Ok(())
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::shell::qualification::{EventKind as FixtureEvent, FixtureAdmission, Qualification};
+macro_rules! fixture_event {
+    ($owner:expr, $kind:ident, $detail:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        $owner.fixture_event(FixtureEvent::$kind, $detail);
+    };
+}
+
+// Private transition labels, not public errors or new lifecycle authority.
+// Unrelated/unsupported transitions deliberately keep NotRecorded provenance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnknownOrigin {
+    NotRecorded, OperationCleanup(Reason), Registry, CoordinatorLock, CoordinatorJoin,
+    SupervisorDisabled, StagedCollision, InstallRetirement, RetirementRetain, RetirementDrain,
+    StagedRefusal, GatePoisoned, Exhausted,
+}
+macro_rules! first_unknown_origin {
+    ($state:ident, $origin:expr, $owner:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if !$state.unknown && !$state.exhausted && $state.first_origin.is_none() {
+            // Split fields rather than borrowing the whole state: a caller may
+            // still hold the exact slot at its fresh transition. Never recover
+            // an association later from a restored/current slot or public DTO.
+            $state.first_origin = installed_session_observation::FirstOrigin::at_transition($origin, $owner);
+        }
+    };
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct Token(String);
+struct TokenBatch { selection: Token, record: Token, preview: Token, bind: Token }
+#[derive(Clone, PartialEq, Eq)]
+struct RecordKey { id: Token, revision: u32 }
+struct NativeContext {
+    revision: u32, project_id: String, project: asset_source::RegisteredRoot, registry_generation: u32,
+    draft: Vec<u8>, platform: Platform, stage: Stage, purpose: Purpose, execution_mode: commands::ExecutionMode,
+}
+// Native admission tuple for one DATA-only browse. It is neither an asset
+// context nor a project registration and contains no draft/record authority.
+struct ProjectPathBinding {
+    project_id: String, field: commands::ProjectPathField, root: asset_source::RegisteredRoot, generation: u32,
+}
+impl ProjectPathBinding {
+    fn registration_matches(&self, generation: u32, root: &asset_source::RegisteredRoot) -> bool {
+        self.generation == generation && self.root == *root
+    }
+}
+struct ArtifactBinding {project_id:String,generation:u32,root:asset_source::RegisteredRoot,format:crate::artifact_inspection_protocol::Format,role:crate::artifact_inspection_protocol::Role}
+struct AndroidSourceBinding {
+    project_id: String, generation: u32, root: asset_source::RegisteredRoot, role: crate::android_tool_sources::Role,
+    acquired: Option<Arc<crate::saved_command_owner::ToolSourceNomination>>,
+}
+enum MaterialOrigin {
+    Selected(asset_source::CapturedSource),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    Stored(vault::StoredMaterial),
+}
+struct Material { origin: MaterialOrigin, observation: FileObservation }
+impl Material {
+    fn bytes(&self) -> &[u8] { match &self.origin {
+        MaterialOrigin::Selected(source) => &source.bytes,
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        MaterialOrigin::Stored(source) => source.bytes.bytes(),
+    } }
+    fn retained_bytes(&self) -> Option<usize> { match &self.origin {
+        MaterialOrigin::Selected(source) => {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            { source.bytes.capacity().checked_add(source.origin.retained_bytes()?) }
+            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+            { Some(source.bytes.capacity()) }
+        },
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        MaterialOrigin::Stored(source) => source.bytes.retained_bytes().ok()?.checked_add(std::mem::size_of::<vault::StoredRef>()),
+    } }
+    fn selected_origin(&self) -> Option<&Arc<OriginWitness>> { match &self.origin {
+        MaterialOrigin::Selected(source) => Some(&source.origin),
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        MaterialOrigin::Stored(_) => None,
+    } }
+}
+struct Payload { kind: Kind, material: Option<Arc<Material>>, fields: Option<Fields> }
+impl Payload {
+    fn bytes(&self) -> usize {
+        RECORD_METADATA_BYTES.saturating_add(self.material.as_ref().map_or(0, |m| m.retained_bytes().unwrap_or(usize::MAX)))
+            .saturating_add(self.fields.as_ref().map_or(0, Fields::byte_count))
+    }
+    fn usable_source(&self) -> bool { self.kind != Kind::AppleDistributionKey && (self.kind.file().is_none() || self.material.as_ref().is_some_and(|m| m.observation.is_observed())) }
+}
+struct Record { key: RecordKey, payload: Arc<Payload>, mutation_pending: bool }
+struct Candidate { payload: Arc<Payload>, record_id: Token, existing: Option<RecordKey> }
+#[derive(Clone)]
+struct SafeAssessment(Arc<AssessmentResult>);
+impl Serialize for SafeAssessment { fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { self.0.serialize(serializer) } }
+impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview() } }
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup, PrepareAppleDistributionKey, UseAppleDistributionKey, AssembleAppleP12 }
+impl Operation {
+    fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
+    fn project_path(self) -> bool { self == Self::ChooseProjectPath }
+    fn android_source(self) -> bool { self == Self::ChooseAndroidSource }
+    fn artifact(self)->bool{self==Self::ChooseArtifact}
+    fn images(self) -> bool { self == Self::ChooseImages }
+    fn installation(self) -> bool { self == Self::InspectInstallation }
+    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.android_source() || self.artifact() || self.images() || self.installation() || self.evidence() }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum SourceState { NotRun, Pending, Captured, Refused, Unknown }
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Settlement { Pending, Known, Unknown, LateKnown }
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Action { Save, Bind, Delete, Initialize }
+struct Preview { token: Token, action: Action, bind_token: Option<Token>, record: Option<RecordKey>, subject: PreviewSubject }
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum SubjectChange { New, Replace, Assign, Delete }
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum PreviewSubject {
+    #[serde(rename_all = "camelCase")]
+    Record { kind: Kind, change: SubjectChange, record_id: Option<Token>, record_revision: Option<u32> },
+    Vault { change: InitializeChange },
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum InitializeChange { Initialize }
+impl PreviewSubject {
+    fn new(kind: Kind, change: SubjectChange, record: Option<&RecordKey>) -> Self {
+        Self::Record { kind, change, record_id: record.map(|record| record.id.clone()), record_revision: record.map(|record| record.revision) }
+    }
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Assignment { kind: Kind, record_id: Token, record_revision: u32, context_revision: u32, availability: AssignmentAvailability }
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AssignmentAvailability { Available, Unavailable }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetStatus {
+    schema_version: u8, status_revision: u32, mode: &'static str, capability: Capability, modes: StorageCapabilities,
+    persistence: Option<PersistenceStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")] backup: Option<Capability>,
+    context: Option<ContextStatus>, operation: Option<OperationStatus>, records: Vec<RecordStatus>, assignments: Vec<Assignment>,
+}
+#[derive(Clone, Copy, Serialize)]
+struct Capability { available: bool, reason: Reason }
+#[derive(Serialize)]
+struct StorageCapabilities { session: Capability, encrypted: Capability }
+impl StorageCapabilities {
+    fn projection(reason: Reason, persistence_qualified: bool) -> Self {
+        let session = Capability { available: reason == Reason::None, reason };
+        let encrypted = if reason == Reason::None && !persistence_qualified {
+            Capability { available: false, reason: Reason::Unqualified }
+        } else { session };
+        Self { session, encrypted }
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistenceStatus { state: &'static str, reason: Reason, key_access: &'static str }
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageStatus { effect: &'static str, durability: &'static str, cleanup: &'static str }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextStatus { revision: u32, project_id: String, platform: Platform, stage: Stage, purpose: Purpose,
+    #[serde(skip_serializing_if = "commands::ExecutionMode::is_github")] execution_mode: commands::ExecutionMode }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationStatus {
+    operation_id: u32, operation: Operation, phase: Phase, reason: Reason, source: SourceState, settlement: Settlement,
+    selection_token: Option<Token>, assessment: Option<SafeAssessment>, preview: Option<PreviewStatus>,
+    storage_outcome: Option<StorageStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")] backup_delivered: Option<bool>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewStatus { token: Token, action: Action, expires_in_ms: u32, subject: PreviewSubject }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordStatus { record_id: Token, revision: u32, kind: Kind, availability: &'static str,
+    storage: &'static str, label: Option<String>, payload_state: &'static str }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinReceipt { New, Pending, Returned, Failed }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeResponse { Accept, Decline, Other }
+fn admitted_response(response: NativeResponse, original: bool, interrupted: bool, allow_decline: bool) -> (bool, bool) {
+    let admitted = original && !interrupted;
+    (admitted && response == NativeResponse::Accept, admitted && allow_decline && response == NativeResponse::Decline)
+}
+#[cfg(feature = "desktop-shell")]
+type CoordinatorHandle = tauri::async_runtime::JoinHandle<()>;
+#[cfg(not(feature = "desktop-shell"))]
+type CoordinatorHandle = JoinHandle<()>;
+struct CoordinatorBook { handle: Option<CoordinatorHandle>, receipt: JoinReceipt }
+struct ChildBook { handle: Option<JoinHandle<ChildEnd>>, receipt: JoinReceipt }
+
+// Only already-closed/positively-joined data is put here. The original operation
+// retains this holding before a locked replacement/removal becomes visible.
+// Its off-lock drain has a separate receipt, never a Drop-as-native-settlement
+// interpretation. At most one holding is populated at a time.
+#[derive(Default)]
+struct Retirement {
+    old_slot: Option<Box<Slot>>, candidate: Option<Candidate>, staged: Option<Staged>,
+    payload: Option<Arc<Payload>>, context: Option<Arc<NativeContext>>, slot_context: Option<Arc<NativeContext>>,
+    assessment: Option<SafeAssessment>, records: Vec<Record>, assignments: Vec<Assignment>,
+    image_batch: Option<asset_source::CapturedPublicImageBatch>, image_paths: Option<Vec<std::path::PathBuf>>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    vault: vault::Retired,
+}
+
+pub(crate) struct OriginalWork {
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_upload_key: std::sync::OnceLock<Arc<crate::service_upload_key_requests::NativeLink>>,
+    pub(crate) id: u32, stop: AtomicBool, ended: AtomicBool, deadline: Mutex<Option<Instant>>,
+    cleanup_end: Mutex<Option<Instant>>,
+    image_failure: Mutex<images::FailureLatch>,
+    installation: Option<installation::Work>,
+    pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
+    source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
+    retirement: Mutex<Retirement>, retired: AtomicBool,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    keyring: Mutex<keyring::LookupBook>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    large_work_started: AtomicBool,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    vault: Mutex<vault::Work>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    backup_selection: std::sync::OnceLock<vault::BackupSelectors>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    upload_key_clock: std::sync::OnceLock<Arc<vault::UploadKeyClock>>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    apple_profile_clock: std::sync::OnceLock<Arc<crate::saved_command_owner::AppleProvisioningClock>>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    apple_profile: std::sync::OnceLock<apple_profile::Work>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    apple_key: std::sync::OnceLock<apple_key::Work>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
+    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    gnome_transport_gate: Mutex<Option<Arc<gnome_transport_fixture::BoundaryGate>>>,
+}
+impl OriginalWork {
+    /// Inert test DATA: no coordinator, GUI, native or source operation entered;
+    /// no returned/settled receipt is written by this constructor.
+    #[cfg(test)]
+    pub(crate) fn artifact_unentered_original_data()->Arc<Self>{Self::new(1,false,Weak::new())}
+    fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
+        Self::construct(id, gui_needed, document, false)
+    }
+    fn new_installation(id: u32, document: Weak<Inner>) -> Arc<Self> {
+        Self::construct(id, false, document, true)
+    }
+    fn construct(id: u32, gui_needed: bool, document: Weak<Inner>, inspect: bool) -> Arc<Self> {
+        let admitted = Instant::now();
+        let end = admitted + if inspect { installation::WORK_TIME } else { WORK };
+        Arc::new_cyclic(|owner| Self { #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: std::sync::OnceLock::new(), id, stop: AtomicBool::new(false), ended: AtomicBool::new(false), deadline: Mutex::new(Some(end)),
+            // Ceiling is owned from admission; Slot.cleanup_end remains None
+            // until actual STOP. These are not the same lifecycle flag.
+            cleanup_end: Mutex::new(inspect.then_some(end + CLEANUP)),
+            image_failure: Mutex::new(images::FailureLatch::default()),
+            installation: inspect.then(|| installation::Work::new(end)),
+            wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
+            child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
+            retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            keyring: Mutex::new(keyring::LookupBook::new()),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            large_work_started: AtomicBool::new(false),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: Mutex::new(vault::Work::default()),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            backup_selection: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            upload_key_clock: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            apple_profile_clock: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            apple_profile: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            apple_key: std::sync::OnceLock::new(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_capture: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            gnome_transport_gate: Mutex::new(None),
+            gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
+                created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
+                destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
+                selected: None, refusal: None }), selected_images: Mutex::new(None), wake: Notify::new(),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                installed_native_response_witness: Mutex::new(None),
+            }) })
+    }
+    pub(crate) fn request_android_source_stop(&self) { self.stop(); }
+    pub(crate) fn request_artifact_stop(&self) { self.stop(); }
+    pub(crate) fn artifact_selected_settled(&self)->bool { self.project_path_settled(true) }
+    pub(crate) fn artifact_cancel_settled(&self)->bool { self.project_path_settled(false) }
+    pub(crate) fn artifact_refusal_settled(&self)->bool { self.android_source_refusal_settled() }
+
+    pub(crate) fn android_source_selected_settled(&self) -> bool { self.project_path_settled(true) }
+    pub(crate) fn android_source_cancel_settled(&self) -> bool { self.project_path_settled(false) }
+    pub(crate) fn android_source_refusal_settled(&self) -> bool {
+        self.resources_settled()
+            && self.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
+    }
+    pub(crate) fn stopped(&self) -> bool { self.stop.load(Ordering::SeqCst) }
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst); self.wake.notify_one(); self.gui.wake.notify_one();
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(selectors) = self.backup_selection.get() { selectors.wake(); }
+    }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    fn has_credential_backup_picker(&self) -> bool { false }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    fn original_gui_call(&self, call: &GuiCall) -> bool { std::ptr::eq(call, self.gui.as_ref()) }
+    fn stop(&self) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(clock)=self.apple_profile_clock.get() {
+            clock.observe_failure_at(Reason::UserCancelled,Instant::now()); self.signal_stop(); return;
+        }
+        if self.installation.is_some() { installation::failure(self, crate::installation::CheckReason::Cancelled, Instant::now()); }
+        else { self.signal_stop(); }
+    }
+    pub(crate) fn endpoint(&self) -> Option<Instant> {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(clock)=self.apple_profile_clock.get() { return (!clock.completed()).then(|| clock.work_end()); }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(clock) = self.upload_key_clock.get() { return clock.endpoint(); }
+        if let Some(work) = &self.installation { return Some(work.end); }
+        match self.deadline.lock() { Ok(end) => *end, Err(_) => Some(Instant::now()) }
+    }
+    pub(crate) fn set_endpoint(&self, end: Option<Instant>) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if self.apple_profile_clock.get().is_some() { return; }
+        // Reconciliation's generic None never erases this admitted clock.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if self.upload_key_clock.get().is_some() { return; }
+        if self.installation.is_some() { return; }
+        match self.deadline.lock() { Ok(mut value) => *value = end, Err(_) => self.stop() }
+    }
+    pub(crate) fn interrupted(&self) -> bool { self.stopped() || self.endpoint().is_some_and(|end| Instant::now() >= end) }
+    fn join_if_ended(&self) -> Option<bool> {
+        if !self.ended.load(Ordering::SeqCst) { return None; }
+        let Ok(mut book) = self.coordinator.try_lock() else { return None; };
+        if book.receipt == JoinReceipt::Returned { return Some(true); }
+        if book.receipt == JoinReceipt::Failed { return Some(false); }
+        let handle = book.handle.as_mut()?;
+        // An end-of-body flag is only permission to poll the retained original;
+        // it is NEVER completion evidence. Pending retains exactly this handle.
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        match Pin::new(handle).poll(&mut cx) {
+            Poll::Pending => None,
+            Poll::Ready(result) => {
+                let normal = result.is_ok();
+                book.receipt = if normal { JoinReceipt::Returned } else { JoinReceipt::Failed };
+                book.handle.take();
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(context) = self.fixture() {
+                    let source = self.source.try_lock().ok().and_then(|source| source.fixture_facts());
+                    context.original_joined(self.id, normal, source);
+                }
+                Some(normal)
+            }
+        }
+    }
+    fn control_resources_settled(&self) -> bool {
+        let coordinator = self.coordinator.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
+        let child = self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
+        let source = self.source.try_lock().is_ok_and(|book| book.not_started() || book.settled());
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let keyring = self.keyring.try_lock().is_ok_and(|book| book.resources_settled());
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let keyring = true;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let backup_selectors = self.backup_selection.get().is_none_or(vault::BackupSelectors::extra_settled);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let backup_selectors = true;
+        coordinator && child && source && self.gui.settled() && keyring && backup_selectors
+            && self.installation.as_ref().is_none_or(installation::Work::settled)
+    }
+    fn original_resources_settled(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if !self.vault.try_lock().is_ok_and(|work| work.settled()) { return false; }
+        self.control_resources_settled()
+    }
+    fn resources_settled(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let allocations = self.keyring.try_lock().is_ok_and(|book| book.allocations_released());
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let allocations = true;
+        self.original_resources_settled() && self.retired.load(Ordering::SeqCst) && allocations
+            && self.gui.selected_images.try_lock().is_ok_and(|paths| paths.is_none())
+    }
+    fn lookup_allocations_allowed(&self) -> bool {
+        if self.installation.as_ref().is_some_and(|work| !work.settled()) { return false; }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if !self.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse() && !work.apple_distribution_key_blocks_reuse()) { return false; }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { true }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    fn dispose_keyring_storage(&self) -> bool {
+        let Ok(retirement) = self.retirement.try_lock() else { return false; };
+        if !self.retired.load(Ordering::SeqCst) || !lookup_memory::retirement_empty(&retirement)
+            || !self.control_resources_settled() { return false; }
+        let Ok(mut book) = self.keyring.try_lock() else { return false; };
+        book.dispose_settled_storage()
+    }
+    fn normally_declined(&self) -> bool {
+        // A normal body may also return after refusal/not-created. Neither that
+        // nor a failed join is evidence of a genuine native Cancel response.
+        self.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && self.gui.facts().is_some_and(|facts| facts.created && !facts.not_created && facts.response
+                && facts.declined && !facts.accepted && facts.refusal.is_none()
+                && facts.destroyed && facts.released && facts.close_ack)
+    }
+    fn project_path_settled(&self, selected: bool) -> bool {
+        // A generic resources_settled allows FAILED joins. Path success/Cancel
+        // instead require the exact normal originals, plus their GUI facts.
+        self.resources_settled()
+            && self.stopped() != selected
+            && self.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && self.child.try_lock().is_ok_and(|book| book.handle.is_none()
+                && book.receipt == (if selected { JoinReceipt::Returned } else { JoinReceipt::New }))
+            && self.source.try_lock().is_ok_and(|book| if selected { !book.not_started() && book.settled() } else { book.not_started() })
+            && self.gui.facts().is_some_and(|facts| project_path_gui_settled(&facts, selected))
+            && self.gui.selected_images.try_lock().is_ok_and(|paths| paths.is_none())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn fixture(&self) -> Option<Arc<Qualification>> { self.gui.document.upgrade()?.fixture.as_ref()?.upgrade() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_event(&self, kind: FixtureEvent, detail: u32) {
+        if let Some(context) = self.fixture() { context.event(kind, self.id, detail); }
+    }
+    fn retain_retirement(&self, retirement: Retirement) -> Result<(), Retirement> {
+        let Ok(mut holding) = self.retirement.try_lock() else { return Err(retirement); };
+        if !self.retired.swap(false, Ordering::SeqCst) { return Err(retirement); }
+        *holding = retirement; Ok(())
+    }
+    fn release_retirement(&self) -> bool {
+        let Ok(mut holding) = self.retirement.try_lock() else { return false; };
+        // The SAME charged retirement owns the nonforgeable publication/join
+        // proof. Attempt concrete native private disposal before taking data;
+        // failed disposal keeps this holding and cannot become empty/Idle.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if !holding.vault.dispose_private_upload_key() || !holding.vault.dispose_private_apple_profile()
+            || !holding.vault.dispose_private_apple_distribution_key() { return false; }
+        let retirement = std::mem::take(&mut *holding);
+        // Still off the document/admission lock, but retain THIS custody mutex
+        // through the actual drop and receipt. A census cannot see empty data
+        // while an off-lock drain is merely scheduled or still in progress.
+        drop(retirement);
+        self.retired.store(true, Ordering::SeqCst); true
+    }
+}
+// Not object ownership: shell.rs retains the actual GTK object on its original
+// main thread. These receipts never authorize replacement/Drop-as-settlement.
+pub(crate) struct GuiCall {
+    owner: Weak<OriginalWork>, document: Weak<Inner>, facts: Mutex<GuiFacts>, pub(crate) wake: Notify,
+    // Separate bounded native-only result, never overloaded into one pathname.
+    // The same original dialog coordinator consumes it after actual GUI release.
+    selected_images: Mutex<Option<Vec<std::path::PathBuf>>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    installed_native_response_witness: Mutex<Option<InstalledNativeResponseWitness>>,
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[derive(Clone)]
+pub(crate) struct InstalledNativeResponseWitness {
+    pub(crate) operation_id: u32,
+    pub(crate) response: NativeResponse,
+    pub(crate) selected: Option<std::path::PathBuf>,
+    pub(crate) callback_returned: bool,
+}
+pub(crate) struct GuiFacts {
+    pub(crate) dispatched: bool, pub(crate) constructing: bool,
+    pub(crate) created: bool, pub(crate) showing: bool, pub(crate) response: bool, pub(crate) accepted: bool, pub(crate) declined: bool,
+    pub(crate) accepted_at: Option<Instant>,
+    pub(crate) destroyed: bool, pub(crate) released: bool, pub(crate) not_created: bool,
+    pub(crate) close_queued: bool, pub(crate) close_ack: bool, pub(crate) release_queued: bool, pub(crate) selected: Option<std::path::PathBuf>,
+    pub(crate) refusal: Option<Reason>,
+}
+fn project_path_gui_settled(facts: &GuiFacts, selected: bool) -> bool {
+    facts.dispatched && facts.created && !facts.constructing && !facts.showing && !facts.not_created
+        && facts.response && facts.refusal.is_none() && facts.destroyed && facts.close_queued && facts.close_ack
+        && facts.release_queued && facts.released && facts.selected.is_none()
+        && (if selected { facts.accepted && !facts.declined && facts.accepted_at.is_some() }
+            else { facts.declined && !facts.accepted && facts.accepted_at.is_none() })
+}
+impl GuiCall {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn record_installed_native_response(self: &Arc<Self>, id: u32, response: NativeResponse,
+        selected: Option<&std::path::Path>) -> Result<(), ()> {
+        let owner = self.owner().ok_or(())?;
+        if owner.id != id || if owner.has_credential_backup_picker() {
+            owner.installed_backup_choice(self).is_none()
+        } else { !Arc::ptr_eq(&owner.gui,self) } {return Err(());}
+        let mut witness = self.installed_native_response_witness.lock().map_err(|_| ())?;
+        if witness.is_some() { return Err(()); } // First real response is immutable.
+        // Sole caller is the original main-thread PanelState::Responded tick.
+        // Both mrk_panel_poll state-1 branches require !callbackActive, and no
+        // native work occurs after the completion clears that final flag.
+        // Its path is already bounded to 4096 bytes by the original native poll.
+        *witness = Some(InstalledNativeResponseWitness { operation_id: id, response,
+            selected: selected.map(std::path::Path::to_path_buf), callback_returned: true });
+        Ok(())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn installed_native_response(&self) -> Result<Option<InstalledNativeResponseWitness>, ()> {
+        // This data stays with the same original call, not a global panel
+        // history. Read before replacing its slot; it grants no settlement.
+        self.installed_native_response_witness.lock().map(|witness| witness.clone()).map_err(|_| ())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_context(&self) -> Option<Arc<Qualification>> { self.owner()?.fixture() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_event(&self, kind: FixtureEvent, detail: u32) {
+        if let Some(owner) = self.owner() { owner.fixture_event(kind, detail); }
+    }
+    pub(crate) fn owner(&self) -> Option<Arc<OriginalWork>> { self.owner.upgrade() }
+    pub(crate) fn facts(&self) -> Option<MutexGuard<'_, GuiFacts>> { self.facts.lock().ok() }
+    pub(crate) fn changed(&self) { self.wake.notify_one(); }
+    pub(crate) fn settled(&self) -> bool { self.facts.lock().is_ok_and(|facts| facts.not_created || facts.destroyed && facts.released) }
+    pub(crate) fn not_created(&self, reason: Reason) {
+        if let Some(mut facts) = self.facts() {
+            // Only the original construction path may prove no object exists.
+            if !facts.created { facts.not_created = true; facts.released = true; facts.refusal = Some(reason); }
+        }
+        self.changed();
+    }
+    pub(crate) fn failed(&self, reason: Reason) {
+        self.failed_at(reason, Instant::now());
+    }
+    pub(crate) fn failed_at(&self, reason: Reason, at: Instant) {
+        // The original failure time precedes lock acquisition. A delayed
+        // observer cannot grant this same operation another cleanup allowance.
+        let Some(inner) = self.document.upgrade() else { return; };
+        let document = DocumentBinding { inner };
+        let Some(owner) = self.owner() else { return; };
+        let mut state = document.lock();
+        fail_gui_original_locked(&mut state, self, &owner, reason, at);
+        document.bump(&mut state); self.changed();
+    }
+    pub(crate) fn begin_response(&self, response: NativeResponse, quit: bool) -> Option<bool> {
+        let Some(inner) = self.document.upgrade() else { return None; };
+        let document = DocumentBinding { inner };
+        let Some(owner) = self.owner() else { return None; };
+        document.gui_response(&owner, self, response, quit)
+    }
+    pub(crate) fn selected_path(&self, path: Result<std::path::PathBuf, Reason>) {
+        let failure_at = Instant::now();
+        let Some(inner) = self.document.upgrade() else { return; };
+        let document = DocumentBinding { inner };
+        let Some(owner) = self.owner() else { return; };
+        let mut state = document.lock();
+        if !owner.original_gui_call(self) { return; }
+        if let Some(mut facts) = self.facts() {
+            match path {
+                Ok(path) if facts.accepted && !owner.interrupted() => facts.selected = Some(path),
+                Ok(_) => {},
+                Err(reason) => {
+                    facts.refusal = Some(reason);
+                    gh_auth::gui_failed_locked(&state, &owner, reason, failure_at);
+                    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) { slot.stop(reason, failure_at); }
+                }
+            }
+        }
+        document.bump(&mut state); self.changed();
+    }
+    pub(crate) fn presented(&self) {
+        let Some(inner) = self.document.upgrade() else { return; };
+        let document = DocumentBinding { inner };
+        let Some(owner) = self.owner() else { return; };
+        let mut state = document.lock();
+        if !owner.original_gui_call(self) || owner.interrupted() || self.facts().is_none_or(|facts| facts.response) { return; }
+        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) {
+            if slot.cleanup_end.is_none() { slot.phase = Phase::Picking; owner.set_endpoint(None); document.bump(&mut state); }
+        } else if state.quit.as_ref().is_some_and(|work| Arc::ptr_eq(work, &owner)) {
+            owner.set_endpoint(None);
+        }
+        // The distinct gh original keeps its admitted whole-operation clock;
+        // presenting this panel never clears or renews that endpoint.
+    }
+}
+
+fn fail_gui_original_locked(state: &mut DocumentState, call: &GuiCall, owner: &Arc<OriginalWork>, reason: Reason, at: Instant) {
+    if !owner.original_gui_call(call) { return; }
+    // Same transition and notification order as the ordinary native failure
+    // path. This only requests STOP; it supplies no response or settlement.
+    if let Some(mut facts) = call.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
+    gh_auth::gui_failed_locked(state, owner, reason, at);
+    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) { slot.stop(reason, at); }
+    if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, owner)) { stop_quit(state, at); }
+    owner.stop();
+}
+
+struct Slot {
+    owner: Arc<OriginalWork>, operation: Operation, phase: Phase, reason: Reason, source: SourceState, settlement: Settlement,
+    context: Option<Arc<NativeContext>>, target: Option<RecordKey>, review_end: Option<Instant>, cleanup_end: Option<Instant>,
+    candidate: Option<Candidate>, selection: Option<Token>, assessment: Option<SafeAssessment>, preview: Option<Preview>,
+    assessment_context_revision: Option<u32>,
+    staged: Option<Staged>, error: Option<CommandError>, project: Option<Project>, discard: bool,
+    kind: Option<Kind>, result_record: Option<RecordKey>, retired_payload: Option<Arc<Payload>>,
+    evidence: Option<EvidenceBinding>, project_path: Option<Arc<ProjectPathBinding>>, path_result: Option<commands::ProjectPathResult>,
+    android_source: Option<Arc<AndroidSourceBinding>>, artifact:Option<Arc<ArtifactBinding>>,
+    images: Option<Arc<images::Binding>>, image_batch: Option<asset_source::CapturedPublicImageBatch>,
+    installation_result: Option<crate::installation::Matching>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    vault: vault::SlotData,
+}
+impl Slot {
+    fn stop(&mut self, reason: Reason, at: Instant) {
+        let at = if self.operation.installation() { installation::stop_at(&self.owner, reason, at) } else { at };
+        self.installation_result = None;
+        self.selection = None; self.preview = None; self.path_result = None; self.discard = true;
+        if self.reason == Reason::None { self.reason = reason; }
+        // A native result can report an earlier failure after a concurrent
+        // cancellation was observed. Contract to that first timestamp, never
+        // renew either the slot or retained original's cleanup interval.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let generation_end = self.owner.apple_profile_stop(reason, at)
+            .or_else(|| vault::upload_key_parent_stop(&self.owner, reason, at));
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let generation_end: Option<Instant> = None;
+        let end = generation_end.unwrap_or_else(|| first_cleanup_end(at, self.owner.endpoint(), self.review_end));
+        self.cleanup_end = Some(self.cleanup_end.map_or(end, |old| old.min(end)));
+        if let Ok(mut original) = self.owner.cleanup_end.lock() { *original = Some(original.map_or(end, |old| old.min(end))); }
+        if self.phase != Phase::Unknown { self.phase = Phase::Stopping; }
+        self.owner.stop();
+    }
+}
+struct DocumentState {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_local_check_grant: Option<Arc<agent_local_checks::Grant>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_android_build_grant: Option<Arc<agent_android_build::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_ios_archive_grant: Option<Arc<agent_ios_archive::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_store_grant:Option<Arc<agent_store::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_store_preparation:Option<Arc<agent_store::preparation::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_local_history:Option<Arc<agent_local_history::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_apple:apple_provisioning::agent::State,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_tool_setup:agent_tool_setup::State,
+    lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
+    session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
+    compatibility_picker_pending: bool,
+    maintenance: macos_maintenance::Closure,
+    saved_observation: Option<Arc<SavedObservationLane>>, saved_input: Option<SavedInputBinding>,
+    apple_provisioning_ready: Option<Arc<crate::application_service_host::NativeStateReady>>,
+    version_allocation_source: Option<Arc<version_allocation::Lane>>,
+    version_enrollment: version_enrollment::State,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    version_reserve: version_reserve::State,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_upload_key: agent_upload_key::State,
+    session_owner_reason: Option<Reason>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    first_origin: Option<installed_session_observation::FirstOrigin>,
+    context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
+    quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
+    github: ConnectionState,
+    gh_auth: Option<gh_auth::Entry>,
+    git_read: Option<git_read::Entry>,
+    git_local: Option<git_local::Entry>,
+    git_local_review: Option<git_local::ReadyReview>,
+    evidence: EvidenceRegistry,
+    images: images::Registry,
+    installation: installation::Registry,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    vault: Option<vault::Session>,
+}
+fn project_path_pending(state: &DocumentState) -> bool {
+    state.slot.as_ref().is_some_and(|slot| (slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact())
+        && (slot.phase != Phase::Idle || !slot.owner.resources_settled()))
+}
+fn credential_discard_operation(operation: Operation) -> bool {
+    !operation.evidence() && !operation.project_path() && !operation.android_source() && !operation.artifact() && !operation.images() && !operation.installation()
+}
+fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if vault::upload_key_setup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+    if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
+    if project_path_pending(state) || images::pending(state) || installation::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) {
+        return Err(AssetError::new(if state.unknown { Reason::CleanupUnknown } else { Reason::Busy }));
+    }
+    Ok(())
+}
+
+// One purpose-bound selection for this original document. It is never inserted
+// into DesktopBridge.projects and cannot change source drafts or GitHub context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidencePurpose { Candidate, Lifecycle(lifecycle_wire::Stage) }
+impl EvidencePurpose {
+    fn lifecycle(self) -> bool { matches!(self, Self::Lifecycle(_)) }
+    fn method(self) -> &'static str { if self.lifecycle() { "release.evidence.observe" } else { "artifacts.candidate.observe" } }
+}
+#[derive(Clone)]
+enum EvidenceResult { Candidate(evidence_wire::Observation), Lifecycle(lifecycle_wire::Observation) }
+impl EvidenceResult {
+    fn purpose(&self) -> EvidencePurpose { match self {
+        Self::Candidate(_) => EvidencePurpose::Candidate, Self::Lifecycle(result) => EvidencePurpose::Lifecycle(result.stage),
+    } }
+}
+#[derive(Clone, PartialEq, Eq)]
+struct EvidenceBinding { operation_id: u32, kind: evidence_wire::OperationKind, selection_id: Option<String>, epoch: u64, purpose: EvidencePurpose }
+impl EvidenceBinding {
+    fn public(&self) -> evidence_wire::Operation {
+        evidence_wire::Operation { operation_id: self.operation_id.to_string(), kind: self.kind, selection_id: self.selection_id.clone() }
+    }
+    fn lifecycle_public(&self) -> Option<lifecycle_wire::Operation> {
+        let EvidencePurpose::Lifecycle(stage) = self.purpose else { return None; };
+        Some(lifecycle_wire::Operation { operation_id: self.operation_id.to_string(), kind: self.kind, selection_id: self.selection_id.clone(), stage })
+    }
+}
+struct EvidenceSelection { view: evidence_wire::Selection, root: asset_source::RegisteredRoot, epoch: u64, purpose: EvidencePurpose }
+struct EvidenceRegistry {
+    revision: u64, epoch: u64, revoked: bool, selection: Option<EvidenceSelection>, operation: Option<EvidenceBinding>,
+    phase: evidence_wire::Phase, result: Option<EvidenceResult>, problem: Option<EvidenceProblem>,
+}
+impl EvidenceRegistry {
+    fn new() -> Self { Self { revision: 0, epoch: 0, revoked: false, selection: None, operation: None,
+        phase: evidence_wire::Phase::Idle, result: None, problem: None } }
+    fn revoke(&mut self, unknown: bool) {
+        self.revoked = true; self.selection = None; self.result = None;
+        self.phase = if unknown { evidence_wire::Phase::Unknown } else { evidence_wire::Phase::Refused };
+        self.problem = Some(if unknown { EvidenceProblem::CleanupUnknown } else { EvidenceProblem::StaleSelection });
+    }
+    fn matches(&self, slot: &Slot) -> bool {
+        let Some(binding) = &slot.evidence else { return false; };
+        slot.operation.evidence() && self.operation.as_ref() == Some(binding) && binding.operation_id == slot.owner.id
+            && binding.epoch == self.epoch
+            && matches!((slot.operation, binding.kind), (Operation::ChooseEvidenceFolder, evidence_wire::OperationKind::Choose)
+                | (Operation::InspectEvidence, evidence_wire::OperationKind::Observe))
+    }
+    fn accepts_result(&self, slot: &Slot, result: &EvidenceResult) -> bool {
+        self.matches(slot) && slot.operation == Operation::InspectEvidence
+            && slot.evidence.as_ref().is_some_and(|binding| self.selection_matches(binding) && binding.purpose == result.purpose())
+    }
+    fn selection_matches(&self, binding: &EvidenceBinding) -> bool {
+        !self.revoked && self.selection.as_ref().is_some_and(|selection| selection.epoch == binding.epoch && selection.purpose == binding.purpose
+            && binding.selection_id.as_deref() == Some(selection.view.selection_id.as_str()))
+    }
+}
+fn evidence_reason(reason: Reason) -> EvidenceProblem {
+    match reason {
+        Reason::CleanupUnknown => EvidenceProblem::CleanupUnknown,
+        Reason::Deadline | Reason::ReviewExpired => EvidenceProblem::Deadline,
+        Reason::UserCancelled => EvidenceProblem::Cancelled,
+        Reason::Capacity | Reason::MaterialLimit | Reason::ParserLimit => EvidenceProblem::Limit,
+        Reason::Busy => EvidenceProblem::Busy,
+        Reason::ContextStale | Reason::SourceChanged | Reason::DocumentLost | Reason::Shutdown => EvidenceProblem::StaleSelection,
+        Reason::SourceRefused | Reason::ProjectOverlap | Reason::ExclusionUnconfirmed => EvidenceProblem::UnsafeSelection,
+        Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem | Reason::Unqualified | Reason::Closed => EvidenceProblem::Unavailable,
+        _ => EvidenceProblem::ObservationFailed,
+    }
+}
+fn cancel_evidence_locked(state: &mut DocumentState, purpose: EvidencePurpose, args: &evidence_wire::Cancel, at: Instant) -> Result<bool, BridgeError> {
+    // A STOP identifies the exact original job, not merely its folder. Match
+    // before clock reconciliation or any change to unrelated shared state.
+    let id = evidence_wire::operation_id(&args.operation_id).ok_or_else(evidence_wire::invalid)?;
+    let binding = state.evidence.operation.as_ref().filter(|binding| binding.operation_id == id
+        && binding.selection_id == args.selection_id && binding.epoch == state.evidence.epoch && binding.purpose == purpose)
+        .ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?.clone();
+    let matching = state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot) && slot.evidence.as_ref() == Some(&binding));
+    if !matching {
+        // A retained terminal operation no longer has an owner to stop. Never
+        // route it into the different shared job now occupying the slot.
+        return if matches!(state.evidence.phase, evidence_wire::Phase::Selected | evidence_wire::Phase::Observed | evidence_wire::Phase::Cancelled | evidence_wire::Phase::Refused) {
+            Ok(false)
+        } else { Err(evidence_wire::refused(EvidenceProblem::StaleSelection)) };
+    }
+    let slot = state.slot.as_mut().ok_or_else(evidence_wire::invalid)?;
+    if slot.phase == Phase::Idle && slot.owner.resources_settled() { return Ok(false); }
+    let reason = if slot.owner.endpoint().is_some_and(|end| at >= end) { Reason::Deadline } else { Reason::UserCancelled };
+    slot.stop(reason, at); Ok(true)
+}
+fn record_evidence_failure(state: &mut DocumentState, owner: &Arc<OriginalWork>, problem: EvidenceProblem, at: Instant) -> bool {
+    let Some(slot) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && state.evidence.matches(slot)) else { return false; };
+    // The first STOP owns both timing and public explanation. A late ordinary
+    // core error cannot relabel a user's cancellation or the original deadline.
+    // Unconfirmed cleanup remains a conservative, sticky authority reduction.
+    if (slot.reason != Reason::None || slot.cleanup_end.is_some()) && problem != EvidenceProblem::CleanupUnknown { return false; }
+    let problem = if problem != EvidenceProblem::CleanupUnknown && slot.owner.endpoint().is_some_and(|end| at >= end) {
+        EvidenceProblem::Deadline
+    } else { problem };
+    state.evidence.problem = Some(problem); state.evidence.result = None;
+    let reason = match problem { EvidenceProblem::Deadline => Reason::Deadline, EvidenceProblem::CleanupUnknown => Reason::CleanupUnknown,
+        EvidenceProblem::Limit => Reason::Capacity, EvidenceProblem::Cancelled => Reason::UserCancelled, _ => Reason::SourceRefused };
+    if let Some(slot) = state.slot.as_mut() { slot.stop(reason, at); }
+    if problem == EvidenceProblem::CleanupUnknown { state.unknown = true; }
+    true
+}
+fn evidence_display_name(path: &std::path::Path) -> String {
+    path.file_name().and_then(|name| name.to_str()).filter(|name|
+        evidence_wire::display_text(name, 128, 512) && !name.contains(['/', '\\']))
+        .unwrap_or("Selected evidence folder").to_owned()
+}
+fn evidence_route_gate(state: &DocumentState, lifecycle: bool) -> Result<(), BridgeError> {
+    if state.evidence.operation.as_ref().is_some_and(|op| op.purpose.lifecycle() != lifecycle)
+        && (state.retiring || state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot)
+            && (slot.phase != Phase::Idle || !slot.owner.resources_settled()))) {
+        return Err(evidence_wire::refused(EvidenceProblem::Busy));
+    }
+    Ok(())
+}
+fn evidence_phase(state: &DocumentState) -> (evidence_wire::Phase, Option<EvidenceProblem>) {
+    let registry = &state.evidence;
+    let mut phase = registry.phase;
+    let mut problem = registry.problem;
+    if state.unknown || state.exhausted {
+        phase = evidence_wire::Phase::Unknown; problem = Some(EvidenceProblem::CleanupUnknown);
+    } else if let Some(slot) = state.slot.as_ref().filter(|slot| registry.matches(slot)) {
+        if slot.phase == Phase::Unknown || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown) {
+            phase = evidence_wire::Phase::Unknown; problem = Some(EvidenceProblem::CleanupUnknown);
+        } else if slot.cleanup_end.is_some() {
+            // STOP is not terminal until all ORIGINAL resources and their data
+            // retirement have settled. A late positive result cannot revive it.
+            phase = if slot.phase == Phase::Idle && slot.owner.resources_settled() {
+                if !registry.revoked && slot.reason == Reason::UserCancelled { evidence_wire::Phase::Cancelled } else { evidence_wire::Phase::Refused }
+            } else { evidence_wire::Phase::Stopping };
+            problem = Some(problem.unwrap_or_else(|| evidence_reason(slot.reason)));
+        }
+    }
+    (phase, problem)
+}
+fn evidence_projection(state: &DocumentState, lifecycle: bool) -> (evidence_wire::Phase, Option<EvidenceProblem>, bool) {
+    let (phase, problem) = evidence_phase(state);
+    let compatible = state.evidence.operation.as_ref().is_none_or(|op| op.purpose.lifecycle() == lifecycle);
+    if !compatible && phase != evidence_wire::Phase::Unknown {
+        (evidence_wire::Phase::Refused, Some(EvidenceProblem::StaleSelection), false)
+    } else { (phase, problem, compatible) }
+}
+fn evidence_snapshot(state: &DocumentState, available: bool) -> evidence_wire::Status {
+    let registry = &state.evidence;
+    if !available { return evidence_wire::Status::unavailable(registry.revision); }
+    let (phase, problem, compatible) = evidence_projection(state, false);
+    evidence_wire::Status { schema_version: 1, revision: registry.revision.to_string(), availability: "available", phase,
+        selection: if registry.revoked || !compatible { None } else { registry.selection.as_ref().filter(|s| s.purpose == EvidencePurpose::Candidate).map(|s| s.view.clone()) },
+        operation: registry.operation.as_ref().filter(|op| op.purpose == EvidencePurpose::Candidate).map(EvidenceBinding::public),
+        result: if phase == evidence_wire::Phase::Observed { match &registry.result { Some(EvidenceResult::Candidate(result)) => Some(result.clone()), _ => None } } else { None }, problem }
+}
+fn release_evidence_snapshot(state: &DocumentState, available: bool) -> lifecycle_wire::Status {
+    let registry = &state.evidence;
+    if !available { return lifecycle_wire::Status::unavailable(registry.revision); }
+    let (phase, problem, compatible) = evidence_projection(state, true);
+    lifecycle_wire::Status { schema_version: 1, revision: registry.revision.to_string(), availability: "available", phase,
+        selection: if registry.revoked || !compatible { None } else { registry.selection.as_ref().and_then(|s| {
+            let EvidencePurpose::Lifecycle(stage) = s.purpose else { return None; };
+            Some(lifecycle_wire::Selection { selection_id: s.view.selection_id.clone(), display_name: s.view.display_name.clone(), stage })
+        }) },
+        operation: registry.operation.as_ref().and_then(EvidenceBinding::lifecycle_public),
+        result: if phase == evidence_wire::Phase::Observed { match &registry.result { Some(EvidenceResult::Lifecycle(result)) => Some(result.clone()), _ => None } } else { None }, problem }
+}
+fn settle_evidence_status(state: &mut DocumentState) {
+    if state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot) && slot.phase == Phase::Idle && slot.owner.resources_settled()) {
+        let (phase, problem) = evidence_phase(state);
+        state.evidence.phase = phase; state.evidence.problem = problem;
+        if phase != evidence_wire::Phase::Observed { state.evidence.result = None; }
+    }
+}
+// A late observer/lifecycle callback cannot move an already-due work or review
+// endpoint forward. The first STOP owns the only cleanup clock.
+fn first_cleanup_end(at: Instant, work: Option<Instant>, review: Option<Instant>) -> Instant {
+    let first = work.map_or(at, |end| at.min(end));
+    review.map_or(first, |end| first.min(end)) + CLEANUP
+}
+fn status_successor(revision: u32) -> Option<u32> { revision.checked_add(1).filter(|next| *next < u32::MAX) }
+fn stop_quit(state: &mut DocumentState, at: Instant) {
+    if let Some(quit) = &state.quit {
+        if state.quit_cleanup_end.is_none() { state.quit_cleanup_end = Some(first_cleanup_end(at, quit.endpoint(), None)); }
+        quit.stop();
+    }
+}
+#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(feature = "desktop-shell", target_os = "macos", target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
+fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
+    if state.stopping && state.quit_accepted && state.quit.as_ref().is_some_and(|quit| quit.stopped()) {
+        state.quit_cleanup_end
+    } else { None }
+}
+fn session_data_empty(state: &DocumentState) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if state.vault.is_some() { return false; }
+    state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
+        && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
+            && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none() && slot.image_batch.is_none() && slot_private_data_empty(slot))
+}
+fn slot_private_data_empty(_slot: &Slot) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { _slot.vault.loaded.is_none()
+        && _slot.owner.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse() && !work.apple_distribution_key_blocks_reuse())
+        && _slot.owner.retirement.try_lock().is_ok_and(|holding| !holding.vault.backup_blocks_reuse() && !holding.vault.upload_key_blocks_reuse() && !holding.vault.apple_profile_blocks_reuse() && !holding.vault.apple_distribution_key_blocks_reuse()) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { true }
+}
+fn assets_can_exit_locked(state: &DocumentState) -> bool {
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if apple_provisioning::agent::prepare::call_pending(&state.agent_apple){return false;}
+    !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
+        && gh_auth::can_exit(state) && !git_local::pending(state)
+}
+fn complete_empty_session_lock(state: &mut DocumentState) -> bool {
+    // The caller must have reinserted its exact original slot. Empty data alone
+    // cannot settle a pending coordinator/source/GUI or off-lock retirement.
+    if state.lock_pending && assets_can_exit_locked(state) {
+        state.session = false; state.lock_pending = false; true
+    } else { false }
+}
+fn quit_question_admitted(state: &DocumentState) -> bool {
+    if state.stopping || state.quit_accepted || state.quit_pending || state.retiring
+        || state.slot.as_ref().is_some_and(|slot| !slot.owner.gui.settled())
+        || state.quit.as_ref().is_some_and(|quit| !quit.resources_settled()) { return false; }
+    if !state.unknown { return true; } // Preserve ordinary quit admission.
+    // This grants only a question after genuine late settlement and a closed
+    // session. Unknown, old endpoints, and original receipts are not reset.
+    !state.exhausted && !state.lost_observed && state.lifetime.original_bound()
+        && !state.session && !state.lock_pending && assets_can_exit_locked(state)
+        && state.quit.as_ref().is_none_or(|quit| quit.normally_declined())
+}
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_version_edit.rs"]
+pub(crate) mod agent_version_edit;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path="asset_session_service_configuration.rs"]
+mod agent_configuration;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_configuration::ConfigurationAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_initialization.rs"]
+pub(crate) mod agent_initialization;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_initialization::InitializationAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_workflow_edit.rs"]
+pub(crate) mod agent_workflow_edit;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_workflow_edit::WorkflowEditAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_metadata_images.rs"]
+pub(crate) mod agent_metadata_images;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_metadata_images_prepare.rs"]
+pub(crate) mod agent_metadata_images_prepare;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_metadata_images::MetadataImagesAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_metadata_text.rs"]
+mod agent_metadata_text;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_metadata_text::MetadataTextAgentGate;
+
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_version_prepare.rs"]
+pub(crate) mod agent_version_prepare;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_version_prepare::VersionPrepareGate;
+
+struct Inner {
+    state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+    session_identity: Arc<()>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_git_index: agent_git_index::NativeState,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_identity_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_identity_revoke_epoch: std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_local_check_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_android_build_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_ios_archive_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_store_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_apple_service:std::sync::OnceLock<std::sync::Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_github_action_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_github_action_revoke_epoch:std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_github_action_allow_pending:std::sync::atomic::AtomicBool,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_store_revoke_epoch:std::sync::atomic::AtomicU64,
+    android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_session: Mutex<Option<installed_session_observation::Book>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    installed_macos_session: Mutex<Option<installed_macos_observation::SessionBook>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture: Option<Weak<Qualification>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_fixture: Option<crate::supervisor::GitHubDocumentFixtureBinding>,
+}
+#[derive(Clone)]
+pub(crate) struct DocumentBinding { inner: Arc<Inner> }
+
+/// Nonsecret weak reference to the actual document. Only that document may
+/// create this gate; the original Supervisor calls it after durable READY.
+pub(crate) struct GitHubPreflightGoGate { inner: Weak<Inner>, agent:Option<Arc<crate::service_github_action_requests::Entry>>, stamp:Option<crate::edit_owner::SavedEditStamp> }
+impl GitHubPreflightGoGate {
+    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
+    pub(crate) fn take_stamp(&mut self)->Option<crate::edit_owner::SavedEditStamp>{self.stamp.take()}
+    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn same_original_document(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.inner, &other.inner) && self.inner.strong_count() != 0
+    }
+    pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_preflight_protocol::Request,
+        claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
+        use crate::{github_preflight_protocol as p, github_preflight_session as s};
+        let document = DocumentBinding { inner: self.inner.upgrade().ok_or_else(|| s::refused(p::Reason::Cancelled))? };
+        let mut state = document.lock(); let now = Instant::now(); document.expire(&mut state, now);
+        let gate = document.github_gate(&state);
+        if gate != GitHubReason::None { return Err(s::refused(s::connection_reason(gate))); }
+        if !document.inner.bridge.supervisor.github_preflight_profile_available() || !p::publisher_bound() {
+            return Err(s::refused(p::Reason::Unqualified));
+        }
+        let original = state.github.preflight_active_registration().map(|(id, generation, root)| (id.to_owned(), generation, root.clone()))
+            .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+        let current = document.registry_result(&mut state, document.inner.bridge.native_project(&original.0), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if current.0 != original.1 || current.1 != original.2 { return Err(s::refused(p::Reason::TargetChanged)); }
+        // This mutex remains held through original session expiry/pin checks,
+        // one-use owner claim and private-buffer transfer. No post-send check.
+        if let Some(e)=&self.agent {
+            e.current(true).map_err(application_service::public_error)?;
+            let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
+            // The sole original stamp moved into this ticket's Active before Doc unlock.
+            if state.github.preflight_active_stamp(id,request).is_none_or(|stamp|!edit.matches(stamp)){return Err(s::refused(p::Reason::TargetChanged));}
+        }
+        state.github.preflight_go(id,digest,request,Instant::now(),||{
+            let granted=claim();
+            if granted { if let Some(e)=&self.agent {if e.go(id).is_err(){e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);return false;}} }
+            granted
+        })
+    }
+}
+
+/// Nonsecret weak reference to the actual document. Only that document may
+/// create this gate; the original Supervisor calls it after durable READY.
+pub(crate) struct GitHubReleaseGoGate { inner: Weak<Inner>, agent:Option<Arc<crate::service_github_action_requests::Entry>>, stamp:Option<crate::edit_owner::SavedEditStamp> }
+impl GitHubReleaseGoGate {
+    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
+    pub(crate) fn take_stamp(&mut self)->Option<crate::edit_owner::SavedEditStamp>{self.stamp.take()}
+    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
+    pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_release_protocol::Request,
+        claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
+        use crate::{github_release_protocol as p, github_release_session as s};
+        let document = DocumentBinding { inner: self.inner.upgrade().ok_or_else(|| s::refused(p::Reason::Cancelled))? };
+        let mut state = document.lock(); let now = Instant::now(); document.expire(&mut state, now);
+        let gate = document.github_gate(&state);
+        if gate != GitHubReason::None { return Err(s::refused(s::connection_reason(gate))); }
+        if !document.inner.bridge.supervisor.github_release_profile_available() || !p::publisher_bound() {
+            return Err(s::refused(p::Reason::Unqualified));
+        }
+        let original = state.github.release_active_registration().map(|(id, generation, root)| (id.to_owned(), generation, root.clone()))
+            .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+        let current = document.registry_result(&mut state, document.inner.bridge.native_project(&original.0), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if current.0 != original.1 || current.1 != original.2 { return Err(s::refused(p::Reason::TargetChanged)); }
+        // This mutex remains held through original session expiry/pin checks,
+        // one-use owner claim and private-buffer transfer. No post-send check.
+        if let Some(e)=&self.agent {
+            e.current(true).map_err(application_service::public_error)?;
+            let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
+            // The sole original stamp moved into this ticket's Active before Doc unlock.
+            if state.github.release_active_stamp(id,request).is_none_or(|stamp|!edit.matches(stamp)){return Err(s::refused(p::Reason::TargetChanged));}
+        }
+        state.github.release_go(id,digest,request,Instant::now(),||{
+            let granted=claim();
+            if granted { if let Some(e)=&self.agent {if e.go(id).is_err(){e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);return false;}} }
+            granted
+        })
+    }
+}
+
+/// The existing original writer calls this document-bound gate only after the
+/// exact Setup READY. No URL, token, project root or edit witness comes from UI.
+pub(crate) struct GitHubSetupGoGate { inner: Weak<Inner>, agent: Option<Arc<crate::service_github_action_requests::Entry>> }
+impl GitHubSetupGoGate {
+    pub(crate) fn agent(&self) -> Option<&Arc<crate::service_github_action_requests::Entry>> { self.agent.as_ref() }
+    pub(crate) fn agent_entering(&self) -> Result<(), BridgeError> {
+        if let Some(e) = &self.agent { e.entering().map_err(application_service::public_error)?; } Ok(())
+    }
+    pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_setup_protocol::Request,
+        claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
+        let document = DocumentBinding { inner: self.inner.upgrade().ok_or_else(|| s::refused(p::Reason::Cancelled))? };
+        let mut state = document.lock(); document.expire(&mut state, Instant::now());
+        let external = document.github_gate(&state);
+        if external != GitHubReason::None { return Err(s::refused(s::connection_reason(external))); }
+        if !document.inner.bridge.supervisor.github_setup_profile_available() { return Err(s::refused(p::Reason::Unqualified)); }
+        let project = state.github.setup_registered_project().map(str::to_owned)
+            .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+        let (generation, root) = document.registry_result(&mut state, document.inner.bridge.native_project(&project), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        let edit = document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)
+            .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        // The SAME document and actual edit registry stay borrowed through all
+        // target/stamp/expiry checks, one-use original claim and token transfer.
+        if let Some(material)=state.github.setup_secret_material(){
+            if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        }
+        if let Some(material)=state.github.setup_variable_material(){
+            if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        }
+        if let Some(e) = &self.agent {
+            if matches!(request.target.selection, p::Selection::Secret(_)) { return Err(s::refused(p::Reason::InvalidInput)); }
+            e.current(true).map_err(application_service::public_error)?;
+        }
+        state.github.setup_go(id, digest, request, generation, &root, &edit, Instant::now(), || {
+            let claimed = claim();
+            if claimed { if let Some(e) = &self.agent {
+                if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; }
+            }}
+            claimed
+        })
+    }
+}
+impl GitHubSetupGoGate {
+    // The first GO remains consumed. This checks the SAME current document,
+    // assignment, registry and edit stamp while the fixed helper is spawned.
+    pub(crate) fn claim_secret<T>(&self,id:&str,request:&crate::github_setup_protocol::Request,
+        material:&Arc<GitHubSecretMaterial>,claim:impl FnOnce()->Result<T,BridgeError>)->Result<T,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        let document=DocumentBinding{inner:self.inner.upgrade().ok_or_else(||s::refused(p::Reason::Cancelled))?};
+        let mut state=document.lock();document.expire(&mut state,Instant::now());
+        let external=document.github_gate(&state);
+        if external!=GitHubReason::None{return Err(s::refused(s::connection_reason(external)))}
+        let project=state.github.setup_registered_project().map(str::to_owned).ok_or_else(||s::refused(p::Reason::TargetChanged))?;
+        let(generation,root)=document.registry_result(&mut state,document.inner.bridge.native_project(&project),None)
+            .map_err(|e|s::refused(if e.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}))?;
+        let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)
+            .map_err(|e|s::refused(if e.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}))?;
+        if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        state.github.setup_secret_current(id,request,material,generation,&root,&edit,Instant::now())?;
+        claim()
+    }
+}
+/// Same document claim after the original History slot's source POST. This
+/// weak reference contains no credential, renderer path or alternate clock.
+pub(crate) struct GitHubHistoryGoGate { inner: Weak<Inner> }
+impl GitHubHistoryGoGate {
+    // Compare the SAME live Doc/Edit/Connection/ticket only. No GO, token,
+    // permission renewal or blocking hashing while this lock is borrowed.
+    pub(crate) fn download_current(&self,id:&str,nomination:&Arc<crate::github_history_session::Nomination>)->bool{
+        let Some(inner)=self.inner.upgrade()else{return false;};
+        let document=DocumentBinding{inner};let mut state=document.lock();
+        document.expire(&mut state,Instant::now());
+        if document.github_gate(&state)!=GitHubReason::None{return false;}
+        let current=document.registry_result(&mut state,document.inner.bridge.native_project(&nomination.project_id),None);
+        let (generation,root)=match current{Ok(value)=>value,Err(error)=>{
+            if error.reason==Reason::CleanupUnknown{state.github.unknown();}return false;
+        }};
+        let edit=match document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity){Ok(value)=>value,Err(error)=>{
+            if error.code=="cleanup_unknown"{state.github.unknown();}return false;
+        }};
+        state.github.history_download_current(id,nomination,generation,&root,&edit,Instant::now())
+    }
+    pub(crate) fn claim(&self,id:&str,digest:&str,nomination:&Arc<crate::github_history_session::Nomination>,
+        claim:impl FnOnce()->bool)->Result<Vec<u8>,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let document=DocumentBinding{inner:self.inner.upgrade().ok_or_else(||s::refused(p::Reason::Cancelled))?};
+        let mut state=document.lock();document.expire(&mut state,Instant::now());
+        let external=document.github_gate(&state);
+        if external!=GitHubReason::None{return Err(s::refused(s::connection_reason(external)));}
+        let profile=document.inner.bridge.supervisor.github_history_profile_reason();
+        if profile!=p::Reason::None{return Err(s::refused(profile));}
+        let current=document.registry_result(&mut state,document.inner.bridge.native_project(&nomination.project_id),None);
+        let(generation,root)=match current{
+            Ok(v)=>v,Err(error)=>{
+                if error.reason==Reason::CleanupUnknown{state.github.unknown();}
+                return Err(s::refused(if error.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        let edit=match document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity){
+            Ok(v)=>v,Err(error)=>{
+                if error.code=="cleanup_unknown"{state.github.unknown();}
+                return Err(s::refused(if error.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        // The actual document and edit registry remain held through the one-use
+        // original claim and bounded private token encoding; no await/callback
+        // acquires a second document or substitutes a public revision for IO.
+        state.github.history_go(id,digest,nomination,generation,&root,&edit,Instant::now(),claim)
+    }
+}
+fn github_history_project_binding(root:&asset_source::RegisteredRoot)->Result<String,BridgeError>{
+    use sha2::{Digest,Sha256};
+    let identity=root.identity.posix().map_err(|_|BridgeError::invalid())?.preflight_identity();
+    let encoded=serde_json::to_vec(&identity).map_err(|_|BridgeError::invalid())?;
+    let mut hash=Sha256::new();hash.update(b"mrk-github-history-project/1\0");
+    hash.update(root.path.as_os_str().as_encoded_bytes());hash.update(b"\0");hash.update(encoded);
+    Ok(format!("{:x}",hash.finalize()))
+}
+impl DocumentBinding {
+    fn github_history_observe_locked(&self,state:&mut DocumentState,now:Instant,external:GitHubReason){
+        let project=state.github.history_registered_project().map(str::to_owned);
+        let original=project.as_deref().and_then(|project|{
+            // SAME classifier as Setup: a newly failed second registry lookup
+            // must latch containing unknown before receipt acceptance.
+            self.github_setup_registry_result(state,self.inner.bridge.native_project(project))
+        });
+        if let Some((generation,root))=original{
+            match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity){
+                Ok(edit)=>state.github.reconcile_history(now,external,Some((generation,&root,&edit))),
+                Err(error)=>{
+                    if error.code=="cleanup_unknown"{state.github.unknown();}
+                    state.github.reconcile_history(now,external,None);
+                },
+            }
+        }else{state.github.reconcile_history(now,external,None);}
+    }
+    pub(crate) fn github_history_status(&self)->crate::github_history_protocol::Status{
+        let mut state=self.lock();let now=Instant::now();self.expire(&mut state,now);
+        let external=self.github_gate(&state);
+        state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),now,external)
+    }
+    pub(crate) fn github_history_command(&self,name:&str,value:&Value)->Result<crate::github_history_protocol::Status,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let command=p::decode_command(name,value).map_err(|_|s::refused(p::Reason::InvalidInput))?;
+        if matches!(command,p::Command::Status){return Ok(self.github_history_status());}
+        // Bounded private metadata only. The native source/work originals are
+        // not opened until the containing Supervisor registers the real owner.
+        let nonces=if matches!(command,p::Command::Start(_)|p::Command::Download(_)){
+            let mut raw=[0u8;32];getrandom::fill(&mut raw).map_err(|_|s::refused(p::Reason::RuntimeUnavailable))?;
+            Some((raw[..16].iter().map(|b|format!("{b:02x}")).collect::<String>(),
+                raw[16..].iter().map(|b|format!("{b:02x}")).collect::<String>()))
+        }else{None};
+        let mut state=self.lock();self.expire(&mut state,Instant::now());
+        if let p::Command::Cancel(args)=&command{return state.github.history_cancel(&args.operation_id);}
+        let (args,download)=match command{p::Command::Start(args)=>(args,false),p::Command::Download(args)=>(args,true),_=>return Err(s::refused(p::Reason::InvalidInput))};
+        let external=self.github_gate(&state);
+        let available=state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),Instant::now(),external);
+        if !available.available{return Err(s::refused(available.reason));}
+        let(project_id,original_generation)=state.github.registration().map(|(id,generation)|(id.to_owned(),generation))
+            .ok_or_else(||s::refused(p::Reason::NotConnected))?;
+        let current=self.registry_result(&mut state,self.inner.bridge.native_project(&project_id),None);
+        let(generation,root)=match current{
+            Ok(v)=>v,Err(error)=>{
+                if error.reason==Reason::CleanupUnknown{state.github.unknown();}
+                return Err(s::refused(if error.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        if generation!=original_generation{return Err(s::refused(p::Reason::TargetChanged));}
+        let binding=github_history_project_binding(&root).map_err(|_|s::refused(p::Reason::TargetChanged))?;
+        let edit=match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity){
+            Ok(v)=>v,Err(error)=>{
+                if error.code=="cleanup_unknown"{state.github.unknown();}
+                return Err(s::refused(if error.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::Busy}));
+            },
+        };
+        let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
+        let(owner_generation,work_nonce)=nonces.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
+        let(nomination,credential_end)=state.github.history_nomination(args,generation,root,stamp,binding,owner_generation,work_nonce,download,Instant::now())?;
+        let gate=GitHubHistoryGoGate{inner:Arc::downgrade(&self.inner)};
+        let admission=crate::supervisor::GitHubHistoryAdmission::reserve(nomination.clone(),gate,credential_end)
+            .map_err(crate::github_connection_session::history_admission_error)?;
+        #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        lookup_memory::history_admission_bytes(&self.inner,&state,admission.bytes()).map_err(|error|
+            s::refused(if error==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+        #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+        return Err(s::refused(p::Reason::Unqualified));
+        // Document+EditGuard remain borrowed from actual source nomination,
+        // through complete capacity admission and synchronous owner install.
+        state.github.history_start(nomination,admission,&self.inner.bridge.supervisor,Instant::now())
+    }
+}
+#[cfg(test)]
+pub(crate) fn github_history_document_data_checks(){
+    // The production reciprocal predicate is used by all large asset/copy
+    // admissions; History participates without blocking stop/status/lock.
+    assert!(allocation_conflict_gate(false,false).is_ok());
+    assert!(allocation_conflict_gate(false,true).is_err());
+    assert!(allocation_conflict_gate(true,false).is_err());
+    assert!(allocation_conflict_gate(true,true).is_err());
+}
+
+fn github_setup_project_binding(root: &asset_source::RegisteredRoot) -> Result<String, BridgeError> {
+    use sha2::{Digest, Sha256};
+    let identity = root.identity.posix().map_err(|_| BridgeError::invalid())?.preflight_identity();
+    let encoded = serde_json::to_vec(&identity).map_err(|_| BridgeError::invalid())?;
+    let mut hash = Sha256::new(); hash.update(b"mrk-github-setup-project/1\0");
+    hash.update(root.path.as_os_str().as_encoded_bytes()); hash.update(b"\0"); hash.update(encoded);
+    Ok(format!("{:x}", hash.finalize())) // Actual registered target correlation, not saved-config authority.
+}
+
+fn github_preflight_project_binding(root: &asset_source::RegisteredRoot) -> Result<String, BridgeError> {
+    use sha2::{Digest, Sha256};
+    let identity = root.identity.posix().map_err(|_| BridgeError::invalid())?.preflight_identity();
+    let encoded = serde_json::to_vec(&identity).map_err(|_| BridgeError::invalid())?;
+    let mut hash = Sha256::new(); hash.update(b"mrk-github-preflight-project/1\0");
+    hash.update(root.path.as_os_str().as_encoded_bytes()); hash.update(b"\0"); hash.update(encoded);
+    Ok(format!("{:x}", hash.finalize())) // Correlation only, not filesystem authority.
+}
+fn github_preflight_home() -> Result<String, BridgeError> {
+    // Ordinary native account configuration, never an IPC field. The helper
+    // traverses no-follow, checks the actual nonroot account and private fixed
+    // suffix, and refuses an unsafe HOME instead of repairing/following it.
+    let home = std::env::var_os("HOME").and_then(|v| v.into_string().ok())
+        .filter(|v| v.starts_with('/') && v.len() <= 4016 && !v.bytes().any(|b| b < 32 || b == 127));
+    home.ok_or_else(|| crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::RuntimeUnavailable))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_slot_gate(state: &DocumentState, owner: &Arc<OriginalWork>, step: Option<crate::vault_keyring_linux::Step>, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    use crate::vault_keyring_linux::Problem;
+    // Fixed own-session close/subscription removal may pass after STOP/loss.
+    // It still belongs to this exact current OriginalWork; no public Boolean
+    // can substitute for the book's expected step or real slot identity.
+    if step.is_some_and(crate::vault_keyring_linux::Step::cleanup) {
+        return keyring_cleanup_endpoint(state, owner, now);
+    }
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && matches!(slot.operation, Operation::Prepare | Operation::Initialize | Operation::Unlock))
+        .ok_or(Problem::Interrupted)?;
+    if !state.lifetime.original_bound() || state.lost_observed || state.exhausted || state.unknown || state.stopping
+        || state.quit_pending || state.retiring || state.lock_pending || owner.interrupted()
+        || slot.phase != Phase::Assessing || slot.cleanup_end.is_some()
+    { return Err(Problem::Interrupted); }
+    owner.endpoint().filter(|end| now < *end).ok_or(Problem::Interrupted)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_cleanup_endpoint(state: &DocumentState, owner: &Arc<OriginalWork>, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    use crate::vault_keyring_linux::Problem;
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner))
+        .ok_or(Problem::Interrupted)?;
+    // STOP/loss never grants a new lease. This same endpoint guards both remote
+    // session close/removal and DISTINCT local shutdown, including first poll.
+    let end = slot.cleanup_end.or_else(|| owner.endpoint()).ok_or(Problem::CleanupUnknown)?;
+    if now >= end || state.unknown || state.exhausted || slot.phase == Phase::Unknown
+        || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown)
+    { return Err(Problem::CleanupUnknown); }
+    Ok(end)
+}
+
+// Only the actual document/current-slot gate can construct this non-Clone
+// token. It is consumed immediately under the same locked original book; it is
+// neither a caller Boolean nor a fake Step::RemoveMatch.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct KeyringShutdownAdmission { endpoint: Instant }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl KeyringShutdownAdmission {
+    pub(crate) fn into_endpoint(self) -> Instant { self.endpoint }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_shutdown_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &crate::vault_keyring_linux::LookupBook, now: Instant)
+    -> Result<KeyringShutdownAdmission, crate::vault_keyring_linux::Problem> {
+    if !book.shutdown_waiting_first_poll() { return Err(crate::vault_keyring_linux::Problem::CleanupUnknown); }
+    Ok(KeyringShutdownAdmission { endpoint: keyring_cleanup_endpoint(state, owner, now)? })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_poll_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &crate::vault_keyring_linux::LookupBook, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    keyring_slot_gate(state, owner, book.current_step(), now)
+}
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
+    problem: Option<(keyring::Problem, Instant)>) -> bool {
+    use keyring::Problem;
+    if let (Some((problem, at)), Some(slot)) = (problem,
+        state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner))) {
+        let reason = match problem {
+            Problem::Interrupted => Reason::UserCancelled,
+            Problem::CleanupUnknown => Reason::CleanupUnknown,
+            Problem::Capacity => Reason::Capacity,
+            Problem::Locked if vault::operation_attached(slot) => Reason::VaultKeyringLocked,
+            Problem::MissingKey if vault::operation_attached(slot) => Reason::VaultKeyMissing,
+            Problem::Denied if vault::operation_attached(slot) => Reason::VaultKeyringDenied,
+            Problem::UnsupportedProvider if vault::operation_attached(slot) => Reason::VaultProviderUnsupported,
+            _ if vault::operation_attached(slot) => Reason::VaultKeyringUnavailable,
+            _ => Reason::SourceRefused,
+        };
+        let before = (slot.reason, slot.cleanup_end);
+        slot.stop(reason, at);
+        return before != (slot.reason, slot.cleanup_end);
+    }
+    false
+}
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+fn keyring_constrain_cleanup(state: &DocumentState, owner: &Arc<OriginalWork>, book: &mut keyring::LookupBook) {
+    if let Some(end) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner)).and_then(|slot| slot.cleanup_end) {
+        // Slot::stop is the sole writer: first_cleanup_end always adds CLEANUP
+        // to the first stop/due timestamp. Never derive this from observer-now.
+        book.constrain_cleanup_endpoint(end - CLEANUP, end);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl DocumentBinding {
+    // Deliberately PRIVATE and UNCALLED by renderer/session prepare/bind. A later
+    // native profile must integrate this into the already-registered coordinator;
+    // no second task or alternate owner is created by this source-only phase.
+    fn enter_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let dispatch_end = keyring_slot_gate(&state, owner, None, now)?;
+        lookup_memory::enter(&state, owner, input, dispatch_end)
+        // No IO is polled while the document/registry mutex is held.
+    }
+    fn admit_keyring_step(&self, owner: &Arc<OriginalWork>, step: crate::vault_keyring_linux::Step)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let dispatch_end = keyring_slot_gate(&state, owner, Some(step), now)?;
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        if !book.expected(step) { return Err(Problem::CleanupUnknown); }
+        book.admit(step, dispatch_end)
+    }
+    fn admit_keyring_shutdown(&self, owner: &Arc<OriginalWork>)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+        let end = keyring_cleanup_endpoint(&state, owner, Instant::now())?;
+        book.admit_shutdown(end)
+    }
+    fn report_keyring_problem(&self, owner: &Arc<OriginalWork>) {
+        // Read and RELEASE the backend mutex before acquiring the document gate.
+        let (problem, cleanup_unknown) = match owner.keyring.lock() {
+            Ok(book) => (book.problem().zip(book.problem_at()), book.document_cleanup_unknown()),
+            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return; }
+        };
+        let mut state = self.lock();
+        self.record_keyring_problem(&mut state, owner, problem, cleanup_unknown);
+    }
+    fn record_keyring_problem(&self, state: &mut DocumentState, owner: &Arc<OriginalWork>,
+        problem: Option<(crate::vault_keyring_linux::Problem, Instant)>, cleanup_unknown: bool) {
+        // The first failure time, not this later observer tick, owns cleanup.
+        if keyring_problem_stop(state, owner, problem) { self.bump(state); }
+        // Record the real first failure clock BEFORE generic Unknown handling,
+        // whose fallback timestamp must not accidentally renew cleanup.
+        // The installed-session diagnostic vocabulary does not describe this
+        // private keyring path; never invent a session/query association.
+        if cleanup_unknown && !state.unknown { self.coordinator_failed(state, UnknownOrigin::NotRecorded, None); }
+    }
+    async fn drive_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::{Next, Problem};
+        self.enter_keyring_lookup(owner, input)?;
+        loop {
+            let next = std::future::poll_fn(|cx| {
+                let turn = {
+                    let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                    let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                    if owner.interrupted() { book.interrupt(); }
+                    self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+                    keyring_constrain_cleanup(&state, owner, &mut book);
+                    drop(state); // Never poll native work under the document mutex.
+                    book.poll(cx)
+                }; // Release book BEFORE acquiring document: never inverted locks.
+                match turn {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(next @ (Next::Admit(_) | Next::AdmitShutdown | Next::Settled | Next::ProviderAcquire | Next::ProviderBind | Next::ProviderRecheck | Next::ProviderRelease)) => Poll::Ready(Ok(next)),
+                    Poll::Ready(Next::FirstPoll) => {
+                        // FINAL admission after bounded stream work. The current
+                        // exact slot/Unknown/effective cutoff is read under the
+                        // original document -> book order. This is the local
+                        // linearization point: later cancellation cannot revoke
+                        // an already-consumed admission retroactively. It is not
+                        // an instantaneous-stop/no-later-native-poll guarantee.
+                        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                        let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                        if owner.interrupted() { book.interrupt(); }
+                        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+                        keyring_constrain_cleanup(&state, owner, &mut book);
+                        let current_gate = keyring_poll_gate(&state, owner, &book, Instant::now());
+                        drop(state);
+                        // No stream turn, await, lock or fallible setup here.
+                        book.first_poll(cx, current_gate);
+                        Poll::Pending
+                    }
+                    Poll::Ready(Next::FirstPollShutdown) => {
+                        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                        let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                        if owner.interrupted() { book.interrupt(); }
+                        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+                        keyring_constrain_cleanup(&state, owner, &mut book);
+                        let admission = keyring_shutdown_gate(&state, owner, &book, Instant::now());
+                        drop(state);
+                        // The typed grant is consumed now: no await, new lock,
+                        // stream work or successor setup can intervene.
+                        book.first_poll_shutdown(cx, admission);
+                        Poll::Pending
+                    }
+                }
+            });
+            tokio::pin!(next);
+            let next = tokio::select! {
+                next = &mut next => Some(next),
+                _ = owner.wake.notified() => None,
+                _ = tokio::time::sleep(Duration::from_millis(25)) => None,
+            };
+            self.report_keyring_problem(owner);
+            match next {
+                Some(Ok(Next::ProviderAcquire)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Acquire).await?,
+                Some(Ok(Next::ProviderBind)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Bind).await?,
+                Some(Ok(Next::ProviderRecheck)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Recheck).await?,
+                Some(Ok(Next::ProviderRelease)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Release).await?,
+                Some(Ok(Next::Admit(step))) => {
+                    // The ignored headless fixture may defer only this fixed
+                    // successor. Re-enter THIS driver to keep pumping its real
+                    // owner stream/deadline; no alternate IO loop or grant.
+                    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if gnome_transport_fixture::hold_successor(owner, step).await { continue; }
+                    // Prepare fallible RNG/DH outside the document lock, under
+                    // this same already-charged original coordinator. The real
+                    // document/slot gate still must admit and first-poll the RPC.
+                    let prepared = if step == crate::vault_keyring_linux::Step::OpenSession {
+                        match owner.keyring.lock() {
+                            Ok(mut book) => { if owner.interrupted() { book.interrupt(); } book.prepare_exchange() }
+                            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(Problem::CleanupUnknown); }
+                        }
+                    } else { Ok(()) };
+                    if let Err(problem) = prepared.and_then(|()| self.admit_keyring_step(owner, step)) {
+                        match owner.keyring.lock() {
+                            Ok(mut book) => book.admission_refused(step, problem),
+                            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(Problem::CleanupUnknown); }
+                        }
+                    }
+                },
+                Some(Ok(Next::AdmitShutdown)) => if let Err(problem) = self.admit_keyring_shutdown(owner) {
+                    match owner.keyring.lock() {
+                        Ok(mut book) => book.shutdown_admission_refused(problem),
+                        Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(Problem::CleanupUnknown); }
+                    }
+                },
+                Some(Ok(Next::Settled)) => {
+                    let book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+                    if !book.resources_settled() { return Err(Problem::CleanupUnknown); }
+                    // This settles only this local child phase. The original
+                    // coordinator join/stage and Unknown/LateKnown gates still
+                    // decide retirement and any operation/result authority.
+                    return book.problem().map_or(Ok(()), Err);
+                },
+                Some(Ok(Next::FirstPoll | Next::FirstPollShutdown)) => {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None);
+                    return Err(Problem::CleanupUnknown);
+                },
+                Some(Err(problem)) => {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None);
+                    // Failed coordinator cannot continue polling. Its actual
+                    // poisoned book/resources remain retained and unfinal.
+                    return Err(problem);
+                }
+                None => self.tick(),
+            }
+            // Candidate/Absent or RemoveMatch alone cannot return/stage. All
+            // retained originals continue until the SDK's real local finality.
+        }
+    }
+    async fn drive_provider_child(&self, owner: &Arc<OriginalWork>, step: crate::vault_keyring_linux::ProviderStep) -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let result = child(owner, ChildJob::KeyringProvider { step }).await;
+        let actual = match result {
+            Ok(ChildEnd::KeyringProvider { step: returned, result }) if returned == step => Some(result),
+            // The blocking child joined, but its pre-entry STOP guard did not
+            // enter the native method. Do not invent a provider Returned fact.
+            Ok(ChildEnd::Refused(_)) => None,
+            Err(Reason::UserCancelled) => {
+                // Refusal before registration is not a joined child. Preserve
+                // the native book and let its existing cleanup state progress.
+                let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+                book.interrupt(); drop(book);
+                if step == crate::vault_keyring_linux::ProviderStep::Release {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, Some(owner));
+                    return Err(Problem::CleanupUnknown);
+                }
+                return Ok(());
+            },
+            Err(_) | Ok(_) => {
+                let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, Some(owner));
+                return Err(Problem::CleanupUnknown);
+            },
+        };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if child.receipt != JoinReceipt::Returned || child.handle.is_some() { return Err(Problem::CleanupUnknown); }
+        let admission = if step == crate::vault_keyring_linux::ProviderStep::Release { keyring_cleanup_endpoint(&state, owner, Instant::now()) }
+            else { keyring_slot_gate(&state, owner, None, Instant::now()) };
+        let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if admission.is_err() || owner.interrupted() { book.interrupt(); }
+        let result = match actual {
+            Some(actual) => book.provider_child_joined(step, actual),
+            None => { book.interrupt(); Ok(()) },
+        };
+        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+        // A provider failure still owns its close path. Driver keeps pumping
+        // the original book; only unknown join/locking stops this coordinator.
+        if result == Err(Problem::CleanupUnknown) { return result; }
+        if actual.is_none() && step == crate::vault_keyring_linux::ProviderStep::Release {
+            // No close method ran. A fresh driver turn must not repeatedly
+            // offer this still-Ready step or fabricate its return/cleanup.
+            drop((book, child)); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, Some(owner));
+            return Err(Problem::CleanupUnknown);
+        }
+        Ok(())
+    }
+}
+
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+// Anchor children beside this source for ordinary and #[path] module loading.
+#[path = "asset_session/lookup_memory"]
+mod lookup_memory {
+    use super::*;
+    use keyring::Problem;
+
+    const WORKING_BYTES: usize = 96 * 1024 * 1024;
+    pub(super) fn execute_remaining(actual:usize)->Option<usize>{WORKING_BYTES.checked_sub(actual)}
+    // store_preflight_admission_bytes includes the complete fixed installed
+    // code. Keep that debit separate from Execute's 96MiB working headroom.
+    pub(super) fn execute_remaining_from_admitted_total(total:usize,extra:usize)->Option<usize>{
+        let working=total.checked_sub(crate::macos_install_record::CONTROL_LIMIT)?;
+        total.checked_add(extra)?; // The combined representation must also fit.
+        execute_remaining(working.checked_add(extra)?)
+    }
+    #[test]
+    fn local_execute_census_remaining_has_no_overflow_or_added_credit(){
+        assert_eq!(execute_remaining(WORKING_BYTES),Some(0));
+        assert_eq!(execute_remaining(WORKING_BYTES-1),Some(1));
+        assert_eq!(execute_remaining(WORKING_BYTES+1),None);
+        assert_eq!(execute_remaining(usize::MAX),None);
+        assert_eq!(WORKING_BYTES,96*1024*1024);assert_eq!(SESSION_BYTES,64*1024*1024);
+        let code=crate::macos_install_record::CONTROL_LIMIT;
+        assert_eq!(execute_remaining_from_admitted_total(code+SESSION_BYTES,64),Some(WORKING_BYTES-SESSION_BYTES-64));
+        assert_eq!(execute_remaining_from_admitted_total(code+WORKING_BYTES,0),Some(0));
+        assert_eq!(execute_remaining_from_admitted_total(code+WORKING_BYTES,1),None);
+        assert_eq!(execute_remaining_from_admitted_total(code-1,0),None);
+        assert_eq!(execute_remaining_from_admitted_total(code,usize::MAX),None);
+        assert_eq!(execute_remaining_from_admitted_total(usize::MAX,1),None);
+    }
+
+    const IDENTITIES: usize = 128;
+    const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
+    pub(super) fn native_state_ready_bytes(ready: &crate::application_service_host::NativeStateReady)
+        -> Result<usize, Problem> {
+        ready.retained_bytes().and_then(|bytes| bytes.checked_add(ARC_CELLS)).ok_or(Problem::Capacity)
+    }
+
+    const FIXED_CONTROL_BYTES: usize = keyring::LOOKUP_CONTROL_BYTES
+        + std::mem::size_of::<OriginalWork>() + std::mem::size_of::<GuiCall>() + std::mem::size_of::<Slot>()
+        + std::mem::size_of::<Mutex<SourceBook>>() + 16 * std::mem::size_of::<usize>();
+    // SDK futures <=32KiB and other SDK cells <=16KiB leave THIS app share
+    // <=16KiB, not another control allowance on top of the fixed 64KiB row.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    const _: () = assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    const _: () = assert!(FIXED_CONTROL_BYTES <= 128 * 1024);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    const WIRE_BYTES: usize = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    const CRYPTO_BYTES: usize = secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    const WIRE_BYTES: usize = keyring::LOOKUP_WIRE_BYTES;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    const CRYPTO_BYTES: usize = crate::vault_crypto::CONTROL_BYTES;
+
+    // Constructible only by this document's locked census. It is not Clone,
+    // configurable wire credit, a global allocator or a process-RSS promise.
+    pub(crate) struct Admission { _private: () }
+    impl Admission {
+        fn checked(live: usize, scratch: usize) -> Result<Self, Problem> {
+            let total = live.checked_add(scratch)
+                .and_then(|bytes| bytes.checked_add(WIRE_BYTES))
+                // Explicit additional crypto row, not spent wire headroom.
+                // The total working/resident limits remain unchanged.
+                .and_then(|bytes| bytes.checked_add(CRYPTO_BYTES))
+                .ok_or(Problem::Capacity)?;
+            if total > WORKING_BYTES { return Err(Problem::Capacity); }
+            Ok(Self { _private: () })
+        }
+        #[cfg(test)]
+        pub(crate) fn data(live: usize, scratch: usize) -> Result<Self, Problem> { Self::checked(live, scratch) }
+    }
+
+    struct Seen { ids: [usize; IDENTITIES], used: usize }
+    impl Seen {
+        fn new() -> Self { Self { ids: [0; IDENTITIES], used: 0 } }
+        fn insert<T>(&mut self, value: &Arc<T>) -> Result<bool, Problem> {
+            let id = Arc::as_ptr(value) as usize;
+            if self.ids[..self.used].contains(&id) { return Ok(false); }
+            if self.used == self.ids.len() { return Err(Problem::Capacity); }
+            self.ids[self.used] = id; self.used += 1; Ok(true)
+        }
+    }
+
+    pub(super) fn retirement_empty(value: &Retirement) -> bool {
+        value.old_slot.is_none() && value.candidate.is_none() && value.staged.is_none() && value.payload.is_none()
+            && value.context.is_none() && value.slot_context.is_none() && value.assessment.is_none()
+            && value.records.capacity() == 0 && value.assignments.capacity() == 0 && value.image_batch.is_none() && value.image_paths.is_none() && value.vault.empty()
+    }
+    fn retirement_known(owner: &OriginalWork, value: &Retirement) -> Result<(), Problem> {
+        // Empty + no positive drain receipt is NOT zero live bytes. The actual
+        // off-document drop now retains this same retirement mutex throughout.
+        if owner.retired.load(Ordering::SeqCst) != retirement_empty(value) { return Err(Problem::CleanupUnknown); }
+        Ok(())
+    }
+    fn child_joined(book: &ChildBook) -> bool {
+        book.handle.is_none() && matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned)
+    }
+
+    mod apple_memory;
+
+    struct Census<'a> {
+        current: Option<(&'a Arc<OriginalWork>, &'a SourceBook, &'a Retirement)>,
+        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen, secret_loans: Seen,
+        vault_stores: Seen, vault_keys: Seen,
+    }
+    impl<'a> Census<'a> {
+        fn new(current: &'a Arc<OriginalWork>, source: &'a SourceBook, retirement: &'a Retirement) -> Self {
+            Self { current: Some((current, source, retirement)), bytes: 0,
+                payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new(),
+                assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() }
+        }
+        fn add(&mut self, bytes: usize) -> Result<(), Problem> {
+            self.bytes = self.bytes.checked_add(bytes).ok_or(Problem::Capacity)?; Ok(())
+        }
+        fn cells<T>(&mut self, count: usize) -> Result<(), Problem> {
+            self.add(count.checked_mul(std::mem::size_of::<T>()).ok_or(Problem::Capacity)?)
+        }
+        fn arc_cells<T>(&mut self) -> Result<(), Problem> { self.add(std::mem::size_of::<T>())?; self.add(ARC_CELLS) }
+        fn token(&mut self, token: &Token) -> Result<(), Problem> { self.add(token.0.capacity()) }
+        fn key(&mut self, key: &RecordKey) -> Result<(), Problem> { self.token(&key.id) }
+        fn context(&mut self, context: &Arc<NativeContext>) -> Result<(), Problem> {
+            if !self.contexts.insert(context)? { return Ok(()); }
+            self.arc_cells::<NativeContext>()?;
+            self.add(context.draft.capacity())?; self.add(context.project_id.capacity())?; self.add(context.project.path.capacity())
+        }
+        fn payload(&mut self, payload: &Arc<Payload>) -> Result<(), Problem> {
+            if !self.payloads.insert(payload)? { return Ok(()); }
+            // This unchanged per-payload metadata allowance includes the native
+            // FileObservation projection: one exact-capacity 256-cell vector
+            // plus <=64KiB exact-capacity strings, not a retained parser arena.
+            self.add(RECORD_METADATA_BYTES)?;
+            if let Some(fields) = &payload.fields { self.add(fields.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(material) = &payload.material {
+                if self.materials.insert(material)? {
+                    self.arc_cells::<Material>()?; self.add(material.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
+                }
+            }
+            Ok(())
+        }
+        fn source(&mut self, source: &Arc<Mutex<SourceBook>>, book: &SourceBook) -> Result<(), Problem> {
+            if !self.sources.insert(source)? { return Ok(()); }
+            self.arc_cells::<Mutex<SourceBook>>()?; self.add(book.retained_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn records(&mut self, records: &Vec<Record>) -> Result<(), Problem> {
+            self.cells::<Record>(records.capacity())?;
+            for record in records { self.key(&record.key)?; self.payload(&record.payload)?; } Ok(())
+        }
+        fn assignments(&mut self, values: &Vec<Assignment>) -> Result<(), Problem> {
+            self.cells::<Assignment>(values.capacity())?;
+            for value in values { self.token(&value.record_id)?; } Ok(())
+        }
+        fn candidate(&mut self, candidate: &Candidate) -> Result<(), Problem> {
+            self.payload(&candidate.payload)?; self.token(&candidate.record_id)?;
+            if let Some(key) = &candidate.existing { self.key(key)?; } Ok(())
+        }
+        fn tokens(&mut self, tokens: &TokenBatch) -> Result<(), Problem> {
+            for token in [&tokens.selection, &tokens.record, &tokens.preview, &tokens.bind] { self.token(token)?; } Ok(())
+        }
+        fn command_error(&mut self) -> Result<(), Problem> {
+            // CommandError is an Arc of a two-variant enum whose two payloads
+            // contain static strings/scalars only; sum both alternatives plus
+            // tag/alignment and Arc cells rather than inspect/private-clone it.
+            self.add(std::mem::size_of::<AssetError>())?;
+            self.add(std::mem::size_of::<crate::credential_assessment::AssessmentError>())?;
+            self.add(2 * ARC_CELLS)
+        }
+        fn assessment(&mut self, value: &SafeAssessment) -> Result<(), Problem> {
+            if self.assessments.insert(&value.0)? { self.add(value.0.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?; }
+            Ok(())
+        }
+        fn vault_store(&mut self, value: &Arc<Mutex<crate::vault_store::StoreBook>>) -> Result<(), Problem> {
+            if self.vault_stores.insert(value)? {
+                let book = value.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                if !book.not_started() && !book.operation_quiescent() && !book.settled() { return Err(Problem::CleanupUnknown); }
+                self.add(book.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
+            }
+            Ok(())
+        }
+        fn vault_key(&mut self, value: &Arc<crate::vault_crypto::VaultKey>) -> Result<(), Problem> {
+            if self.vault_keys.insert(value)? { self.add(value.retained_bytes())?; self.add(ARC_CELLS)?; } Ok(())
+        }
+        fn vault_loan(&mut self, value: &vault::BoundLoan) -> Result<(), Problem> {
+            self.context(&value.context)?; self.payload(&value.payload)?; self.vault_store(&value.store)?; self.vault_key(&value.key)
+        }
+        fn apple_profile_source(&mut self, value: &Arc<AppleP12Loan>) -> Result<(), Problem> {
+            if !self.secret_loans.insert(value)? { return Ok(()); }
+            self.add(value.own_retained_bytes())?;
+            self.vault_loan(value.census_loan())
+        }
+        fn apple_distribution_key_sources(&mut self, value: &vault::distribution_key::Work) -> Result<(), Problem> {
+            // Work.retained_bytes/data_bytes already includes this immutable
+            // inventory. Deduplicate only its actual shared Arc against the
+            // parent-only source census, never a renderer count or estimate.
+            if let Some(destination)=value.destination() {
+                let inventory=destination.inventory();
+                if !self.secret_loans.insert(inventory)? {
+                    self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                }
+            }
+            if let Some(destination)=value.p12_destination() {
+                let inventory=destination.inventory();
+                if !self.secret_loans.insert(inventory)? { self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?; }
+            }
+            if let Some(context) = value.context() { self.context(context)?; }
+            if let Some(key) = value.key() { self.vault_key(key)?; }
+            if let Some(store) = value.store() { self.vault_store(store)?; }
+            if let Some(payload) = value.payload().map_err(|_| Problem::CleanupUnknown)? { self.payload(&payload)?; }
+            Ok(())
+        }
+        fn vault_session(&mut self, value: &vault::Session) -> Result<(), Problem> {
+            self.add(value.data_bytes().ok_or(Problem::Capacity)?)?; self.vault_store(value.store())?;
+            if let Some(key) = value.key() { self.vault_key(key)?; }
+            for loan in value.bound.iter().flatten() { self.vault_loan(loan)?; } Ok(())
+        }
+        fn artifact_inputs(&mut self)->Result<(),Problem>{
+            let Some((current,_,_))=self.current else{return Err(Problem::CleanupUnknown)};
+            let Some(document)=current.gui.document.upgrade()else{return Ok(());};
+            // DATA-only snapshots may have no containing Document. The real
+            // enter below separately requires its live, bound original slot.
+            self.artifact_document(&document)
+        }
+        fn artifact_document(&mut self,document:&Arc<Inner>)->Result<(),Problem>{
+            self.apple_retained_document(document)?;
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            self.add(vault::installed_backup_observation::document_bytes(document).map_err(|_|Problem::Capacity)?)?;
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                // Snapshot originals under the old book, then release it before
+                // visiting any owner. No inferred picker/quit coverage or IO.
+                let snapshot={
+                    let book=document.installed_macos_session.try_lock().map_err(|_|Problem::Capacity)?;
+                    match book.as_ref().and_then(|b|b.git_upstream.as_ref().map(|c|(b,c))) {
+                        None=>None,
+                        Some((b,c))=>{
+                            if b.originals.len()>2{return Err(Problem::Capacity)}
+                            let bytes=std::mem::size_of::<installed_macos_observation::SessionBook>()
+                                .checked_add(b.originals.capacity().checked_mul(std::mem::size_of::<(Arc<OriginalWork>,Option<Operation>)>()).ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                            Some((Arc::clone(c),b.originals.iter().map(|(o,_)|Arc::clone(o)).collect::<Vec<_>>(),bytes))
+                        }
+                    }
+                };
+                if let Some((control,originals,bytes))=snapshot {
+                    self.add(bytes)?;self.add(control.retained_bytes().ok_or(Problem::Capacity)?)?;
+                    for original in &originals {self.owner(original)?;}
+                }
+            }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                // Snapshot originals under the old book, then release it before
+                // visiting any owner. No inferred picker/quit coverage or IO.
+                let snapshot={
+                    let book=document.installed_macos_session.try_lock().map_err(|_|Problem::Capacity)?;
+                    match book.as_ref().and_then(|b|b.git_cli.as_ref().map(|c|(b,c))) {
+                        None=>None,
+                        Some((b,c))=>{
+                            if b.originals.len()>2{return Err(Problem::Capacity)}
+                            let bytes=std::mem::size_of::<installed_macos_observation::SessionBook>()
+                                .checked_add(b.originals.capacity().checked_mul(std::mem::size_of::<(Arc<OriginalWork>,Option<Operation>)>()).ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                            Some((Arc::clone(c),b.originals.iter().map(|(o,_)|Arc::clone(o)).collect::<Vec<_>>(),bytes))
+                        }
+                    }
+                };
+                if let Some((control,originals,bytes))=snapshot {
+                    self.add(bytes)?;self.add(control.retained_bytes().ok_or(Problem::Capacity)?)?;
+                    for original in &originals {self.owner(original)?;}
+                }
+            }
+            let snapshot=document.bridge.artifact_inspection.artifact_census().map_err(|_|Problem::Capacity)?;
+            self.add(snapshot.data_bytes().ok_or(Problem::Capacity)?)?;
+            for (original,proof) in snapshot.members(){
+                self.owner(original)?;
+                if self.materials.insert(proof)?{self.arc_cells::<asset_source::ArtifactProbe>()?;self.add(proof.path.capacity())?;self.add(proof.label.capacity())?;self.add(proof.identity.retained_bytes().ok_or(Problem::Capacity)?)?;}
+            }Ok(())
+        }
+        fn artifact_binding(&mut self,value:&Arc<ArtifactBinding>)->Result<(),Problem>{
+            if self.contexts.insert(value)?{self.arc_cells::<ArtifactBinding>()?;self.add(value.project_id.capacity())?;self.add(value.root.path.capacity())?;}Ok(())
+        }
+        fn staged(&mut self, staged: &Staged) -> Result<(), Problem> {
+            match staged {
+                Staged::Artifact{proof,binding}=>{self.artifact_binding(binding)?;self.add(proof.path.capacity())?;self.add(proof.label.capacity())?;self.add(proof.identity.retained_bytes().ok_or(Problem::Capacity)?)},
+                Staged::Selected { payload, tokens } => { self.payload(payload)?; self.tokens(tokens) },
+                Staged::Prepared { result: Err(_), tokens } => { self.command_error()?; self.tokens(tokens) },
+                Staged::Prepared { result: Ok(result), tokens } => { self.assessment(result)?; self.tokens(tokens) },
+                Staged::Delete(tokens) => self.tokens(tokens),
+                Staged::Committed { bind } => { if let Some(token) = bind { self.token(token)?; } Ok(()) },
+                Staged::Bound(value) => self.token(&value.record_id),
+                Staged::Refused(_) | Staged::Installation(_) => Ok(()),
+                Staged::Vault(value) => self.add(value.retained_bytes().ok_or(Problem::Capacity)?),
+                Staged::Images { batch, binding } => {
+                    self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?;
+                    self.add(binding.retained_bytes().ok_or(Problem::Capacity)?)
+                },
+                // No invented census for opaque AssessmentResult vectors or
+                // unrelated project/evidence/path DTOs in this closed slice.
+                _ => Err(Problem::Unavailable),
+            }
+        }
+        fn slot(&mut self, slot: &Slot) -> Result<(), Problem> {
+            if slot.evidence.is_some()
+                || slot.project_path.is_some() || slot.path_result.is_some() { return Err(Problem::Unavailable); }
+            self.add(std::mem::size_of::<Slot>())?;
+            // The ordinary chooser keeps its published Project after result
+            // return and Snapshot. Charge its three owned String buffers; the
+            // inline cells are above and the SAME original owner is below.
+            // This DATA is neither a registered source nor a join receipt.
+            if let Some(project) = &slot.project {
+                self.add(project.id.capacity())?; self.add(project.name.capacity())?; self.add(project.path.capacity())?;
+            }
+            if let Some(assessment) = &slot.assessment { self.assessment(assessment)?; }
+            if let Some(payload) = &slot.vault.loaded { self.payload(payload)?; }
+            if let Some(loan) = &slot.vault.previous_bound {
+                self.add(vault::BOUND_LOAN_BYTES)?; self.vault_loan(loan)?;
+            }
+            if let Some(store) = &slot.vault.lease { self.vault_store(store)?; }
+            if let Some(label) = &slot.vault.label { self.add(label.capacity())?; }
+            self.add(slot.vault.recovery_retained_bytes())?;
+            if let Some(context) = &slot.context { self.context(context)?; }
+            if let Some(key) = &slot.target { self.key(key)?; }
+            if let Some(candidate) = &slot.candidate { self.candidate(candidate)?; }
+            if let Some(token) = &slot.selection { self.token(token)?; }
+            if let Some(preview) = &slot.preview {
+                self.token(&preview.token)?;
+                if let Some(token) = &preview.bind_token { self.token(token)?; }
+                if let Some(key) = &preview.record { self.key(key)?; }
+                if let PreviewSubject::Record { record_id: Some(token), .. } = &preview.subject { self.token(token)?; }
+            }
+            if let Some(binding)=&slot.artifact{self.artifact_binding(binding)?;}
+            if let Some(staged) = &slot.staged { self.staged(staged)?; }
+            if slot.error.is_some() { self.command_error()?; }
+            if let Some(key) = &slot.result_record { self.key(key)?; }
+            if let Some(payload) = &slot.retired_payload { self.payload(payload)?; }
+            if let Some(batch) = &slot.image_batch { self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(binding) = &slot.images { self.add(binding.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            self.owner(&slot.owner)
+        }
+        fn retirement(&mut self, retirement: &Retirement) -> Result<(), Problem> {
+            if let Some(assessment) = &retirement.assessment { self.assessment(assessment)?; }
+            self.add(retirement.vault.data_bytes().ok_or(Problem::Capacity)?)?;
+            if let Some(source) = retirement.vault.apple_profile_source() { self.apple_profile_source(source)?; }
+            self.apple_distribution_key_sources(retirement.vault.apple_distribution_key_work())?;
+            if let Some(vault) = &retirement.vault.session { self.vault_session(vault)?; }
+            for key in retirement.vault.keys.iter().flatten() { self.vault_key(key)?; }
+            if let Some(payload) = &retirement.vault.loaded { self.payload(payload)?; }
+            for loan in retirement.vault.bound.iter().flatten().chain(retirement.vault.previous_bound.iter()) { self.vault_loan(loan)?; }
+            if let Some(candidate) = &retirement.candidate { self.candidate(candidate)?; }
+            if let Some(staged) = &retirement.staged { self.staged(staged)?; }
+            if let Some(payload) = &retirement.payload { self.payload(payload)?; }
+            if let Some(batch) = &retirement.image_batch { self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(paths) = &retirement.image_paths {
+                self.cells::<std::path::PathBuf>(paths.capacity())?;
+                for path in paths { self.add(path.capacity())?; }
+            }
+            if let Some(context) = &retirement.context { self.context(context)?; }
+            if let Some(context) = &retirement.slot_context { self.context(context)?; }
+            self.records(&retirement.records)?; self.assignments(&retirement.assignments)?;
+            if let Some(slot) = &retirement.old_slot { self.slot(slot)?; } Ok(())
+        }
+        fn owner(&mut self, owner: &Arc<OriginalWork>) -> Result<(), Problem> {
+            if !self.owners.insert(owner)? { return Ok(()); }
+            self.arc_cells::<OriginalWork>()?; self.arc_cells::<GuiCall>()?;
+            if let Some(work)=owner.apple_profile.get() {
+                self.add(work.own_bytes())?;
+                if let Some(sources)=work.census_sources().map_err(|_|Problem::CleanupUnknown)? { self.profile_sources(&sources)?; }
+            }
+            if let Some(work)=owner.apple_key.get() {
+                self.add(work.own_bytes())?;
+                if let Some(sources)=work.census_sources().map_err(|_|Problem::CleanupUnknown)? { self.key_sources(&sources)?; }
+            }
+            // The same parent clock/receive/journal backing is quoted by the
+            // SavedSession. Only the Arc/OnceLock cells live inline here.
+            if let Some(selectors) = owner.backup_selection.get() {
+                self.add(selectors.settled_census_bytes().ok_or(Problem::CleanupUnknown)?)?;
+            }
+            if let Some(work) = &owner.installation {
+                self.add(work.retained_bytes_if_settled().ok_or(Problem::CleanupUnknown)?)?;
+            }
+            let vault = owner.vault.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            self.add(vault.backup_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(vault.upload_key_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(vault.apple_profile_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(vault.apple_distribution_key_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.apple_distribution_key_sources(vault.apple_distribution_key_work())?;
+            if let Some(source) = vault.apple_profile_source() { self.apple_profile_source(source)?; }
+            if owner.upload_key_clock.get().is_some() { self.arc_cells::<vault::UploadKeyClock>()?; }
+            if let Some(store) = vault.store_ref() { self.vault_store(store)?; }
+            if let Some(key) = vault.key_ref() { self.vault_key(key)?; }
+            let gui = owner.gui.facts.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            if !(gui.not_created || gui.destroyed && gui.released) { return Err(Problem::CleanupUnknown); }
+            if let Some(path) = &gui.selected { self.add(path.capacity())?; }
+            let image_paths = owner.gui.selected_images.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            if let Some(paths) = &*image_paths {
+                self.cells::<std::path::PathBuf>(paths.capacity())?;
+                for path in paths { self.add(path.capacity())?; }
+            }
+            if let Some((_, source, retirement)) = self.current.filter(|(current, _, _)| Arc::ptr_eq(owner, current)) {
+                retirement_known(owner, retirement)?;
+                self.source(&owner.source, source)?; self.retirement(retirement)
+            } else {
+                // A retained old/quit owner has no remaining original which may
+                // allocate after this snapshot. Busy/failed/ambiguous is refusal.
+                let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let keyring = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                if coordinator.receipt != JoinReceipt::Returned || coordinator.handle.is_some() || !child_joined(&child)
+                    || !(source.not_started() || source.settled()) || !keyring.resources_settled() || !keyring.allocations_released()
+                { return Err(Problem::CleanupUnknown); }
+                retirement_known(owner, &retirement)?;
+                self.source(&owner.source, &source)?; self.retirement(&retirement)
+            }
+        }
+        fn profile_sources(&mut self, sources:&Arc<vault::profile_sources::AppleProfileSources>)->Result<(),Problem>{
+            if !self.secret_loans.insert(sources)? { return Ok(()); }
+            self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
+            for loan in sources.loans() { self.vault_loan(loan)?; }
+            Ok(())
+        }
+        fn key_sources(&mut self, sources:&Arc<vault::key_sources::AppleKeySources>)->Result<(),Problem>{
+            if !self.secret_loans.insert(sources)? { return Ok(()); }
+            self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.vault_loan(sources.loan())?;
+            if let Some(payload)=sources.certificate_payload() { self.payload(&payload)?; }
+            if let Some(selected)=sources.selected_p12_census().map_err(|_|Problem::CleanupUnknown)? { self.apple_profile_source(&selected)?; }
+            if let Some(inventory)=sources.inventory() {
+                if self.secret_loans.insert(inventory)? { self.add(inventory.own_retained_bytes().ok_or(Problem::Capacity)?)?; }
+                self.context(inventory.context())?; self.vault_key(inventory.key())?; self.vault_store(inventory.store())?;
+            }
+            Ok(())
+        }
+        fn secret_loan(&mut self,loan:&Arc<GitHubSecretMaterial>)->Result<(),Problem>{
+            if !self.secret_loans.insert(loan)?{return Ok(())}
+            let(context,payload)=loan.census_parts();self.context(context)?;self.payload(payload)?;
+            self.arc_cells::<GitHubSecretMaterial>()?;self.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn variable_loan(&mut self,loan:&Arc<GitHubVariableMaterial>)->Result<(),Problem>{
+            // Same finite set for the mutually exclusive Setup material kinds.
+            // Live distinct Arc allocations cannot share a data address.
+            if !self.secret_loans.insert(loan)?{return Ok(())}
+            let(context,payload)=loan.census_parts();self.context(context)?;self.payload(payload)?;
+            self.arc_cells::<GitHubVariableMaterial>()?;self.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
+            if state.retiring { return Err(Problem::CleanupUnknown); }
+            self.add(std::mem::size_of::<DocumentState>())?;
+            // Both original Store owners retain continuity across idle/context replacement.
+            self.add(crate::saved_command_owner::identity_continuity_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(crate::saved_command_owner::store_versions_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(crate::saved_command_owner::apple_provisioning_retained_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+            // This Document binding can outlive every Apple review/input. It
+            // is distinct from the owner's fixed retained comparison buffers.
+            if let Some(ready) = &state.apple_provisioning_ready { self.apple_state_ready(ready)?; }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::application_service_host::identity_history_document_backing_bytes())?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::agent_identity_requests::document_backing_bytes())?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::agent_local_checks::DOCUMENT_BACKING)?;
+            #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),target_os="macos",target_pointer_width="64",target_arch="aarch64"))]
+            self.add(crate::shell::installed_observation::installed_cli_observation_bytes())?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::agent_build_requests::DOCUMENT_BACKING)?; // ONE shared build inbox, not one per platform.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::application_service::ipc_response_memory::document_backing().ok_or(Problem::Capacity)?)?; // SAME8 originals; one Metadata lease through actual stream close, not per-family pools.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_git_requests::DOCUMENT_BACKING + agent_git_index::document_backing())?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
+            self.add(crate::service_github_action_protocol::DOCUMENT_BACKING)?; // ONE complete GitHub inbox/scopes/history; IPC-only replies are in the SAME8 pool.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_upload_key_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(agent_upload_key::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_version_edit_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_metadata_text_requests::DOCUMENT_BACKING)?; // SAME Config32; only one active full metadata bundle.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_tool_setup_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(agent_tool_setup::retained_bytes(state).ok_or(Problem::Capacity)?)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            {if !agent_local_history::native_backing_fits(){return Err(Problem::Capacity);}self.add(crate::service_store_requests::history::retained_document_backing().ok_or(Problem::Capacity)?)?;} // SAME Store32/2MiB, including the closed History sibling; original material remains charged.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/history; IPC-only replies are in the SAME8 pool.
+            self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
+            self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            self.add(git_local::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            self.add(version_enrollment::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(version_reserve::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+            self.records(&state.records)?; self.assignments(&state.assignments)?;
+            if let Some(context) = &state.context { self.context(context)?; }
+            if let Some(loan)=state.github.setup_secret_material(){self.secret_loan(loan)?;}
+            if let Some(loan)=state.github.setup_variable_material(){self.variable_loan(loan)?;}
+            if state.github.setup_has_material() || state.github.history_has_retained_data() {
+                // One containing Connection projection, even when an idle
+                // Setup consent and a prior History result are both retained.
+                self.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+            }
+            if let Some(slot) = &state.slot { self.slot(slot)?; }
+            if let Some(quit) = &state.quit { self.owner(quit)?; } Ok(())
+        }
+    }
+
+    // There is no fabricated current keyring owner for Setup. With None every
+    // retained asset owner must satisfy the same positive settled branch above.
+    pub(super) fn secret_admission_bytes(document:&Arc<Inner>,state:&DocumentState, loan:&Arc<GitHubSecretMaterial>,
+        helper_bytes:usize,applying:bool)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        census.secret_loan(loan)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){
+            // Otherwise document() already charged the same complete buffers.
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        // All capacities above are from original buffers, shared Arcs visited
+        // once. Below are distinct future child-work and framing reservations.
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        census.add(helper_bytes)?;
+        census.add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?;
+        census.add(if applying {crate::github_setup_protocol::SECRET_APPLY_BUFFERS}
+            else{crate::github_setup_protocol::SECRET_PREPARE_BUFFERS})?;
+        // The same existing committed-session cap, not the larger keyring
+        // allowance, bounds this operation's complete retained working set.
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}
+        Ok(census.bytes)
+    }
+
+    // No fabricated current OriginalWork. All previously retained asset
+    // owners must be positively quiescent before this independent readonly IO.
+    pub(super) fn history_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        // Includes native source reservation, raw saved config and the fixed
+        // simultaneous framing/receipt/Status-copy term. Not a process RSS claim.
+        // The full128MiB installed-runtime reservation is separate from the
+        // shared64MiB Document/source/owner/framing allowance. All conservative
+        // service/history debits above remain charged, including future replies.
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { crate::macos_history_inventory::admission_bytes(census.bytes,future).ok_or(Problem::Capacity) }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { census.add(future)?;if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes) }
+    }
+
+    // The same pure Document/storage census, not History execution authority.
+    // Gh-auth reserves its distinct complete runtime and held source set; only
+    // one joined serial capture may release that debit for the next capture.
+    // Storage arithmetic only; no History authority or live-owner census.
+    pub(super) fn git_read_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        history_admission_bytes(document,state,future)
+    }
+    // Storage arithmetic only; GitLocal retains its OWN publisher, sources,
+    // NativeUse and fixed runtime. The read facet supplies no mutation grant.
+    pub(super) fn git_local_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        git_local_admission_bytes_for(document,state,future,crate::git_local_protocol::Kind::Stage)
+    }
+    pub(super) fn git_local_admission_bytes_for(document:&Arc<Inner>,state:&DocumentState,future:usize,kind:crate::git_local_protocol::Kind)->Result<usize,Problem>{
+        let retained=retained_document_bytes(document,state)?;
+        if kind.is_push() {
+            crate::git_local_protocol::push_worker::admission_bytes(retained,future)
+        } else if kind==crate::git_local_protocol::Kind::Fetch {
+            crate::git_local_protocol::fetch_worker::admission_bytes(retained,future)
+        } else {crate::git_local_protocol::admission_bytes(retained,future)}.ok_or(Problem::Capacity)
+    }
+    // Exact current device coordinator only; its OriginalWork has never opened
+    // Source/GUI/keyring/vault. Real per-call Supervisor Books must already be
+    // gone, and the complete retained Doc/Original is counted under the old cap.
+    pub(super) fn github_device_admission_bytes(document:&Arc<Inner>,state:&DocumentState,owner:&Arc<OriginalWork>,future:usize)->Result<usize,Problem>{
+        if !gh_auth::device::census_original(state).is_some_and(|current|Arc::ptr_eq(current,owner))
+            || gh_auth::retained_bytes(state).is_none(){return Err(Problem::CleanupUnknown)}
+        let source=owner.source.try_lock().map_err(|_|Problem::CleanupUnknown)?;
+        let retirement=owner.retirement.try_lock().map_err(|_|Problem::CleanupUnknown)?;
+        let child=owner.child.try_lock().map_err(|_|Problem::CleanupUnknown)?;
+        let coordinator=owner.coordinator.try_lock().map_err(|_|Problem::CleanupUnknown)?;
+        if !source.not_started()||!retirement_empty(&retirement)||child.receipt!=JoinReceipt::New||child.handle.is_some()
+            ||coordinator.receipt!=JoinReceipt::Pending||coordinator.handle.is_none(){return Err(Problem::CleanupUnknown)}
+        if !owner.keyring.try_lock().is_ok_and(|k|k.resources_settled()&&k.allocations_released()){return Err(Problem::CleanupUnknown)}
+        let mut census=Census{current:Some((owner,&source,&retirement)),bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?}
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        {crate::macos_history_inventory::admission_bytes(census.bytes,future).ok_or(Problem::Capacity)}
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        {let _=future;Err(Problem::Unavailable)}
+    }
+    pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        history_admission_bytes(document,state,future)
+    }
+
+    // Actual retained Document/artifact/GitHub buffers for a new public-tool
+    // operation. No fabricated current owner, standalone state or signing credit.
+    pub(super) fn retained_document_bytes(document: &Arc<Inner>, state: &DocumentState) -> Result<usize, Problem> {
+        document_bytes_with_tool_pickers(document, state, None, None)
+    }
+    // The SAME census/Seen visits every exact current and earlier picker held
+    // by tool preparation. A snapshot path or the current Document.slot alone
+    // cannot account for those original source/GUI/retirement allocations.
+    pub(super) fn tool_acquisition_document_bytes(document: &Arc<Inner>, state: &DocumentState,
+        tools: &crate::saved_command_owner::ToolAcquisitionCensus) -> Result<usize, Problem> {
+        document_bytes_with_tool_pickers(document, state, Some(tools), None)
+    }
+    // Same concrete census for delegated source registration. These are the
+    // three actual Checked picker originals, not paths or replacement owners.
+    pub(super) fn tool_setup_registration_document_bytes(document: &Arc<Inner>, state: &DocumentState,
+        pickers: &[Arc<OriginalWork>; 3]) -> Result<usize, Problem> {
+        document_bytes_with_tool_pickers(document, state, None, Some(pickers))
+    }
+    fn document_bytes_with_tool_pickers(document: &Arc<Inner>, state: &DocumentState,
+        tools: Option<&crate::saved_command_owner::ToolAcquisitionCensus>,
+        registration: Option<&[Arc<OriginalWork>; 3]>) -> Result<usize, Problem> {
+        let mut census = Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
+            sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() };
+        census.artifact_document(document)?;
+        census.document(state)?;
+        if let Some(tools) = tools {
+            for original in tools.picker_originals() { census.owner(original)?; }
+        }
+        if let Some(pickers) = registration {
+            for original in pickers { census.owner(original)?; }
+        }
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data() {
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        Ok(census.bytes)
+    }
+
+    // Future Store owner adds its actual owned scratch/framing separately; this
+    // counts the same context/payload originals once, not copied secret buffers.
+    pub(super) fn store_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>,
+        future:usize)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        census.selected_store_material(loan)?;census.add(loan.supplemental_frame_bytes())?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(future)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(super) fn local_history_admission(document:&Arc<Inner>,state:&DocumentState,consent:&LocalHistoryConsent,actual:usize)->Result<Admission,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        if let Some(context)=&consent.context{census.context(context)?;}
+        census.arc_cells::<LocalHistoryConsent>()?;
+        census.add(consent.project_id.capacity())?;census.add(consent.root.path.capacity())?;
+        if let Some(id)=&consent.candidate_operation_id{census.add(id.capacity())?;}
+        if let Some(id)=&consent.stage_operation_id{census.add(id.capacity())?;}
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;
+        Admission::checked(census.bytes,0)
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn local_candidate_admission(document:&Arc<Inner>,state:&DocumentState,material:&AndroidSigningMaterial,actual:usize)->Result<Admission,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),
+            assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        let(context,keys,payloads,comparison)=material.candidate_census();
+        census.context(context)?;census.arc_cells::<AndroidSigningMaterial>()?;
+        census.cells::<RecordKey>(keys.capacity())?;for key in keys{census.key(key)?;}
+        census.cells::<Arc<Payload>>(payloads.capacity())?;for payload in payloads{census.payload(payload)?;}
+        census.add(comparison.retained_heap_bytes().ok_or(Problem::Capacity)?)?;
+        // Weak<Document> is inline in the SAME material; payload/context Arcs
+        // use the existing Seen sets, not a copied private material buffer.
+        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn local_ios_candidate_admission(document:&Arc<Inner>,state:&DocumentState,material:&IOSSigningMaterial,actual:usize)->Result<Admission,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),
+            assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        let(context,keys,payloads,comparison)=material.candidate_census();
+        census.context(context)?;census.arc_cells::<IOSSigningMaterial>()?;
+        census.cells::<RecordKey>(keys.capacity())?;for key in keys{census.key(key)?;}
+        census.cells::<Arc<Payload>>(payloads.capacity())?;for payload in payloads{census.payload(payload)?;}
+        census.add(comparison.retained_heap_bytes().ok_or(Problem::Capacity)?)?;
+        // Weak<Document> is inline in the SAME material; payload/context Arcs
+        // use the existing Seen sets, not a copied private material buffer.
+        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn local_store_prepare_admission(document:&Arc<Inner>,state:&DocumentState,material:&SelectedStoreMaterial,actual:usize)->Result<Admission,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        let(context,payload)=material.census_parts();census.context(context)?;census.payload(payload)?;
+        for(_,payload)in material.supplemental_census(){census.payload(payload)?;}
+        census.arc_cells::<SelectedStoreMaterial>()?;census.add(material.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(material.supplemental_frame_bytes())?;
+        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn local_store_execute_admission(document:&Arc<Inner>,state:&DocumentState,material:&SelectedStoreMaterial,actual:usize)->Result<Admission,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        if let Some((bytes,pickers))=material.execute_census().ok_or(Problem::CleanupUnknown)?{
+            census.add(bytes)?;for picker in pickers.iter().flatten(){census.owner(picker)?;}
+        }
+        let(context,payload)=material.census_parts();census.context(context)?;census.payload(payload)?;
+        for(_,payload)in material.supplemental_census(){census.payload(payload)?;}
+        census.arc_cells::<SelectedStoreMaterial>()?;census.add(material.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(material.supplemental_frame_bytes())?;
+        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
+    }
+
+    pub(super) fn store_preflight_admission_bytes(document:&Arc<Inner>,state:&DocumentState,
+        loan:&Arc<SelectedStoreMaterial>,future:usize)->Result<usize,Problem>{
+        let backing=store_admission_bytes(document,state,loan,future)?;
+        // One actual installed inspector; callers cannot supply this term.
+        backing.checked_add(crate::macos_install_record::CONTROL_LIMIT).ok_or(Problem::Capacity)
+    }
+
+    pub(super) fn variable_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<GitHubVariableMaterial>,
+        original_bytes:usize)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;census.variable_loan(loan)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(original_bytes)?;
+        // Same original Config wrapper and explicitly distinct wire buffers.
+        // No secret helper allocation, second native original or renewed quota.
+        census.add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?;
+        census.add(crate::github_setup_protocol::VARIABLE_WIRE_BUFFERS)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+    }
+
+    pub(super) fn live_bytes(state: &DocumentState, owner: &Arc<OriginalWork>, source: &SourceBook, retirement: &Retirement) -> Result<usize, Problem> {
+        let mut census = Census::new(owner, source, retirement); census.artifact_inputs()?; census.document(state)?; Ok(census.bytes)
+    }
+    // Fixed generation callers only: actual retained catalogue/Selection and
+    // zero-to-three original source pickers, never a path/version quote.
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+    pub(super) fn upload_key_catalogue_bytes(tools: &crate::saved_command_owner::UploadKeyToolLoan) -> Result<usize, Problem> {
+        let (bytes, pickers) = tools.census().ok_or(Problem::CleanupUnknown)?;
+        let mut census = Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
+            sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() };
+        census.add(bytes)?;
+        for original in pickers.iter().flatten() { census.owner(original)?; }
+        census.add(std::mem::size_of::<Census<'_>>())?; Ok(census.bytes)
+    }
+    // SAME already-rostered current OriginalWork, not a fabricated current
+    // owner or permission for a sibling active operation. Use only at READY or
+    // pre-NEW when the original native inspector has frozen its real charge.
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+    pub(super) fn upload_key_live_bytes(document: &Arc<Inner>, state: &DocumentState, owner: &Arc<OriginalWork>,
+        tools: &crate::saved_command_owner::UploadKeyToolLoan) -> Result<usize, Problem> {
+        if !state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::GenerateUploadKey)
+            || owner.upload_key_clock.get().is_none() { return Err(Problem::Unavailable); }
+        let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if owner.installation.is_some() || !(source.not_started() || source.settled())
+            || !owner.gui.settled() || !owner.keyring.try_lock().is_ok_and(|book| book.resources_settled() && !book.memory_held()) {
+            return Err(Problem::CleanupUnknown);
+        }
+        let mut census = Census::new(owner, &source, &retirement);
+        census.artifact_document(document)?; census.document(state)?;
+        let (bytes, pickers) = tools.census().ok_or(Problem::CleanupUnknown)?;
+        census.add(bytes)?;
+        for original in pickers.iter().flatten() { census.owner(original)?; }
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data() {
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        census.add(std::mem::size_of::<Census<'_>>())?; Ok(census.bytes)
+    }
+
+    pub(super) fn pending_slot_bytes(state: &DocumentState, slot: &Slot) -> Result<usize, Problem> {
+        let source = slot.owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let retirement = slot.owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let mut census = Census::new(&slot.owner, &source, &retirement);
+        census.artifact_inputs()?; census.document(state)?; census.slot(slot)?; Ok(census.bytes)
+    }
+    pub(super) fn enter(state: &DocumentState, owner: &Arc<OriginalWork>,
+        input: keyring::LookupInput, end: Instant) -> Result<(), Problem> {
+        let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if coordinator.receipt != JoinReceipt::Pending || coordinator.handle.is_none() || !child_joined(&child)
+            || !(source.not_started() || source.settled()) || owner.large_work_started.load(Ordering::SeqCst)
+            || owner.installation.is_some() || !book.can_begin() { return Err(Problem::CleanupUnknown); }
+        let _document=owner.gui.document.upgrade().ok_or(Problem::Unavailable)?;
+        if !state.lifetime.original_bound()||state.slot.as_ref().is_none_or(|slot|!Arc::ptr_eq(&slot.owner,owner)){
+            return Err(Problem::Unavailable);
+        }
+        let live = live_bytes(state, owner, &source, &retirement)?;
+        // Child/parser originals are positively joined; credential_format drops
+        // arenas before ChildEnd. Non-Token child/R1/Value work has NEVER
+        // started in this owner; no caller-local Captured result is omitted.
+        // Thus no parser/request scratch is silently presumed inside 6MiB.
+        let charge = Admission::checked(live, 0)?;
+        let result = book.begin(input, end, charge);
+        // These are the ACTUAL child/source/retirement dispatch locks; none is
+        // released between the census and publishing the one nonduplicable charge.
+        drop((book, retirement, source, child, coordinator)); result
+    }
+
+    #[cfg(test)]
+    mod project_result_census_tests {
+        // Direct census logic with inert DATA only. No DocumentBinding, native
+        // picker, native registration, task or Git operation is constructed here.
+        use super::*;
+
+        fn census() -> Census<'static> {
+            Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
+                sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(),
+                vault_stores: Seen::new(), vault_keys: Seen::new() }
+        }
+        fn slot_data() -> Slot {
+            let owner = OriginalWork::new(1, false, Weak::new());
+            // Model the retained receipt; this does not assert a native join.
+            owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+            let mut slot = Slot::new(owner, Operation::ChooseProject, None, None, None);
+            slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            slot
+        }
+        fn project_data() -> Project {
+            let mut project = Project { id: String::with_capacity(91), name: String::with_capacity(513), path: String::with_capacity(4097) };
+            project.id.push_str("project-1"); project.name.push_str("Retained project DATA"); project.path.push_str("/inert/project");
+            project
+        }
+        fn slot_bytes(slot: &Slot) -> Result<usize, Problem> {
+            let mut census = census(); census.slot(slot)?; Ok(census.bytes)
+        }
+        fn document_bytes(state: &DocumentState) -> Result<usize, Problem> {
+            let mut census = census(); census.document(state)?; Ok(census.bytes)
+        }
+
+        #[test]
+        fn retained_project_charges_all_capacities_without_disposing_or_replacing_original() {
+            let mut state = crate::asset_session::tests::empty_state();
+            state.session = false; state.next_operation = 1; state.slot = Some(slot_data());
+            let owner = state.slot.as_ref().unwrap().owner.clone();
+            let before = document_bytes(&state).unwrap();
+            let project = project_data();
+            let extra = project.id.capacity() + project.name.capacity() + project.path.capacity();
+            assert!(extra > project.id.len() + project.name.len() + project.path.len());
+            state.slot.as_mut().unwrap().project = Some(project);
+            assert_eq!(document_bytes(&state), Ok(before + extra));
+            let slot = state.slot.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&slot.owner, &owner));
+            assert_eq!(slot.project.as_ref().unwrap().id, "project-1");
+            assert!(slot.operation == Operation::ChooseProject && slot.phase == Phase::Idle
+                && slot.settlement == Settlement::Known && slot.reason == Reason::None && !slot.discard);
+            assert!(!owner.stopped() && owner.retired.load(Ordering::SeqCst));
+            assert!(matches!(owner.coordinator.lock().unwrap().receipt, JoinReceipt::Returned));
+            assert_eq!(state.next_operation, 1);
+            // The observer may retain the SAME picker Arc before the slot is
+            // visited. Charge that owner once, not zero or once per alias.
+            let mut aliased = census(); aliased.owner(&owner).unwrap(); aliased.slot(slot).unwrap();
+            assert_eq!(aliased.bytes, slot_bytes(slot).unwrap());
+        }
+
+        #[test]
+        fn retained_project_does_not_replace_positive_original_receipts_or_unlock_books() {
+            let mut slot = slot_data(); slot.project = Some(project_data());
+            let owner = slot.owner.clone();
+            assert!(slot_bytes(&slot).is_ok());
+            for receipt in [JoinReceipt::New, JoinReceipt::Pending, JoinReceipt::Failed] {
+                owner.coordinator.lock().unwrap().receipt = receipt;
+                assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+                assert!(owner.coordinator.lock().unwrap().receipt == receipt);
+            }
+            owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+            for receipt in [JoinReceipt::Pending, JoinReceipt::Failed] {
+                owner.child.try_lock().unwrap().receipt = receipt;
+                assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+            }
+            owner.child.try_lock().unwrap().receipt = JoinReceipt::New;
+            let source = owner.source.lock().unwrap();
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown)); drop(source);
+            let retirement = owner.retirement.lock().unwrap();
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown)); drop(retirement);
+            owner.retired.store(false, Ordering::SeqCst);
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+            assert!(!owner.retired.load(Ordering::SeqCst));
+            owner.retired.store(true, Ordering::SeqCst);
+            owner.gui.facts.lock().unwrap().not_created = false;
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+            assert!(!owner.gui.facts.lock().unwrap().destroyed);
+            owner.gui.facts.lock().unwrap().not_created = true;
+            assert!(slot_bytes(&slot).is_ok());
+            assert!(slot.project.is_some() && Arc::ptr_eq(&slot.owner, &owner) && !owner.stopped());
+        }
+
+        #[test]
+        fn retained_project_does_not_admit_unrelated_dtos_or_overflow() {
+            let mut slot = slot_data(); slot.project = Some(project_data());
+            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe,
+                selection_id: None, epoch: 1, purpose: EvidencePurpose::Candidate });
+            assert_eq!(slot_bytes(&slot), Err(Problem::Unavailable)); slot.evidence = None;
+            slot.project_path = Some(Arc::new(ProjectPathBinding { project_id: "project-1".into(),
+                field: commands::ProjectPathField::VersionSource, generation: 1,
+                root: asset_source::RegisteredRoot { path: "/inert/project".into(),
+                    identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }));
+            assert_eq!(slot_bytes(&slot), Err(Problem::Unavailable)); slot.project_path = None;
+            slot.path_result = Some(commands::project_path_result("project-1", commands::ProjectPathField::VersionSource, "package.json".into()).ok().unwrap());
+            assert_eq!(slot_bytes(&slot), Err(Problem::Unavailable)); slot.path_result = None;
+            let mut overflow = census();
+            overflow.bytes = usize::MAX - std::mem::size_of::<Slot>() - slot.project.as_ref().unwrap().id.capacity();
+            assert_eq!(overflow.slot(&slot), Err(Problem::Capacity));
+            assert!(slot_bytes(&slot).is_ok());
+            assert_eq!(SESSION_BYTES, 64 * 1024 * 1024);
+        }
+    }
+
+    #[cfg(all(test, all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    mod tests {
+        // Fixed-census DATA only. Synthetic bookkeeping below is never a native
+        // source/SDK/coordinator receipt, allocation measurement or provider test.
+        use super::*;
+
+        fn empty_payload() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
+        fn material(capacity: usize) -> Arc<Material> {
+            let observation = credential_format::inspect(credential_format::FileKind::AndroidKeystore, &[], &mut || false)
+                .ok().expect("inert empty observation");
+            Arc::new(Material { origin: MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity))), observation })
+        }
+        fn data_context() -> Arc<NativeContext> {
+            Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "data-project".into(),
+                project: asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+                registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Signing })
+        }
+        fn tokens() -> TokenBatch {
+            TokenBatch { selection: Token(String::new()), record: Token(String::new()), preview: Token(String::new()), bind: Token(String::new()) }
+        }
+        fn live(state: &DocumentState, owner: &Arc<OriginalWork>) -> Result<usize, Problem> {
+            let source = owner.source.lock().unwrap(); let retirement = owner.retirement.lock().unwrap();
+            live_bytes(state, owner, &source, &retirement)
+        }
+
+        #[test]
+        fn app_control_cells_fit_the_shared_sixteen_kib_row() {
+            assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+            assert_eq!(zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES, 1024 * 1024);
+        }
+        #[test]
+        fn lookup_allowance_checks_boundary_overflow_and_capture_overlap() {
+            // No fabricated current owner exemption in the Setup census.
+            let old=OriginalWork::new(3,false,Weak::new());let source=SourceBook::new();let retirement=Retirement::default();
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            assert_eq!(none.owner(&old),Err(Problem::CleanupUnknown));
+            old.coordinator.lock().unwrap().receipt=JoinReceipt::Returned;
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            let busy=old.source.lock().unwrap();assert_eq!(none.owner(&old),Err(Problem::CleanupUnknown));drop(busy);
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            assert!(none.owner(&old).is_ok());
+            let native=data_context();let payload=Arc::new(Payload{kind:Kind::AndroidKeystore,material:None,
+                fields:Some(commands::own_fields(Kind::AndroidKeystore,&serde_json::json!({"storePassword":"test","keyPassword":null,"keyAlias":null})).ok().unwrap())});
+            let loan=github_secret::data_loan(native.clone(),payload.clone());
+            let mut census=Census::new(&old,&source,&retirement);census.current=None;
+            census.context(&native).unwrap();census.payload(&payload).unwrap();let before=census.bytes;
+            census.secret_loan(&loan).unwrap();let once=census.bytes;
+            assert_eq!(once-before,std::mem::size_of::<GitHubSecretMaterial>()+ARC_CELLS+loan.own_retained_heap_bytes().unwrap());
+            census.secret_loan(&loan.clone()).unwrap();assert_eq!(census.bytes,once);
+            let cipher=crate::supervisor::SecretSealed::retained_data(loan.clone());
+            let cipher_bytes=cipher.retained_heap_bytes().unwrap();
+            assert_eq!(cipher_bytes,crate::github_setup_protocol::RESPONSE_LIMIT+31+71);
+            census.add(cipher_bytes).unwrap();let idle=census.bytes;
+            census.secret_loan(&cipher.material).unwrap();assert_eq!(census.bytes,idle);
+            let mut boundary=Census::new(&old,&source,&retirement);boundary.bytes=SESSION_BYTES-cipher_bytes;
+            boundary.add(cipher_bytes).unwrap();assert_eq!(boundary.bytes,SESSION_BYTES);
+            assert_eq!(boundary.bytes.checked_add(1).is_some_and(|v|v<=SESSION_BYTES),false);
+            drop(cipher);
+            // Real nonsecret borrowed-field and original Arc census, not a
+            // fake SecretSealed. Same backing is charged once across clones.
+            let variable_payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).ok().unwrap())});
+            let variable=github_variable::data_loan(native.clone(),variable_payload.clone(),crate::github_setup_protocol::VariableRequirement::GoogleWifProvider);
+            census.context(&native).unwrap();census.payload(&variable_payload).unwrap();let before_variable=census.bytes;
+            census.variable_loan(&variable).unwrap();let variable_bytes=census.bytes;
+            assert_eq!(variable_bytes-before_variable,std::mem::size_of::<GitHubVariableMaterial>()+ARC_CELLS+variable.own_retained_heap_bytes().unwrap());
+            census.variable_loan(&variable.clone()).unwrap();assert_eq!(census.bytes,variable_bytes);
+            assert_eq!(variable.value().unwrap(),"projects/123/locations/global/workloadIdentityPools/release/providers/github");
+            // Actual lookup/current predicates against the existing inert
+            // DocumentState fixture. No GUI/provider/runtime is constructed.
+            let mut current=crate::asset_session::tests::empty_state();
+            current.lifetime.crash_hook_installed();current.lifetime.started(true);current.lifetime.finished(true);
+            current.context=Some(native.clone());
+            current.records.push(Record{key:RecordKey{id:Token("1".repeat(32)),revision:2},payload:variable_payload.clone(),mutation_pending:false});
+            current.assignments.push(Assignment{kind:Kind::GoogleWif,record_id:Token("1".repeat(32)),record_revision:2,
+                context_revision:1,availability:AssignmentAvailability::Available});
+            assert!(variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            assert!(!variable.current(&current,"changed-project",native.registry_generation,&native.project));
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation+1,&native.project));
+            current.records[0].payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).ok().unwrap())});
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            current.records[0].payload=variable_payload.clone();current.records[0].mutation_pending=true;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.records[0].mutation_pending=false;
+            current.assignments[0].record_revision=3;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.assignments[0].record_revision=2;
+            current.assignments[0].availability=AssignmentAvailability::Unavailable;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.assignments[0].availability=AssignmentAvailability::Available;
+            current.lock_pending=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.lock_pending=false;
+            current.unknown=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.unknown=false;
+            current.stopping=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.stopping=false;
+            current.retiring=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.retiring=false;
+            assert!(variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            current.lifetime.invalidate();assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            let consent=crate::github_setup_session::ConsentMaterial::Variable(variable.clone());
+            assert!(consent.secret().is_none()&&consent.variable().is_some_and(|v|Arc::ptr_eq(v,&variable)));
+            // A child cannot turn another fingerprint into current NoChange.
+            let wire=crate::github_setup_protocol::Request{kind:crate::github_setup_protocol::Kind::Prepare,
+                target:crate::github_setup_protocol::Target{project_binding:"a".repeat(64),repository:"Owner/Repo".into(),account_id:"11".into(),
+                    repository_id:"22".into(),selection:crate::github_setup_protocol::Selection::Variable(variable.selection().clone())},prepared:None};
+            let hash=variable.source().material.sha256.clone();
+            let mut value=serde_json::json!({"schemaVersion":1,"action":"prepare","reason":"no-change","effect":"not-started",
+                "writeClaimed":false,"writeAcknowledged":false,"prepared":null,
+                "observed":{"environmentName":"mobile-candidate","environmentId":"33","name":"MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
+                    "value":{"bytes":variable.value().unwrap().len(),"sha256":hash},"metadata":{"createdAt":"2026-10-09T00:00:00Z","updatedAt":"2026-10-09T00:00:00Z"}},
+                "control":{"reason":"none","credentialExpiresAt":null,"cooldownSeconds":null,"cooldownBlocked":false}});
+            let observed=serde_json::from_value(value.clone()).unwrap();assert!(variable.outcome_matches(&wire,&observed));
+            value["observed"]["value"]["sha256"]=serde_json::json!("e".repeat(64));
+            assert!(!variable.outcome_matches(&wire,&serde_json::from_value(value).unwrap()));
+            let input=variable.go_frame("setup-1",&"a".repeat(64),"inert-token").unwrap();
+            let decoded:serde_json::Value=serde_json::from_slice(&input).unwrap();assert_eq!(decoded["go"]["value"],"projects/123/locations/global/workloadIdentityPools/release/providers/github");
+            assert!(decoded["go"].get("sealed").is_none());
+            let frame=loan.frame(&[0;32]).unwrap();assert_eq!(frame.retained_heap_bytes(),crate::github_setup_protocol::SECRET_REQUEST_LIMIT);
+            assert_eq!(&frame.bytes()[44..],b"test");assert_eq!(&frame.bytes()[..8],b"MRKSEAL1");
+            let reserved = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES
+                + secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
+            assert_eq!(secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES, 32 * 1024);
+            assert!(Admission::checked(WORKING_BYTES - reserved, 0).is_ok());
+            assert!(matches!(Admission::checked(WORKING_BYTES - reserved + 1, 0), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(usize::MAX, 1), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(1, usize::MAX), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(SESSION_BYTES, 32 * 1024 * 1024 + 1), Err(Problem::Capacity)));
+            assert_eq!(SESSION_BYTES, 64 * 1024 * 1024); // The committed quota is independent and unchanged.
+            let owner = OriginalWork::new(1, false, Weak::new()); let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut census = Census::new(&owner, &source, &retirement);
+            assert_eq!(census.cells::<Record>(usize::MAX), Err(Problem::Capacity));
+        }
+        #[test]
+        fn lookup_identity_census_is_fixed_and_duplicate_arcs_spend_no_slot() {
+            let values: Vec<_> = (0..IDENTITIES + 1).map(Arc::new).collect();
+            let mut seen = Seen::new();
+            for value in &values[..IDENTITIES] { assert_eq!(seen.insert(value), Ok(true)); }
+            assert_eq!(seen.insert(&values[0].clone()), Ok(false));
+            assert_eq!(seen.insert(&values[IDENTITIES]), Err(Problem::Capacity));
+            assert_eq!(seen.used, IDENTITIES);
+        }
+        #[test]
+        fn lookup_tool_picker_census_refuses_unjoined_and_contended_originals() {
+            // Same inert original constructor, not a returned-picker factory.
+            // Tools have no fabricated current-owner exemption in this census.
+            let picker = OriginalWork::artifact_unentered_original_data();
+            let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut unjoined = Census::new(&picker, &source, &retirement);
+            unjoined.current = None;
+            assert_eq!(unjoined.owner(&picker), Err(Problem::CleanupUnknown));
+            assert_eq!(unjoined.owners.used, 1); // Reached the original, not omitted.
+            let held = picker.coordinator.lock().unwrap();
+            let mut contended = Census::new(&picker, &source, &retirement);
+            contended.current = None;
+            assert_eq!(contended.owner(&picker), Err(Problem::CleanupUnknown));
+            assert_eq!(contended.owners.used, 1);
+            assert!(matches!(held.receipt, JoinReceipt::New));
+            drop(held);
+            assert!(!picker.android_source_selected_settled());
+        }
+        #[test]
+        fn lookup_payload_material_context_and_source_arcs_deduplicate_separately() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut census = Census::new(&owner, &source, &retirement);
+            let captured = material(29);
+            let first = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(captured.clone()), fields: None });
+            census.payload(&first).unwrap(); let once = census.bytes;
+            census.payload(&first.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let second = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(captured), fields: None });
+            census.payload(&second).unwrap(); assert_eq!(census.bytes, once + RECORD_METADATA_BYTES);
+            let distinct = material(29);
+            let extra = RECORD_METADATA_BYTES + std::mem::size_of::<Material>() + ARC_CELLS
+                + distinct.retained_bytes().unwrap() + ARC_CELLS;
+            let third = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(distinct), fields: None });
+            let before = census.bytes; census.payload(&third).unwrap(); assert_eq!(census.bytes, before + extra);
+
+            let context = data_context(); census.context(&context).unwrap(); let once = census.bytes;
+            census.context(&context.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let extra = std::mem::size_of::<NativeContext>() + ARC_CELLS + context.draft.capacity()
+                + context.project_id.capacity() + context.project.path.capacity();
+            let other = data_context(); census.context(&other).unwrap(); assert_eq!(census.bytes, once + extra);
+
+            let source = Arc::new(Mutex::new(SourceBook::unstarted_backing_data()));
+            let book = source.lock().unwrap(); census.source(&source, &book).unwrap(); let once = census.bytes;
+            census.source(&source.clone(), &book).unwrap(); assert_eq!(census.bytes, once);
+            let other = Arc::new(Mutex::new(SourceBook::unstarted_backing_data()));
+            let other_book = other.lock().unwrap(); let extra = std::mem::size_of::<Mutex<SourceBook>>() + ARC_CELLS + other_book.retained_bytes().unwrap();
+            census.source(&other, &other_book).unwrap(); assert_eq!(census.bytes, once + extra);
+        }
+        #[test]
+        fn lookup_census_counts_retained_old_slots_records_contexts_and_refused_source_backing() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
+            state.slot = Some(Slot::new(owner.clone(), Operation::Prepare, None, None, None));
+            let baseline = live(&state, &owner).unwrap();
+            let old = OriginalWork::new(2, false, Weak::new());
+            old.coordinator.lock().unwrap().receipt = JoinReceipt::Returned; // Model only, no claimed original task.
+            *old.source.lock().unwrap() = SourceBook::unstarted_backing_data();
+            let retained_source = old.source.lock().unwrap().retained_bytes().unwrap();
+            let shared = empty_payload(); let old_payload = empty_payload(); let retained_record = empty_payload(); let context = data_context();
+            let mut old_slot = Slot::new(old, Operation::ChooseFile, Some(context.clone()), None, None);
+            old_slot.candidate = Some(Candidate { payload: old_payload.clone(), record_id: Token(String::new()), existing: None });
+            old_slot.staged = Some(Staged::Selected { payload: old_payload, tokens: tokens() });
+            let retirement = Retirement { old_slot: Some(Box::new(old_slot)), payload: Some(shared.clone()), context: Some(context),
+                records: vec![Record { key: RecordKey { id: Token(String::new()), revision: 1 }, payload: retained_record, mutation_pending: false }],
+                ..Retirement::default() };
+            assert!(owner.retain_retirement(retirement).is_ok());
+            state.slot.as_mut().unwrap().candidate = Some(Candidate { payload: shared.clone(), record_id: Token(String::new()), existing: None });
+            state.slot.as_mut().unwrap().retired_payload = Some(shared);
+            let total = live(&state, &owner).unwrap();
+            assert!(total >= baseline + 3 * RECORD_METADATA_BYTES + retained_source + 97);
+            state.retiring = true; assert_eq!(live(&state, &owner), Err(Problem::CleanupUnknown)); state.retiring = false;
+            assert!(owner.release_retirement()); // DATA-only drop, no original resource to settle.
+            state.slot.as_mut().unwrap().candidate = None; state.slot.as_mut().unwrap().retired_payload = None;
+            assert_eq!(live(&state, &owner), Ok(baseline));
+            owner.retired.store(false, Ordering::SeqCst);
+            assert_eq!(live(&state, &owner), Err(Problem::CleanupUnknown)); // Empty in-flight holding is not zero.
+        }
+        #[test]
+        fn lookup_census_refuses_unsupported_retained_dto_shapes() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
+            let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
+            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe, selection_id: None, epoch: 1, purpose: EvidencePurpose::Candidate });
+            state.slot = Some(slot);
+            assert_eq!(live(&state, &owner), Err(Problem::Unavailable));
+            state.slot.as_mut().unwrap().evidence = None;
+            assert!(live(&state, &owner).is_ok());
+        }
+    }
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) use lookup_memory::Admission as KeyringMemoryAdmission;
+
+fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
+    // All large/copy admissions share the current document mutex. STOP, status,
+    // lock/loss and reconciliation intentionally do not call this predicate.
+    allocation_conflict_gate(
+        state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+        state.github.setup_secret_work_pending() || state.github.history_work_pending() || state.github.play_cleanup_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state))
+}
+fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+    if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
+    Ok(())
+}
+fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    if (version_allocation::pending(state) || version_enrollment::pending(state)) { return Err(BridgeError::new("busy", "Finish the original saved-source inspection first.")); }
+    if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+    passive_document_state_gate(state)
+}
+// Same passive checks; only the private matching removal peer uses this
+// companion while its own new-work closure remains continuously installed.
+fn passive_document_state_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    // Existing passive services do not require editing/crash-hook qualification.
+    // The caller still holds this same document mutex through Supervisor claim.
+    if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+    if state.stopping { return Err(BridgeError::shutdown()); }
+    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) || git_local::pending(state) {
+        return Err(BridgeError::new("busy", "Finish the original native operation first."));
+    }
+    Ok(())
+}
+fn installation_reveal_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    passive_document_gate(state)?;
+    if !state.lifetime.original_bound() || state.lost_observed {
+        return Err(BridgeError::new("installation_document_unavailable", "The original application document is unavailable."));
+    }
+    if state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+        || state.github.native_work_pending() {
+        return Err(BridgeError::new("busy", "Finish the original native operation first."));
+    }
+    Ok(())
+}
+fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl FnOnce() -> Result<(), AssetError>) -> Result<(), AssetError> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if vault::upload_key_setup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+    if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
+    // Shared native lifecycle/state checks only. The caller retains the real
+    // document mutex; each route must still apply its own qualification gate.
+    if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
+    if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+    if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+    owner_gate()?;
+    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state) { return Err(AssetError::new(Reason::Busy)); }
+    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
+        && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
+    if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+    lookup_allocation_gate(state)
+}
+fn session_owner_reason(supervisor_disabled: bool, edit_disabled: bool, supervisor_stopping: bool, edit_stopping: bool) -> Option<Reason> {
+    if supervisor_disabled || edit_disabled { Some(Reason::CleanupUnknown) }
+    else if supervisor_stopping || edit_stopping { Some(Reason::Shutdown) } else { None }
+}
+fn observe_session_owner_reason(state: &mut DocumentState, reason: Option<Reason>) -> bool {
+    if state.session_owner_reason == reason { return false; }
+    state.session_owner_reason = reason; true
+}
+fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
+    // Private asset custody is separate from the installed project-only
+    // profile. Sharing document checks must not qualify either native route.
+    if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
+    Ok(())
+}
+#[path="asset_session_paired_versions.rs"]
+mod paired_versions;
+fn macos_session_context(platform: Platform, stage: Stage, purpose: Purpose) -> bool {
+    if platform == Platform::Both || purpose == Purpose::VersionInventory { return paired_versions::scope(platform,stage,purpose,commands::ExecutionMode::Local); }
+    if purpose == Purpose::Provisioning { return platform == Platform::Ios && stage == Stage::Candidate; }
+    match platform {
+        // These are implemented input routes, not a copy of core requiredness.
+        // The core alone decides whether this stage/purpose needs the input.
+        Platform::Android | Platform::Project => true,
+        Platform::Both => false,
+        Platform::Ios => matches!(purpose, Purpose::Full | Purpose::Store)
+            || stage == Stage::Candidate && purpose == Purpose::Signing,
+    }
+}
+fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: Kind) -> bool {
+    if !macos_session_context(platform, stage, purpose) { return false; }
+    match platform {
+        Platform::Both => matches!(kind,Kind::GoogleServiceAccount|Kind::AscP8),
+        Platform::Android => matches!(kind, Kind::AndroidKeystore | Kind::AndroidFirebase | Kind::GoogleWif),
+        Platform::Project => kind == Kind::ProjectReadToken,
+        Platform::Ios => match purpose {
+            Purpose::Full | Purpose::Store => kind == Kind::AscP8
+                || stage != Stage::Candidate && matches!(kind, Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment),
+            Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),
+            Purpose::Provisioning => matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile),
+            Purpose::VersionInventory => false,
+        },
+    }
+}
+fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
+    if context.platform == Platform::Both || context.purpose == Purpose::VersionInventory {
+        return if paired_versions::selected(context) && matches!(kind,Kind::GoogleServiceAccount|Kind::AscP8) && kind.enabled() { Ok(()) }
+            else { Err(AssetError::new(Reason::UnsupportedFormat)) };
+    }
+    if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+    if context.purpose == Purpose::Provisioning && (context.execution_mode != commands::ExecutionMode::Local
+        || context.platform != Platform::Ios || context.stage != Stage::Candidate
+        || !matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile)) {
+        return Err(AssetError::new(Reason::UnsupportedFormat));
+    }
+    if kind == Kind::GoogleServiceAccount {
+        return if context.execution_mode == commands::ExecutionMode::Local && context.platform == Platform::Android
+            && matches!(context.purpose, Purpose::Full | Purpose::Store) && kind.enabled() { Ok(()) }
+            else { Err(AssetError::new(Reason::UnsupportedFormat)) };
+    }
+    if context.execution_mode == commands::ExecutionMode::Local && kind == Kind::GoogleWif {
+        return Err(AssetError::new(Reason::UnsupportedFormat));
+    }
+    if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
+        && !macos_session_kind(context.platform, context.stage, context.purpose, kind) {
+        return Err(AssetError::new(Reason::UnsupportedFormat));
+    }
+    Ok(())
+}
+// Positive use must remain bound to the actual current Mac context, not merely
+// a retained kind, numeric revision, cached assessment or old signing context.
+// Explicit deletion is deliberately excluded by each positive-use caller.
+fn session_slot_kind_gate(state: &DocumentState, slot: &Slot, kind: Kind) -> Result<(), AssetError> {
+    if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) {
+        let context = slot.context.as_ref().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+        if !state.context.as_ref().is_some_and(|current| Arc::ptr_eq(current, context) && current.revision == context.revision) {
+            return Err(AssetError::new(Reason::ContextStale));
+        }
+        session_kind_gate(context, kind)?;
+    }
+    Ok(())
+}
+fn session_staged_kind_gate(state: &DocumentState, slot: &Slot, staged: &Staged) -> Result<(), AssetError> {
+    if !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) { return Ok(()); }
+    let kind = match staged {
+        Staged::Selected { payload, .. } => Some(Some(payload.kind)),
+        Staged::Prepared { .. } | Staged::Committed { bind: Some(_) } => Some(slot.kind),
+        Staged::Bound(assignment) => Some(Some(assignment.kind)),
+        _ => None, // Deletion/retirement and unrelated owners gain no use authority.
+    };
+    if let Some(kind) = kind {
+        let kind = kind.filter(|kind| slot.kind == Some(*kind)).ok_or_else(AssetError::invalid)?;
+        session_slot_kind_gate(state, slot, kind)?;
+    }
+    Ok(())
+}
+fn preflight_document_gate(state: &DocumentState, profile: Option<crate::offline_preflight_protocol::Profile>)
+    -> Option<crate::offline_preflight_protocol::Availability> {
+    use crate::offline_preflight_protocol::Availability;
+    // A missing platform backend is not a lost qualified original. Before the
+    // first Finished event, no run/intent exists and binding is merely pending.
+    if profile.is_none() { Some(Availability::UnsupportedPlatform) }
+    else if state.lost_observed { Some(Availability::DocumentLost) }
+    else if !state.lifetime.original_bound() { Some(Availability::Busy) }
+    else { None }
+}
+fn local_store_document_gate(state: &DocumentState, profile: Option<crate::local_store_preflight_protocol::Profile>)
+    -> Option<crate::local_store_preflight_protocol::Availability> {
+    use crate::local_store_preflight_protocol::Availability;
+    // A missing platform backend is not a lost qualified original. Before the
+    // first Finished event, no run/intent exists and binding is merely pending.
+    if profile.is_none() { Some(Availability::UnsupportedPlatform) }
+    else if state.lost_observed { Some(Availability::DocumentLost) }
+    else if !state.lifetime.original_bound() { Some(Availability::Busy) }
+    else { None }
+}
+fn android_build_document_gate(state: &DocumentState, profile: Option<crate::android_build_protocol::Profile>)
+    -> Option<crate::android_build_protocol::Availability> {
+    use crate::android_build_protocol::Availability;
+    // Unsupported/no-original is not cleanup failure. Initial Finished is
+    // still pending; an absent Android owner must not poison passive services.
+    if profile.is_none() { Some(Availability::UnsupportedPlatform) }
+    else if state.lost_observed { Some(Availability::DocumentLost) }
+    else if !state.lifetime.original_bound() { Some(Availability::Busy) }
+    else { None }
+}
+fn project_recovery_document_gate(state: &DocumentState, profile: Option<crate::project_recovery_protocol::Profile>)
+    -> Option<crate::project_recovery_protocol::Availability> {
+    use crate::project_recovery_protocol::Availability;
+    // Unsupported/no-original is not cleanup failure. Initial Finished is
+    // still pending; an absent Recovery owner must not poison passive services.
+    if profile.is_none() { Some(Availability::UnsupportedPlatform) }
+    else if state.lost_observed { Some(Availability::DocumentLost) }
+    else if !state.lifetime.original_bound() { Some(Availability::Busy) }
+    else { None }
+}
+
+fn ios_archive_document_gate(state: &DocumentState, profile: Option<crate::ios_archive_protocol::Profile>)
+    -> Option<crate::ios_archive_protocol::Availability> {
+    use crate::ios_archive_protocol::Availability;
+    // Unsupported/no-original is not cleanup failure. Initial Finished is
+    // still pending; an absent iOS owner must not poison passive services.
+    if profile.is_none() { Some(Availability::UnsupportedPlatform) }
+    else if state.lost_observed { Some(Availability::DocumentLost) }
+    else if !state.lifetime.original_bound() { Some(Availability::Busy) }
+    else { None }
+}
+
+impl DocumentBinding {
+    pub(crate) fn new(bridge: Arc<DesktopBridge>) -> Self {
+        let (changes, _) = watch::channel(0);
+        let android_registration_control = bridge.android_build.registration_control();
+        let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()), android_registration_control,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity_service: std::sync::OnceLock::new(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_local_check_service: std::sync::OnceLock::new(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_android_build_service: std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_git_index: agent_git_index::NativeState::default(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_ios_archive_service: std::sync::OnceLock::new(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_store_service:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_apple_service:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_github_action_service:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_github_action_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_github_action_allow_pending:std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_store_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_session: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            installed_macos_session: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture: None,
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            github_fixture: None,
+            state: Mutex::new(DocumentState {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_local_check_grant: None,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
+            next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+            context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+            github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }) }) };
+        // One memory-only binding to the Supervisor created in the ordinary
+        // DesktopBridge constructor. A later document cannot rebind its lease.
+        document.inner.bridge.supervisor.bind_original_session_document(&document.inner.session_identity);
+        document.inner.bridge.android_build.bind_original_document(&document.inner.session_identity);
+        document.inner.bridge.edits.bind_saved_registration(&document.inner.session_identity, document.inner.android_registration_control.clone());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        document.inner.android_registration_control.bind_application_service(&document.inner.bridge.application_service);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        document.inner.bridge.edits.bind_identity_history(&document.inner.session_identity, &document.inner.bridge.application_service);
+        document.inner.bridge.diagnostics.bind_original_document(&document.inner.session_identity);
+        document
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_fixture(bridge: Arc<DesktopBridge>, permit: FixtureAdmission) -> Result<Self, &'static str> {
+        let mut document = Self::new(bridge);
+        let context = permit.consume()?;
+        Arc::get_mut(&mut document.inner).ok_or("sg1_new_document_not_exclusive")?.fixture = Some(Arc::downgrade(&context));
+        context.bind_original(document.clone())?;
+        Ok(document)
+    }
+    /// One consumed G1 permission for this new document and its original
+    /// Supervisor only. No asset/workflow/GUI qualification is conferred.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_github_fixture(bridge: Arc<DesktopBridge>, permit: crate::supervisor::GitHubDocumentFixturePermit) -> Result<Self, &'static str> {
+        let binding = permit.consume(&bridge.supervisor)?;
+        let mut document = Self::new(bridge);
+        Arc::get_mut(&mut document.inner).ok_or("g1_new_document_not_exclusive")?.github_fixture = Some(binding);
+        Ok(document)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_fixture_permitted(&self) -> bool {
+        self.inner.github_fixture.as_ref().is_some_and(|binding| binding.permits(&self.inner.bridge.supervisor))
+    }
+    fn github_qualified(&self) -> bool {
+        if github_session::qualified_for(&self.inner.bridge.supervisor) { return true; }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.github_fixture_permitted() { return true; }
+        false
+    }
+    fn persistence_qualified(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { vault::qualified(self) }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { false }
+    }
+    fn native_qualified(&self) -> bool {
+        if NATIVE_QUALIFIED { return true; }
+        if self.inner.bridge.installed_session_available(&self.inner.session_identity) { return true; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
+        false
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn register_installed_session(&self, registration: crate::shell::installed_observation::SessionRegistration) -> Result<(), BridgeError> {
+        // Observe only, before original navigation/IPC. Ordinary construction
+        // must already make this exact identity available through its Supervisor.
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+            || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+            || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+        let case = registration.consume()?;
+        self.inner.bridge.supervisor.require_installed_session_available(&self.inner.session_identity)?;
+        let mut observation = self.inner.installed_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if observation.is_some() { return Err(BridgeError::invalid()); }
+        *observation = Some(installed_session_observation::Book::new(case)); Ok(())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_commands(&self, tools: crate::shell::installed_observation::commands::ToolsAdmission,
+        offline: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.exhausted || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !tools.document_matches(&self.inner.session_identity) {
+            return Err(BridgeError::invalid());
+        }
+        self.inner.bridge.diagnostics.admit_installed_observation(&self.inner.session_identity, tools)?;
+        self.inner.bridge.preflight.admit_installed_observation(offline)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_tools_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.diagnostics.installed_tools_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_tools_normal_selected(&self) -> bool {
+        let state = self.lock();
+        state.next_operation == 0 && state.next_context == 0 && !state.session && state.slot.is_none() && state.context.is_none()
+            && state.quit.is_none() && !state.exhausted && !state.lost_observed && !state.stopping && !state.unknown
+            && self.live_session_owner_reason().is_none()
+            && self.inner.bridge.diagnostics.normal_selected(&self.inner.session_identity)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_android_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.android_build.installed_android_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_android_normal_selected(&self) -> bool {
+        let state = self.lock();
+        state.next_operation == 0 && state.next_context == 0 && !state.session && state.slot.is_none() && state.context.is_none()
+            && state.quit.is_none() && !state.exhausted && !state.lost_observed && !state.stopping && !state.unknown
+            && self.live_session_owner_reason().is_none()
+            && self.inner.bridge.android_build.normal_selected(&self.inner.session_identity)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_android(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.exhausted || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
+        self.inner.bridge.android_build.admit_installed_observation(&self.inner.session_identity, token)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    pub(crate) fn installed_recovery_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.project_recovery.installed_recovery_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    pub(crate) fn admit_installed_recovery(&self, token: crate::shell::installed_observation::recovery::Admission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
+        self.inner.bridge.project_recovery.admit_installed_observation(token)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn installed_ios_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.ios_archive.installed_ios_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn admit_installed_ios(&self, token: crate::shell::installed_observation::ios::Admission) -> Result<(), BridgeError> {
+        // Original setup only, under the same real document lock used by
+        // Start/loss/selection. A Mac token cannot admit another document or
+        // another SavedCommandOwner, nor open any ordinary production gate.
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
+        self.inner.bridge.ios_archive.admit_installed_ios_observation(token)
+    }
+    fn project_selection_qualified(&self) -> bool {
+        if self.inner.bridge.installed_project_selection_available() { return true; }
+        // Preserve SG1's existing, separately consumed development permission.
+        // It is not installed-profile authority and does not select that core.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
+        false
+    }
+    pub(crate) fn installation_reveal_available(&self) -> bool {
+        // Profile DATA only; the command rechecks the actual original document.
+        crate::installation::reveal_profile_available(self.inner.bridge.installed_project_selection_available())
+    }
+    pub(crate) fn reveal_installation(&self) -> Result<crate::installation::RevealRequestSent, BridgeError> {
+        // This SAME original mutex is held through the synchronous AppKit call.
+        // No await, queued callback, spawned task or new operation owner can
+        // outlive admission or race a quit/loss transition after the check.
+        let state = self.lock();
+        installation_reveal_document_gate(&state)?;
+        if self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        if self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() {
+            return Err(BridgeError::shutdown());
+        }
+        if !self.installation_reveal_available() { return Err(crate::installation::unavailable()); }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            mrk_macos_installed_native::reveal_installation().map_err(|_| crate::installation::unconfirmed())?;
+            Ok(crate::installation::request_sent())
+        }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { Err(crate::installation::unavailable()) }
+    }
+    pub(crate) fn project_selection_available(&self) -> bool {
+        // Profile/display DATA, never live lifecycle permission. Windows uses
+        // the same retained original project route as its profile admission;
+        // a compatibility pathname result cannot enable native registration.
+        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))
+    }
+    pub(crate) fn project_path_selection_available(&self) -> bool {
+        // Exact installed-profile DATA only. Neither the compatibility picker
+        // nor SG1 nor the still-false asset capability qualifies this purpose.
+        if self.inner.bridge.installed_project_path_selection_available() { return true; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if self.inner.installed_macos_session.try_lock().is_ok_and(|book| book.as_ref()
+            .and_then(|book| book.project_fields.as_ref()).is_some_and(|control| control.permits(&self.inner.session_identity))) { return true; }
+        false
+    }
+    fn evidence_qualified(&self, purpose: EvidencePurpose) -> bool {
+        // Existing fixture permits do NOT authorize the new picker/query route.
+        installed_evidence_profile(self.inner.bridge.installed_evidence_selection_available(),
+            self.inner.bridge.supervisor.passive_method_available(purpose.method()))
+    }
+    fn lock(&self) -> MutexGuard<'_, DocumentState> {
+        match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                let mut state = error.into_inner();
+                // A poisoned gate cannot emit differing DTOs at one ordinary
+                // revision. Freeze the same final redacted authority while
+                // retaining all originals for conservative settlement/exit.
+                if !state.exhausted { self.exhaust(&mut state, UnknownOrigin::GatePoisoned); }
+                state
+            }
+        }
+    }
+    fn bump(&self, state: &mut DocumentState) {
+        git_local::invalidate(state);
+        git_read::stop(state); // A real Document revision change retires only original eligibility.
+        version_enrollment::stop(state);
+        git_read::reconcile(state);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if state.quit_accepted || state.stopping || state.lost_observed || state.unknown {
+            // Accepted quit/document loss only, never merely opening or
+            // cancelling the quit confirmation. Host retains its own errors.
+            let _ = self.inner.bridge.application_service.retire_for_exit();
+        }
+        images::observe_failure(state);
+        installation::observe_failure(state);
+        installation::remember(state);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::observe_stop(state, Instant::now());
+        if state.exhausted { return; }
+        if state.unknown { version_allocation::stop(state); self.inner.android_registration_control.poisoned(); state.saved_input = None; gh_auth::stop(state, GitHubReason::CleanupUnknown); state.github.unknown(); state.evidence.revoke(true); }
+        images::refresh(state);
+        let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
+        state.evidence.revision = revision;
+        match status_successor(state.revision) {
+            Some(next) => { state.revision = next; self.inner.changes.send_replace(next); }
+            None => self.exhaust(state, UnknownOrigin::Exhausted),
+        }
+    }
+    fn exhaust(&self, state: &mut DocumentState, _origin: UnknownOrigin) {
+        self.inner.android_registration_control.poisoned(); state.saved_input = None;
+        first_unknown_origin!(state, _origin, None);
+        state.exhausted = true; state.unknown = true; state.stopping = true; state.lost_observed = true;
+        state.github.exhaust();
+        state.evidence.revision = u64::MAX; state.evidence.revoke(true);
+        state.lifetime.invalidate(); invalidate_all(state);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::revoke_all(state);
+        if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
+        images::refresh(state);
+        stop_quit(state, Instant::now());
+        self.inner.bridge.edits.document_lost(MAIN);
+        self.inner.bridge.diagnostics.document_lost();
+        self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.apple_provisioning.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
+        self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.inner.bridge.tool_acquisition.document_lost(); self.inner.bridge.upload_key.document_lost();
+        state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
+    }
+    fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
+        let Some(next) = state.next_operation.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
+        state.next_operation = next; Ok(next)
+    }
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
+    fn loss_locked(&self, state: &mut DocumentState, publisher: Option<&RegistrationPublisher>) {
+        state.saved_input = None;
+        if publisher.is_none() { self.inner.android_registration_control.poisoned(); }
+        state.lost_observed = true;
+        state.evidence.revoke(false);
+        state.github.retire(GitHubReason::Cancelled);
+        invalidate_all(state);
+        if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::DocumentLost, Instant::now()); }
+        stop_quit(state, Instant::now());
+        // This actual loss path is synchronous under the same admission lock.
+        // EditOwner's first-loss tombstone was preallocated, with no loss RNG.
+        self.inner.bridge.edits.document_lost_published(MAIN, publisher);
+        self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.apple_provisioning.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
+        self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.inner.bridge.tool_acquisition.document_lost(); self.inner.bridge.upload_key.document_lost(); self.bump(state);
+    }
+    fn apply(&self, state: &mut DocumentState, action: DocumentAction, publisher: Option<&RegistrationPublisher>) {
+        match action {
+            DocumentAction::Bind => {
+                if self.inner.bridge.edits.initial_document_published(MAIN, publisher).is_err() { state.lifetime.invalidate(); self.loss_locked(state, publisher); }
+                else { self.bump(state); }
+            }
+            DocumentAction::Lost => self.loss_locked(state, publisher), DocumentAction::None => {},
+        }
+    }
+    pub(crate) fn observe(&self, event: impl FnOnce(&mut DocumentLifetime) -> DocumentAction) {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, true).ok();
+        {
+            let mut state = self.lock(); let action = event(&mut state.lifetime);
+            if action != DocumentAction::None {
+                if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost); }
+                state.saved_input = None;
+            }
+            self.apply(&mut state, action, publisher.as_ref().filter(|p| p.accepted()));
+        }
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); }
+    }
+    pub(crate) fn navigation(&self, trusted: bool) -> bool {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, true).ok();
+        let allowed = {
+            let mut state = self.lock(); let (allowed, action) = state.lifetime.navigation(trusted);
+            if action != DocumentAction::None {
+                if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost); }
+                state.saved_input = None;
+            }
+            self.apply(&mut state, action, publisher.as_ref().filter(|p| p.accepted())); allowed
+        };
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } allowed
+    }
+    pub(crate) fn lost(&self) {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, true).ok();
+        // Authenticated native loss is unconditional: original STOP BEFORE Doc.
+        if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost); }
+        {
+            let mut state = self.lock(); let action = state.lifetime.invalidate(); state.saved_input = None;
+            self.apply(&mut state, action, publisher.as_ref().filter(|p| p.accepted()));
+        }
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); }
+    }
+    pub(crate) fn hook_installed(&self) { self.observe(DocumentLifetime::crash_hook_installed); }
+    fn environment_gate(&self, state: &DocumentState) -> crate::environment_diagnostics_protocol::Availability {
+        use crate::environment_diagnostics_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+        if !state.lifetime.original_bound() || state.lost_observed
+            || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+            || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+            || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+    pub(crate) fn environment_diagnostics_status(&self) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+        // DATA only: inspect existing state/registry generation and already-ended
+        // original task joins. Never poll a tool or start a replacement owner.
+        let state = self.lock();
+        if !self.inner.bridge.diagnostics.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.diagnostics.context_changed(); }
+        self.inner.bridge.diagnostics.status(self.environment_gate(&state))
+    }
+    pub(crate) fn environment_diagnostics_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.diagnostics.subscribe() }
+    fn preflight_gate(&self, state: &DocumentState) -> crate::offline_preflight_protocol::Availability {
+        use crate::offline_preflight_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+        if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+    fn local_store_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+        use crate::local_store_preflight_protocol::Availability;
+        if self.inner.bridge.apple_provisioning.disabled(){return Availability::CleanupUnknown;}
+        if self.inner.bridge.apple_provisioning.stopping(){return Availability::Shutdown;}
+        if self.inner.bridge.apple_provisioning.busy(){return Availability::Busy;}
+        self.local_store_base_gate(state)
+    }
+    fn local_store_base_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+        self.local_store_base_gate_current_profile(state,None)
+    }
+    fn local_store_base_gate_current_profile(&self,state:&DocumentState,profile:Option<&Arc<vault::profile_sources::AppleProfileSources>>)->crate::local_store_preflight_protocol::Availability {
+        self.local_store_base_gate_current_profile_key(state,profile,None)
+    }
+    fn local_store_base_gate_current_profile_key(&self,state:&DocumentState,profile:Option<&Arc<vault::profile_sources::AppleProfileSources>>,key:Option<&Arc<vault::key_sources::AppleKeySources>>)->crate::local_store_preflight_protocol::Availability {
+        use crate::local_store_preflight_protocol::Availability;
+        if ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled()) || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+        if ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping()) || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+        if ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy()) || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+        if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| (slot.phase != Phase::Idle || !slot.owner.resources_settled())
+                && !profile.is_some_and(|sources| windows_compatible_profile_current_slot(slot,sources))
+                && !key.is_some_and(|sources| windows_compatible_key_current_slot(slot,sources)))
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+    fn local_store_prepare_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+        use crate::local_store_preflight_protocol::Availability;
+        if (self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || self.inner.bridge.local_store_execute.disabled() || self.inner.bridge.local_store_reconcile.disabled() || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+        if (self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || self.inner.bridge.local_store_execute.stopping() || self.inner.bridge.local_store_reconcile.stopping() || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+        if (self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || self.inner.bridge.local_store_execute.busy() || self.inner.bridge.local_store_reconcile.busy() || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+        if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+    fn local_store_reconcile_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+        use crate::local_store_preflight_protocol::Availability;
+        if (self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_execute.disabled() || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+        if (self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_execute.stopping() || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+        if (self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_execute.busy() || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+        if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+    fn local_store_execute_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+        use crate::local_store_preflight_protocol::Availability;
+        if ((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || (self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled())) || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+        if ((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || (self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping())) || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+        if ((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || (self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy())) || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+        if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+    fn artifact_gate(&self, state: &DocumentState) -> crate::artifact_inspection_protocol::Availability {
+        use crate::artifact_inspection_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+            || ((self.inner.bridge.android_build.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.android_build.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()))))) { return Availability::Shutdown; }
+        if crate::artifact_inspection_protocol::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+        if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+            || ((self.inner.bridge.android_build.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))))) { return Availability::Busy; }
+        Availability::Available
+    }
+
+    pub(crate) fn artifact_inspection_subscribe(&self)->watch::Receiver<u32>{self.inner.bridge.artifact_inspection.subscribe()}
+    pub(crate) fn artifact_inspection_relay_lost(&self){let _state=self.lock();self.inner.bridge.artifact_inspection.document_lost();}
+    pub(crate) fn artifact_inspection_status(&self)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        self.reconcile();let state=self.lock();
+        if !self.inner.bridge.artifact_inspection.registration_matches(self.inner.bridge.registry_generation()){self.inner.bridge.artifact_inspection.context_changed();}
+        self.inner.bridge.artifact_inspection.artifact_status(self.artifact_gate(&state))
+    }
+    pub(crate) fn artifact_inspection_prepare(&self,args:crate::artifact_inspection_protocol::Prepare)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        use crate::artifact_inspection_protocol as wire;
+        let (generation,root,checked,tools)={
+            let mut state=self.lock();let gate=self.artifact_gate(&state);
+            if gate!=wire::Availability::Available{return Err(if gate==wire::Availability::Busy{BridgeError::new("artifact_inspection_busy","Finish the original operation first.")}else{BridgeError::new("artifact_inspection_unavailable","Artifact inspection is unavailable.")});}
+            let (generation,root)=self.registry_result(&mut state,self.inner.bridge.native_project(&args.project_id),None).map_err(|_|wire::invalid())?;
+            let checked=self.inner.bridge.artifact_inspection.artifact_snapshot(&args,generation,&root)?;
+            let tools=if args.format==wire::Format::Aab{self.inner.bridge.android_build.artifact_tool_loan(&self.inner.session_identity)?}else{None};
+            (generation,root,checked,tools)
+        };
+        // Original GUI/probe/task proof outside Document AND registry. Then
+        // recheck exact registered root/loan identity under the unchanged gate.
+        if !checked.originals_settled(){return Err(BridgeError::cleanup_unknown());}
+        let mut state=self.lock();let current=self.registry_result(&mut state,self.inner.bridge.native_project(&args.project_id),None).map_err(|_|wire::invalid())?;
+        if current!=(generation,root.clone()){return Err(wire::invalid());}
+        self.inner.bridge.artifact_inspection.artifact_prepare(args,generation,root,&checked,tools,self.artifact_gate(&state))
+    }
+    pub(crate) fn artifact_inspection_start(&self,args:crate::artifact_inspection_protocol::Start)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        let at=Instant::now();let mut state=self.lock();
+        let project=self.inner.bridge.artifact_inspection.prepared_project(&args.operation_id,&args.owner_generation)?;
+        let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();
+        let admitted=self.inner.bridge.artifact_inspection.artifact_start(args,at,selected,self.artifact_gate(&state))?;
+        drop(state);Ok(admitted.release())
+    }
+    pub(crate) fn artifact_inspection_cancel(&self,args:crate::artifact_inspection_protocol::Cancel)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        let state=self.lock();self.inner.bridge.artifact_inspection.artifact_cancel(args,self.artifact_gate(&state))
+    }
+    pub(crate) fn artifact_inspection_discard(&self,args:crate::artifact_inspection_protocol::Discard)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        let state=self.lock();self.inner.bridge.artifact_inspection.artifact_discard(args,self.artifact_gate(&state))
+    }
+    #[cfg(feature="desktop-shell")]
+    pub(crate) fn artifact_inspection_pick(&self,app:tauri::AppHandle,input:crate::artifact_inspection_protocol::Pick)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]{let _=(app,input);return Err(BridgeError::new("artifact_inspection_unavailable","Artifact inspection requires the installed Mac runtime."));}
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]{
+            self.reconcile();let mut state=self.lock();self.expire(&mut state,Instant::now());
+            let gate=self.artifact_gate(&state);
+            if gate!=crate::artifact_inspection_protocol::Availability::Available{return Err(BridgeError::new("artifact_inspection_unavailable","Artifact selection is unavailable."));}
+            idle(&state).map_err(|_|BridgeError::new("artifact_inspection_busy","Finish the original operation first."))?;
+            let (generation,root)=self.registry_result(&mut state,self.inner.bridge.native_project(&input.project_id),None).map_err(|_|crate::artifact_inspection_protocol::invalid())?;
+            let id=self.next_operation(&mut state).map_err(|_|BridgeError::cleanup_unknown())?;
+            if id==u32::MAX{self.exhaust(&mut state,UnknownOrigin::Exhausted);return Err(BridgeError::cleanup_unknown());}
+            let binding=Arc::new(ArtifactBinding{project_id:input.project_id.clone(),generation,root:root.clone(),format:input.format,role:input.role});
+            let owner=OriginalWork::new(id,true,Arc::downgrade(&self.inner));let mut slot=Slot::new(owner.clone(),Operation::ChooseArtifact,None,None,None);slot.artifact=Some(binding.clone());
+            let start=self.install(&mut state,slot,Job::Artifact{app,binding}).map_err(|_|BridgeError::cleanup_unknown())?;
+            if let Err(error)=self.inner.bridge.artifact_inspection.artifact_admit_pick(&input,generation,root,owner,gate){drop(state);drop(start);return Err(error);}
+            let result=self.inner.bridge.artifact_inspection.artifact_status(gate);drop(state);
+            match result{Ok(status)=>{if start.send(()).is_err(){return Err(BridgeError::cleanup_unknown());}Ok(status)},Err(error)=>{drop(start);Err(error)}}
+        }
+    }
+
+    pub(crate) fn offline_preflight_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.preflight.subscribe() }
+    pub(crate) fn offline_preflight_relay_lost(&self) {
+        // A lost status channel retires consent/sends original STOP; it never
+        // deletes the owner, reopens a slot or asserts native finality.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.agent_local_checks_relay_lost();
+        let _state = self.lock(); self.inner.bridge.preflight.document_lost();
+    }
+    pub(crate) fn offline_preflight_status(&self) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let state = self.lock();
+        if !self.inner.bridge.preflight.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.preflight.context_changed(); }
+        self.inner.bridge.preflight.status(self.preflight_gate(&state))
+    }
+    pub(crate) fn prepare_offline_preflight(&self, args: crate::offline_preflight_protocol::Prepare) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let mut state = self.lock();
+        let gate = self.preflight_gate(&state);
+        // All fixed errors here precede intent allocation. No project is opened.
+        if gate != crate::offline_preflight_protocol::Availability::Available {
+            return Err(if gate == crate::offline_preflight_protocol::Availability::Busy {
+                BridgeError::new("offline_preflight_busy", "Finish or cancel the original operation before reviewing saved offline checks.")
+            } else { crate::offline_preflight_owner::unavailable() });
+        }
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
+        let (generation, root) = selected.map_err(|_| crate::offline_preflight_owner::unavailable())?;
+        self.inner.bridge.preflight.prepare(args, generation, root, gate)
+    }
+    pub(crate) fn start_offline_preflight(&self, args: crate::offline_preflight_protocol::Start) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let admitted_at = Instant::now(); // Native T before lock/lookup/executor/runtime/enqueue/await.
+        let mut state = self.lock();
+        let project = self.inner.bridge.preflight.prepared_project(&args.operation_id, &args.owner_generation)?;
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
+        let admitted = self.inner.bridge.preflight.start(args, admitted_at, selected, self.preflight_gate(&state))?;
+        // Real document/context/quit decisions cannot interleave registration,
+        // one-use consent consumption, original roster claim and release.
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_offline_preflight(&self, args: crate::offline_preflight_protocol::Cancel) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let state = self.lock();
+        self.inner.bridge.preflight.cancel(&args.operation_id, &args.owner_generation, self.preflight_gate(&state))
+    }
+    fn android_build_gate(&self, state: &DocumentState) -> crate::android_build_protocol::Availability {
+        use crate::android_build_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.android_registration_control.is_unknown() || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping())))) { return Availability::Shutdown; }
+        if let Some(reason) = android_build_document_gate(state, crate::android_build_protocol::Profile::current()) { return reason; }
+        if !self.inner.bridge.android_build.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+        // Require actual Disconnect, not an idle/retired public GitHub ticket.
+        // Asset phase AND original resources must settle, as must all edits,
+        // recovery attention, passive queries and the other saved-command owner.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+            || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())))) { return Availability::Busy; }
+        Availability::Available
+    }
+
+    fn android_registration_mismatch_locked(&self, state: &mut DocumentState, publisher: &mut RegistrationPublisher)
+        -> Result<(), BridgeError> {
+        if !self.inner.bridge.android_build.registration_matches(self.inner.bridge.registry_generation()) {
+            if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+            state.saved_input = None;
+            self.inner.bridge.android_build.context_changed_published(Some(publisher));
+        }
+        Ok(())
+    }
+    pub(crate) fn android_tool_sources_status(&self) -> Result<crate::android_tool_sources::Status, BridgeError> {
+        self.reconcile();
+        let mut publisher = self.inner.android_registration_control.reserve_reconciliation().ok();
+        let result = (|| {
+            let mut state = self.lock(); self.expire(&mut state, Instant::now());
+            if let Some(publisher) = publisher.as_mut() { self.android_registration_mismatch_locked(&mut state, publisher)?; }
+            self.observe_android_source_slot(&state);
+            let gate = if publisher.is_none() && !self.inner.android_registration_control.is_unknown() {
+                crate::android_build_protocol::Availability::Busy
+            } else { self.android_build_gate(&state) };
+            let gate = crate::android_tool_sources::status_availability(
+                gate, self.inner.bridge.installed_android_source_selection_available());
+            self.inner.bridge.android_build.sources_status(gate)
+        })();
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
+    }
+    pub(crate) fn cancel_android_tool_source(&self, input: crate::android_tool_sources::Cancel) -> Result<crate::android_tool_sources::Status, BridgeError> {
+        let mut state = self.lock();
+        let status = self.inner.bridge.android_build.cancel_source(input, self.android_build_gate(&state))?;
+        // Consume the actual first cancellation timestamp under the same
+        // Document gate now, rather than granting a new interval on next poll.
+        self.expire(&mut state, Instant::now());
+        Ok(status)
+    }
+    fn observe_android_source_slot(&self, state: &DocumentState) {
+        if let Some(slot)=state.slot.as_ref().filter(|slot|slot.operation.artifact()){
+            self.inner.bridge.artifact_inspection.artifact_observe_pick(&slot.owner,slot.phase,slot.reason,state.unknown);
+        }
+
+        if let Some(slot) = state.slot.as_ref().filter(|slot| slot.operation.android_source()) {
+            self.inner.bridge.android_build.observe_source(&slot.owner, slot.phase, slot.reason, state.unknown);
+        }
+    }
+
+    pub(crate) fn android_toolchain_catalog_status(&self) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let state=self.lock();
+        self.inner.bridge.android_build.catalog_status(self.android_build_gate(&state))
+    }
+    pub(crate) fn refresh_android_toolchain_catalog(&self) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let admitted_at=Instant::now(); // Original T, before Document/Registry admission or a native reader.
+        let state=self.lock();
+        let admitted=self.inner.bridge.android_build.refresh_catalog(&self.inner.session_identity,admitted_at,self.android_build_gate(&state))?;
+        // No native read/ACL call begins while the original document is locked.
+        drop(state);admitted.release()
+    }
+    pub(crate) fn recover_android_toolchain(&self,input:crate::android_toolchain_catalog::Recover) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let admitted_at=Instant::now(); // Keep the original recovery deadline before document admission.
+        let state=self.lock();
+        let admitted=self.inner.bridge.android_build.recover_catalog(&self.inner.session_identity,admitted_at,input,self.android_build_gate(&state))?;
+        // The same native recovery owner must not begin while the document is locked.
+        drop(state);admitted.release()
+    }
+    pub(crate) fn select_android_toolchain(&self,input:crate::android_toolchain_catalog::Select) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let state=self.lock();
+        self.inner.bridge.android_build.select_catalog(input,self.android_build_gate(&state))
+    }
+    pub(crate) fn cancel_android_toolchain_catalog(&self,input:crate::android_toolchain_catalog::Cancel) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let state=self.lock();
+        self.inner.bridge.android_build.cancel_catalog(input,self.android_build_gate(&state))
+    }
+    pub(crate) fn android_build_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.android_build.subscribe() }
+    pub(crate) fn android_build_relay_lost(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.inner.bridge.application_service.android_tools_relay_lost(); // Memory-only before original STOP.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.agent_android_builds_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_store_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_apple_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.github_action_agent_relay_closed();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_tool_setup_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.git_index_relay_lost();
+        // Loss retires consent/STOP under the same gate. It is not settlement,
+        // owner deletion, a replacement run or permission to reopen the slot.
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();
+        if let Some(publisher)=publisher.as_mut(){let _=publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost);}
+        {
+            let mut state=self.lock();state.saved_input=None;
+            self.inner.bridge.android_build.document_lost_published(publisher.as_ref());
+        }
+        if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
+    }
+    pub(crate) fn android_build_status(&self) -> Result<crate::android_build_protocol::Status, BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve_reconciliation().ok();
+        let result = (|| {
+            let mut state = self.lock();
+            if let Some(publisher) = publisher.as_mut() { self.android_registration_mismatch_locked(&mut state, publisher)?; }
+            // A saturated read remains nonactionable DATA; it is not relay loss.
+            let gate = if publisher.is_none() && !self.inner.android_registration_control.is_unknown() {
+                crate::android_build_protocol::Availability::Busy
+            } else { self.android_build_gate(&state) };
+            self.inner.bridge.android_build.status(gate)
+        })();
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
+    }
+    pub(crate) fn prepare_android_build(&self, args: crate::android_build_protocol::Prepare) -> Result<crate::android_build_protocol::Status, BridgeError> {
+        let mut state = self.lock();
+        let gate = self.android_build_gate(&state);
+        if gate != crate::android_build_protocol::Availability::Available {
+            return Err(if gate == crate::android_build_protocol::Availability::Busy {
+                BridgeError::new("android_build_busy", "Finish or cancel the original operation before reviewing a saved Android build.")
+            } else { crate::android_build_owner::unavailable() });
+        }
+        // Only the existing native root identity/generation, never a renderer
+        // path or a diagnostics/offline fixture permit, reaches this owner.
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
+        let (generation, root) = selected.map_err(|_| crate::android_build_owner::unavailable())?;
+        let material = if args.context().signed() {
+            Some(self.review_android_material(&state, &args.context(), generation, &root)?)
+        } else { None };
+        self.inner.bridge.android_build.prepare_material(args, generation, root, gate, material)
+    }
+    pub(crate) fn start_android_build(&self, args: crate::android_build_protocol::Start) -> Result<crate::android_build_protocol::Status, BridgeError> {
+        let admitted_at = Instant::now(); // Original T before the document lock, lookup, executor or await.
+        let mut state = self.lock();
+        let project = self.inner.bridge.android_build.prepared_project(&args.operation_id, &args.owner_generation)?;
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
+        let material = self.inner.bridge.android_build.prepared_material(&args.operation_id, &args.owner_generation)?
+            .filter(|original| selected.as_ref().is_some_and(|(generation, root)| self.recheck_android_material(&state, original, *generation, root).is_ok()));
+        let admitted = self.inner.bridge.android_build.start_material(args, admitted_at, selected, self.android_build_gate(&state), material)?;
+        // Gate/root/generation, one-use consent and the original roster claim
+        // share this document mutex. GO is released only after unlocking it.
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_android_build(&self, args: crate::android_build_protocol::Cancel) -> Result<crate::android_build_protocol::Status, BridgeError> {
+        let state = self.lock();
+        // Exact original cancellation remains callable after loss/shutdown or
+        // retained Unknown. The availability gate never hides status or STOP.
+        self.inner.bridge.android_build.cancel(&args.operation_id, &args.owner_generation, self.android_build_gate(&state))
+    }
+    fn project_recovery_gate(&self, state: &DocumentState) -> crate::project_recovery_protocol::Availability {
+        use crate::project_recovery_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))) { return Availability::Shutdown; }
+        if let Some(reason) = project_recovery_document_gate(state, crate::project_recovery_protocol::Profile::current()) { return reason; }
+        // Require actual Disconnect, not an idle/retired public GitHub ticket.
+        // Asset phase AND original resources must settle, as must all edits,
+        // recovery attention, passive queries and the other saved-command owner.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+            || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))) { return Availability::Busy; }
+        Availability::Available
+    }
+    pub(crate) fn project_recovery_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.project_recovery.subscribe() }
+    pub(crate) fn project_recovery_relay_lost(&self) {
+        // Loss retires consent/STOP under the same gate. It is not settlement,
+        // owner deletion, a replacement run or permission to reopen the slot.
+        let _state = self.lock(); self.inner.bridge.project_recovery.document_lost();
+    }
+    pub(crate) fn project_recovery_status(&self) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
+        let state = self.lock();
+        if !self.inner.bridge.project_recovery.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.project_recovery.context_changed(); }
+        self.inner.bridge.project_recovery.status(self.project_recovery_gate(&state))
+    }
+    pub(crate) fn prepare_project_recovery(&self, args: crate::project_recovery_protocol::Prepare) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
+        let mut state = self.lock();
+        let gate = self.project_recovery_gate(&state);
+        if gate != crate::project_recovery_protocol::Availability::Available {
+            return Err(if gate == crate::project_recovery_protocol::Availability::Busy {
+                BridgeError::new("project_recovery_busy", "Finish or cancel the original operation before reviewing project recovery.")
+            } else { crate::project_recovery_owner::unavailable() });
+        }
+        // Only the existing native root identity/generation, never a renderer
+        // path or a diagnostics/offline fixture permit, reaches this owner.
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
+        let (generation, root) = selected.map_err(|_| crate::project_recovery_owner::unavailable())?;
+        self.inner.bridge.project_recovery.prepare(args, generation, root, gate)
+    }
+    pub(crate) fn start_project_recovery(&self, args: crate::project_recovery_protocol::Start) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
+        let admitted_at = Instant::now(); // Original T before the document lock, lookup, executor or await.
+        let mut state = self.lock();
+        let project = self.inner.bridge.project_recovery.prepared_project(&args.operation_id, &args.owner_generation)?;
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
+        let admitted = self.inner.bridge.project_recovery.start(args, admitted_at, selected, self.project_recovery_gate(&state))?;
+        // Gate/root/generation, one-use consent and the original roster claim
+        // share this document mutex. GO is released only after unlocking it.
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_project_recovery(&self, args: crate::project_recovery_protocol::Cancel) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
+        let state = self.lock();
+        // Exact original cancellation remains callable after loss/shutdown or
+        // retained Unknown. The availability gate never hides status or STOP.
+        self.inner.bridge.project_recovery.cancel(&args.operation_id, &args.owner_generation, self.project_recovery_gate(&state))
+    }
+    fn ios_archive_gate(&self, state: &DocumentState) -> crate::ios_archive_protocol::Availability {
+        use crate::ios_archive_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))) { return Availability::Shutdown; }
+        if let Some(reason) = ios_archive_document_gate(state, crate::ios_archive_protocol::Profile::current()) { return reason; }
+        // Require actual Disconnect, not an idle/retired public GitHub ticket.
+        // Asset phase AND original resources must settle, as must all edits,
+        // recovery attention, passive queries and the other saved-command owner.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+            || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))) { return Availability::Busy; }
+        Availability::Available
+    }
+    pub(crate) fn ios_archive_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.ios_archive.subscribe() }
+    pub(crate) fn ios_archive_relay_lost(&self) {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_ios_archives_relay_lost();
+        // Loss retires consent/STOP under the same gate. It is not settlement,
+        // owner deletion, a replacement run or permission to reopen the slot.
+        let _state = self.lock(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost();
+    }
+    pub(crate) fn ios_archive_status(&self) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+        let state = self.lock();
+        if !self.inner.bridge.ios_archive.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); }
+        self.inner.bridge.ios_archive.status(self.ios_archive_gate(&state))
+    }
+    pub(crate) fn prepare_ios_archive(&self, args: crate::ios_archive_protocol::Prepare) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+        let mut state = self.lock();
+        let gate = self.ios_archive_gate(&state);
+        if gate != crate::ios_archive_protocol::Availability::Available {
+            return Err(if gate == crate::ios_archive_protocol::Availability::Busy {
+                BridgeError::new("ios_archive_busy", "Finish or cancel the original operation before reviewing the selected local iOS action.")
+            } else { crate::ios_archive_owner::unavailable() });
+        }
+        // Only the existing native root identity/generation, never a renderer
+        // path or a diagnostics/offline fixture permit, reaches this owner.
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
+        let (generation, root) = selected.map_err(|_| crate::ios_archive_owner::unavailable())?;
+        let material = if args.context().signed() {
+            Some(self.review_ios_material(&state, &args.context(), generation, &root)?)
+        } else { None };
+        self.inner.bridge.ios_archive.prepare_material(args, generation, root, gate, material)
+    }
+    pub(crate) fn start_ios_archive(&self, args: crate::ios_archive_protocol::Start) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+        let admitted_at = Instant::now(); // Original T before the document lock, lookup, executor or await.
+        let mut state = self.lock();
+        let project = self.inner.bridge.ios_archive.prepared_project(&args.operation_id, &args.owner_generation)?;
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
+        let material = self.inner.bridge.ios_archive.prepared_material(&args.operation_id, &args.owner_generation)?
+            .filter(|original| selected.as_ref().is_some_and(|(generation, root)| self.recheck_ios_material(&state, original, *generation, root).is_ok()));
+        let admitted = self.inner.bridge.ios_archive.start_material(args, admitted_at, selected, self.ios_archive_gate(&state), material)?;
+        // Gate/root/generation, one-use consent and the original roster claim
+        // share this document mutex. GO is released only after unlocking it.
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_ios_archive(&self, args: crate::ios_archive_protocol::Cancel) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+        let state = self.lock();
+        // Exact original cancellation remains callable after loss/shutdown or
+        // retained Unknown. The availability gate never hides status or STOP.
+        self.inner.bridge.ios_archive.cancel(&args.operation_id, &args.owner_generation, self.ios_archive_gate(&state))
+    }
+    /// The existing passive Supervisor claim is synchronous under this SAME
+    /// real mutex; a gate check before awaiting query() would leave a race.
+    /// This is not an offline-preflight runner or a new query resource owner.
+    pub(crate) fn passive_query(&self, bridge: &DesktopBridge, method: crate::protocol::Method, params: serde_json::Value) -> Result<crate::supervisor::PassiveQuery, BridgeError> {
+        let state = self.lock();
+        self.passive_query_gate_locked(&state, bridge)?;
+        self.inner.bridge.supervisor.start_passive(method, params)
+    }
+    fn passive_query_gate_locked(&self, state: &DocumentState, bridge: &DesktopBridge) -> Result<(), BridgeError> {
+        if !std::ptr::eq(bridge, self.inner.bridge.as_ref()) { return Err(BridgeError::invalid()); }
+        passive_document_gate(state)?;
+        if state.saved_observation.as_ref().is_some_and(|lane| !lane.returned()) {
+            return Err(BridgeError::new("busy", "The original saved observation has not returned."));
+        }
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        Ok(())
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    pub(crate) fn environment_fixture_registration(&self,
+        permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed || state.stopping { return Err(BridgeError::cleanup_unknown()); }
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.environment_fixture_registration(permit, change)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    pub(crate) fn offline_fixture_registration(&self,
+        permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if self.preflight_gate(&state) != crate::offline_preflight_protocol::Availability::Available {
+            return Err(crate::offline_preflight_owner::unavailable());
+        }
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.offline_fixture_registration(permit)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    pub(crate) fn offline_fixture_gate(&self, permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
+        gate: &str, present: bool) -> Result<(), BridgeError> {
+        let (id, _, generation) = permit.validate(&self.inner.bridge.preflight)?;
+        if !permit.gate_evidence() { return Err(crate::offline_preflight_owner::unavailable()); }
+        let mut state = self.lock();
+        if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.stopping {
+            return Err(crate::offline_preflight_owner::unavailable());
+        }
+        match (gate, present) {
+            ("retained-private", true) if state.github.registration().is_none() => {
+                state.github = github_session::offline_fixture_private(permit, &self.inner.bridge.preflight)?;
+            },
+            ("retained-private", false) if state.github.registration() == Some((id, generation))
+                && !state.github.native_work_pending() => {
+                // The real disconnect DATA path, not token retirement alone.
+                state.github.disconnect("github-session-1", Instant::now(), GitHubReason::None)?;
+                if state.github.registration().is_some() { return Err(crate::offline_preflight_owner::unavailable()); }
+            },
+            ("existing-work", true) if state.slot.is_none() => {
+                // Inert retained work: no coordinator/child/GUI is scheduled.
+                // Phase and unreturned OriginalWork are the actual gate inputs;
+                // removal below is not claimed as native physical settlement.
+                state.slot = Some(Slot { owner: OriginalWork::new(u32::MAX - 1, false, Arc::downgrade(&self.inner)),
+                    operation: Operation::ChooseFile, phase: Phase::Admitting, reason: Reason::None,
+                    source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
+                    review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
+                    preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, android_source: None, artifact:None, images: None, image_batch: None, installation_result: None,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: vault::SlotData::default() });
+            },
+            ("existing-work", false) if state.slot.as_ref().is_some_and(|slot|
+                slot.owner.id == u32::MAX - 1 && slot.phase == Phase::Admitting) => {
+                let slot = state.slot.as_ref().ok_or_else(crate::offline_preflight_owner::unavailable)?;
+                if slot.owner.coordinator.lock().map_err(|_| BridgeError::cleanup_unknown())?.handle.is_some()
+                    || slot.owner.child.try_lock().map_err(|_| BridgeError::cleanup_unknown())?.handle.is_some() {
+                    return Err(BridgeError::cleanup_unknown());
+                }
+                state.slot.take();
+            },
+            ("recovery-attention", _) => {
+                self.inner.bridge.edits.offline_fixture_attention(permit, &self.inner.bridge.preflight, present)?;
+            },
+            _ => return Err(crate::offline_preflight_owner::unavailable()),
+        }
+        self.bump(&mut state); Ok(())
+    }
+    pub(crate) fn start_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Start) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+        let ticket = self.inner.bridge.diagnostics.ticket()?; // Original T, entropy/executor before lock/effects.
+        self.admit_environment_diagnostics(ticket,args,None)
+    }
+    pub(super) fn admit_environment_diagnostics(&self,ticket:crate::environment_diagnostics_owner::Ticket,args:crate::environment_diagnostics_protocol::Start,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<crate::environment_diagnostics_protocol::Status,BridgeError>{
+        let state = self.lock();
+        use crate::environment_diagnostics_protocol::Availability;
+        match self.environment_gate(&state) {
+            Availability::Available => {}, Availability::Busy => return Err(BridgeError::new("environment_diagnostics_busy", "Finish or cancel the original native operation before checking build tools.")),
+            Availability::CleanupUnknown => return Err(BridgeError::cleanup_unknown()), Availability::Shutdown => return Err(BridgeError::shutdown()),
+            _ => return Err(BridgeError::new("environment_diagnostics_owner", "This request does not identify the original build-tool diagnostics run.")),
+        }
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let delegation_edit=entry.map(|entry|self.tool_setup_admission_guard(&state,entry)).transpose()?;
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        if entry.is_some(){return Err(BridgeError::invalid());}
+        let (generation, root) = self.inner.bridge.environment_registration(&args.project_id)?;
+        let admitted = self.inner.bridge.diagnostics.admit(ticket, args, generation, root)?;
+        // Real document loss, selection, assets, edits, GitHub and quit cannot
+        // interleave lookup/claim/enqueue. All original handles exist before GO.
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        drop(delegation_edit);
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Cancel) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+        let state = self.lock();
+        // Exact original STOP stays usable during shutdown, document loss,
+        // deadline or retained Unknown; it never grants start authority.
+        self.inner.bridge.diagnostics.cancel(&args.run_id, &args.owner_generation, self.environment_gate(&state))
+    }
+    /// Configuration operations retire saved-command consent/STOP under the
+    /// same document mutex, then wait for original settlement before writing.
+    /// Their existing root/owner semantics and diagnostics exclusion remain.
+    #[cfg(test)]
+    pub(crate) fn configuration_edit_admit<T>(&self, action: impl FnOnce(&DesktopBridge) -> Result<T, BridgeError>) -> Result<T, BridgeError> {
+        self.configuration_edit_admit_published(|bridge, _publisher| action(bridge))
+    }
+    pub(crate) fn configuration_edit_admit_published<T>(&self,
+        action: impl FnOnce(&DesktopBridge, &RegistrationPublisher) -> Result<T, BridgeError>) -> Result<T, BridgeError> {
+        self.configuration_edit_admit_checked(|_,_|Ok(()),|bridge,publisher,()|action(bridge,publisher))
+    }
+    fn configuration_edit_admit_checked<T,U>(&self,
+        before:impl FnOnce(&DocumentState,&RegistrationPublisher)->Result<U,BridgeError>,
+        action:impl FnOnce(&DesktopBridge,&RegistrationPublisher,U)->Result<T,BridgeError>)->Result<T,BridgeError>{
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+        let mut state = self.lock();
+        if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+        if !state.lifetime.original_bound() || state.lost_observed { return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain.")); }
+        if state.stopping { return Err(BridgeError::shutdown()); }
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
+        if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
+            && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
+        if project_path_pending(&state) || images::pending(&state) { return Err(BridgeError::new("busy", "Finish the original native file selection first.")); }
+        let admitted=before(&state,&publisher)?; // Agent READ may not invalidate/STOP an active peer.
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
+        state.saved_input = None;
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        state.github.setup_context_changed();
+        state.github.setup_ensure_idle()?;
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        action(&self.inner.bridge, &publisher,admitted)
+        })();
+        finish_registration_publisher(publisher); result
+    }
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+    pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+        let mut state = self.lock();
+        if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
+        state.saved_input = None;
+        self.inner.bridge.diagnostics.context_changed();
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        if state.stopping { return Err(BridgeError::shutdown()); }
+        if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
+        state.compatibility_picker_pending = true; self.bump(&mut state); Ok(())
+        })();
+        finish_registration_publisher(publisher); result
+    }
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+    pub(crate) fn compatibility_picker_end(&self) {
+        // This preserves the existing compatibility picker reservation; it is
+        // NOT evidence for a qualified macOS/Windows document/GUI owner.
+        // Android admission also sees this reservation until publication/end;
+        // begin already retired any old consent under this same mutex.
+        let mut state = self.lock(); state.compatibility_picker_pending = false; self.bump(&mut state);
+    }
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+    pub(crate) fn compatibility_picker_publish(&self, path: std::path::PathBuf) -> Result<Project, BridgeError> {
+        let state = self.lock();
+        if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        self.inner.bridge.register_picked_project(path)
+    }
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
+    pub(crate) fn compatibility_quit_begin(&self) -> bool {
+        let mut state = self.lock();
+        if state.compatibility_picker_pending || state.quit_pending { return false; }
+        state.quit_pending = true; self.bump(&mut state); true
+    }
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
+    pub(crate) fn compatibility_quit_result(&self, accepted: bool) {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::Quit, true).ok();
+        {
+        let mut state = self.lock(); state.quit_pending = false;
+        if accepted {
+            if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+            state.saved_input = None;
+            state.stopping = true; version_allocation::stop(&state); version_enrollment::stop(&mut state); self.inner.bridge.diagnostics.request_shutdown();
+            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.apple_provisioning.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown(); self.inner.bridge.upload_key.request_shutdown();
+        }
+        self.bump(&mut state);
+        }
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); }
+    }
+    fn common_gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
+        self.common_gate_with_upload_key_preparation(state, session, None)
+    }
+    fn common_gate_with_upload_key_preparation(&self, state: &DocumentState, session: bool,
+        preparation: Option<&Arc<crate::saved_command_owner::UploadKeyPreparation>>) -> Result<(), AssetError> {
+        common_document_gate(state, session, || {
+            if let Some(preparation) = preparation {
+                if !preparation.admission_current(&self.inner.bridge.upload_key, Instant::now()) {
+                    return Err(AssetError::new(Reason::ContextStale));
+                }
+            }
+            if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+            if (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) { return Err(AssetError::new(Reason::Shutdown)); }
+            if (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Err(AssetError::new(Reason::Shutdown)); }
+            if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || preparation.is_none() && self.inner.bridge.upload_key.busy()))))) {
+                return Err(AssetError::new(Reason::Busy));
+            }
+            Ok(())
+        })
+    }
+    fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
+        self.gate_with_upload_key_preparation(state, session, None)
+    }
+    fn gate_with_upload_key_preparation(&self, state: &DocumentState, session: bool,
+        preparation: Option<&Arc<crate::saved_command_owner::UploadKeyPreparation>>) -> Result<(), AssetError> {
+        self.common_gate_with_upload_key_preparation(state, session, preparation)?;
+        if let Some(reason) = self.live_session_owner_reason() { return Err(AssetError::new(reason)); }
+        ordinary_asset_platform_gate()?;
+        if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
+        if session && !session_writable(state) { return Err(AssetError::new(Reason::Closed)); } Ok(())
+    }
+    fn live_session_owner_reason(&self) -> Option<Reason> {
+        session_owner_reason(self.inner.bridge.supervisor.disabled(), self.inner.bridge.edits.disabled(),
+            self.inner.bridge.supervisor.stopping(), self.inner.bridge.edits.stopping())
+    }
+    fn project_path_gate(&self, state: &DocumentState) -> Result<(), AssetError> {
+        self.common_gate(state, false)?;
+        project_path_idle_gate(state, self.project_path_selection_available())?;
+        if self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+        if !self.inner.bridge.supervisor.can_exit() || !self.inner.bridge.edits.can_exit() || state.github.native_work_pending() {
+            return Err(AssetError::new(Reason::Busy));
+        }
+        Ok(())
+    }
+    fn evidence_gate(&self, state: &DocumentState, purpose: EvidencePurpose) -> Result<(), BridgeError> {
+        evidence_route_gate(state, purpose.lifecycle())?;
+        if !self.evidence_qualified(purpose) { return Err(evidence_wire::refused(EvidenceProblem::Unavailable)); }
+        // Reuse lifecycle/Android/diagnostic gates without granting the broad
+        // private-asset profile or requiring a credential session/source project.
+        self.common_gate(state, false).map_err(|error| evidence_wire::refused(evidence_reason(error.reason)))?;
+        evidence_selection_gate(state)?;
+        if self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        if self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return Err(evidence_wire::refused(EvidenceProblem::Unavailable)); }
+        if !self.inner.bridge.supervisor.can_exit() || !self.inner.bridge.edits.can_exit() || state.github.native_work_pending() {
+            return Err(evidence_wire::refused(EvidenceProblem::Busy));
+        }
+        Ok(())
+    }
+    pub(crate) fn artifact_evidence_status(&self) -> Result<evidence_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), false)?;
+        self.reconcile_scope(Some(false));
+        let mut state = self.lock(); evidence_route_gate(&state, false)?; self.expire(&mut state, Instant::now());
+        evidence_snapshot(&state, self.evidence_qualified(EvidencePurpose::Candidate)).checked()
+    }
+    pub(crate) fn artifact_evidence_cancel(&self, args: evidence_wire::Cancel) -> Result<evidence_wire::Status, BridgeError> {
+        // Match before expire/reconcile: a wrong cancellation is not authority
+        // even to change another slot's status or its clock.
+        let mut state = self.lock();
+        // Do not alter credentials/source/G state or invoke Supervisor STOP.
+        // The existing coordinator retains the exact in-progress query future.
+        if cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &args, Instant::now())? { self.bump(&mut state); }
+        evidence_snapshot(&state, self.evidence_qualified(EvidencePurpose::Candidate)).checked()
+    }
+    pub(crate) fn release_evidence_status(&self) -> Result<lifecycle_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), true)?;
+        self.reconcile_scope(Some(true));
+        let mut state = self.lock(); evidence_route_gate(&state, true)?; self.expire(&mut state, Instant::now());
+        release_evidence_snapshot(&state, self.evidence_qualified(EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate))).checked()
+    }
+    pub(crate) fn release_evidence_cancel(&self, args: lifecycle_wire::Cancel) -> Result<lifecycle_wire::Status, BridgeError> {
+        let mut state = self.lock();
+        let purpose = state.evidence.operation.as_ref().filter(|op| op.purpose.lifecycle())
+            .map(|op| op.purpose).ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
+        if cancel_evidence_locked(&mut state, purpose, &args, Instant::now())? { self.bump(&mut state); }
+        release_evidence_snapshot(&state, self.evidence_qualified(purpose)).checked()
+    }
+    #[cfg(feature = "desktop-shell")]
+    fn evidence_job_matches(&self, owner: &Arc<OriginalWork>, purpose: EvidencePurpose) -> bool {
+        let state = self.lock();
+        state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && state.evidence.matches(slot)
+            && slot.evidence.as_ref().is_some_and(|binding| binding.purpose == purpose))
+    }
+    #[cfg(feature = "desktop-shell")]
+    fn evidence_failed(&self, owner: &Arc<OriginalWork>, problem: EvidenceProblem) {
+        let mut state = self.lock();
+        if record_evidence_failure(&mut state, owner, problem, Instant::now()) { self.bump(&mut state); }
+    }
+    fn registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>, original: Option<&Arc<OriginalWork>>) -> Result<T, AssetError> {
+        // Admission/context callers without an explicit original pass None.
+        // In particular, state.slot is not a diagnostic association fallback.
+        if result.as_ref().is_err_and(|error| error.reason == Reason::CleanupUnknown) {
+            self.coordinator_failed(state, UnknownOrigin::Registry, original);
+        }
+        result
+    }
+    fn project_path_registration(&self, state: &mut DocumentState, binding: &ProjectPathBinding) -> Result<(), AssetError> {
+        let (generation, root) = self.registry_result(state, self.inner.bridge.native_project(&binding.project_id), None)?;
+        if !binding.registration_matches(generation, &root) { return Err(AssetError::new(Reason::ContextStale)); }
+        Ok(())
+    }
+    fn github_gate(&self, state: &DocumentState) -> GitHubReason {
+        let base = self.github_base_gate(state);
+        if base == GitHubReason::None && (gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)) { GitHubReason::Busy } else { base }
+    }
+    // Only the retained gh-auth original uses this companion to avoid treating
+    // its OWN pending capture as unrelated new-work admission.
+    fn github_base_gate(&self, state: &DocumentState) -> GitHubReason {
+        if (version_allocation::pending(state) || version_enrollment::pending(state)) { return GitHubReason::Busy; }
+        if state.maintenance.closed() { return GitHubReason::Busy; }
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+            || self.inner.bridge.diagnostics.disabled() || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return GitHubReason::CleanupUnknown; }
+        if !self.github_qualified() { return GitHubReason::Unqualified; }
+        if !state.lifetime.original_bound() || state.lost_observed || state.stopping
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping()
+            || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return GitHubReason::Cancelled; }
+        if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())))))
+            || state.compatibility_picker_pending { return GitHubReason::Busy; }
+        if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
+            slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
+        GitHubReason::None
+    }
+    fn github_observe_locked(&self, state: &mut DocumentState, now: Instant) {
+        gh_auth::observe_locked(self, state, now);
+        // Recheck the real document and native ID registry BEFORE consuming a
+        // positive receipt. This does not inspect a path, launch work or acquire
+        // another document owner; lock order stays document -> registry -> owner.
+        if state.exhausted { state.github.exhaust(); }
+        else if state.unknown || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { state.github.unknown(); }
+        else if state.lost_observed || !state.lifetime.original_bound() || state.stopping
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { state.github.retire(GitHubReason::Cancelled); }
+        let registration = state.github.registration().map(|(id, generation)| (id.to_owned(), generation));
+        if let Some((id, original)) = registration {
+            match self.registry_result(state, self.inner.bridge.github_registration(&id), None) {
+                Ok(generation) if generation == original => {},
+                Err(error) if error.reason == Reason::CleanupUnknown => state.github.unknown(),
+                _ => state.github.retire(GitHubReason::TargetChanged),
+            }
+        }
+        let gate = self.github_gate(state);
+        state.github.reconcile(now, gate);
+        gh_auth::retire_joined(self, state);
+        self.github_setup_observe_locked(state, now, gate);
+        self.github_publication_observe_locked(state, now, gate);
+        self.repository_create_observe_locked(state, now, gate);
+        self.github_activity_observe_locked(state, now, gate);
+        self.pull_request_observe_locked(state, now, gate);
+        self.actions_retry_observe_locked(state, now, gate);
+        self.play_cleanup_observe_locked(state, now, gate);
+        self.github_history_observe_locked(state, now, gate);
+    }
+    fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {
+        match self.registry_result(state, result, None) {
+            Ok(original) => Some(original),
+            Err(error) => {
+                // This second lookup may have newly failed after the caller
+                // sampled its external gate. Latch containing uncertainty
+                // before the same pending Setup receipt can be reconciled.
+                if error.reason == Reason::CleanupUnknown { state.github.unknown(); }
+                None
+            },
+        }
+    }
+    fn github_setup_observe_locked(&self, state: &mut DocumentState, now: Instant, external: GitHubReason) {
+        let project = state.github.setup_registered_project().map(str::to_owned);
+        let original = project.as_deref().and_then(|project| {
+            self.github_setup_registry_result(state, self.inner.bridge.native_project(project))
+        });
+        // A real fresh Edit registry guard is held until this same original
+        // receipt is correlated. No boolean status or cloned stamp substitutes.
+        if let Some((generation, root)) = original {
+            let material_current=state.github.setup_secret_material().is_none_or(|material|
+                state.github.setup_registered_project().is_some_and(|project|material.current(state,project,generation,&root)))
+                &&state.github.setup_variable_material().is_none_or(|material|
+                    state.github.setup_registered_project().is_some_and(|project|material.current(state,project,generation,&root)));
+            if !material_current{state.github.setup_context_changed();}
+            match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity) {
+                Ok(edit) => state.github.reconcile_setup(now, external, Some((generation, &root, &edit))),
+                Err(error) => {
+                    if error.code == "cleanup_unknown" { state.github.unknown(); }
+                    state.github.reconcile_setup(now, external, None);
+                },
+            }
+        } else { state.github.reconcile_setup(now, external, None); }
+    }
+    pub(crate) fn github_remote_setup_status(&self) -> crate::github_setup_protocol::Status {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let external = self.github_gate(&state);
+        state.github.setup_status(self.inner.bridge.supervisor.github_setup_profile_available(), now, external)
+    }
+    pub(crate) fn github_remote_setup_command(&self, name: &str, value: &Value) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
+        let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_remote_setup_execute(command, None)
+    }
+    pub(super) fn github_remote_setup_execute(&self, command: crate::github_setup_protocol::Command,
+        agent: Option<Arc<crate::service_github_action_requests::Entry>>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
+        if matches!(command, p::Command::Status) { return Ok(self.github_remote_setup_status()); }
+        // One bounded native nonce, before original admission. No credential,
+        // filesystem inspection or network exchange is performed by this step.
+        let nonce = if matches!(command, p::Command::Prepare(_)) {
+            let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?;
+            Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        } else { None };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        match &command {
+            p::Command::Cancel(args) => return state.github.setup_cancel(&args.operation_id),
+            p::Command::Discard(args) => return state.github.setup_discard(args),
+            _ => {},
+        }
+        let external = self.github_gate(&state);
+        let available = state.github.setup_status(self.inner.bridge.supervisor.github_setup_profile_available(), Instant::now(), external);
+        if !available.available { return Err(s::refused(available.reason)); }
+        let (project_id, original_generation) = state.github.registration().map(|(id, generation)| (id.to_owned(), generation))
+            .ok_or_else(|| s::refused(p::Reason::NotConnected))?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&project_id), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
+        let binding = github_setup_project_binding(&root).map_err(|_| s::refused(p::Reason::TargetChanged))?;
+        let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)
+            .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::Busy }))?;
+        let delegated_variable = self.remote_setup_agent_entry(&mut state, &command, agent.as_ref(), &project_id,
+            generation, &root, &binding, &edit, Instant::now())?;
+        let setup_material=if let p::Command::Prepare(args)=&command {
+            if let p::Selection::Secret(selected)=&args.selection {
+                let material=self.review_github_secret_material(&state,selected,&project_id,generation,&root)?;
+                let admission=crate::supervisor::SecretNativeAdmission::reserve(material.clone())?;
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                lookup_memory::secret_admission_bytes(&self.inner,&state,&material,admission.bytes(),false).map_err(|e|
+                    s::refused(if e==keyring::Problem::CleanupUnknown {p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                return Err(s::refused(p::Reason::Unqualified));
+                Some(crate::supervisor::SetupNativeAdmission::Secret(admission))
+            }else if let p::Selection::Variable(selected)=&args.selection{
+                let material = match delegated_variable {
+                    Some(material) => material,
+                    None => self.review_github_variable_material(&state,selected,&project_id,generation,&root)?,
+                };
+                let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Prepare)?;
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                lookup_memory::variable_admission_bytes(&self.inner,&state,&material,admission.bytes()).and_then(|bytes| {
+                    if agent.is_some() { self.remote_setup_additional(&state, bytes, 0).map_err(|e| if e.code == "github_remote_setup_refused_cleanup_unknown" { keyring::Problem::CleanupUnknown } else { keyring::Problem::Capacity }) } else { Ok(bytes) }
+                }).map_err(|e|
+                    s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                return Err(s::refused(p::Reason::Unqualified));
+                Some(crate::supervisor::SetupNativeAdmission::Variable(admission))
+            }else{None}
+        }else{None};
+        let gate = GitHubSetupGoGate { inner: Arc::downgrade(&self.inner), agent: agent.clone() };
+        let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
+        match command {
+            p::Command::Prepare(args) => {
+                let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
+                let nonce=nonce.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
+                match setup_material {
+                    Some(crate::supervisor::SetupNativeAdmission::Secret(admission))=>state.github.setup_secret_prepare(args,generation,root,&binding,stamp,nonce,admission,gate,supervisor,now),
+                    Some(crate::supervisor::SetupNativeAdmission::Variable(admission))=>state.github.setup_variable_prepare(args,generation,root,&binding,stamp,nonce,admission,gate,supervisor,now),
+                    None=>state.github.setup_prepare(args,generation,root,&binding,stamp,nonce,gate,supervisor,now)}
+            },
+            p::Command::Apply(args) => {
+                if state.github.setup_has_material(){
+                    let(target,mut consent)=state.github.setup_take_apply(args,generation,&root,&binding,&edit,now)?;
+                    // Consume exactly once before later admission. No relookup or
+                    // replacement Arc is allowed to renew this reviewed field.
+                    let retained=consent.retained_heap_bytes().ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                    match consent.material.take().ok_or_else(||s::refused(p::Reason::MaterialChanged))?{
+                    s::ConsentMaterial::Secret(sealed)=>{
+                    let material=sealed.material.clone();
+                    if !self.native_qualified()||!material.current(&state,&project_id,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+                    let admission=crate::supervisor::SecretNativeAdmission::reserve_apply(sealed)?;
+                    let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
+                        .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                    #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                    lookup_memory::secret_admission_bytes(&self.inner,&state,&material,future,true).map_err(|e|
+                        s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                    #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                    return Err(s::refused(p::Reason::Unqualified));
+                    state.github.setup_secret_apply(target,consent,root,admission,gate,supervisor,Instant::now())
+                    },
+                    s::ConsentMaterial::Variable(material)=>{
+                        if !self.native_qualified()||!material.current(&state,&project_id,generation,&root)
+                            ||!matches!(&consent.prepared,p::Prepared::Variable(v) if material.prepared_matches(v)){
+                            return Err(s::refused(p::Reason::MaterialChanged))
+                        }
+                        let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Apply)?;
+                        let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
+                            .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                        #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                        lookup_memory::variable_admission_bytes(&self.inner,&state,&material,future).and_then(|bytes| {
+                    if agent.is_some() { self.remote_setup_additional(&state, bytes, 0).map_err(|e| if e.code == "github_remote_setup_refused_cleanup_unknown" { keyring::Problem::CleanupUnknown } else { keyring::Problem::Capacity }) } else { Ok(bytes) }
+                }).map_err(|e|
+                            s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                        #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                        return Err(s::refused(p::Reason::Unqualified));
+                        state.github.setup_variable_apply(target,consent,root,admission,gate,supervisor,Instant::now())
+                    },
+                    }
+                }else{state.github.setup_apply(args,generation,root,&binding,&edit,gate,supervisor,now)}
+            },
+            p::Command::Status | p::Command::Discard(_) | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
+        }
+    }
+    pub(crate) fn github_connection_status(&self) -> github_wire::Status {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now()); state.github.snapshot()
+    }
+    pub(crate) fn github_connection_connect_token(&self, value: &Value) -> Result<github_wire::Status, BridgeError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let gate = self.github_gate(&state);
+        // This is BEFORE the borrowed decoder makes its single native-owned
+        // credential copy. Unqualified builds never collect a private session.
+        if gate != GitHubReason::None { return Err(github_session::refused(gate)); }
+        let github_wire::Command::ConnectToken(args) = github_wire::decode_command_value("github_connection_connect_token", value)
+            .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
+        let generation = self.registry_result(&mut state, self.inner.bridge.github_registration(&args.project_id), None)
+            .map_err(|error| github_session::refused(if error.reason == Reason::CleanupUnknown { GitHubReason::CleanupUnknown } else { GitHubReason::TargetChanged }))?;
+        let now = Instant::now(); let wall = std::time::SystemTime::now();
+        state.github.connect(args, generation, &self.inner.bridge.supervisor, now, wall)
+    }
+    pub(crate) fn github_connection_refresh(&self, value: &Value) -> Result<github_wire::Status, BridgeError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let gate = self.github_gate(&state);
+        if gate != GitHubReason::None { return Err(github_session::refused(gate)); }
+        let github_wire::Command::Refresh(args) = github_wire::decode_command_value("github_connection_refresh", value)
+            .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
+        state.github.refresh(&args.session_id, args.expected_revision, &self.inner.bridge.supervisor, Instant::now())
+    }
+    pub(crate) fn github_connection_disconnect(&self, value: &Value) -> Result<github_wire::Status, BridgeError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let github_wire::Command::Disconnect(args) = github_wire::decode_command_value("github_connection_disconnect", value)
+            .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
+        // No new admission gate: exact retirement stays usable during Busy,
+        // quit, expiry, document loss or retained Unknown. Never sessionless STOP.
+        let gate = self.github_gate(&state);
+        state.github.disconnect(&args.session_id, Instant::now(), gate)
+    }
+    pub(crate) fn github_preflight_status(&self) -> crate::github_preflight_protocol::Status {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let gate = self.github_gate(&state);
+        state.github.preflight_status(self.inner.bridge.supervisor.github_preflight_profile_available(), now, gate)
+    }
+    pub(crate) fn github_preflight_command(&self, name: &str, value: &Value) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+        use crate::{github_preflight_protocol as p, github_preflight_session as s};
+        let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_preflight_execute(command,None)
+    }
+    pub(super) fn github_preflight_execute(&self,command:crate::github_preflight_protocol::Command,agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<crate::github_preflight_protocol::Status,BridgeError>{
+        use crate::{github_preflight_protocol as p,github_preflight_session as s};
+        if matches!(command, p::Command::Status) { return Ok(self.github_preflight_status()); }
+        // Native entropy/account DATA before locking. No filesystem traversal,
+        // helper, token copy or network occurs at this preparation boundary.
+        let marker = if matches!(command, p::Command::Prepare(_)) {
+            let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?;
+            Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        } else { None };
+        let home = if matches!(command, p::Command::Dispatch(_) | p::Command::Track(_) | p::Command::Reconcile(_) | p::Command::Pending(_)) {
+            Some(github_preflight_home()?)
+        } else { None };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if let p::Command::Cancel(args) = command { return state.github.preflight_cancel(&args.operation_id); }
+        let gate = self.github_gate(&state);
+        let available = state.github.preflight_status(self.inner.bridge.supervisor.github_preflight_profile_available(), Instant::now(), gate);
+        if !available.available { return Err(s::refused(available.reason)); }
+        let (project_id, original_generation) = state.github.registration().map(|(id, generation)| (id.to_owned(), generation))
+            .ok_or_else(|| s::refused(p::Reason::NotConnected))?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&project_id), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
+        let project_binding = github_preflight_project_binding(&root)?;
+        let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity);
+        if agent.is_some() && edit.is_err(){return Err(s::refused(p::Reason::TargetChanged));}
+        state.github.preflight_agent_entry(&command,agent.as_ref(),generation,&root,&project_binding,edit.as_ref().ok(),Instant::now())?;
+        let stamp=edit.as_ref().ok().map(|e|e.stamp()).transpose()?;
+        let gate = GitHubPreflightGoGate { inner: Arc::downgrade(&self.inner),agent,stamp };
+        let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let marker = marker.map(|fresh| supervisor.installed_preflight_prepare_marker(&gate, fresh)).transpose()?;
+        match command {
+            p::Command::Prepare(args) => state.github.preflight_prepare(args, generation, root, &project_binding,
+                marker.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Dispatch(args) => state.github.preflight_dispatch(args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Track(args) => state.github.preflight_observe(p::Kind::Track, args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Reconcile(args) => state.github.preflight_observe(p::Kind::Reconcile, args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Pending(args) => state.github.preflight_pending(args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Status | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
+        }
+    }
+    pub(crate) fn github_release_status(&self) -> crate::github_release_protocol::Status {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let gate = self.github_gate(&state);
+        state.github.release_status(self.inner.bridge.supervisor.github_release_profile_available(), now, gate)
+    }
+    pub(crate) fn github_release_command(&self, name: &str, value: &Value) -> Result<crate::github_release_protocol::Status, BridgeError> {
+        use crate::{github_release_protocol as p, github_release_session as s};
+        let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_release_execute(command,None)
+    }
+    pub(super) fn github_release_execute(&self,command:crate::github_release_protocol::Command,agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<crate::github_release_protocol::Status,BridgeError>{
+        use crate::{github_release_protocol as p,github_release_session as s};
+        if matches!(command, p::Command::Status) { return Ok(self.github_release_status()); }
+        // Native entropy/account DATA before locking. No filesystem traversal,
+        // helper, token copy or network occurs at this preparation boundary.
+        let marker = if matches!(command, p::Command::Prepare(_)) {
+            let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?;
+            Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        } else { None };
+        let home = if matches!(command, p::Command::Dispatch(_) | p::Command::Track(_) | p::Command::Reconcile(_) | p::Command::Pending(_)) {
+            Some(github_preflight_home().map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?)
+        } else { None };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if let p::Command::Cancel(args) = command { return state.github.release_cancel(&args.operation_id); }
+        let gate = self.github_gate(&state);
+        let available = state.github.release_status(self.inner.bridge.supervisor.github_release_profile_available(), Instant::now(), gate);
+        if !available.available { return Err(s::refused(available.reason)); }
+        let (project_id, original_generation) = state.github.registration().map(|(id, generation)| (id.to_owned(), generation))
+            .ok_or_else(|| s::refused(p::Reason::NotConnected))?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&project_id), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
+        let project_binding = github_preflight_project_binding(&root)?;
+        let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity);
+        if agent.is_some() && edit.is_err(){return Err(s::refused(p::Reason::TargetChanged));}
+        state.github.release_agent_entry(&command,agent.as_ref(),generation,&root,&project_binding,edit.as_ref().ok(),Instant::now())?;
+        let stamp=edit.as_ref().ok().map(|e|e.stamp()).transpose()?;
+        let gate = GitHubReleaseGoGate { inner: Arc::downgrade(&self.inner),agent,stamp };
+        let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
+        match command {
+            p::Command::Prepare(args) => state.github.release_prepare(args, generation, root, &project_binding,
+                marker.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Dispatch(args) => state.github.release_dispatch(args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Track(args) => state.github.release_observe(p::Kind::Track, args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Reconcile(args) => state.github.release_observe(p::Kind::Reconcile, args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Pending(args) => state.github.release_pending(args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Status | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
+        }
+    }
+    /// Controlled integration only: the retained original SourceBook produced
+    /// this proof after its own successful terminal checks and closes. Publish
+    /// through the real registry under the same document admission mutex; no
+    /// workflow permission, fabricated identity or registry repair is involved.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn github_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        let mut state = self.lock();
+        if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
+        if state.unknown || state.exhausted { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
+            || state.session || state.context.is_some() || !state.records.is_empty() || !state.assignments.is_empty()
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.stopping() || self.inner.bridge.edits.disabled() || !self.github_fixture_permitted() {
+            return Err(AssetError::new(Reason::Unqualified));
+        }
+        // Do not consume a ready G1 receipt before this registration change.
+        // The next actual status/reconciliation rechecks this registry first.
+        // This supplied event is not native picker-admission/callback evidence.
+        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+        self.inner.bridge.project_recovery.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+        self.inner.bridge.ios_archive.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation), None)?;
+        self.bump(&mut state);
+        Ok(published)
+    }
+    /// Observation only: never reconcile, retire, consume a receipt, erase a
+    /// token, or mark an original settled on the finalizer's behalf. Contention
+    /// and poison remain unconfirmed; the caller retains the original document.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn github_fixture_material_settled(&self) -> bool {
+        self.github_fixture_permitted() && self.inner.state.try_lock().is_ok_and(|state| state.github.material_settled())
+    }
+    /// Workflow admission uses this actual document/selection mutex, not a
+    /// separate lock or an unlocked not_quitting observation. Both callbacks
+    /// are synchronous, bounded in-memory work only; open entropy must already
+    /// be in the EditOwner's private ticket. The asset qualification gate is
+    /// deliberately NOT workflow qualification.
+    #[cfg(test)]
+    pub(crate) fn workflow_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::WorkflowRegistration) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
+    }
+    #[cfg(test)]
+    pub(crate) fn metadata_text_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.inner.bridge.edits.metadata_text_agent_manual()?;
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
+    }
+    #[cfg(test)]
+    pub(crate) fn release_version_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
+    }
+    // Only the four explicitly registered-root domains use this same mutex and
+    // proof. A proof never qualifies a writer or changes configuration custody.
+    #[cfg(test)]
+    fn registered_edit_admit<T>(
+        &self, domain: crate::edit_protocol::EditDomain,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(domain, project_id, |bridge, registered, _publisher| enqueue(bridge, registered))
+    }
+    // Fixed recovery entry only. Normal configuration keeps its original path
+    // gate; it cannot obtain this registered-root authority through that API.
+    pub(crate) fn configuration_recovery_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+            let mut state = self.lock();
+            let registered = self.registered_edit_root_locked_published(&mut state, crate::edit_protocol::EditDomain::Configuration,
+                project_id, None, &mut publisher)?;
+            enqueue(&self.inner.bridge, registered, &publisher)
+        })();
+        finish_registration_publisher(publisher); result
+    }
+    pub(crate) fn workflow_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::WorkflowRegistration, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
+    }
+    pub(crate) fn initialization_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ProjectInitialization, project_id, enqueue)
+    }
+    pub(crate) fn metadata_text_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.inner.bridge.edits.metadata_text_agent_manual()?;
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
+    }
+    pub(crate) fn release_version_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
+    }
+    // The normal registered domains remain closed. Configuration recovery has
+    // its separate fixed wrapper above, using this same original mutex/proof.
+    fn registered_edit_admit_published<T>(
+        &self, domain: crate::edit_protocol::EditDomain,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        if domain == crate::edit_protocol::EditDomain::Configuration { return Err(BridgeError::invalid()); }
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+            let mut state = self.lock();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if domain==crate::edit_protocol::EditDomain::ProjectInitialization{
+                self.inner.bridge.edits.initialization_agent_origin(MAIN,None)?;
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if domain==crate::edit_protocol::EditDomain::GitHubWorkflows{
+                self.inner.bridge.edits.workflow_edit_agent_origin(MAIN,None)?;
+            }
+            let registered = self.registered_edit_root_locked_published(&mut state, domain, project_id, None, &mut publisher)?;
+            enqueue(&self.inner.bridge, registered, &publisher)
+        })();
+        finish_registration_publisher(publisher); result
+    }
+    fn registered_edit_root_locked_published(
+        &self, state: &mut DocumentState, domain: crate::edit_protocol::EditDomain,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        selected_images: Option<&Arc<images::Binding>>, publisher: &mut RegistrationPublisher,
+    ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
+        if !matches!(domain, crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::GitHubWorkflows
+            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::ProjectInitialization
+            | crate::edit_protocol::EditDomain::ProjectIdentity)
+            || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
+        self.expire(state, Instant::now());
+        if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+        if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+        if !state.lifetime.original_bound() || state.lost_observed {
+            return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain."));
+        }
+        if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+        if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        // SAME Document lock: reject reciprocal edits before publisher/context side effects.
+        if gh_auth::pending(state) || git_read::pending(state) || git_local::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) { return Err(BridgeError::new("busy", "Finish the original native connection or saved-source inspection first.")); }
+        if domain == crate::edit_protocol::EditDomain::ProjectIdentity {
+            // Retire an already-ready positive Store original BEFORE a context
+            // invalidation could downgrade it and hide its continuity veto.
+            // Active work/reviews refuse; they are never cancelled to admit ID edits.
+            self.inner.bridge.local_store_execute.ensure_idle()?;
+            self.inner.bridge.local_store_reconcile.ensure_idle()?;
+        }
+        if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+        state.saved_input = None;
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+        if state.retiring || state.lock_pending || state.compatibility_picker_pending || state.slot.as_ref().is_some_and(|slot|
+            slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())
+                && !selected_images.is_some_and(|binding| images::own_settled_selection(slot, binding))) {
+            return Err(BridgeError::new("busy", "The original native project selection has not settled."));
+        }
+        let id = project_id(&self.inner.bridge)?;
+        // Selection admission/publication and document loss cannot interleave
+        // this native lookup with the original owner's claim and enqueue. The
+        // registry guard is released before taking EditOwner's lock.
+        let selected = self.registry_result(state, self.inner.bridge.native_project(&id), None);
+        let (generation, root) = selected.map_err(|error| match error.reason {
+            Reason::CleanupUnknown => {
+                // Registry poison is sticky and revokes the original edit;
+                // an error reply alone must not leave a live review token.
+                self.inner.bridge.edits.document_lost_published(MAIN, Some(&*publisher));
+                BridgeError::cleanup_unknown()
+            }
+            Reason::Unqualified => BridgeError::unavailable("The selected project has no qualified native root identity."),
+            _ => BridgeError::invalid(),
+        })?;
+        Ok(crate::edit_owner::RegisteredEditRoot { generation, root })
+    }
+    /// Headless controlled-integration entry only: consume a real, already
+    /// settled SourceBook probe under this SAME document admission mutex. It
+    /// does not enable asset services or manufacture project/root identities.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn workflow_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::GitHubWorkflows)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn metadata_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::MetadataText)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn version_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::ReleaseVersion)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn registered_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32,
+        domain: crate::edit_protocol::EditDomain) -> Result<Project, AssetError> {
+        let mut state = self.lock();
+        self.expire(&mut state, Instant::now());
+        if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
+        if state.unknown || state.exhausted { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        let permitted = match domain {
+            crate::edit_protocol::EditDomain::GitHubWorkflows => self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::MetadataText => self.inner.bridge.edits.metadata_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::ReleaseVersion => self.inner.bridge.edits.version_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::MetadataImages => false,
+        };
+        if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
+            || state.session || state.context.is_some() || !state.records.is_empty() || !state.assignments.is_empty()
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.supervisor.disabled()
+            || !permitted {
+            return Err(AssetError::new(Reason::Unqualified));
+        }
+        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+        self.inner.bridge.project_recovery.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+        self.inner.bridge.ios_archive.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation), None)?;
+        self.bump(&mut state);
+        Ok(published)
+    }
+    fn current_context(&self, state: &mut DocumentState, revision: u32) -> Result<Arc<NativeContext>, AssetError> {
+        let context = state.context.as_ref().filter(|context| context.revision == revision).cloned().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+        let matches = self.context_matches(state, &context);
+        if !self.registry_result(state, matches, None)? { return Err(AssetError::new(Reason::ContextStale)); } Ok(context)
+    }
+    fn context_matches(&self, state: &DocumentState, context: &Arc<NativeContext>) -> Result<bool, AssetError> {
+        if !state.lifetime.original_bound() || state.stopping || state.unknown { return Ok(false); }
+        if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
+            && !macos_session_context(context.platform, context.stage, context.purpose) { return Ok(false); }
+        let Some(current) = &state.context else { return Ok(false); };
+        if !Arc::ptr_eq(current, context) || current.revision != context.revision || self.inner.bridge.registry_generation() != context.registry_generation { return Ok(false); }
+        let (generation, root) = self.inner.bridge.native_project(&context.project_id)?;
+        Ok(generation == context.registry_generation && root.identity == context.project.identity && root.path == context.project.path)
+    }
+    fn expire(&self, state: &mut DocumentState, now: Instant) {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_upload_key::forward(state);
+        git_read::reconcile(state);
+        git_local::reconcile(&self.inner,state);
+        let owner_reason = self.live_session_owner_reason();
+        // Display changes advance the existing native revision. This is
+        // capability DATA, not a fabricated asset cleanup result, and does
+        // not block original discard/retirement/quit behind new admission.
+        let mut changed = images::observe_failure(state) | installation::observe_failure(state) | observe_session_owner_reason(state, owner_reason);
+        if let Some(slot)=state.slot.as_mut().filter(|slot|slot.operation.artifact()){
+            if let Some((reason,at))=self.inner.bridge.artifact_inspection.artifact_pick_stop(&slot.owner){let before=slot.cleanup_end;slot.stop(reason,at);changed|=before!=slot.cleanup_end;}
+        }
+        if let Some(slot) = state.slot.as_mut().filter(|slot| slot.operation.android_source()) {
+            if let Some((reason, at)) = self.inner.bridge.android_build.source_stop(&slot.owner) {
+                let before = slot.cleanup_end; slot.stop(reason, at); changed |= before != slot.cleanup_end;
+            }
+        }
+        if let Some(slot) = state.slot.as_mut() {
+            if slot.cleanup_end.is_none() && slot.phase != Phase::Idle {
+                let work = slot.owner.endpoint();
+                let due = match (work, slot.review_end) {
+                    (Some(work), Some(review)) if work <= review => Some((work, Reason::Deadline)),
+                    (_, Some(review)) => Some((review, Reason::ReviewExpired)),
+                    (Some(work), None) => Some((work, Reason::Deadline)),
+                    (None, None) => None,
+                };
+                if let Some((end, reason)) = due.filter(|(end, _)| now >= *end) { slot.stop(reason, end); changed = true; }
+            }
+            if slot.phase != Phase::Unknown && slot.cleanup_end.is_some_and(|end| now >= end) && !slot.owner.resources_settled() {
+                first_unknown_origin!(state, UnknownOrigin::OperationCleanup(slot.reason), Some(&slot.owner));
+                slot.phase = Phase::Unknown; slot.source = SourceState::Unknown; slot.settlement = Settlement::Unknown; state.unknown = true;
+                changed = true;
+            }
+        }
+        if let Some(quit) = &state.quit {
+            if state.quit_cleanup_end.is_none() {
+                if let Some(end) = quit.endpoint().filter(|end| now >= *end) {
+                    state.quit_cleanup_end = Some(end + CLEANUP); quit.stop(); changed = true;
+                }
+            }
+            if state.quit_cleanup_end.is_some_and(|end| now >= end) && !quit.resources_settled() && !state.unknown {
+                state.unknown = true; changed = true;
+            }
+        }
+        if state.unknown {
+            invalidate_all(state);
+            if let Some(slot) = state.slot.as_mut() {
+                if slot.cleanup_end.is_none() && slot.phase != Phase::Idle { slot.stop(Reason::CleanupUnknown, now); changed = true; }
+            }
+        }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { changed |= vault::observe_stop(state, now); }
+        self.github_observe_locked(state, now);
+        if changed { self.bump(state); }
+    }
+    fn snapshot(&self, state: &DocumentState) -> AssetStatus {
+        let mut status = Self::status_data_modes(state, self.native_qualified(), self.persistence_qualified());
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::backup_desktop::project(self, state, &mut status);
+        status
+    }
+    // A projection of retained DATA only. This Boolean is never native
+    // admission; every operation uses the original document/profile gates.
+    #[cfg(test)]
+    fn status_data(state: &DocumentState, native_qualified: bool) -> AssetStatus {
+        Self::status_data_modes(state, native_qualified, false)
+    }
+    fn status_data_modes(state: &DocumentState, native_qualified: bool, persistence_qualified: bool) -> AssetStatus {
+        // A saturated public sequence is one stable final redacted snapshot.
+        // Internal originals may still settle for exit; no wrapped/new epoch is
+        // offered to a renderer to compare against the exhausted authority.
+        if state.exhausted {
+            return AssetStatus { schema_version: 3, status_revision: u32::MAX, mode: "closed", persistence: None, backup: None, capability: Capability { available: false, reason: Reason::CleanupUnknown },
+                modes: StorageCapabilities::projection(Reason::CleanupUnknown, false),
+                context: None, operation: None, records: Vec::new(), assignments: Vec::new() };
+        }
+        let redacted = !state.lifetime.original_bound() || state.unknown;
+        let private_redacted = redacted || encrypted_mode(state) && !encrypted_authority_visible(state)
+            || asset_mode(state) == "closed";
+        let capability_reason = if state.unknown { Reason::CleanupUnknown } else if state.stopping { Reason::Shutdown }
+            else if state.lost_observed { Reason::DocumentLost }
+            else if let Some(reason) = state.session_owner_reason { reason }
+            else if ordinary_asset_platform_gate().is_err() { Reason::UnsupportedPlatform }
+            else if !native_qualified { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
+        let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
+            phase: slot.phase, reason: slot.reason, source: slot.source, settlement: slot.settlement,
+            storage_outcome: storage_status(slot), backup_delivered: None,
+            selection_token: if private_redacted || slot.operation.images() || slot.operation.installation() { None } else { slot.selection.clone() },
+            assessment: if private_redacted || slot.operation.images() || slot.operation.installation() || !slot.assessment_context_revision.is_some_and(|revision| state.context.as_ref().is_some_and(|context| context.revision == revision)) {
+                None
+            } else { slot.assessment.clone() },
+            preview: if redacted || slot.operation.images() || slot.operation.installation() || asset_mode(state) == "closed" { None } else { slot.preview.as_ref().filter(|preview| (!private_redacted || preview.action == Action::Initialize)
+                && preview_subject_valid(state, slot, preview)).map(|preview| PreviewStatus {
+                token: preview.token.clone(), action: preview.action, subject: preview.subject.clone(),
+                expires_in_ms: u32::try_from(slot.review_end.map_or(Duration::ZERO, |end| end.saturating_duration_since(Instant::now())).as_millis()).unwrap_or(u32::MAX) }) } });
+        AssetStatus { schema_version: 3, status_revision: state.revision, mode: asset_mode(state), persistence: persistence_status(state), backup: None,
+            capability: Capability { available: capability_reason == Reason::None, reason: capability_reason },
+            modes: StorageCapabilities::projection(capability_reason, persistence_qualified),
+            context: if private_redacted { None } else { state.context.as_ref().map(|context| ContextStatus { revision: context.revision, project_id: context.project_id.clone(),
+                platform: context.platform, stage: context.stage, purpose: context.purpose, execution_mode: context.execution_mode }) }, operation,
+            records: if redacted || asset_mode(state) == "closed" { Vec::new() } else if encrypted_mode(state) { encrypted_summaries(state) } else { state.records.iter().map(|record| RecordStatus { storage: "session", label: None,
+                payload_state: if record_assessed(state, &record.key) { "assessed" } else { "not-checked" }, record_id: record.key.id.clone(), revision: record.key.revision,
+                kind: record.payload.kind, availability: if record.mutation_pending { "mutation-pending" } else if state.assignments.iter().any(|a| a.record_id == record.key.id && a.record_revision == record.key.revision && assignment_available(state, a)) { "assigned" } else { "unassigned" } }).collect() },
+            assignments: if private_redacted { Vec::new() } else { state.assignments.iter().map(|assignment| {
+                let mut visible = assignment.clone();
+                if !assignment_available(state, assignment) { visible.availability = AssignmentAvailability::Unavailable; }
+                visible
+            }).collect() } }
+    }
+    pub(crate) fn status(&self) -> AssetStatus {
+        self.reconcile();
+        let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.snapshot(&state)
+    }
+    pub(crate) fn open_session(&self) -> Result<AssetStatus, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, false)?;
+        idle(&state)?;
+        if state.session { return Ok(self.snapshot(&state)); }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if state.vault.is_some() { return Err(AssetError::new(Reason::Busy)); }
+        let remaining_records = RECORD_LIMIT.saturating_sub(state.records.len());
+        let remaining_assignments = 8usize.saturating_sub(state.assignments.len());
+        state.records.try_reserve_exact(remaining_records).map_err(|_| AssetError::new(Reason::Capacity))?;
+        state.assignments.try_reserve_exact(remaining_assignments).map_err(|_| AssetError::new(Reason::Capacity))?;
+        // Keep a closed encrypted operation's actual receipt until explicit
+        // new-mode admission. It is not a session operation and must not be
+        // relabelled. Only already-settled DATA is removed off this real gate.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let old = if state.slot.as_ref().is_some_and(vault::operation_attached) { state.slot.take() } else { None };
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let old: Option<Slot> = None;
+        state.session = true; state.retiring = old.is_some(); self.bump(&mut state);
+        if old.is_some() {
+            drop(state); drop(old);
+            let mut state = self.lock(); state.retiring = false;
+            self.bump(&mut state); Ok(self.snapshot(&state))
+        } else { Ok(self.snapshot(&state)) }
+    }
+    pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
+        if !paired_versions::boundary(args.platform,args.stage,args.purpose,args.execution_mode)
+            || args.platform == Platform::Both && (args.draft["android"]["enabled"] != true || args.draft["ios"]["enabled"] != true) {
+            return Err(AssetError::invalid());
+        }
+        if args.execution_mode == commands::ExecutionMode::Local && !cfg!(all(target_os="macos", target_pointer_width="64", any(target_arch="aarch64",target_arch="x86_64"))) {
+            return Err(AssetError::new(Reason::UnsupportedPlatform));
+        }
+        if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
+            && !macos_session_context(args.platform, args.stage, args.purpose) {
+            return Err(AssetError::new(Reason::UnsupportedFormat));
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) {
+            if !context.context_input(args.project_id) || !args.draft.as_object().is_some_and(|draft| draft.is_empty())
+                || args.platform != Platform::Android || args.stage != Stage::Candidate || args.purpose != Purpose::Signing {
+                context.refuse(); return Err(AssetError::new(Reason::Unqualified));
+            }
+        }
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)
+            .map_err(|error|AssetError::new(if error.code=="busy"{Reason::Busy}else{Reason::CleanupUnknown}))?;
+        let result=(|| {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
+        lookup_allocation_gate(&state)?; // Before draft/project/field backing copies.
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?;
+        state.saved_input=None;
+        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed(); self.gate(&state, true)?;
+        let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::context_gate(&state, registry_generation)?;
+        let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
+        // Bounded, already-admitted Value serialization, not source parsing or
+        // external IO. Keep only exact bytes, never another long-lived Value.
+        let draft = commands::draft_bytes(args.draft)?;
+        let project_id = commands::copy_text(args.project_id)?;
+        let retired_slot_context = retire_context_authority(&mut state, Instant::now());
+        state.next_context = revision;
+        let old = state.context.replace(Arc::new(NativeContext { execution_mode: args.execution_mode, revision, project_id, project, registry_generation, draft,
+            platform: args.platform, stage: args.stage, purpose: args.purpose }));
+        // Keep even this data-only retirement registered. Another context
+        // admission cannot accumulate caller-local old draft buffers while an
+        // earlier caller is descheduled between unlock and its off-lock drop.
+        state.retiring = true;
+        self.bump(&mut state); let status = self.snapshot(&state); drop(state); drop((old, retired_slot_context));
+        let mut state = self.lock(); state.retiring = false; Ok(status)
+        })();
+        finish_registration_publisher(publisher);result
+    }
+    pub(crate) fn discard(&self, id: u32) -> Result<AssetStatus, AssetError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
+        if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && credential_discard_operation(slot.operation)).ok_or_else(AssetError::invalid)?;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::request_backup_discard(slot);
+        if !preserve_storage_operation(slot) { slot.operation = Operation::Discard; }
+        slot.stop(Reason::UserCancelled, Instant::now());
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::observe_stop(&mut state, Instant::now());
+        self.bump(&mut state);
+        drop(state); Ok(self.status())
+    }
+    pub(crate) fn lock_session(&self) -> Result<AssetStatus, AssetError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::CredentialLock, false)
+            .map_err(|error| AssetError::new(if error.code == "busy" { Reason::Busy } else { Reason::CleanupUnknown }))?;
+        let result = (|| {
+        let mut state = self.lock();
+        // Credential Lock is not another image-cancel route. Refuse before
+        // invalidating consent/context/vault state or requesting any STOP.
+        credential_lock_gate(&state)?;
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)
+            .map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        state.saved_input = None;
+        // Lock retires context DATA; STOP does not claim either saved-command
+        // owner's resources settled or turn vault lock into GitHub Disconnect.
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+        invalidate_all(&mut state); state.lock_pending = true;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::revoke_all(&mut state);
+        if let Some(slot) = state.slot.as_mut() {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault::request_backup_discard(slot);
+            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.artifact() && !slot.operation.images() && !slot.operation.installation() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
+            slot.stop(Reason::UserCancelled, Instant::now());
+        }
+        self.bump(&mut state); drop(state); Ok(self.status())
+        })();
+        finish_registration_publisher(publisher); result
+    }
+}
+
+fn idle(state: &DocumentState) -> Result<(), AssetError> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if vault::backup_pending(state) || vault::upload_key_setup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+    if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled()) { return Err(AssetError::new(Reason::Busy)); } Ok(())
+}
+fn encrypted_mode(_state: &DocumentState) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::mode(_state) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { false }
+}
+fn encrypted_authority_visible(_state: &DocumentState) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::authority_visible(_state) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { true }
+}
+fn preserve_storage_operation(_slot: &Slot) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::preserve_operation(_slot) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { false }
+}
+fn vault_retirement_data(_value: &Retirement) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { !_value.vault.empty() }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { false }
+}
+fn assignment_available(state: &DocumentState, assignment: &Assignment) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if encrypted_mode(state) && !vault::assignment_current(state, assignment) { return false; }
+    assignment.availability == AssignmentAvailability::Available
+        && (!cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
+            || state.context.as_ref().is_some_and(|context| context.revision == assignment.context_revision
+                && session_kind_gate(context, assignment.kind).is_ok()))
+}
+fn record_assessed(state: &DocumentState, key: &RecordKey) -> bool {
+    let Some(context) = &state.context else { return false; };
+    if record_pending(state, key) { return false; }
+    state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
+        && assignment_available(state, assignment) && assignment.context_revision == context.revision)
+        || state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::None && slot.cleanup_end.is_none()
+            && slot.assessment.is_some() && slot.assessment_context_revision == Some(context.revision)
+            && (!cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
+                || slot.kind.is_some_and(|kind| session_slot_kind_gate(state, slot, kind).is_ok()))
+            && slot.candidate.is_none() && (slot.target.as_ref() == Some(key) || slot.result_record.as_ref() == Some(key)))
+}
+fn session_writable(state: &DocumentState) -> bool {
+    if state.session { return true; }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::writable(state) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { false }
+}
+fn asset_mode(state: &DocumentState) -> &'static str { if encrypted_mode(state) { "encrypted" } else if state.session { "session" } else { "closed" } }
+fn persistence_status(_state: &DocumentState) -> Option<PersistenceStatus> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::projection(_state) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { None }
+}
+fn storage_status(_slot: &Slot) -> Option<StorageStatus> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::outcome(_slot) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { None }
+}
+fn encrypted_summaries(_state: &DocumentState) -> Vec<RecordStatus> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    { vault::summaries(_state) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { Vec::new() }
+}
+fn has_record(state: &DocumentState, key: &RecordKey, kind: Kind) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if encrypted_mode(state) { return vault::has_record(state, key, kind); }
+    state.records.iter().any(|record| record.key == *key && record.payload.kind == kind)
+}
+fn record_pending(state: &DocumentState, key: &RecordKey) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if encrypted_mode(state) { return vault::pending(state, key); }
+    state.records.iter().any(|record| record.key == *key && record.mutation_pending)
+}
+fn record_usable(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: Kind) -> bool {
+    if session_slot_kind_gate(state, slot, kind).is_err() { return false; }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if encrypted_mode(state) { return vault::usable(state, slot, key, kind); }
+    state.records.iter().any(|record| record.key == *key && record.payload.kind == kind && !record.mutation_pending && record.payload.usable_source())
+}
+fn slot_payload<'a>(state: &'a DocumentState, slot: &'a Slot) -> Option<&'a Arc<Payload>> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let Some(payload) = &slot.vault.loaded { return Some(payload); }
+    slot.candidate.as_ref().map(|candidate| &candidate.payload).or_else(||
+        slot.target.as_ref().and_then(|target| state.records.iter().find(|record| &record.key == target).map(|record| &record.payload)))
+}
+fn project_path_idle_gate(state: &DocumentState, installed_profile: bool) -> Result<(), AssetError> {
+    if !installed_profile { return Err(AssetError::new(Reason::Unqualified)); }
+    idle(state)
+}
+fn invalidate_all(state: &mut DocumentState) {
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_upload_key::stop(state,Instant::now());
+    git_read::stop(state);
+    git_local::invalidate(state);
+    version_allocation::stop(state);
+    version_enrollment::stop(state);
+    gh_auth::stop(state, if state.unknown { GitHubReason::CleanupUnknown }
+        else if state.stopping || state.lost_observed { GitHubReason::Cancelled }
+        else { GitHubReason::TargetChanged });
+    if state.github.setup_has_material(){state.github.setup_context_changed();}
+    for assignment in &mut state.assignments { assignment.availability = AssignmentAvailability::Unavailable; }
+    if let Some(slot) = state.slot.as_mut() { slot.selection = None; slot.preview = None; }
+}
+fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Arc<NativeContext>> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    let completed_receipt = vault::completed_context_receipt(state);
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    let completed_receipt = false;
+    invalidate_all(state);
+    let slot = state.slot.as_mut()?;
+    // An already settled installation result has no project context to retire.
+    if slot.operation.installation() && slot.phase == Phase::Idle && slot.owner.resources_settled() && slot.context.is_none() { return None; }
+    if completed_receipt {
+        // Retain the successful operation/storage receipt and exact lease.
+        // Old-context DATA is disposed under context()'s existing retirement
+        // gate; reconcile must not later relabel it as active stale work.
+        slot.assessment_context_revision = None; slot.review_end = None;
+        return slot.context.take();
+    }
+    slot.error = Some(AssetError::new(Reason::ContextStale).into()); slot.stop(Reason::ContextStale, at);
+    None
+}
+fn revoke_record(state: &mut DocumentState, key: &RecordKey) {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    vault::revoke(state, key);
+    for assignment in &mut state.assignments { if assignment.record_id == key.id && assignment.record_revision == key.revision { assignment.availability = AssignmentAvailability::Unavailable; } }
+    if let Some(record) = state.records.iter_mut().find(|record| record.key == *key) { record.mutation_pending = true; }
+    if state.slot.as_ref().is_some_and(|slot| slot.target.as_ref() == Some(key)) { if let Some(slot) = state.slot.as_mut() { slot.preview = None; slot.selection = None; } }
+}
+fn own_record(reference: commands::RecordRef<'_>) -> Result<RecordKey, AssetError> { Ok(RecordKey { id: Token(commands::copy_text(reference.record_id)?), revision: reference.expected_revision }) }
+fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kind: Kind) -> Result<Option<RecordKey>, AssetError> {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if vault::mode(state) { return vault::target(state, reference, kind); }
+    let Some(reference) = reference else { if state.records.len() >= RECORD_LIMIT { return Err(AssetError::new(Reason::Capacity)); } return Ok(None); };
+    let key = own_record(reference)?;
+    if !state.records.iter().any(|record| record.key == key && record.payload.kind == kind && !record.mutation_pending) { return Err(AssetError::invalid()); } Ok(Some(key))
+}
+
+enum ChildJob {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    GitHubAuth(gh_auth::ChildCall),
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    Artifact{path:std::path::PathBuf,binding:Arc<ArtifactBinding>},
+    Installation,
+    Tokens, Capture { path: std::path::PathBuf, roots: Vec<asset_source::RegisteredRoot>, kind: credential_format::FileKind },
+    Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot>, application: Option<asset_source::RegisteredRoot> },
+    ProjectPath { path: std::path::PathBuf, binding: Arc<ProjectPathBinding> },
+    Images { paths: Vec<std::path::PathBuf>, binding: Arc<images::Binding> },
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    Vault(vault::Child),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    KeyringProvider { step: crate::vault_keyring_linux::ProviderStep },
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    KeyringHelper(DocumentBinding),
+}
+enum ChildEnd {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    GitHubAuth(Result<(), Reason>),
+    Artifact(asset_source::ArtifactProbe), Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
+    Images(asset_source::CapturedPublicImageBatch),
+    Installation(Result<crate::installation::Matching, crate::installation::CheckReason>),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    Vault(vault::ChildResult),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    KeyringProvider { step: crate::vault_keyring_linux::ProviderStep, result: Result<(), crate::vault_keyring_linux::Problem> },
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    KeyringHelper(Result<(), keyring::Problem>),
+}
+enum Staged {
+    Artifact{proof:asset_source::ArtifactProbe,binding:Arc<ArtifactBinding>},
+    Installation(crate::installation::Matching),
+    Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
+    Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
+    ProjectPath { proof: asset_source::ProjectPathProbe, binding: Arc<ProjectPathBinding> },
+    AndroidSource { proof: asset_source::ProjectProbe, binding: Arc<AndroidSourceBinding> },
+    Images { batch: asset_source::CapturedPublicImageBatch, binding: Arc<images::Binding> },
+    EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch, purpose: EvidencePurpose }, EvidenceObserved(EvidenceResult),
+    Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    Vault(vault::Staged),
+}
+#[cfg(feature = "desktop-shell")]
+enum Job {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    Artifact{app:tauri::AppHandle,binding:Arc<ArtifactBinding>},
+    Installation,
+    Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
+    Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot>, application: Option<asset_source::RegisteredRoot> },
+    ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    AndroidSource { app: tauri::AppHandle, binding: Arc<AndroidSourceBinding> },
+    Images { app: tauri::AppHandle, binding: Arc<images::Binding> },
+    ChooseEvidenceFolder { app: tauri::AppHandle, purpose: EvidencePurpose }, InspectEvidence { root: asset_source::RegisteredRoot, purpose: EvidencePurpose },
+    Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    Vault(vault::Job),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    AppleProfile(apple_profile::Request),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    AppleKey(apple_key::Request),
+}
+
+async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7, ChildJob::Installation => 8 };
+    let mut book = owner.child.lock().await;
+    let mut failed_cleanup = false;
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if book.handle.is_none() && book.receipt == JoinReceipt::Failed && matches!(&job, ChildJob::Vault(vault::Child::Release)) {
+        failed_cleanup = vault::retain_failed_child_for_release(owner);
+    }
+    if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && !failed_cleanup { return Err(Reason::CleanupUnknown); }
+    if owner.interrupted() && !cleanup_child(&job) && !key_preservation_child(owner, &job) { return Err(Reason::UserCancelled); }
+    // Reciprocal to lookup_memory::enter: retain this exact child mutex while
+    // checking the charge and registering the original blocking dispatch.
+    if !child_allocation_admitted(owner, &job) { return Err(Reason::Busy); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if !matches!(&job, ChildJob::Tokens | ChildJob::KeyringProvider { .. }) && !matches!(&job, ChildJob::Vault(job) if !job.large()) {
+        // A joined Captured ChildEnd may still be a caller-local large holding.
+        // This closed slice refuses later lookup in that same owner rather than
+        // presume that Returned means the result was published/disposed.
+        owner.large_work_started.store(true, Ordering::SeqCst);
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    if !matches!(&job, ChildJob::Tokens | ChildJob::KeyringHelper(_)) && !matches!(&job, ChildJob::Vault(job) if !job.large()) {
+        owner.large_work_started.store(true, Ordering::SeqCst);
+    }
+    book.receipt = JoinReceipt::Pending;
+    let (start, enter) = oneshot::channel();
+    let worker = owner.clone();
+    book.handle = Some(tokio::task::spawn_blocking(move || {
+        if enter.blocking_recv().is_err() { return ChildEnd::Refused(Reason::UserCancelled); }
+        execute_child(&worker, job)
+    }));
+    fixture_event!(owner, ChildRegistered, fixture_kind);
+    // No blocking child can enter RNG/native work before its ORIGINAL handle
+    // and resource slots above exist. Dropping an invoke never touches them.
+    if start.send(()).is_err() { owner.stop(); }
+    let result = match book.handle.as_mut() { Some(handle) => handle.await, None => { book.receipt = JoinReceipt::Failed; return Err(Reason::CleanupUnknown); } };
+    book.handle.take(); // Only after this original join returned.
+    fixture_event!(owner, ChildJoined, fixture_kind * 2 + u32::from(result.is_ok()));
+    match result { Ok(result) => { book.receipt = JoinReceipt::Returned; Ok(result) }, Err(_) => { book.receipt = JoinReceipt::Failed; Err(Reason::CleanupUnknown) } }
+}
+fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
+    let mut stop = || owner.interrupted();
+    if stop() && !cleanup_child(&job) && !key_preservation_child(owner, &job) { return ChildEnd::Refused(Reason::UserCancelled); }
+    match job {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        ChildJob::GitHubAuth(call) => ChildEnd::GitHubAuth(gh_auth::execute_child(owner, call)),
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        ChildJob::Artifact{path,binding}=>match owner.source.lock(){
+            Ok(mut book)=>match asset_source::probe_artifact(&mut book,&binding.root,path,binding.role,&mut stop){Ok(proof)=>ChildEnd::Artifact(proof),Err(reason)=>ChildEnd::Refused(reason)},
+            Err(_)=>ChildEnd::Refused(Reason::CleanupUnknown),
+        },
+        ChildJob::Installation => ChildEnd::Installation(installation::execute(owner)),
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        ChildJob::KeyringHelper(document) => ChildEnd::KeyringHelper(keyring_macos::execute(&document, owner)),
+        ChildJob::Tokens => match random_tokens(&mut stop) { Ok(tokens) => ChildEnd::Tokens(tokens), Err(reason) => ChildEnd::Refused(reason) },
+        ChildJob::Capture { path, roots, kind } => {
+            let captured = match owner.source.lock() { Ok(mut book) => asset_source::capture(&mut book, path, &roots, kind, &mut stop), Err(_) => Err(Reason::CleanupUnknown) };
+            match captured {
+                Ok(captured) => match credential_format::inspect(kind, &captured.bytes, &mut stop) {
+                    Ok(observation) => {
+                        fixture_event!(owner, HeaderObserved, u32::from(kind == credential_format::FileKind::AndroidKeystore
+                            && observation.is_observed() && captured.bytes == [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0]));
+                        ChildEnd::Captured(Material { origin: MaterialOrigin::Selected(captured), observation })
+                    }, Err(_) => ChildEnd::Refused(Reason::UserCancelled),
+                },
+                Err(reason) => ChildEnd::Refused(reason),
+            }
+        }
+        ChildJob::Probe { path, origins, vault, application } => match owner.source.lock() {
+            Ok(mut book) => {
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                let result = asset_source::probe_project_excluding_private_roots(&mut book, path, &origins, vault.as_ref(), application.as_ref(), &mut stop);
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+                let result = if vault.is_some() || application.is_some() { Err(Reason::UnsupportedPlatform) } else { asset_source::probe_project(&mut book, path, &origins, &mut stop) };
+                match result { Ok(probe) => ChildEnd::Probed(probe), Err(reason) => ChildEnd::Refused(reason) }
+            },
+            Err(_) => ChildEnd::Refused(Reason::CleanupUnknown),
+        },
+        ChildJob::ProjectPath { path, binding } => match owner.source.lock() {
+            Ok(mut book) => match asset_source::probe_project_path(&mut book, &binding.root, path, binding.field, &mut stop) {
+                Ok(proof) => ChildEnd::ProjectPath(proof), Err(reason) => ChildEnd::Refused(reason),
+            },
+            Err(_) => ChildEnd::Refused(Reason::CleanupUnknown),
+        },
+        ChildJob::Images { paths, binding } => {
+            let captured = match owner.source.lock() {
+                Ok(mut book) => asset_source::capture_public_images(&mut book, paths, &binding.root, binding.byte_limit,
+                    &mut stop, &mut |reason| images::source_failure(owner, reason)),
+                Err(_) => Err(Reason::CleanupUnknown),
+            };
+            match captured {
+                Ok(batch) => ChildEnd::Images(batch),
+                Err(reason) => { images::source_failure(owner, reason); ChildEnd::Refused(reason) },
+            }
+        },
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        ChildJob::Vault(job) => match vault::execute(owner, job) { Ok(result) => ChildEnd::Vault(result), Err(reason) => ChildEnd::Refused(reason) },
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        ChildJob::KeyringProvider { step } => {
+            use crate::vault_keyring_linux::ProviderStep;
+            let result = match owner.keyring.lock() {
+                Ok(mut book) => match step {
+                    ProviderStep::Acquire => book.prepare_provider(&mut || owner.interrupted()),
+                    ProviderStep::Bind => book.bind_provider(&mut || owner.interrupted()),
+                    ProviderStep::Recheck => book.recheck_provider(&mut || owner.interrupted()),
+                    ProviderStep::Release => book.release_provider(&mut || vault::cleanup_expired(owner)),
+                },
+                // A poisoned custody lock prevented method entry. Do not
+                // describe this joined refusal as a native method return.
+                Err(_) => return ChildEnd::Refused(Reason::CleanupUnknown),
+            };
+            ChildEnd::KeyringProvider { step, result }
+        },
+    }
+}
+fn key_preservation_child(_owner: &Arc<OriginalWork>, _job: &ChildJob) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::SaveAppleDistributionKey(request)) = _job { return request.admitted(_owner); }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::SaveAppleP12(request)) = _job { return request.admitted(_owner); }
+    false
+}
+fn cleanup_child(_job: &ChildJob) -> bool {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    { return matches!(_job, ChildJob::KeyringHelper(_)) || matches!(_job, ChildJob::Vault(job) if job.cleanup())
+        || matches!(_job, ChildJob::GitHubAuth(call) if call.cleanup()); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { matches!(_job, ChildJob::Vault(job) if job.cleanup()) || matches!(_job, ChildJob::KeyringProvider { step: crate::vault_keyring_linux::ProviderStep::Release }) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { false }
+}
+fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::CheckAppleP12Sources(sources,point)) = _job { return vault::key_sources::p12::child_admitted(_owner,sources,*point); }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::CheckAppleCertificateSources(sources, point)) = _job {
+        return vault::key_sources::certificate::child_admitted(_owner, sources, *point);
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_) | vault::Child::SaveAppleP12(_))) = _job {
+        return vault::distribution_key::child_admitted(_owner, job);
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if matches!(_job, ChildJob::Vault(vault::Child::Release)) { return vault::release_child_admitted(_owner); }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::Backup(request)) = _job { return vault::backup_child_admitted(_owner, request); }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::GenerateUploadKey(request)) = _job { return vault::upload_key_child_admitted(_owner, request); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let ChildJob::KeyringProvider { step } = _job {
+        return _owner.keyring.try_lock().is_ok_and(|book| book.provider_step_ready(*step));
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    if matches!(_job, ChildJob::KeyringHelper(_)) {
+        return _owner.keyring.try_lock().is_ok_and(|book| book.dispatch_ready());
+    }
+    _owner.lookup_allocations_allowed()
+}
+fn random_tokens(stop: &mut dyn FnMut() -> bool) -> Result<TokenBatch, Reason> {
+    fn one(stop: &mut dyn FnMut() -> bool) -> Result<Token, Reason> {
+        if stop() { return Err(Reason::UserCancelled); }
+        let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| Reason::SourceRefused)?;
+        if stop() { return Err(Reason::UserCancelled); }
+        let mut token = String::new(); token.try_reserve_exact(32).map_err(|_| Reason::Capacity)?;
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in &bytes { token.push(char::from(HEX[usize::from(byte >> 4)])); token.push(char::from(HEX[usize::from(byte & 15)])); }
+        bytes.fill(0); Ok(Token(token)) // Best effort only, not an erasure claim.
+    }
+    Ok(TokenBatch { selection: one(stop)?, record: one(stop)?, preview: one(stop)?, bind: one(stop)? })
+}
+
+fn prepare_copy_start(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> Result<bool, Reason> {
+    if state.stopping || state.unknown || !state.lifetime.original_bound() || owner.interrupted() { return Err(Reason::UserCancelled); }
+    if state.retiring || state.quit_pending || state.lock_pending || !owner.lookup_allocations_allowed() { return Err(Reason::Busy); }
+    let slot = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Reason::ContextStale)?;
+    if slot.cleanup_end.is_some() { return Err(slot.reason); }
+    // Sticky, conservative boundary: this slice refuses lookup after ANY R1
+    // request/Value or non-Token child work started in this owner, even after a later phase change.
+    // Its memory is not the native parser's 6MiB arena and is not in the census.
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    owner.large_work_started.store(true, Ordering::SeqCst);
+    let changed = slot.phase != Phase::Assessing; slot.phase = Phase::Assessing; Ok(changed)
+}
+
+fn assemble_request(payload: &Payload, context: &NativeContext) -> Result<AssessmentRequest, CommandError> {
+    let draft = crate::protocol::strict_json(&context.draft).map_err(|_| AssetError::invalid())?;
+    let fields = payload.fields.as_ref().ok_or_else(AssetError::invalid)?.into_value();
+    let observation = match &payload.material { Some(material) => serde_json::to_value(&material.observation).map_err(|_| AssetError::invalid())?, None => Value::Null };
+    // Move Values into maps. json! on an already-owned Value can add a hidden
+    // overlapping tree. Drop the entire assembled Value before awaiting R1.
+    let (platform,purpose)=paired_versions::assessment_scope(payload.kind,context,&draft)?;
+    let mut ctx = Map::new(); ctx.insert("draft".into(), draft);
+    ctx.insert("platform".into(), serde_json::to_value(platform).map_err(|_| AssetError::invalid())?);
+    ctx.insert("stage".into(), serde_json::to_value(context.stage).map_err(|_| AssetError::invalid())?);
+    ctx.insert("purpose".into(), serde_json::to_value(purpose).map_err(|_| AssetError::invalid())?);
+    if context.execution_mode != commands::ExecutionMode::Github {
+        ctx.insert("executionMode".into(), serde_json::to_value(context.execution_mode).map_err(|_| AssetError::invalid())?);
+    }
+    let mut input = Map::new(); input.insert("kind".into(), Value::String(payload.kind.name().into())); input.insert("fields".into(), fields); input.insert("observation".into(), observation);
+    let mut root = Map::new(); root.insert("schemaVersion".into(), Value::from(1)); root.insert("policyVersion".into(), Value::String(commands::POLICY.into()));
+    root.insert("context".into(), Value::Object(ctx)); root.insert("input".into(), Value::Object(input));
+    let value = Value::Object(root);
+    let request = AssessmentRequest::admit(&value)?;
+    drop(value); Ok(request)
+}
+
+impl Slot {
+    fn new(owner: Arc<OriginalWork>, operation: Operation, context: Option<Arc<NativeContext>>, target: Option<RecordKey>, review_end: Option<Instant>) -> Self {
+        let assessment_context_revision = context.as_ref().map(|context| context.revision);
+        Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
+            context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
+            assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None,
+            evidence: None, project_path: None, path_result: None, android_source: None, artifact:None, images: None, image_batch: None, installation_result: None,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: vault::SlotData::default() }
+    }
+}
+
+// Set before spawning, so loss of an unpolled future also permits observation of
+// the ORIGINAL join. This guard proves no resource settlement, normal return or
+// success. A failed join remains a spent receipt in its original book.
+struct CoordinatorEnd(Arc<OriginalWork>);
+impl Drop for CoordinatorEnd {
+    fn drop(&mut self) { self.0.ended.store(true, Ordering::SeqCst); self.0.wake.notify_one(); }
+}
+
+impl DocumentBinding {
+    fn gui_response(&self, owner: &Arc<OriginalWork>, call: &GuiCall, response: NativeResponse, quit: bool) -> Option<bool> {
+        let mut publisher = if quit { self.inner.android_registration_control.reserve(RegistrationPublisherKind::Quit, true).ok() } else { None };
+        let result = (|| {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if !owner.original_gui_call(call) || quit && owner.has_credential_backup_picker() { return None; }
+        let backup = !quit && owner.has_credential_backup_picker();
+        // The same retained gh registration rematches under Document BEFORE
+        // borrowing GuiFacts; the helper never re-locks either mutex.
+        let gh_original = if quit { None } else { gh_auth::gui_current_locked(self, &mut state, owner) };
+        let mut facts = call.facts()?;
+        if facts.response { return None; }
+        facts.response = true; facts.showing = false;
+        let now = Instant::now();
+        let original = if quit { state.quit.as_ref().is_some_and(|work| Arc::ptr_eq(work, owner)) }
+            else { gh_original.unwrap_or_else(|| state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown) };
+        // Remember the actual native decline before stop_quit changes STOP.
+        // A programmatic post-STOP close or rejected late OK is never Cancel.
+        let path_choice = !quit && (gh_original.is_some() || state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())));
+        // Preserve the existing Project/File/Evidence receipt semantics. This
+        // new purpose separately records genuine native Cancel, never Other or
+        // a programmatic/late post-STOP close, for its null-only cancellation.
+        (facts.accepted, facts.declined) = admitted_response(response, original, owner.interrupted(), quit || path_choice);
+        fixture_event!(owner, ResponseDecision, u32::from(facts.accepted) + 2 * u32::from(facts.declined));
+        if facts.accepted {
+            facts.accepted_at = Some(now);
+            // Neither the whole-operation gh deadline nor the two-picker backup IO budget renews here.
+            if gh_original.is_none() && !backup { owner.set_endpoint(Some(now + WORK)); }
+        }
+        let read_one_path = facts.accepted && !quit;
+        if quit {
+            if facts.accepted {
+                // Actual native OK linearizes with admission, not a later
+                // dialog-return or renderer callback. Cancel changes none of
+                // the settled assignments and never renews review time.
+                if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+                state.saved_input = None;
+                state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                self.stop_tool_setup_locked(&mut state,crate::service_tool_setup_protocol::Reason::Shutdown,now);
+                state.evidence.revoke(false);
+                state.github.retire(GitHubReason::Cancelled);
+                self.inner.bridge.diagnostics.request_shutdown();
+                self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.apple_provisioning.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown();
+                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown(); self.inner.bridge.upload_key.request_shutdown();
+                if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
+                stop_quit(&mut state, now);
+                fixture_event!(owner, QuitStop, 1);
+            } else { stop_quit(&mut state, now); }
+        } else if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
+            if read_one_path {
+                slot.phase = if backup { Phase::Picking } else { Phase::Capturing };
+                slot.source = if slot.operation == Operation::ChooseFile || slot.operation.images() { SourceState::Pending } else { SourceState::NotRun };
+                if !backup && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.artifact() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
+            } else { slot.stop(Reason::UserCancelled, now); }
+        } else if gh_original.is_some() && !read_one_path {
+            gh_auth::gui_failed_locked(&state, owner,
+                if facts.declined { Reason::UserCancelled } else { Reason::SourceRefused }, now);
+        }
+        drop(facts); self.bump(&mut state); call.changed(); Some(read_one_path)
+        })();
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
+    }
+
+    fn phase(&self, owner: &Arc<OriginalWork>, phase: Phase) -> Result<(), Reason> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if state.stopping || state.unknown || !state.lifetime.original_bound() || owner.interrupted() { return Err(Reason::UserCancelled); }
+        let slot = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)).ok_or(Reason::ContextStale)?;
+        if slot.cleanup_end.is_some() { return Err(slot.reason); }
+        if slot.phase != phase { slot.phase = phase; self.bump(&mut state); } Ok(())
+    }
+    fn begin_prepare_copy(&self, owner: &Arc<OriginalWork>) -> Result<(), Reason> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if prepare_copy_start(&mut state, owner)? { self.bump(&mut state); } Ok(())
+    }
+    fn tick(&self) { let mut state = self.lock(); self.expire(&mut state, Instant::now()); }
+    fn stage(&self, owner: &Arc<OriginalWork>, staged: Staged) {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
+            // Exactly one original coordinator stages once. Never overwrite a
+            // possibly secret-bearing result or publish before its normal join.
+            if slot.staged.is_none() { slot.staged = Some(staged); self.bump(&mut state); return; }
+            slot.stop(Reason::CleanupUnknown, Instant::now());
+            first_unknown_origin!(state, UnknownOrigin::StagedCollision, Some(owner));
+            state.unknown = true; self.bump(&mut state);
+        }
+        drop(state); drop(staged);
+    }
+    fn coordinator_failed(&self, state: &mut DocumentState, _origin: UnknownOrigin, _original: Option<&Arc<OriginalWork>>) {
+        first_unknown_origin!(state, _origin, _original);
+        state.unknown = true; invalidate_all(state);
+        if let Some(slot) = state.slot.as_mut() {
+            slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown;
+            slot.reason = Reason::CleanupUnknown; slot.settlement = Settlement::Unknown;
+        }
+        self.bump(state);
+    }
+
+    /// Joins only ended originals and drains closed data outside this real
+    /// admission mutex. A revoked durable lease may register its one finite
+    /// cleanup-only continuation; GO is opened only after releasing this gate.
+    /// No native syscall, picker, assessment or new work authority runs here.
+    fn reconcile(&self) { self.reconcile_scope(None); }
+    fn reconcile_scope(&self, evidence_family: Option<bool>) { self.reconcile_checked(evidence_family, None); }
+    fn reconcile_installation(&self, id: u32) { self.reconcile_checked(None, Some(id)); }
+    fn reconcile_checked(&self, evidence_family: Option<bool>, installation_id: Option<u32>) {
+        let mut publisher=match self.inner.android_registration_control.reserve_reconciliation() {
+            Ok(publisher)=>Some(publisher),
+            // Polling is optional. Leave already-owned closed DATA staged for
+            // the next original poll; an existing publisher or saturation is
+            // not an invented loss event or permission to interrupt Apply.
+            Err(error) if error.code=="busy"=>return,
+            Err(_)=>None,
+        };
+        self.reconcile_checked_published(evidence_family,installation_id,publisher.as_mut());
+        if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
+        if evidence_family.is_none() && installation_id.is_none(){
+            let mut state=self.lock();self.reconcile_android_registration_locked(&state);
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+            {self.reconcile_macos_removal_locked(&mut state);self.reconcile_macos_maintenance_locked(&mut state);}
+        }
+    }
+    fn reconcile_checked_published(&self,evidence_family:Option<bool>,installation_id:Option<u32>,
+        mut publisher:Option<&mut RegistrationPublisher>) {
+        let mut release: Option<Arc<OriginalWork>> = None;
+        let mut state = self.lock();
+        // Status may have waited while its old idle slot was replaced. Never
+        // route that request through an unrelated original or start its cleanup.
+        if installation_id.is_some_and(|id| !state.slot.as_ref().is_some_and(|slot|
+            slot.operation.installation() && slot.owner.id == id)) { return; }
+        // A request may have waited for this mutex since its initial route
+        // check. Never expire/join the other family's newly installed owner.
+        // Both families still use this one original reconciliation algorithm.
+        if evidence_family.is_some_and(|family| evidence_route_gate(&state, family).is_err()) { return; }
+        self.expire(&mut state, Instant::now());
+        if state.retiring { return; }
+        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        match vault::start_cleanup(self, &mut state) {
+            Ok(Some(start)) => { drop(state); let _ = start.send(()); return; },
+            Ok(None) => {},
+            Err(_) => { self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return; },
+        }
+
+        // Quit has its own original join receipt but shares the one GTK book.
+        // No new quit coordinator is created to recheck an earlier Unknown.
+        if let Some(quit) = state.quit.clone() {
+            if let Some(normal) = quit.join_if_ended() {
+                if !normal && !state.unknown { state.unknown = true; invalidate_all(&mut state); self.bump(&mut state); }
+                if normal && quit.resources_settled() && state.quit_pending {
+                    quit.set_endpoint(None);
+                    state.quit_pending = false;
+                    if !state.quit_accepted && !state.unknown { state.quit_cleanup_end = None; }
+                    self.bump(&mut state);
+                }
+            }
+        }
+
+        let Some(mut slot) = state.slot.take() else {
+            // An empty session has no original resource roster to await.
+            if state.lock_pending || state.stopping || !state.lifetime.original_bound() {
+                let records = std::mem::take(&mut state.records);
+                let assignments = std::mem::take(&mut state.assignments);
+                let context = state.context.take();
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                let vault = vault::take_empty_session(&mut state);
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+                let vault: Option<()> = None;
+                let changed = state.session || state.lock_pending || context.is_some() || !records.is_empty() || !assignments.is_empty() || vault.is_some();
+                state.retiring = true; drop(state); drop((records, assignments, context, vault));
+                let mut state = self.lock(); state.retiring = false; state.session = false; state.lock_pending = false;
+                if changed { self.bump(&mut state); }
+            }
+            return;
+        };
+        let joined = slot.owner.join_if_ended();
+        if joined == Some(false) && slot.settlement != Settlement::LateKnown {
+            first_unknown_origin!(state, UnknownOrigin::CoordinatorJoin, Some(&slot.owner));
+            slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown;
+            slot.reason = Reason::CleanupUnknown; slot.settlement = Settlement::Unknown;
+            if !state.unknown { state.unknown = true; self.bump(&mut state); }
+        }
+
+        // The coordinator's failed/returned join cannot dispose an unjoined
+        // original blocking child. Observe it separately without a new worker.
+        let mut orphan_result = None;
+        if joined.is_some() {
+            if let Ok(mut book) = slot.owner.child.try_lock() {
+                if let Some(handle) = book.handle.as_mut().filter(|handle| handle.is_finished()) {
+                    let mut cx = TaskContext::from_waker(Waker::noop());
+                    if let Poll::Ready(result) = Pin::new(handle).poll(&mut cx) {
+                        book.handle.take();
+                        book.receipt = if result.is_ok() { JoinReceipt::Returned } else { JoinReceipt::Failed };
+                        orphan_result = result.ok();
+                    }
+                }
+            }
+        }
+
+        if matches!(&orphan_result, Some(ChildEnd::Images(_))) {
+            // The actual original child has joined, but its coordinator did
+            // not consume the result. Preserve its complete batch in this
+            // original slot until native settlement and ordinary retirement;
+            // it is never another selected/token-bearing result.
+            slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true;
+            slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+            if slot.image_batch.is_none() {
+                if let Some(ChildEnd::Images(batch)) = orphan_result.take() { slot.image_batch = Some(batch); }
+            } else {
+                // A sole child cannot also have published a batch. Refuse this
+                // invariant violation, and keep admission/census locked out
+                // until the extra already-closed DATA is actually disposed.
+                state.slot = Some(slot); state.retiring = true; self.bump(&mut state);
+                drop(state); drop(orphan_result);
+                let mut state = self.lock(); state.retiring = false; self.bump(&mut state); drop(state);
+                self.reconcile_checked_published(None,None,publisher.as_deref_mut()); return;
+            }
+            self.bump(&mut state);
+        }
+
+        // A failed coordinator can leave accepted image path DATA in the
+        // original GUI cell even after the native object actually settled.
+        // Drain that bounded data through the SAME retirement book. Do not
+        // require resources_settled here: it intentionally requires this cell
+        // empty and cannot grant credit before the real off-lock drain.
+        if slot.operation.images() && slot.owner.original_resources_settled() && slot.owner.retired.load(Ordering::SeqCst) {
+            let owner = slot.owner.clone(); let mut draining = false; let mut refused = false;
+            if let Ok(mut paths) = owner.gui.selected_images.try_lock() {
+                if paths.is_some() {
+                    let retirement = Retirement { image_paths: paths.take(), ..Retirement::default() };
+                    match owner.retain_retirement(retirement) {
+                        Ok(()) => draining = true,
+                        Err(retirement) => { *paths = retirement.image_paths; refused = true; },
+                    }
+                }
+            }
+            if draining || refused {
+                slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true;
+                slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+                if draining {
+                    state.slot = Some(slot); state.retiring = true; self.bump(&mut state);
+                    drop(state); drop(orphan_result);
+                    let disposed = owner.release_retirement();
+                    let mut state = self.lock(); state.retiring = false;
+                    if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::RetirementDrain, Some(&owner)); return; }
+                    self.bump(&mut state); drop(state); self.reconcile_checked_published(None,None,publisher.as_deref_mut()); return;
+                }
+                self.bump(&mut state);
+            }
+        }
+
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if let Some(ChildEnd::KeyringHelper(result)) = &orphan_result {
+            let at = if let Ok(mut book) = slot.owner.keyring.try_lock() {
+                book.interrupt(); book.child_joined(*result);
+                book.problem_at().unwrap_or_else(Instant::now)
+            } else { Instant::now() };
+            slot.stop(Reason::CleanupUnknown, at); slot.phase = Phase::Unknown;
+            slot.settlement = Settlement::Unknown; state.unknown = true;
+            first_unknown_origin!(state, UnknownOrigin::CoordinatorJoin, Some(&slot.owner));
+            self.bump(&mut state);
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(ChildEnd::KeyringProvider { step, result }) = &orphan_result {
+            // This is the actual joined child of the retained original slot,
+            // not the abandoned coordinator's success. Record its exact native
+            // return/join once, but stop before any live provider successor.
+            let at = if let Ok(mut book) = slot.owner.keyring.try_lock() {
+                book.interrupt();
+                let _ = book.provider_child_joined(*step, *result);
+                book.problem_at().unwrap_or_else(Instant::now)
+            } else { Instant::now() };
+            slot.stop(Reason::CleanupUnknown, at); slot.phase = Phase::Unknown;
+            slot.settlement = Settlement::Unknown; state.unknown = true;
+            first_unknown_origin!(state, UnknownOrigin::CoordinatorJoin, Some(&slot.owner));
+            self.bump(&mut state);
+        }
+
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if slot.owner.control_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
+            && slot.owner.keyring.try_lock().is_ok_and(|book| book.memory_held()) {
+            // A settled SDK/book still owns its charged backing. Register this
+            // disposal before releasing the actual document gate. In particular
+            // dispose a just-consumed orphan ChildEnd BEFORE refunding anything.
+            let owner = slot.owner.clone(); state.slot = Some(slot); state.retiring = true;
+            drop(state); drop(orphan_result);
+            let disposed = owner.dispose_keyring_storage();
+            let mut state = self.lock(); state.retiring = false;
+            if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return; }
+            self.bump(&mut state); drop(state);
+            // At most one such pass for this one-shot owner: storage is gone,
+            // entered/error/Unknown facts are untouched. Continue ordinary
+            // publication/retirement now instead of waiting for slot replacement.
+            self.reconcile_checked_published(None,None,publisher.as_deref_mut()); return;
+        }
+
+        let resources = slot.owner.resources_settled();
+        let tuple_result = slot.context.as_ref().map_or(Ok(true), |context| self.context_matches(&state, context));
+        let tuple_ok = self.registry_result(&mut state, tuple_result, Some(&slot.owner)).unwrap_or(false);
+        if !tuple_ok && slot.cleanup_end.is_none() {
+            slot.error = Some(AssetError::new(Reason::ContextStale).into());
+            slot.stop(Reason::ContextStale, Instant::now()); self.bump(&mut state);
+        }
+        if state.stopping || !state.lifetime.original_bound() || state.lock_pending {
+            if slot.cleanup_end.is_none() {
+                let reason = if state.stopping { Reason::Shutdown } else if state.lock_pending { Reason::UserCancelled } else { Reason::DocumentLost };
+                slot.stop(reason, Instant::now()); self.bump(&mut state);
+            }
+        }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let key_preservation_publication = slot.staged.as_ref().is_some_and(|staged|
+            vault::distribution_key::key_store::publication_ready(&state, &slot, staged));
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let key_preservation_publication = false;
+        if joined == Some(true) && resources && (slot.cleanup_end.is_none() || key_preservation_publication) {
+            // The actual original normal join was observed inside its endpoint.
+            // A pending quit confirmation may defer publication, not retain or
+            // renew a completed work clock. Review remains absolute.
+            slot.owner.set_endpoint(None);
+            if !state.quit_pending && !state.unknown || key_preservation_publication {
+                if let Some(staged) = slot.staged.take() {
+                    self.publish_published(&mut state, &mut slot, staged,publisher.as_deref_mut());
+                    self.bump(&mut state);
+                }
+            }
+        }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let cleanup_data_ready = vault::retirement_ready(&state, &slot);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let cleanup_data_ready = false;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let profile_retirement_deferred = apple_profile::retirement_deferred(&slot)
+            || apple_key::retirement_deferred(&slot)
+            || vault::apple_profile_retirement_deferred(&slot)
+            || vault::distribution_key::retirement_deferred(&slot);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let profile_retirement_deferred = false;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let key_disposal_ready = vault::distribution_key::retirement_ready(&slot.owner);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let key_disposal_ready = false;
+        if !profile_retirement_deferred && (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready || key_disposal_ready) {
+            let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
+            let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
+                payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(),
+                slot_context: if retire_context { slot.context.take() } else { None }, ..Retirement::default() };
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            { retirement.vault = vault::take_retirement(&mut state, &mut slot); }
+            // Keep the sanitized explanation for the terminal idle receipt, but
+            // release all native candidate leases before known settlement.
+            if state.lock_pending || state.stopping || !state.lifetime.original_bound() || cleanup_data_ready {
+                retirement.records = std::mem::take(&mut state.records);
+                retirement.assignments = std::mem::take(&mut state.assignments);
+                retirement.context = state.context.take();
+            }
+            for record in &mut state.records {
+                if slot.target.as_ref() == Some(&record.key) || slot.result_record.as_ref() == Some(&record.key) { record.mutation_pending = false; }
+            }
+            let had_data = retirement.candidate.is_some() || retirement.staged.is_some() || retirement.payload.is_some() || retirement.slot_context.is_some() || !retirement.records.is_empty()
+                || !retirement.assignments.is_empty() || retirement.context.is_some() || retirement.image_batch.is_some() || vault_retirement_data(&retirement);
+            if had_data || resources && slot.phase != Phase::Idle && slot.settlement != Settlement::LateKnown {
+                match slot.owner.retain_retirement(retirement) {
+                    Ok(()) => {
+                        // A concurrent status observer cannot call data disposal
+                        // settled while this original holding is being drained.
+                        slot.phase = if state.unknown { Phase::Unknown } else { Phase::Stopping };
+                        slot.settlement = if state.unknown { Settlement::Unknown } else { Settlement::Pending };
+                        state.retiring = true; release = Some(slot.owner.clone());
+                        self.bump(&mut state);
+                    },
+                    Err(retirement) => {
+                        // This is only already-closed data. No native handle is
+                        // forgotten; keep the slot unqualified if its holding
+                        // could not be established.
+                        slot.candidate = retirement.candidate; slot.staged = retirement.staged;
+                        slot.retired_payload = retirement.payload; slot.context = retirement.slot_context;
+                        slot.image_batch = retirement.image_batch;
+                        if !retirement.records.is_empty() { state.records = retirement.records; }
+                        if !retirement.assignments.is_empty() { state.assignments = retirement.assignments; }
+                        if retirement.context.is_some() { state.context = retirement.context; }
+                        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                        vault::restore_retirement(&mut state, &mut slot, retirement.vault);
+                        first_unknown_origin!(state, UnknownOrigin::RetirementRetain, Some(&slot.owner));
+                        state.unknown = true; slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+                        self.bump(&mut state);
+                    }
+                }
+            }
+        }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        vault::observe_detached_stop(&mut state, &slot, Instant::now());
+        state.slot = Some(slot);
+        self.observe_android_source_slot(&state);
+        settle_evidence_status(&mut state);
+        if complete_empty_session_lock(&mut state) { self.bump(&mut state); }
+        if state.unknown { invalidate_all(&mut state); }
+        drop(state);
+        // A completed abandoned child result is never a new usable selection.
+        drop(orphan_result);
+        if let Some(owner) = release {
+            let disposed = owner.release_retirement();
+            let mut state = self.lock();
+            state.retiring = false;
+            if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::RetirementDrain, Some(&owner)); return; }
+            let unknown = state.unknown;
+            if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) {
+                slot.selection = None; slot.preview = None;
+                if slot.owner.resources_settled() {
+                    slot.owner.set_endpoint(None);
+                    slot.settlement = if unknown { Settlement::LateKnown } else { Settlement::Known };
+                    slot.phase = if unknown { Phase::Unknown } else { Phase::Idle };
+                    slot.review_end = None;
+                } else {
+                    // Draining private data does not settle the separately
+                    // retained document vault originals or SDK close failures.
+                    slot.settlement = if unknown { Settlement::Unknown } else { Settlement::Pending };
+                    slot.phase = if unknown { Phase::Unknown } else { Phase::Stopping };
+                }
+            }
+            // Lock/loss/quit may have arrived during a candidate-only off-lock
+            // drain. Keep that request pending until a subsequent reconcile
+            // retires its whole session roster; never report closed over data
+            // that this earlier holding did not include.
+            if (state.lock_pending || state.stopping || !state.lifetime.original_bound()) && session_data_empty(&state) {
+                state.session = false; state.lock_pending = false;
+            }
+            settle_evidence_status(&mut state);
+            self.observe_android_source_slot(&state);
+            self.bump(&mut state);
+        }
+        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        {
+            let mut state = self.lock();
+            match vault::start_cleanup(self, &mut state) {
+                Ok(Some(start)) => { drop(state); let _ = start.send(()); },
+                Ok(None) => {},
+                Err(_) => self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None),
+            }
+        }
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_upload_key::retired(self,&self.lock());
+    }
+
+    #[cfg(test)]
+    fn publish(&self,state:&mut DocumentState,slot:&mut Slot,staged:Staged){
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();
+        self.publish_published(state,slot,staged,publisher.as_mut());
+        if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
+    }
+    fn publish_published(&self, state: &mut DocumentState, slot: &mut Slot, staged: Staged,
+        mut publisher:Option<&mut RegistrationPublisher>) {
+        // This function performs bounded memory-only publication. Every source,
+        // GTK, parser and original coordinator/child join has already settled.
+        if let Err(error) = session_staged_kind_gate(state, slot, &staged) {
+            // Keep secret-bearing refused output with its original retirement,
+            // rather than dropping it in this document-locked publication path.
+            slot.staged = Some(staged); slot.error = Some(error.into());
+            slot.stop(error.reason, Instant::now()); return;
+        }
+        let acquired_publication = match &staged {
+            Staged::AndroidSource { binding, .. } => binding.acquired.as_ref().and_then(|nomination|
+                publisher.as_deref().and_then(|publisher| nomination.publication_epoch(&slot.owner,publisher))),
+            _ => None,
+        };
+        if matches!(&staged,Staged::Project{..}|Staged::AndroidSource{..}){
+            let Some(publisher)=publisher.as_deref_mut() else{
+                self.inner.android_registration_control.poisoned();state.unknown=true;
+                slot.staged=Some(staged);slot.stop(Reason::CleanupUnknown,Instant::now());return;
+            };
+            let reason=if matches!(&staged,Staged::AndroidSource{..}){
+                crate::android_registration_app_protocol::Reason::SourceChanged
+            }else{crate::android_registration_app_protocol::Reason::ContextChanged};
+            if !publisher.accepted() && publisher.accept(reason).is_err(){
+                state.unknown=true;slot.staged=Some(staged);slot.stop(Reason::CleanupUnknown,Instant::now());return;
+            }
+            state.saved_input=None;
+        }
+        match staged {
+            Staged::Artifact{proof,binding}=>{
+                if !slot.operation.artifact()||!slot.artifact.as_ref().is_some_and(|v|Arc::ptr_eq(v,&binding))||!slot.owner.artifact_selected_settled(){
+                    slot.stop(Reason::CleanupUnknown,Instant::now());state.unknown=true;return;}
+                let current=self.registry_result(state,self.inner.bridge.native_project(&binding.project_id),Some(&slot.owner));
+                if !current.is_ok_and(|(generation,root)|generation==binding.generation&&root==binding.root){slot.stop(Reason::ContextStale,Instant::now());return;}
+                if self.inner.bridge.artifact_inspection.artifact_publish_pick(&slot.owner,proof).is_err(){slot.stop(Reason::CleanupUnknown,Instant::now());state.unknown=true;return;}
+                slot.phase=Phase::Idle;slot.settlement=Settlement::Known;
+            }
+            Staged::Installation(matching) => installation::publish(state, slot, matching),
+            Staged::Images { batch, binding } => images::publish(self, state, slot, batch, binding),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            Staged::Vault(result) => vault::publish(self, state, slot, result),
+            Staged::AndroidSource { proof, binding } => {
+                if !slot.operation.android_source() || !slot.android_source.as_ref().is_some_and(|original| Arc::ptr_eq(original, &binding))
+                    || !slot.owner.android_source_selected_settled() {
+                    slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
+                }
+                let registered = self.registry_result(state, self.inner.bridge.native_project(&binding.project_id), Some(&slot.owner));
+                if !registered.is_ok_and(|(generation, root)| generation == binding.generation && root == binding.root) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                let published = publisher.as_deref().ok_or_else(BridgeError::cleanup_unknown)
+                    .and_then(|publisher| self.inner.bridge.android_build.publish_source(&slot.owner, proof, publisher));
+                if published.is_err() {
+                    slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
+                }
+                if let (Some(nomination),Some(publisher))=(&binding.acquired,publisher.as_deref()) {
+                    nomination.published(&slot.owner,publisher,acquired_publication);
+                }
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            }
+            Staged::ProjectPath { proof, binding } => {
+                if !slot.operation.project_path() || !slot.project_path.as_ref().is_some_and(|original| Arc::ptr_eq(original, &binding)) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                if !slot.owner.project_path_settled(true) {
+                    slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
+                }
+                if let Err(error) = self.project_path_registration(state, &binding) {
+                    slot.stop(error.reason, Instant::now()); return;
+                }
+                match commands::project_path_result(&binding.project_id, binding.field, proof.into_relative_path()) {
+                    Ok(result) => {
+                        // Only bounded relative DATA. No registry/context,
+                        // assignment, evidence selection or asset record changes.
+                        slot.path_result = Some(result); slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+                    },
+                    Err(error) => slot.stop(error.reason, Instant::now()),
+                }
+            }
+            Staged::EvidenceFolder { proof, tokens, purpose } => {
+                if state.evidence.revoked || !state.evidence.matches(slot) || slot.operation != Operation::ChooseEvidenceFolder || !tokens_distinct(&tokens)
+                    || !slot.evidence.as_ref().is_some_and(|binding| binding.purpose == purpose) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                let selection_id = format!("evidence-{}", tokens.selection.0);
+                let display_name = evidence_display_name(proof.path());
+                state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id, display_name },
+                    root: asset_source::RegisteredRoot { path: proof.path().to_path_buf(), identity: proof.identity() }, epoch: state.evidence.epoch, purpose });
+                state.evidence.phase = evidence_wire::Phase::Selected; state.evidence.problem = None; state.evidence.result = None;
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            }
+            Staged::EvidenceObserved(result) => {
+                if !state.evidence.accepts_result(slot, &result) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                state.evidence.result = Some(result); state.evidence.phase = evidence_wire::Phase::Observed; state.evidence.problem = None;
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            }
+            Staged::Selected { payload, tokens } => {
+                if !tokens_distinct(&tokens) || state.records.iter().any(|record| record.key.id == tokens.record) {
+                    slot.staged = Some(Staged::Selected { payload, tokens }); slot.stop(Reason::SourceRefused, Instant::now()); return;
+                }
+                slot.kind = Some(payload.kind); slot.source = SourceState::Captured;
+                slot.candidate = Some(Candidate { payload, record_id: tokens.record, existing: slot.target.clone() });
+                slot.selection = Some(tokens.selection); slot.phase = Phase::Selected; slot.settlement = Settlement::Known;
+                fixture_event!(slot.owner, CandidatePublished, 1);
+            }
+            Staged::Prepared { result, tokens } => {
+                if !tokens_distinct(&tokens) { slot.stop(Reason::SourceRefused, Instant::now()); return; }
+                if let Some(candidate) = slot.candidate.as_mut() {
+                    if candidate.record_id.0.is_empty() {
+                        if state.records.iter().any(|record| record.key.id == tokens.record) { slot.stop(Reason::SourceRefused, Instant::now()); return; }
+                        candidate.record_id = tokens.record;
+                    }
+                }
+                match result {
+                    Ok(result) => {
+                        let payload = slot_payload(state, slot);
+                        let usable = payload.is_some_and(|payload| payload.usable_source());
+                        let permitted = result.permits() && usable;
+                        slot.assessment = Some(result);
+                        if slot.candidate.as_ref().is_some_and(|candidate| candidate.payload.kind.file().is_some()) { slot.selection = Some(tokens.selection); }
+                        if permitted {
+                            let save = slot.candidate.is_some();
+                            let Some(kind) = slot.kind else { slot.stop(Reason::SourceRefused, Instant::now()); return; };
+                            let existing = slot.candidate.as_ref().and_then(|candidate| candidate.existing.as_ref());
+                            let subject = PreviewSubject::new(kind, if save { if existing.is_some() { SubjectChange::Replace } else { SubjectChange::New } } else { SubjectChange::Assign },
+                                if save { existing } else { slot.target.as_ref() });
+                            let preview = Preview { token: tokens.preview, action: if save { Action::Save } else { Action::Bind },
+                                bind_token: if save { Some(tokens.bind) } else { None }, record: if save { None } else { slot.target.clone() }, subject };
+                            offer_preview(state, slot, preview);
+                        } else if slot.selection.is_some() { slot.phase = Phase::Selected; }
+                        else { slot.phase = Phase::Idle; slot.discard = true; }
+                    }
+                    Err(error) => {
+                        slot.error = Some(error);
+                        if slot.candidate.as_ref().is_some_and(|candidate| candidate.payload.kind.file().is_some()) {
+                            slot.selection = Some(tokens.selection); slot.phase = Phase::Selected;
+                        } else { slot.phase = Phase::Idle; slot.discard = true; }
+                    }
+                }
+                slot.settlement = Settlement::Known;
+            }
+            Staged::Delete(tokens) => {
+                if !tokens_distinct(&tokens) || !slot.target.as_ref().is_some_and(|key| record_pending(state, key)) {
+                    slot.stop(Reason::SourceChanged, Instant::now()); return;
+                }
+                let Some(kind) = slot.kind else { slot.stop(Reason::SourceRefused, Instant::now()); return; };
+                let preview = Preview { token: tokens.preview, action: Action::Delete, bind_token: None, record: slot.target.clone(),
+                    subject: PreviewSubject::new(kind, SubjectChange::Delete, slot.target.as_ref()) };
+                offer_preview(state, slot, preview); slot.settlement = Settlement::Known;
+            }
+            #[cfg(feature = "desktop-shell")]
+            Staged::Project { proof, generation } => match self.inner.bridge.publish_checked_project(proof, generation) {
+                Ok(project) => {
+                    invalidate_all(state);
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                    match self.inner.bridge.native_generation() {
+                        Ok(actual) => vault::registered_generation(state, actual),
+                        Err(error) => {
+                            slot.error = Some(error.into()); slot.stop(Reason::CleanupUnknown, Instant::now());
+                            state.unknown = true; vault::revoke_all(state); return;
+                        },
+                    }
+                    slot.project = Some(project); slot.source = SourceState::NotRun; slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+                    fixture_event!(slot.owner, ProjectPublished, 1);
+                    // Registry generation is part of every old context tuple.
+                    // Keep its bounded bytes only until this off-lock retirement.
+                }
+                Err(error) => {
+                    let reason = error.reason; slot.error = Some(error.into()); slot.stop(reason, Instant::now());
+                    if reason == Reason::CleanupUnknown { state.unknown = true; }
+                }
+            },
+            #[cfg(not(feature = "desktop-shell"))]
+            Staged::Project { .. } => slot.stop(Reason::Unqualified, Instant::now()),
+            Staged::Committed { bind } => {
+                if let Some(token) = bind {
+                    let record = slot.result_record.clone();
+                    if !record.as_ref().is_some_and(|key| state.records.iter().any(|record| record.key == *key && record.payload.usable_source())) {
+                        slot.stop(Reason::SourceChanged, Instant::now()); return;
+                    }
+                    if let Some(key) = &record { for row in &mut state.records { if row.key == *key { row.mutation_pending = false; } } }
+                    let Some(kind) = slot.kind else { slot.stop(Reason::SourceRefused, Instant::now()); return; };
+                    let subject = PreviewSubject::new(kind, SubjectChange::Assign, record.as_ref());
+                    offer_preview(state, slot, Preview { token, action: Action::Bind, bind_token: None, record, subject });
+                } else { slot.phase = Phase::Idle; slot.discard = true; }
+                slot.settlement = Settlement::Known;
+            }
+            Staged::Bound(assignment) => {
+                let context_result = slot.context.as_ref().map_or(Ok(false), |context| {
+                    if context.revision != assignment.context_revision { Ok(false) } else { self.context_matches(state, context) }
+                });
+                let context_ok = self.registry_result(state, context_result, Some(&slot.owner)).unwrap_or(false);
+                if !record_usable(state, slot, &RecordKey { id: assignment.record_id.clone(), revision: assignment.record_revision }, assignment.kind)
+                    || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits)
+                    || !context_ok {
+                    slot.stop(Reason::ContextStale, Instant::now()); slot.error = Some(AssetError::new(Reason::ContextStale).into()); return;
+                }
+                let existing = state.assignments.iter().position(|existing| existing.kind == assignment.kind);
+                if existing.is_none() && (state.assignments.len() >= 8 || state.assignments.try_reserve_exact(1).is_err()) {
+                    slot.stop(Reason::Capacity, Instant::now()); return;
+                }
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                if encrypted_mode(state) {
+                    if let Err(reason) = vault::bind_payload(state, slot, &assignment) {
+                        slot.stop(reason, Instant::now()); slot.error = Some(AssetError::new(reason).into()); return;
+                    }
+                }
+                // Same document lock; every failure/capacity check preceded the
+                // retained loan. This assignment move cannot allocate or fail.
+                if let Some(index) = existing { state.assignments[index] = assignment; }
+                else { state.assignments.push(assignment); }
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known; slot.discard = true;
+            }
+            Staged::Refused(reason) => {
+                slot.error = Some(AssetError::new(reason).into());
+                if slot.source == SourceState::Pending { slot.source = SourceState::Refused; }
+                slot.stop(reason, Instant::now());
+                if reason == Reason::CleanupUnknown {
+                    first_unknown_origin!(state, UnknownOrigin::StagedRefusal, Some(&slot.owner));
+                    state.unknown = true;
+                }
+            }
+        }
+    }
+}
+
+fn tokens_distinct(tokens: &TokenBatch) -> bool {
+    let tokens = [&tokens.selection, &tokens.record, &tokens.preview, &tokens.bind];
+    tokens.iter().enumerate().all(|(i, token)| token.0.len() == 32 && token.0.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && tokens[i + 1..].iter().all(|other| *token != *other))
+}
+
+fn preview_subject_valid(state: &DocumentState, slot: &Slot, preview: &Preview) -> bool {
+    let PreviewSubject::Record { kind, change, record_id, record_revision } = &preview.subject else {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { return vault::initialize_preview_valid(state, slot, preview); }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        { return false; }
+    };
+    if !kind.enabled() || slot.kind != Some(*kind) { return false; }
+    if matches!(preview.action, Action::Save | Action::Bind) && session_slot_kind_gate(state, slot, *kind).is_err() { return false; }
+    let referenced = match (record_id, record_revision) {
+        (None, None) => false,
+        (Some(id), Some(revision)) => {
+            if !has_record(state, &RecordKey { id: id.clone(), revision: *revision }, *kind) { return false; }
+            true
+        }, _ => return false,
+    };
+    let matches = |key: &RecordKey| record_id.as_ref() == Some(&key.id) && *record_revision == Some(key.revision);
+    match (preview.action, change) {
+        (Action::Save, SubjectChange::New) => !referenced && preview.record.is_none() && preview.bind_token.is_some() && slot.target.is_none()
+            && slot.candidate.as_ref().is_some_and(|candidate| candidate.existing.is_none() && candidate.payload.kind == *kind),
+        (Action::Save, SubjectChange::Replace) => referenced && preview.record.is_none() && preview.bind_token.is_some() && slot.target.as_ref().is_some_and(matches)
+            && slot.candidate.as_ref().is_some_and(|candidate| candidate.existing.as_ref().is_some_and(matches) && candidate.payload.kind == *kind),
+        (Action::Bind, SubjectChange::Assign) => referenced && preview.bind_token.is_none() && preview.record.as_ref().is_some_and(matches)
+            && slot.result_record.as_ref().or(slot.target.as_ref()).is_some_and(matches),
+        (Action::Delete, SubjectChange::Delete) => referenced && preview.bind_token.is_none() && preview.record.as_ref().is_some_and(matches) && slot.target.as_ref().is_some_and(matches),
+        _ => false,
+    }
+}
+fn offer_preview(state: &DocumentState, slot: &mut Slot, preview: Preview) {
+    if !preview_subject_valid(state, slot, &preview) {
+        slot.error = Some(AssetError::new(Reason::SourceChanged).into());
+        slot.stop(Reason::SourceChanged, Instant::now()); return;
+    }
+    slot.selection = None; slot.preview = Some(preview); slot.phase = Phase::Preview;
+}
+
+#[cfg(feature = "desktop-shell")]
+fn restore_failed_install_retirement(state: &mut DocumentState, _owner: &Arc<OriginalWork>, retirement: Retirement) {
+    // The failure belongs to the NEW owner, before the old slot is restored.
+    first_unknown_origin!(state, UnknownOrigin::InstallRetirement, Some(_owner));
+    state.slot = retirement.old_slot.map(|slot| *slot); state.unknown = true;
+}
+
+#[cfg(feature = "desktop-shell")]
+impl DocumentBinding {
+    fn install(&self, state: &mut DocumentState, mut slot: Slot, job: Job) -> Result<oneshot::Sender<()>, AssetError> {
+        // Every caller also has its real reciprocal admission check. Keep the
+        // path original nonreplaceable here even if a future caller omits one;
+        // an absent path slot in its invoke waiter then implies known settlement.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let retired_cleanup = matches!(&job, Job::Vault(vault::Job::Release)) && vault::late_cleanup_install(state, &slot);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let retired_cleanup = false;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let cleanup_only = matches!(&job, Job::Vault(vault::Job::Release));
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let cleanup_only = false;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        { agent_upload_key::retired(self,state); agent_upload_key::before_install(state,&slot,cleanup_only)?; }
+        if state.maintenance.closed() && !cleanup_only { return Err(AssetError::new(Reason::Busy)); }
+        // An already-late-settled unrelated path remains Unknown. Only the
+        // revoked vault lease's finite Release may retain/retire that old slot;
+        // this is never permission to replace a live path or start new work.
+        if (project_path_pending(state) || images::pending(state) || installation::pending(state)) && !retired_cleanup { return Err(AssetError::new(Reason::Busy)); }
+        lookup_allocation_gate(state)?;
+        // Public images share lifecycle custody, not a private credential
+        // session/lease. Their raw allowance already charges retained vault
+        // DATA without attaching or consuming the vault's use authority.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if !slot.operation.images() && !slot.operation.installation() { vault::attach_asset_slot(state, &mut slot)?; }
+        settle_evidence_status(state);
+        installation::remember(state);
+        let owner = slot.owner.clone();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        self.installed_record_original(&owner, Some(slot.operation))?;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        self.installed_macos_record_original(&owner, Some(slot.operation))?;
+        let old_slot = state.slot.take().map(Box::new);
+        if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
+            restore_failed_install_retirement(state, &owner, retirement);
+            return Err(AssetError::new(Reason::CleanupUnknown));
+        }
+        state.slot = Some(slot);
+        let mut book = match owner.coordinator.lock() { Ok(book) => book, Err(_) => {
+            self.coordinator_failed(state, UnknownOrigin::CoordinatorLock, Some(&owner)); return Err(AssetError::new(Reason::CleanupUnknown));
+        } };
+        book.receipt = JoinReceipt::Pending;
+        let (start, enter) = oneshot::channel();
+        let document = self.clone(); let worker = owner.clone(); let end = CoordinatorEnd(owner.clone());
+        book.handle = Some(tauri::async_runtime::spawn(async move {
+            let _end = end;
+            if enter.await.is_err() {
+                worker.gui.not_created(Reason::UserCancelled);
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                worker.credential_backup_no_dispatch_end(Reason::UserCancelled);
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                worker.apple_profile_no_dispatch();
+                worker.release_retirement(); document.stage(&worker, Staged::Refused(Reason::UserCancelled)); return;
+            }
+            run_job(document, worker, job).await;
+        }));
+        fixture_event!(owner, CoordinatorRegistered, 0);
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if let Some(link)=owner.agent_upload_key.get() { link.installed(owner.id).map_err(|_| AssetError::new(Reason::CleanupUnknown))?; }
+        // The original handle, GUI acquisition facts and child/resource slots
+        // exist before this sender can be used. The caller releases the actual
+        // DocumentBinding lock before opening the start barrier.
+        self.bump(state); Ok(start)
+    }
+    pub(crate) fn choose(&self, app: tauri::AppHandle, args: commands::Choose<'_>) -> Result<AssetStatus, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) {
+            if args.kind != Kind::AndroidKeystore || args.replacement.is_some() {
+                context.refuse(); return Err(AssetError::new(Reason::Unqualified));
+            }
+        }
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?; idle(&state)?;
+        if args.kind.file().is_none() { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+        let context = self.current_context(&mut state, args.context_revision)?;
+        session_kind_gate(&context, args.kind)?;
+        let target = target(&state, args.replacement, args.kind)?;
+        let mut roster = self.registry_result(&mut state, self.inner.bridge.native_roster(), None)?;
+        if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(vault) = vault::physical_root(&state) { roster.roots.push(vault); }
+        let id = self.next_operation(&mut state)?;
+        let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        let mut slot = Slot::new(owner, Operation::ChooseFile, Some(context), target.clone(), None);
+        slot.kind = Some(args.kind); slot.source = SourceState::Pending;
+        if let Some(target) = &target { revoke_record(&mut state, target); }
+        let start = self.install(&mut state, slot, Job::Choose { app, kind: args.kind, roster })?;
+        let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
+    }
+
+    pub(crate) fn prepare(&self, args: commands::Prepare<'_>) -> Result<u32, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
+        let context = self.current_context(&mut state, args.context_revision)?;
+        let durable = encrypted_mode(&state);
+        if args.label.is_some() != (durable && !matches!(args.source, commands::Source::Record(_))) { return Err(AssetError::invalid()); }
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if durable {
+            if let commands::Source::Record(reference) = &args.source {
+                let key = own_record(commands::RecordRef { record_id: reference.record_id, expected_revision: reference.expected_revision })?;
+                let (id, start) = self.prepare_stored_vault(&mut state, key, context)?;
+                drop(state); let _ = start.send(()); return Ok(id);
+            }
+        }
+        let now = Instant::now();
+        let (payload, candidate, target, review_end) = match args.source {
+            commands::Source::Selection(token) => {
+                let slot = state.slot.as_ref().filter(|slot| matches!(slot.phase, Phase::Selected | Phase::Preview) && slot.owner.resources_settled()
+                    && slot.selection.as_ref().is_some_and(|selection| selection.0 == token)).ok_or_else(AssetError::invalid)?;
+                if !slot.context.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, &context)) { return Err(AssetError::new(Reason::ContextStale)); }
+                let original = slot.candidate.as_ref().ok_or_else(AssetError::invalid)?;
+                session_kind_gate(&context, original.payload.kind)?;
+                let fields = commands::own_fields(original.payload.kind, args.fields.ok_or_else(AssetError::invalid)?)?;
+                let payload = Arc::new(Payload { kind: original.payload.kind, material: original.payload.material.clone(), fields: Some(fields) });
+                let candidate = Candidate { payload: payload.clone(), record_id: original.record_id.clone(), existing: original.existing.clone() };
+                (payload, Some(candidate), slot.target.clone(), slot.review_end)
+            }
+            commands::Source::Record(reference) => {
+                idle(&state)?; let key = own_record(reference)?;
+                let record = state.records.iter().find(|record| record.key == key && !record.mutation_pending).ok_or_else(AssetError::invalid)?;
+                session_kind_gate(&context, record.payload.kind)?;
+                (record.payload.clone(), None, Some(key), Some(now + REVIEW))
+            }
+            commands::Source::Scalar { kind, replacement } => {
+                idle(&state)?;
+                session_kind_gate(&context, kind)?;
+                if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken | Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment) { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+                let target = target(&state, replacement, kind)?;
+                let fields = commands::own_fields(kind, args.fields.ok_or_else(AssetError::invalid)?)?;
+                let payload = Arc::new(Payload { kind, material: None, fields: Some(fields) });
+                let candidate = Candidate { payload: payload.clone(), record_id: Token(String::new()), existing: target.clone() };
+                (payload, Some(candidate), target, Some(now + REVIEW))
+            }
+        };
+        let id = self.next_operation(&mut state)?;
+        let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let mut slot = Slot::new(owner, Operation::Prepare, Some(context.clone()), target.clone(), review_end);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { slot.vault.label = args.label.flatten().map(commands::copy_text).transpose()?; }
+        slot.kind = Some(payload.kind); slot.source = if payload.material.is_some() { SourceState::Captured } else { SourceState::NotRun };
+        let is_mutation = candidate.is_some(); slot.candidate = candidate;
+        // A selection token and any dependent preview are consumed at admission,
+        // before new RNG/assessment. Stored-record reassessment is not mutation.
+        if let Some(old) = state.slot.as_mut() { old.selection = None; old.preview = None; }
+        if is_mutation { if let Some(target) = &target { revoke_record(&mut state, target); } }
+        let start = self.install(&mut state, slot, Job::Prepare { payload, context })?;
+        drop(state); let _ = start.send(()); Ok(id)
+    }
+
+    pub(crate) fn prepare_delete(&self, reference: commands::RecordRef<'_>) -> Result<AssetStatus, AssetError> {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if encrypted_mode(&self.lock()) { return self.prepare_vault_delete(reference); }
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?; idle(&state)?;
+        let key = own_record(reference)?;
+        let kind = state.records.iter().find(|record| record.key == key && !record.mutation_pending).map(|record| record.payload.kind).ok_or_else(AssetError::invalid)?;
+        let id = self.next_operation(&mut state)?; let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let mut slot = Slot::new(owner, Operation::PrepareDelete, None, Some(key.clone()), Some(Instant::now() + REVIEW)); slot.kind = Some(kind);
+        revoke_record(&mut state, &key);
+        let start = self.install(&mut state, slot, Job::Delete)?;
+        let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
+    }
+
+    /// No original resource/handle or secret-bearing result is removed into this
+    /// waiter. Abandonment is just loss of an observer, including during R1 IO.
+    pub(crate) async fn prepared(&self, id: u32) -> Result<AssetStatus, CommandError> {
+        prepared_reply::PreparedReply::ordinary(self.clone(), id).await?
+            .ok_or_else(|| AssetError::new(Reason::ContextStale).into())
+    }
+}
+
+#[cfg(feature = "desktop-shell")]
+async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) {
+    if !owner.release_retirement() {
+        // No GUI dispatch has happened on this original path yet.
+        installation::failure(&owner, crate::installation::CheckReason::CleanupUnknown, Instant::now());
+        owner.gui.not_created(Reason::CleanupUnknown);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        owner.credential_backup_no_dispatch_end(Reason::CleanupUnknown);
+        document.stage(&owner, Staged::Refused(Reason::CleanupUnknown)); return;
+    }
+    let operation = execute_job(&document, &owner, job);
+    tokio::pin!(operation);
+    // One original coordinator drives cancellation while retaining (not
+    // dropping/replacing) its exact child/R1 future. Timers only forbid future
+    // success and set STOP; an unresponsive syscall/query still owns its slot.
+    let staged = loop {
+        tokio::select! {
+            result = &mut operation => break result,
+            _ = owner.wake.notified() => document.tick(),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
+        }
+    };
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if owner.installation.is_none() { vault::after_job(&document, &owner, &staged).await; }
+    document.stage(&owner, staged);
+}
+
+#[cfg(feature = "desktop-shell")]
+async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: Job) -> Staged {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    let job = match job { Job::AppleProfile(request) => return apple_profile::run(document,owner,request).await, Job::AppleKey(request) => return apple_key::run(document,owner,request).await, other=>other };
+    if owner.interrupted() {
+        owner.gui.not_created(Reason::UserCancelled);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        owner.credential_backup_no_dispatch_end(Reason::UserCancelled);
+        return Staged::Refused(Reason::UserCancelled);
+    }
+    match job {
+        Job::Installation => installation::run(owner).await,
+        Job::Images { app, binding } => images::run(document, owner, app, binding).await,
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        Job::Vault(job) => vault::run(document, owner, job).await,
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        Job::AppleProfile(_) => Staged::Refused(Reason::CleanupUnknown), // consumed only by the fixed branch above
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        Job::AppleKey(_) => Staged::Refused(Reason::CleanupUnknown),
+        Job::Retire { bind } => Staged::Committed { bind },
+        Job::Bind(assignment) => Staged::Bound(assignment),
+        Job::ChooseEvidenceFolder { app, purpose } => {
+            if !document.evidence_job_matches(owner, purpose) { owner.gui.not_created(Reason::ContextStale); return Staged::Refused(Reason::ContextStale); }
+            let tokens = match child(owner, ChildJob::Tokens).await {
+                Ok(ChildEnd::Tokens(tokens)) => tokens,
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => { owner.gui.not_created(reason); return Staged::Refused(reason); },
+                _ => { owner.gui.not_created(Reason::CleanupUnknown); return Staged::Refused(Reason::CleanupUnknown); },
+            };
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::EvidenceFolder, None).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            // Ordinary directory metadata only, no project publication and no
+            // credential-source capture or user-selected document paths.
+            match child(owner, ChildJob::Probe { path, origins: Vec::new(), vault: None, application: None }).await {
+                Ok(ChildEnd::Probed(proof)) => Staged::EvidenceFolder { proof, tokens, purpose },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        Job::InspectEvidence { root, purpose } => {
+            if !document.evidence_job_matches(owner, purpose) { return Staged::Refused(Reason::ContextStale); }
+            if let Err(reason) = document.phase(owner, Phase::Assessing) { return Staged::Refused(reason); }
+            if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
+            let result = match purpose {
+                EvidencePurpose::Candidate => document.inner.bridge.observe_candidate_evidence(&root).await.map(EvidenceResult::Candidate),
+                EvidencePurpose::Lifecycle(stage) => document.inner.bridge.observe_release_evidence(&root, stage).await.map(EvidenceResult::Lifecycle),
+            };
+            if let Err(error) = &result { document.evidence_failed(owner, evidence_wire::core_problem(error)); }
+            // Keep the same query/coordinator if its Supervisor reported
+            // unknown cleanup. No new wait lease, global cancel or clock.
+            if document.inner.bridge.supervisor.disabled() {
+                { let mut state = document.lock(); document.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); }
+                while !document.inner.bridge.supervisor.can_exit() { tokio::time::sleep(Duration::from_millis(50)).await; }
+            }
+            if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
+            match result { Ok(result) => Staged::EvidenceObserved(result), Err(_) => Staged::Refused(Reason::SourceRefused) }
+        }
+        Job::Choose { app, kind, roster } => {
+            let tokens = match child(owner, ChildJob::Tokens).await {
+                Ok(ChildEnd::Tokens(tokens)) => tokens,
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => { owner.gui.not_created(reason); return Staged::Refused(reason); },
+                _ => { owner.gui.not_created(Reason::CleanupUnknown); return Staged::Refused(Reason::CleanupUnknown); },
+            };
+            let file_kind = match kind.file() { Some(kind) => kind, None => { owner.gui.not_created(Reason::UnsupportedFormat); return Staged::Refused(Reason::UnsupportedFormat); } };
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::File(file_kind), None).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            match child(owner, ChildJob::Capture { path, roots: roster.roots, kind: file_kind }).await {
+                Ok(ChildEnd::Captured(material)) => Staged::Selected { payload: Arc::new(Payload { kind, material: Some(Arc::new(material)), fields: None }), tokens },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        Job::Prepare { payload, context } => prepare_job(document, owner, payload, context).await,
+        Job::Delete => match child(owner, ChildJob::Tokens).await {
+            Ok(ChildEnd::Tokens(tokens)) => Staged::Delete(tokens),
+            Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+        },
+        Job::Project { app, generation, origins, vault, application } => {
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::Project, None).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            match child(owner, ChildJob::Probe { path, origins, vault, application }).await {
+                Ok(ChildEnd::Probed(proof)) => Staged::Project { proof, generation },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        Job::Artifact{app,binding}=>{
+            let path=match crate::shell::run_owned_dialog(&app,owner,crate::shell::DialogChoice::ArtifactInput{format:binding.format,role:binding.role},None).await{
+                Ok(Some(path))=>path,Ok(None)=>return Staged::Refused(Reason::UserCancelled),Err(reason)=>return Staged::Refused(reason)};
+            if let Err(reason)=document.phase(owner,Phase::Capturing){return Staged::Refused(reason);}
+            match child(owner,ChildJob::Artifact{path,binding:binding.clone()}).await{
+                Ok(ChildEnd::Artifact(proof))=>Staged::Artifact{proof,binding},Ok(ChildEnd::Refused(reason))|Err(reason)=>Staged::Refused(reason),_=>Staged::Refused(Reason::CleanupUnknown)}
+        }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        Job::AndroidSource { app, binding } => {
+            let chosen = match &binding.acquired {
+                Some(nomination) => crate::shell::run_owned_acquired_tool_source(&app,owner,nomination).await,
+                None => crate::shell::run_owned_dialog(&app,owner,crate::shell::DialogChoice::AndroidToolSource(binding.role),None).await,
+            };
+            let path = match chosen {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            // Reuse the original bounded parent-relative directory probe and
+            // its SourceBook cleanup, NOT project-relative-path validation or
+            // project registration. No payload is read or supplier code run.
+            match child(owner, ChildJob::Probe { path, origins: Vec::new(), vault: None, application: None }).await {
+                Ok(ChildEnd::Probed(proof)) => Staged::AndroidSource { proof, binding },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason),
+                _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        Job::ProjectPath { app, binding } => {
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::ProjectPath(binding.field), Some(binding.root.path.clone())).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                use tauri::Manager;
+                if let Some(q) = app.try_state::<Arc<crate::shell::installed_observation::Observation>>() {
+                    // The actual native choice/close/release returned. Only
+                    // this fixed observer may now mutate its synthetic input,
+                    // before the original SourceBook child begins; never inject
+                    // a selection, resource proof, or successful result.
+                    if !q.path_selected(document, owner, binding.field, &path) { return Staged::Refused(Reason::SourceRefused); }
+                }
+            }
+            match child(owner, ChildJob::ProjectPath { path, binding: binding.clone() }).await {
+                Ok(ChildEnd::ProjectPath(proof)) => Staged::ProjectPath { proof, binding },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "desktop-shell")]
+async fn prepare_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, payload: Arc<Payload>, context: Arc<NativeContext>) -> Staged {
+            let tokens = match child(owner, ChildJob::Tokens).await {
+                Ok(ChildEnd::Tokens(tokens)) => tokens,
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => return Staged::Refused(reason), _ => return Staged::Refused(Reason::CleanupUnknown),
+            };
+            if let Err(reason) = document.begin_prepare_copy(owner) { return Staged::Refused(reason); }
+            let result = match assemble_request(&payload, &context) {
+                Ok(request) => {
+                    if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
+                    let assessor = assess_supplied(&document.inner.bridge.supervisor, request);
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    let assessor = document.inner.bridge.supervisor.observe_installed_session_query(owner, assessor);
+                    assessor.await.map(|result| SafeAssessment(Arc::new(result))).map_err(CommandError::from)
+                }
+                Err(error) => Err(error),
+            };
+            // An R1 cleanup-unknown receipt is not its child settlement. The
+            // unchanged Supervisor exposes only a conservative all-originals
+            // can-exit view. Retain this exact coordinator/payload until that
+            // view settles; do not cancel unrelated queries or fabricate a new
+            // per-query lease. Unknown remains sticky even on late settlement.
+            if document.inner.bridge.supervisor.disabled() {
+                { let mut state = document.lock(); document.coordinator_failed(&mut state, UnknownOrigin::SupervisorDisabled, Some(owner)); }
+                while !document.inner.bridge.supervisor.can_exit() { tokio::time::sleep(Duration::from_millis(50)).await; }
+            }
+            if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
+            Staged::Prepared { result, tokens }
+}
+
+#[cfg(feature = "desktop-shell")]
+impl DocumentBinding {
+    fn choose_evidence_locked(&self, state: &mut DocumentState, app: tauri::AppHandle, purpose: EvidencePurpose) -> Result<oneshot::Sender<()>, BridgeError> {
+        self.evidence_gate(state, purpose)?;
+        let Some(epoch) = state.evidence.epoch.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); };
+        let id = self.next_operation(state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        if id == u32::MAX { self.exhaust(state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Choose, selection_id: None, epoch, purpose };
+        let mut slot = Slot::new(owner, Operation::ChooseEvidenceFolder, None, None, None); slot.evidence = Some(binding.clone());
+        // Only an accepted new native choice changes stage/purpose and revokes
+        // the previous ID. Source drafts, assignments and G remain untouched.
+        state.evidence.epoch = epoch; state.evidence.selection = None; state.evidence.result = None; state.evidence.problem = None;
+        state.evidence.phase = evidence_wire::Phase::Choosing; state.evidence.operation = Some(binding);
+        self.install(state, slot, Job::ChooseEvidenceFolder { app, purpose }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))
+    }
+    fn observe_evidence_locked(&self, state: &mut DocumentState, args: evidence_wire::Observe, lifecycle: bool) -> Result<oneshot::Sender<()>, BridgeError> {
+        let selected = state.evidence.selection.as_ref().filter(|selection| selection.view.selection_id == args.selection_id
+            && selection.epoch == state.evidence.epoch && selection.purpose.lifecycle() == lifecycle)
+            .ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
+        let root = selected.root.clone(); let epoch = selected.epoch; let purpose = selected.purpose;
+        self.evidence_gate(state, purpose)?;
+        let id = self.next_operation(state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        if id == u32::MAX { self.exhaust(state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe, selection_id: Some(args.selection_id), epoch, purpose };
+        let mut slot = Slot::new(owner, Operation::InspectEvidence, None, None, None); slot.evidence = Some(binding.clone());
+        state.evidence.result = None; state.evidence.problem = None; state.evidence.phase = evidence_wire::Phase::Observing; state.evidence.operation = Some(binding);
+        self.install(state, slot, Job::InspectEvidence { root, purpose }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))
+    }
+    pub(crate) fn artifact_evidence_choose(&self, app: tauri::AppHandle) -> Result<evidence_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), false)?;
+        self.reconcile_scope(Some(false)); let mut state = self.lock(); evidence_route_gate(&state, false)?; self.expire(&mut state, Instant::now());
+        let start = self.choose_evidence_locked(&mut state, app, EvidencePurpose::Candidate)?;
+        let status = evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    pub(crate) fn artifact_evidence_observe(&self, args: evidence_wire::Observe) -> Result<evidence_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), false)?;
+        self.reconcile_scope(Some(false)); let mut state = self.lock(); evidence_route_gate(&state, false)?; self.expire(&mut state, Instant::now());
+        let start = self.observe_evidence_locked(&mut state, args, false)?;
+        let status = evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    pub(crate) fn release_evidence_choose(&self, app: tauri::AppHandle, args: lifecycle_wire::Choose) -> Result<lifecycle_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), true)?;
+        self.reconcile_scope(Some(true)); let mut state = self.lock(); evidence_route_gate(&state, true)?; self.expire(&mut state, Instant::now());
+        let start = self.choose_evidence_locked(&mut state, app, EvidencePurpose::Lifecycle(args.stage))?;
+        let status = release_evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    pub(crate) fn release_evidence_observe(&self, args: lifecycle_wire::Observe) -> Result<lifecycle_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), true)?;
+        self.reconcile_scope(Some(true)); let mut state = self.lock(); evidence_route_gate(&state, true)?; self.expire(&mut state, Instant::now());
+        let start = self.observe_evidence_locked(&mut state, args, true)?;
+        let status = release_evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    fn consume_preview(&self, state: &mut DocumentState, token: &str, bind: bool) -> Result<Preview, AssetError> {
+        if state.slot.as_ref().is_some_and(|slot| slot.preview.as_ref().is_some_and(|preview| !preview_subject_valid(state, slot, preview))) {
+            return Err(self.refuse_consumed(state, AssetError::invalid()));
+        }
+        let slot = state.slot.as_mut().ok_or_else(AssetError::invalid)?;
+        if slot.reason == Reason::ContextStale { return Err(AssetError::new(Reason::ContextStale)); }
+        if slot.phase != Phase::Preview || !slot.owner.resources_settled() { return Err(AssetError::new(Reason::Busy)); }
+        let preview = slot.preview.as_ref().filter(|preview| preview.token.0 == token && (preview.action == Action::Bind) == bind).ok_or_else(AssetError::invalid)?;
+        let _ = preview; // Validate the exact action/token before consuming.
+        let preview = slot.preview.take().ok_or_else(AssetError::invalid)?;
+        slot.selection = None;
+        self.bump(state); Ok(preview)
+    }
+    fn refuse_consumed(&self, state: &mut DocumentState, error: AssetError) -> AssetError {
+        if let Some(slot) = state.slot.as_mut() { slot.error = Some(error.into()); slot.stop(error.reason, Instant::now()); }
+        if error.reason == Reason::CleanupUnknown { state.unknown = true; invalidate_all(state); }
+        self.bump(state); error
+    }
+
+    pub(crate) fn commit(&self, token: &str) -> Result<AssetStatus, AssetError> {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if encrypted_mode(&self.lock()) { return self.commit_vault(token); }
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
+        let preview = self.consume_preview(&mut state, token, false)?;
+        // All checks after consumption either admit this exact finite effect or
+        // leave the old record bytes unassigned. No implicit retry/reassessment.
+        let decision = (|| -> Result<(Option<RecordKey>, Option<Arc<Payload>>, Option<Token>, Kind), AssetError> {
+            let slot = state.slot.as_ref().ok_or_else(AssetError::invalid)?;
+            let kind = slot.kind.ok_or_else(AssetError::invalid)?;
+            match preview.action {
+                Action::Save => {
+                    let context = slot.context.as_ref().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+                    if !self.context_matches(&state, context)? { return Err(AssetError::new(Reason::ContextStale)); }
+                    session_kind_gate(context, kind)?;
+                    let candidate = slot.candidate.as_ref().ok_or_else(AssetError::invalid)?;
+                    if candidate.payload.kind != kind || !candidate.payload.usable_source() || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits) {
+                        return Err(AssetError::new(Reason::SourceRefused));
+                    }
+                    let (key, previous_bytes) = match &candidate.existing {
+                        Some(expected) => {
+                            let record = state.records.iter().find(|record| record.key == *expected && record.payload.kind == kind && record.mutation_pending).ok_or_else(AssetError::invalid)?;
+                            let revision = record.key.revision.checked_add(1).ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
+                            (RecordKey { id: record.key.id.clone(), revision }, record.payload.bytes())
+                        }
+                        None => {
+                            if state.records.len() >= RECORD_LIMIT || candidate.record_id.0.len() != 32 || state.records.iter().any(|record| record.key.id == candidate.record_id) {
+                                return Err(AssetError::new(Reason::Capacity));
+                            }
+                            (RecordKey { id: candidate.record_id.clone(), revision: 1 }, 0)
+                        }
+                    };
+                    let occupied = state.records.iter().try_fold(0usize, |total, record| total.checked_add(record.payload.bytes())).ok_or_else(|| AssetError::new(Reason::Capacity))?;
+                    let next = occupied.checked_sub(previous_bytes).and_then(|bytes| bytes.checked_add(candidate.payload.bytes())).ok_or_else(|| AssetError::new(Reason::Capacity))?;
+                    if next > SESSION_BYTES { return Err(AssetError::new(Reason::Capacity)); }
+                    Ok((Some(key), Some(candidate.payload.clone()), Some(preview.bind_token.clone().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?), kind))
+                }
+                Action::Delete => {
+                    let key = preview.record.clone().ok_or_else(AssetError::invalid)?;
+                    if !state.records.iter().any(|record| record.key == key && record.payload.kind == kind && record.mutation_pending) { return Err(AssetError::invalid()); }
+                    Ok((Some(key), None, None, kind))
+                }
+                Action::Bind | Action::Initialize => Err(AssetError::invalid()),
+            }
+        })();
+        let (key, payload, bind, kind) = match decision {
+            Ok(decision) => decision,
+            Err(error) => {
+                if error.reason == Reason::CleanupUnknown { self.exhaust(&mut state, UnknownOrigin::NotRecorded); }
+                return Err(self.refuse_consumed(&mut state, error));
+            }
+        };
+        let id = self.next_operation(&mut state)?;
+        let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let old = state.slot.as_ref().ok_or_else(AssetError::invalid)?;
+        let mut slot = Slot::new(owner, Operation::Commit, old.context.clone(), old.target.clone(), old.review_end);
+        slot.kind = Some(kind); slot.source = old.source; slot.phase = Phase::Mutating; slot.assessment = old.assessment.clone();
+        slot.result_record = if payload.is_some() { key.clone() } else { None };
+        let key = key.ok_or_else(AssetError::invalid)?;
+        let retired_payload = if let Some(payload) = payload {
+            if let Some(record) = state.records.iter_mut().find(|record| record.key.id == key.id) {
+                record.key = key; record.mutation_pending = true; Some(std::mem::replace(&mut record.payload, payload))
+            } else { state.records.push(Record { key, payload, mutation_pending: true }); None }
+        } else {
+            let index = state.records.iter().position(|record| record.key == key).ok_or_else(AssetError::invalid)?;
+            let removed = state.records.remove(index);
+            state.assignments.retain(|assignment| assignment.record_id != key.id);
+            Some(removed.payload)
+        };
+        // The old payload is attached to the existing original slot before its
+        // record reference disappears. install transfers that closed holding to
+        // the newly admitted original coordinator for an off-lock drain.
+        if let Some(old) = state.slot.as_mut() { old.retired_payload = retired_payload; }
+        let start = self.install(&mut state, slot, Job::Retire { bind })?;
+        let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
+    }
+
+    pub(crate) fn bind(&self, token: &str) -> Result<AssetStatus, AssetError> {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if encrypted_mode(&self.lock()) { return self.bind_vault(token); }
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
+        let preview = self.consume_preview(&mut state, token, true)?;
+        let decision = (|| -> Result<(RecordKey, Kind, Arc<NativeContext>), AssetError> {
+            let slot = state.slot.as_ref().ok_or_else(AssetError::invalid)?;
+            let context = slot.context.as_ref().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+            if !self.context_matches(&state, context)? { return Err(AssetError::new(Reason::ContextStale)); }
+            let key = preview.record.clone().ok_or_else(AssetError::invalid)?;
+            let kind = slot.kind.ok_or_else(AssetError::invalid)?;
+            if !record_usable(&state, slot, &key, kind)
+                || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits) { return Err(AssetError::new(Reason::SourceRefused)); }
+            if state.assignments.len() >= 8 && !state.assignments.iter().any(|assignment| assignment.kind == kind) { return Err(AssetError::new(Reason::Capacity)); }
+            Ok((key, kind, context.clone()))
+        })();
+        let (key, kind, context) = match decision { Ok(decision) => decision, Err(error) => return Err(self.refuse_consumed(&mut state, error)) };
+        let id = self.next_operation(&mut state)?; let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let old = state.slot.as_ref().ok_or_else(AssetError::invalid)?;
+        let mut slot = Slot::new(owner, Operation::Bind, Some(context.clone()), Some(key.clone()), old.review_end);
+        slot.kind = Some(kind); slot.source = old.source; slot.phase = Phase::Mutating; slot.assessment = old.assessment.clone();
+        for assignment in &mut state.assignments { if assignment.kind == kind { assignment.availability = AssignmentAvailability::Unavailable; } }
+        let assignment = Assignment { kind, record_id: key.id, record_revision: key.revision, context_revision: context.revision, availability: AssignmentAvailability::Available };
+        let start = self.install(&mut state, slot, Job::Bind(assignment))?;
+        let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
+    }
+
+    pub(crate) fn choose_project(&self, app: tauri::AppHandle) -> Result<u32, AssetError> {
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)
+            .map_err(|error|AssetError::new(if error.code=="busy"{Reason::Busy}else{Reason::CleanupUnknown}))?;
+        let result=(|| {
+        self.reconcile_checked_published(None, None, Some(&mut publisher)); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
+        if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?; }
+        state.saved_input=None;
+        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed(); self.common_gate(&state, false)?;
+        if !self.project_selection_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
+        idle(&state)?;
+        // Acquire the registry's checked generation before any native work;
+        // poison is sticky document Unknown, never merely a later picker error.
+        let generation = self.registry_result(&mut state, self.inner.bridge.native_generation(), None)?;
+        // Capture the genuine held private root while the original Document
+        // admits this picker. Its SourceBook proves both physical directions;
+        // publication rematches that marker against the then-current host.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let application = self.tool_application_exclusion_root(&state)?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let application = None;
+        let mut origins = Vec::new(); origins.try_reserve_exact(state.records.len()).map_err(|_| AssetError::new(Reason::Capacity))?;
+        for record in &state.records { if let Some(origin) = record.payload.material.as_ref().and_then(|material| material.selected_origin()) { origins.push(origin.clone()); } }
+        let id = self.next_operation(&mut state)?;
+        let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        let slot = Slot::new(owner, Operation::ChooseProject, None, None, None);
+        // A later registration probes every retained source. Its admission,
+        // not only success, revokes old use; cancel/refusal never restores it.
+        invalidate_all(&mut state);
+        state.github.retire(GitHubReason::TargetChanged);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let vault = vault::physical_root(&state);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let vault = None;
+        let start = self.install(&mut state, slot, Job::Project { app, generation, origins, vault, application })?;
+        drop(state); let _ = start.send(()); Ok(id)
+        })();
+        finish_registration_publisher(publisher);result
+    }
+    pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.project_result_original(id, None).await }
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { self.project_result_original(id).await }
+    }
+    async fn project_result_original(&self, id: u32,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,
+    ) -> Result<Option<Project>, AssetError> {
+        loop {
+            self.reconcile();
+            {
+                let state = self.lock();
+                let slot = state.slot.as_ref().filter(|slot| slot.owner.id == id).ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+                if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+                if slot.phase == Phase::Idle && slot.owner.resources_settled() {
+                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled {
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                        if let (Some(companion), Some(project)) = (selection.as_deref_mut(), slot.project.as_ref()) {
+                            // This guard still binds the original id/slot. Only
+                            // saved DATA crosses the return, never an observer
+                            // callback/Record lock or a later success witness.
+                            *companion = Some(installed_macos_observation::capture_project_selection(&self.inner, id, slot, project));
+                        }
+                        return Ok(slot.project.clone());
+                    }
+                    return Err(AssetError::new(slot.reason));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+
+    pub(crate) fn choose_android_tool_source(&self, app: tauri::AppHandle, input: crate::android_tool_sources::Choose)
+        -> Result<crate::android_tool_sources::Status, BridgeError> {
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { let _ = (app, input); return Err(crate::android_tool_sources::unavailable()); }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)?;
+            let result=(|| {
+            self.reconcile_checked_published(None, None, Some(&mut publisher));
+            let mut state = self.lock(); self.expire(&mut state, Instant::now());
+            let gate = self.android_build_gate(&state);
+            // Ordinary installed main-window/picker profile only. Test controls,
+            // rfd compatibility, credential qualification and catalog selection
+            // do not independently authorize this source purpose.
+            if gate != crate::android_build_protocol::Availability::Available
+                || !self.inner.bridge.installed_android_source_selection_available() {
+                return Err(crate::android_tool_sources::unavailable());
+            }
+            idle(&state).map_err(|_| crate::android_tool_sources::unavailable())?;
+            let before = self.inner.bridge.android_build.sources_status(gate)?;
+            if before.availability != crate::android_build_protocol::Availability::Available
+                || before.source_generation != input.source_generation { return Err(crate::android_tool_sources::invalid()); }
+            let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&input.project_id), None)
+                .map_err(|_| crate::android_tool_sources::unavailable())?;
+            let acquired = if input.acquired.is_some() || input.discovered.is_some() {
+                let nomination=self.inner.bridge.tool_acquisition.nominate_acquired_tool_source(
+                    &self.inner.session_identity,&input,generation,&root,&publisher)?;
+                self.tool_source_nomination_current(&state,&nomination,generation,&root,None)?;
+                Some(nomination)
+            } else { None };
+            if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::SourceChanged)?; }
+            state.saved_input=None;
+            let id = self.next_operation(&mut state).map_err(|_| BridgeError::cleanup_unknown())?;
+            if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(BridgeError::cleanup_unknown()); }
+            let binding = Arc::new(AndroidSourceBinding { project_id: input.project_id.clone(), generation, root: root.clone(), role: input.role, acquired: acquired.clone() });
+            let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+            let mut slot = Slot::new(owner.clone(), Operation::ChooseAndroidSource, None, None, None);
+            slot.android_source = Some(binding.clone());
+            let start = self.install(&mut state, slot, Job::AndroidSource { app, binding })
+                .map_err(|_| BridgeError::cleanup_unknown())?;
+            // Actual asset coordinator/GUI/source/child roster already exists,
+            // with GO still closed. Save that SAME original in Android Registry.
+            if let Err(error) = self.inner.bridge.android_build.admit_source(&self.inner.session_identity, &input, generation, root.clone(), owner.clone(), &publisher, gate) {
+                drop(state); drop(start); return Err(error);
+            }
+            if let Some(nomination)=&acquired {
+                if nomination.admitted(&owner,&publisher).is_err()
+                    || self.tool_source_nomination_current(&state,nomination,generation,&root,Some(&owner)).is_err() {
+                    drop(state);drop(start);return Err(crate::android_tool_sources::invalid());
+                }
+            }
+            let status = match self.inner.bridge.android_build.sources_status(self.android_build_gate(&state)) {
+                Ok(status) => status, Err(error) => { drop(state); drop(start); return Err(error); }
+            };
+            drop(state);
+            if start.send(()).is_err() { return Err(BridgeError::cleanup_unknown()); }
+            Ok(status)
+            })();
+            finish_registration_publisher(publisher);result
+        }
+    }
+
+    pub(crate) fn choose_project_path(&self, app: tauri::AppHandle, args: commands::ChooseProjectPath<'_>) -> Result<Arc<OriginalWork>, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.project_path_gate(&state)?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
+        let project_id = commands::copy_text(args.project_id)?;
+        let id = self.next_operation(&mut state)?;
+        if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); }
+        let binding = Arc::new(ProjectPathBinding { project_id, field: args.field, root, generation });
+        let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        let mut slot = Slot::new(owner.clone(), Operation::ChooseProjectPath, None, None, None);
+        slot.project_path = Some(binding.clone());
+        // No choose_project reuse, invalidation, RNG, capture or credential
+        // session. Install the same original coordinator/GUI/source/child book
+        // under the real document gate before releasing its start barrier.
+        let start = self.install(&mut state, slot, Job::ProjectPath { app, binding })?;
+        drop(state); let _ = start.send(()); Ok(owner)
+    }
+    pub(crate) async fn project_path_result(&self, owner: Arc<OriginalWork>) -> Result<Option<commands::ProjectPathResult>, AssetError> {
+        // This observer removes no original handle or result from the document.
+        // Renderer abandonment cannot cancel or replace the retained operation.
+        loop {
+            self.reconcile();
+            {
+                let mut state = self.lock();
+                if state.unknown || state.exhausted { return Err(AssetError::new(Reason::CleanupUnknown)); }
+                let Some(slot) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) else {
+                    if owner.resources_settled() { return Err(AssetError::new(Reason::ContextStale)); }
+                    // Not expected: install refuses to remove an unresolved
+                    // path original. Never turn missing ownership into Cancel.
+                    self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(AssetError::new(Reason::CleanupUnknown));
+                };
+                if !state.quit_pending && slot.phase == Phase::Idle && owner.resources_settled() {
+                    if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
+                    if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+                    let binding = slot.project_path.clone().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+                    let reason = slot.reason;
+                    let result = slot.path_result.clone();
+                    self.project_path_registration(&mut state, &binding)?;
+                    if reason == Reason::UserCancelled && owner.project_path_settled(false) { return Ok(None); }
+                    if reason != Reason::None { return Err(AssetError::new(reason)); }
+                    if owner.project_path_settled(true) {
+                        if let Some(result) = result { return Ok(Some(result)); }
+                    }
+                    self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(AssetError::new(Reason::CleanupUnknown));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    pub(crate) fn not_quitting(&self) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+        if state.unknown { return Err(BridgeError::cleanup_unknown()); }
+        if state.stopping { return Err(BridgeError::shutdown()); }
+        if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+        self.inner.bridge.android_build.ensure_idle()?;
+        self.inner.bridge.project_recovery.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        Ok(())
+    }
+    pub(crate) fn assets_can_exit(&self) -> bool {
+        self.reconcile(); assets_can_exit_locked(&self.lock())
+    }
+    fn retained_material_can_exit(&self) -> bool {
+        self.reconcile(); let state = self.lock(); assets_can_exit_locked(&state) && state.github.material_settled()
+    }
+    async fn shutdown_assets(&self) -> Result<(), AssetError> {
+        // Native OK set stopping/revoked authority under the real gate before
+        // this future exists. This observer never grants a new cleanup endpoint.
+        loop {
+            self.reconcile();
+            {
+                let state = self.lock();
+                if assets_can_exit_locked(&state) && state.github.material_settled() { return Ok(()); }
+                if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    pub(crate) fn can_exit(&self) -> bool {
+        let (ready, quit) = {
+            let state = self.lock();
+            (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled()
+                && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
+                && !version_allocation::pending(&state) && !version_enrollment::pending(&state)
+                && {
+                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) && !agent_upload_key::pending(&state) && !agent_tool_setup::pending(&state) }
+                    #[cfg(not(any(target_os="linux",target_os="macos")))] { true }
+                }
+                && state.maintenance.can_exit()
+                && self.inner.android_registration_control.can_exit(), state.quit.clone())
+        };
+        // The app's data-only observer does not run general session publication.
+        // Only this already-ended quit original is joined here.
+        ready && quit.is_some_and(|quit| quit.join_if_ended() == Some(true) && quit.resources_settled())
+            && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+            && (self.inner.bridge.preflight.can_exit() && (((self.inner.bridge.local_store.can_exit() && self.inner.bridge.apple_provisioning.can_exit()) && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))))
+    }
+    #[cfg(any(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    pub(crate) fn exit_cleanup_end(&self) -> Option<Instant> {
+        // Observe only the retained accepted Quit's first STOP; never reconcile,
+        // start another owner, or create a timestamp in the exit observer.
+        accepted_quit_cleanup_end(&self.lock())
+    }
+    pub(crate) fn request_quit(&self, app: tauri::AppHandle) {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        // An unresolved or already accepted quit only wakes its originals. A
+        // settled, closed Unknown session can ask for first consent; this never
+        // repairs that session, replaces unresolved work or repeats shutdown.
+        if !quit_question_admitted(&state) {
+            if let Some(quit) = &state.quit { quit.wake.notify_one(); } return;
+        }
+        let id = match self.next_operation(&mut state) { Ok(id) => id, Err(_) => return };
+        let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.installed_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if self.installed_macos_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
+        let previous = state.quit.replace(owner.clone());
+        state.quit_pending = true; state.quit_accepted = false; state.quit_cleanup_end = None;
+        let (start, enter) = oneshot::channel();
+        let document = self.clone(); let worker = owner.clone(); let end = CoordinatorEnd(owner.clone());
+        let mut book = match owner.coordinator.lock() {
+            Ok(book) => book,
+            Err(_) => { state.unknown = true; self.bump(&mut state); return; }
+        };
+        book.receipt = JoinReceipt::Pending;
+        book.handle = Some(tauri::async_runtime::spawn(async move {
+            let _end = end;
+            if enter.await.is_err() { worker.gui.not_created(Reason::UserCancelled); return; }
+            run_quit(document, worker, app).await;
+        }));
+        fixture_event!(owner, CoordinatorRegistered, 1);
+        self.bump(&mut state); drop(book); drop(state); drop(previous); let _ = start.send(());
+    }
+}
+
+#[cfg(feature = "desktop-shell")]
+async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: tauri::AppHandle) {
+    let dialog = crate::shell::run_owned_dialog(&app, &owner, crate::shell::DialogChoice::Quit, None);
+    tokio::pin!(dialog);
+    let mut dialog_ended = false;
+    loop {
+        let accepted = { document.lock().quit_accepted };
+        if accepted { break; }
+        tokio::select! {
+            _ = &mut dialog => {
+                dialog_ended = true;
+                if !document.lock().quit_accepted { return; }
+                break;
+            },
+            _ = owner.wake.notified() => document.tick(),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
+        }
+    }
+    // Actual OK already latched STOP on the asset slot. Start all shutdown
+    // futures once, even if the original quit dialog is still being disposed.
+    // join! does not short-circuit an error or abandon any original future.
+    let settlement = async {
+        let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
+        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.local_store.shutdown(), document.inner.bridge.apple_provisioning.shutdown(), document.inner.bridge.local_store_prepare.shutdown(), document.inner.bridge.local_store_reconcile.shutdown(), document.inner.bridge.local_store_execute.shutdown(), document.inner.bridge.local_history.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown(), document.inner.bridge.tool_acquisition.shutdown(), document.inner.bridge.upload_key.shutdown());
+    };
+    tokio::pin!(settlement);
+    loop {
+        tokio::select! {
+            _ = &mut settlement => break,
+            _ = owner.wake.notified() => document.tick(),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
+        }
+    }
+    // Late all-positive settlement may permit exit, never a successful import,
+    // new owner, reassignment or reuse of this unknown session.
+    while !(document.inner.bridge.upload_key.can_exit() && document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && (document.inner.bridge.preflight.can_exit() && ((document.inner.bridge.local_store.can_exit() && document.inner.bridge.apple_provisioning.can_exit()) && ((document.inner.bridge.local_store_prepare.can_exit() && document.inner.bridge.local_store_reconcile.can_exit()) && document.inner.bridge.local_store_execute.can_exit())) && document.inner.bridge.local_history.can_exit()) && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit() && document.inner.bridge.artifact_inspection.can_exit()))) {
+        tokio::select! {
+            _ = owner.wake.notified() => document.tick(),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => document.tick(),
+        }
+    }
+    // The fixed data-only exit observer will join this ORIGINAL coordinator and
+    // the original relay before setting exit_ready. No task self-join, inline
+    // GTK dispatch or body-ended flag is substituted for those joins.
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+mod installed_macos_observation {
+    use super::*;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SelectionCustody { Bound, Unavailable, Inconsistent }
+    impl SelectionCustody {
+        pub(crate) fn label(self) -> &'static str { match self {
+            Self::Bound => "bound-original-data", Self::Unavailable => "unavailable-original-data",
+            Self::Inconsistent => "inconsistent-original-data",
+        }}
+    }
+    // Short-lived, bounded return companion, not a ProjectWitness, native
+    // owner or serializable DTO. Only fixed relational labels may be exported.
+    pub(crate) struct ProjectSelectionData {
+        operation_id: u32, returned: Option<Project>, custody: SelectionCustody,
+        selected: Option<std::path::PathBuf>, identity: Option<[u64; 5]>,
+    }
+    pub(crate) fn selection_path_bounded(path: &std::path::Path) -> bool {
+        path.to_str().is_some_and(|text| text.len() <= asset_source::PATH_LIMIT && text.starts_with('/')
+            && !text.as_bytes().contains(&0) && (text == "/" || text[1..].split('/').all(|part|
+                !part.is_empty() && part != "." && part != ".." && part.len() <= 255)))
+    }
+    fn selection_project_bounded(project: &Project) -> bool {
+        crate::protocol::valid_id(&project.id) && project.name.len() <= 255
+            && selection_path_bounded(std::path::Path::new(&project.path))
+    }
+    fn recorded_identity(root: &asset_source::RegisteredRoot) -> Option<[u64; 5]> {
+        // Pure projection of stored scalars. Fixture index5/nlink is NOT part
+        // of RegisteredRoot; dev/ino stay lossless u64s, never JSON numbers.
+        let identity = root.identity.posix().ok()?.preflight_identity();
+        Some([identity.device.parse().ok()?, identity.inode.parse().ok()?,
+            u64::from(identity.mode), u64::from(identity.uid), u64::from(identity.gid)])
+    }
+    fn saved_project_selection(id: u32, original_bound: bool, project: &Project,
+        response: Option<&InstalledNativeResponseWitness>, registration: Option<&(u32, asset_source::RegisteredRoot)>) -> ProjectSelectionData {
+        let mut data = ProjectSelectionData { operation_id: id, returned: None, custody: SelectionCustody::Inconsistent,
+            selected: None, identity: None };
+        if !original_bound || id == 0 || !selection_project_bounded(project) { return data; }
+        data.returned = Some(project.clone());
+        // These independent axes describe saved response/registry facts, even
+        // if their transfer is inconsistent. A foreign response id never
+        // supplies a selected path; an absent registration supplies no inode.
+        data.selected = response.filter(|saved| saved.operation_id == id && saved.response == NativeResponse::Accept)
+            .and_then(|saved| saved.selected.as_deref()).filter(|path| selection_path_bounded(path))
+            .map(std::path::Path::to_path_buf);
+        data.identity = registration.and_then(|(_, root)| recorded_identity(root));
+        let inconsistent = response.is_some_and(|saved| saved.operation_id != id || saved.response != NativeResponse::Accept
+                || !saved.callback_returned || saved.selected.as_deref().and_then(std::path::Path::to_str) != Some(project.path.as_str()))
+            || registration.is_some_and(|(generation, root)| *generation != 2 || root.path.to_str() != Some(project.path.as_str()));
+        data.custody = if inconsistent { SelectionCustody::Inconsistent }
+            else if response.is_none() || registration.is_none() || data.identity.is_none() { SelectionCustody::Unavailable }
+            else { SelectionCustody::Bound };
+        data
+    }
+    impl ProjectSelectionData {
+        pub(crate) fn for_result(&self, id: u32, returned: &Project) -> (SelectionCustody, Option<[u64; 5]>, Option<&std::path::Path>) {
+            // The shell must carry this companion with that SAME public
+            // result. Neither a replaced slot nor renderer id is queried here.
+            if self.operation_id != id || !self.returned.as_ref().is_some_and(|project| same_project(project, returned)) {
+                return (SelectionCustody::Inconsistent, None, None);
+            }
+            (self.custody, self.identity, self.selected.as_deref())
+        }
+    }
+    pub(super) fn capture_project_selection(document: &Arc<Inner>, id: u32, slot: &Slot, project: &Project) -> ProjectSelectionData {
+        // Called only under project_result_original's existing document guard,
+        // immediately before its selected return. No extra lifecycle gate:
+        // later owner.ended/joins/edit readiness cannot hide these saved facts.
+        let original_bound = slot.operation == Operation::ChooseProject && slot.owner.id == id && original_call(document, &slot.owner)
+            && slot.project.as_ref().is_some_and(|saved| same_project(saved, project));
+        if !original_bound { return saved_project_selection(id, false, project, None, None); }
+        let response = slot.owner.gui.installed_native_response().ok().flatten();
+        let registration = if selection_project_bounded(project) { document.bridge.native_project(&project.id).ok() } else { None };
+        saved_project_selection(id, original_bound, project, response.as_ref(), registration.as_ref())
+    }
+    pub(crate) fn selection_saved_data_checks() -> bool {
+        // Synthetic stored DATA only. No document/bridge, native object, task,
+        // probe, ProjectWitness or runtime is made. These are not receipts.
+        use crate::shell::installed_observation::ios::Case as InputCase;
+        if session_original_limit(false, None).is_some() || session_original_limit(true, None) != Some(12) { return false; }
+        for (case, expected) in [(InputCase::AndroidInputs, Some(18)), (InputCase::SigningInputs, Some(12)),
+            (InputCase::SignedRefusal, Some(12)), (InputCase::SignedCancel, Some(12)),
+            (InputCase::ToolchainPrerequisite, None), (InputCase::VersionStale, None), (InputCase::UnsignedArchive, None),
+            (InputCase::Cancel, None), (InputCase::Finality, None), (InputCase::RecoveryEmpty, None)] {
+            if session_original_limit(false, Some(case)) != expected || session_original_limit(true, Some(case)).is_some() { return false; }
+        }
+        let owner = OriginalWork::new(2, false, Weak::new());
+        let Ok(mut coordinator) = owner.coordinator.lock() else { return false; };
+        coordinator.receipt = JoinReceipt::Returned; drop(coordinator);
+        let project = Project { id: "project-1".into(), name: "other".into(), path: "/synthetic/other".into() };
+        let root = asset_source::RegisteredRoot { path: project.path.clone().into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let registration = (2, root);
+        let response = InstalledNativeResponseWitness { operation_id: 2, response: NativeResponse::Accept,
+            selected: Some(project.path.clone().into()), callback_returned: true };
+        let Ok(mut saved) = owner.gui.installed_native_response_witness.lock() else { return false; };
+        *saved = Some(response.clone()); drop(saved);
+        let Ok(saved) = owner.gui.installed_native_response() else { return false; };
+        // The immediate resources_settled predicate can be true while the
+        // unchanged completed() predicate's ended/probed-child requirements
+        // are false. A synthetic positive binding tests only DATA reduction.
+        if !owner.resources_settled() || owner.ended.load(Ordering::SeqCst)
+            || !owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New) { return false; }
+        let data = saved_project_selection(2, true, &project, saved.as_ref(), Some(&registration));
+        if data.for_result(2, &project) != (SelectionCustody::Bound, Some([1, 2, 0o40700, 123, 123]), Some(std::path::Path::new(&project.path)))
+            || owner.ended.load(Ordering::SeqCst) || owner.project_path_settled(true) { return false; }
+        for (native, registered, custody, has_identity, has_path) in [
+            (None, Some(&registration), SelectionCustody::Unavailable, true, false),
+            (Some(&response), None, SelectionCustody::Unavailable, false, true),
+            (None, None, SelectionCustody::Unavailable, false, false),
+        ] {
+            let data = saved_project_selection(2, true, &project, native, registered);
+            let (actual, identity, path) = data.for_result(2, &project);
+            if actual != custody || identity.is_some() != has_identity || path.is_some() != has_path { return false; }
+        }
+        for (response, expected_path) in [
+            (InstalledNativeResponseWitness { operation_id: 3, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { response: NativeResponse::Decline, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: None, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: Some("/synthetic/first-save".into()), ..response.clone() }, Some(std::path::Path::new("/synthetic/first-save"))),
+            (InstalledNativeResponseWitness { callback_returned: false, ..response.clone() }, Some(std::path::Path::new("/synthetic/other"))),
+        ] {
+            let data = saved_project_selection(2, true, &project, Some(&response), Some(&registration));
+            if data.for_result(2, &project) != (SelectionCustody::Inconsistent, Some([1, 2, 0o40700, 123, 123]), expected_path) { return false; }
+        }
+        for registration in [(3, registration.1.clone()), (2, asset_source::RegisteredRoot { path: "/synthetic/unrelated".into(), ..registration.1.clone() })] {
+            if saved_project_selection(2, true, &project, Some(&response), Some(&registration)).for_result(2, &project).0
+                != SelectionCustody::Inconsistent { return false; }
+        }
+        let foreign = saved_project_selection(2, false, &project, Some(&response), Some(&registration));
+        if foreign.for_result(2, &project) != (SelectionCustody::Inconsistent, None, None)
+            || data.for_result(1, &project) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        for changed in [Project { id: "project-2".into(), ..project.clone() }, Project { name: "changed".into(), ..project.clone() },
+            Project { path: "/synthetic/changed".into(), ..project.clone() }] {
+            if data.for_result(2, &changed) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        let maximum = format!("/{}", vec!["x".repeat(255); 16].join("/"));
+        if maximum.len() != asset_source::PATH_LIMIT || !selection_path_bounded(std::path::Path::new(&maximum))
+            || selection_path_bounded(std::path::Path::new(&(maximum + "/x"))) { return false; }
+        for path in ["relative", "/bad/../path", "/bad//path", "/bad/path/", "/bad/\0path"] {
+            let malformed = Project { path: path.into(), ..project.clone() };
+            if selection_path_bounded(std::path::Path::new(path))
+                || saved_project_selection(2, true, &malformed, Some(&response), Some(&registration)).for_result(2, &malformed)
+                    != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        true
+    }
+    pub(crate) struct ProjectWitness {
+        document: Weak<Inner>, owner: Weak<OriginalWork>, project: Project,
+        generation: u32, root: asset_source::RegisteredRoot, edit: crate::edit_owner::InstalledMacDocumentWitness,
+    }
+    pub(crate) struct PickerWitness {
+        document: Weak<Inner>, owner: Weak<OriginalWork>, generation: u32,
+        edit: crate::edit_owner::InstalledMacDocumentWitness,
+    }
+    pub(crate) struct InstallationWitness {
+        document: Weak<Inner>, edit: crate::edit_owner::InstalledMacDocumentWitness,
+    }
+    /// Observer-only references to actual registered originals, not synthetic
+    /// receipts or custody owners. Slots are never removed or reused. Keeping
+    /// the original work book does not retain its retired private payloads.
+    include!("asset_session_tool_setup_observation.rs");
+    mod push_observation {use super::*;include!("asset_session_git_push_observation.rs");}
+    mod upstream_observation {use super::*;include!("asset_session_git_upstream_observation.rs");}
+    mod git_cli_observation {use super::*;include!("asset_session_git_cli_observation.rs");}
+    mod fetch_observation {use super::*;include!("asset_session_git_fetch_observation.rs");}
+    pub(super) struct SessionBook {
+        pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
+        // A distinct one-use instrumented P2 admission, never an asset/iOS
+        // session grant. The same existing history retains actual originals.
+        pub(super) project_fields: Option<Arc<crate::shell::installed_observation::project_fields::Control>>,
+        // Historical Case returned by the original one-use registration. It
+        // does not confer native/private-input availability or a live permit.
+        input_case: Option<crate::shell::installed_observation::ios::Case>,
+        pub(super) vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
+        pub(super) tool_setup: Option<Arc<crate::shell::installed_observation::tool_setup::Control>>,
+        pub(super) git_fetch:Option<Arc<crate::shell::installed_observation::git_fetch::Control>>,
+        pub(super) git_push:Option<Arc<crate::shell::installed_observation::git_push::Control>>,
+        pub(super) git_upstream:Option<Arc<crate::shell::installed_observation::git_upstream::Control>>,
+        pub(super) git_cli:Option<Arc<crate::shell::installed_observation::git_cli::Control>>,
+    }
+    fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
+        match (project_fields, input_case) {
+            (false, Some(case)) => case.session_final_original(),
+            (true, None) => Some(12),
+            _ => None,
+        }
+    }
+    impl SessionBook {
+        fn original_limit(&self) -> Option<u32> {
+            let git_count=usize::from(self.git_fetch.is_some())+usize::from(self.git_push.is_some())+usize::from(self.git_upstream.is_some())+usize::from(self.git_cli.is_some());
+            if git_count>0{return (git_count==1&&self.project_fields.is_none()&&self.input_case.is_none()&&self.vault.is_none()&&self.tool_setup.is_none()).then_some(2)}
+            if let Some(control)=&self.tool_setup {return (self.project_fields.is_none() && self.input_case.is_none() && self.vault.is_none()).then_some(control.case().maximum_original());}
+            if let Some(control) = &self.vault {
+                return (self.project_fields.is_none() && self.input_case.is_none()).then_some(control.case.maximum_original());
+            }
+            session_original_limit(self.project_fields.is_some(), self.input_case)
+        }
+    }
+    pub(crate) struct SessionSnapshot {
+        pub(crate) status: Value, pub(crate) originals: usize, pub(crate) originals_settled: bool,
+        pub(crate) empty: bool,
+    }
+    fn session_original_settled(document: &Arc<Inner>, owner: &Arc<OriginalWork>) -> bool {
+        original_call(document, owner) && owner.ended.load(Ordering::SeqCst) && owner.resources_settled()
+            && owner.coordinator.try_lock().is_ok_and(|b| b.handle.is_none() && b.receipt == JoinReceipt::Returned)
+            && owner.child.try_lock().is_ok_and(|b| b.handle.is_none() && matches!(b.receipt, JoinReceipt::New | JoinReceipt::Returned))
+            && owner.source.try_lock().is_ok_and(|b| b.not_started() || b.settled())
+            && owner.gui.facts().is_some_and(|g| g.selected.is_none() && g.released && g.refusal.is_none()
+                && (g.not_created || g.created && g.response && g.destroyed && g.close_ack))
+    }
+    // These observations neither reconcile/publish the document nor acquire a
+    // source or GUI owner. The ordinary relay and coordinators own all joins.
+    fn quiet(state: &DocumentState) -> bool {
+        !state.unknown && !state.exhausted && !state.retiring && !state.session && !state.lock_pending
+            && !state.compatibility_picker_pending && state.context.is_none() && state.records.is_empty()
+            && state.assignments.is_empty() && !state.github.native_work_pending() && state.github.material_settled()
+            && state.github.registration().is_none() && state.evidence.epoch == 0
+            && state.evidence.selection.is_none() && state.evidence.operation.is_none() && state.evidence.result.is_none()
+    }
+    fn live(state: &DocumentState) -> bool {
+        quiet(state) && state.lifetime.original_bound() && !state.lost_observed && !state.stopping
+            && !state.quit_pending && !state.quit_accepted && !state.evidence.revoked
+    }
+    fn same_document(document: &Arc<Inner>, witness: &Weak<Inner>) -> bool {
+        witness.upgrade().is_some_and(|original| Arc::ptr_eq(document, &original))
+    }
+    fn original_call(document: &Arc<Inner>, owner: &Arc<OriginalWork>) -> bool {
+        same_document(document, &owner.gui.document)
+            && owner.gui.owner().is_some_and(|original| Arc::ptr_eq(owner, &original))
+    }
+    fn project_slot(slot: &Slot) -> bool {
+        slot.operation == Operation::ChooseProject && slot.source == SourceState::NotRun
+            && slot.context.is_none() && slot.target.is_none() && slot.candidate.is_none() && slot.selection.is_none()
+            && slot.assessment.is_none() && slot.preview.is_none() && slot.assessment_context_revision.is_none()
+            && slot.staged.is_none() && slot.kind.is_none() && slot.result_record.is_none() && slot.retired_payload.is_none()
+            && slot.evidence.is_none() && slot.project_path.is_none() && slot.path_result.is_none()
+    }
+    fn settled_slot(slot: &Slot) -> bool {
+        project_slot(slot) && slot.phase == Phase::Idle && slot.settlement == Settlement::Known && slot.error.is_none()
+    }
+    fn completed(document: &Arc<Inner>, owner: &Arc<OriginalWork>, response: NativeResponse,
+        probed: bool, quit: bool) -> Option<InstalledNativeResponseWitness> {
+        if !original_call(document, owner) || !owner.ended.load(Ordering::SeqCst) || !owner.resources_settled()
+            || !owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            || !owner.child.try_lock().is_ok_and(|book| book.handle.is_none()
+                && book.receipt == if probed { JoinReceipt::Returned } else { JoinReceipt::New })
+            || !owner.source.try_lock().is_ok_and(|book| if probed { !book.not_started() && book.settled() } else { book.not_started() }) {
+            return None;
+        }
+        let witness = owner.gui.installed_native_response().ok()??;
+        if witness.operation_id != owner.id || witness.response != response || !witness.callback_returned
+            || !owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.constructing
+                && !facts.showing && !facts.not_created && facts.response && facts.refusal.is_none()
+                && facts.accepted == (response == NativeResponse::Accept)
+                // Production records genuine Project Cancel only in the
+                // original response witness, not GuiFacts.declined.
+                && facts.declined == (quit && response == NativeResponse::Decline)
+                && facts.accepted_at.is_some() == (response == NativeResponse::Accept)
+                && facts.selected.is_none() && facts.destroyed && facts.close_queued && facts.close_ack
+                && facts.release_queued && facts.released) { return None; }
+        Some(witness)
+    }
+    #[derive(Clone, Copy, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct VaultSnapshot {
+        pub(crate) unknown: bool, pub(crate) originals: usize, pub(crate) originals_settled: bool, pub(crate) empty: bool,
+        pub(crate) document_unknown: bool, pub(crate) exhausted: bool, pub(crate) lost_observed: bool, pub(crate) original_bound: bool,
+        pub(crate) operation_id: Option<u32>, pub(crate) operation_phase: Option<Phase>,
+        pub(crate) operation_reason: Option<Reason>, pub(crate) operation_settlement: Option<&'static str>,
+        pub(crate) state: Option<&'static str>, pub(crate) key_present: bool, pub(crate) initialize_preview: bool,
+        pub(crate) preview_consumed: bool, pub(crate) storage: Option<vault::QualificationStorage>,
+        pub(crate) initialize: Option<crate::vault_keyring_macos::QualificationSnapshot>,
+        pub(crate) lookup: Option<crate::vault_keyring_macos::QualificationSnapshot>,
+        pub(crate) initialize_transport: Option<crate::vault_keyring_macos::QualificationTransportSnapshot>,
+        pub(crate) lookup_transport: Option<crate::vault_keyring_macos::QualificationTransportSnapshot>,
+    }
+    impl DocumentBinding {
+        pub(crate) fn register_installed_macos_vault(&self,
+            token: crate::shell::installed_observation::vault::Registration) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.vault.is_some() || state.context.is_some() || state.quit.is_some() || state.lost_observed
+                || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+                || !self.inner.bridge.installed_project_selection_available() || !self.inner.bridge.supervisor.can_exit()
+                || !self.inner.bridge.edits.can_exit() { return Err(BridgeError::invalid()); }
+            self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
+            let mut book = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if book.is_some() { return Err(BridgeError::invalid()); }
+            let control = token.consume(&self.inner.session_identity)?;
+            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None,git_fetch:None,git_push:None,git_upstream:None,git_cli:None });
+            Ok(())
+        }
+        pub(crate) fn installed_macos_vault_action(&self, action: crate::shell::installed_observation::vault::Action) -> Result<AssetStatus, AssetError> {
+            use crate::shell::installed_observation::vault::Action;
+            use vault::{Qualification, QualifiedAction};
+            let (selection, root, token) = {
+                let state = self.lock();
+                let book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+                let book = book.as_ref().ok_or_else(AssetError::invalid)?;
+                let control = book.vault.as_ref().ok_or_else(AssetError::invalid)?;
+                let roster = self.inner.bridge.native_roster().map_err(|_| AssetError::new(Reason::ContextStale))?;
+                if !live(&state) || state.next_operation != action.previous_original()
+                    || !book.originals.iter().all(|(owner,_)|session_original_settled(&self.inner,owner))
+                    || book.originals.len() != state.next_operation as usize || roster.generation != 2 || roster.roots.len() != 1
+                    || roster.roots[0].path != control.project() { return Err(AssetError::new(Reason::ContextStale)); }
+                let token = if action == Action::Initialize {
+                    let slot = state.slot.as_ref().ok_or_else(AssetError::invalid)?;
+                    let preview = slot.preview.as_ref().filter(|p|vault::initialize_preview_valid(&state, slot, p)).ok_or_else(AssetError::invalid)?;
+                    Some(preview.token.0.clone())
+                } else { None };
+                let selection = control.select(&self.inner.session_identity, action, state.next_operation).ok_or_else(AssetError::invalid)?;
+                (selection, control.root().to_path_buf(), token)
+            };
+            match action {
+                Action::Open => self.open_encrypted_selected(&root, Qualification::Installed(selection), QualifiedAction::Open),
+                Action::Reopen => self.open_encrypted_selected(&root, Qualification::Installed(selection), QualifiedAction::Reopen),
+                Action::Prepare => self.prepare_vault_initialize_selected(Qualification::Installed(selection)),
+                Action::Initialize => self.commit_vault_selected(token.as_deref().ok_or_else(AssetError::invalid)?, Qualification::Installed(selection)),
+                Action::Unlock => self.unlock_vault_selected(Qualification::Installed(selection)),
+                Action::LockInitialized | Action::LockUnlocked => {
+                    // This is the same ordinary credential Lock, not a new
+                    // original or a native Keychain lock. Consume the selector
+                    // once against the current document before calling it.
+                    {
+                        let state = self.lock();
+                        if !selection.consume(&self.inner.session_identity, action, state.next_operation, None) { return Err(AssetError::invalid()); }
+                    }
+                    self.lock_session()
+                },
+            }
+        }
+        pub(crate) fn installed_macos_vault_checkpoint(&self, owner: &Arc<OriginalWork>,
+            checkpoint: crate::shell::installed_observation::vault::Checkpoint) -> Result<(), crate::vault_keyring_macos::Problem> {
+            use crate::{shell::installed_observation::vault::Checkpoint, vault_keyring_macos::Problem};
+            let mut state = self.lock(); self.expire(&mut state, Instant::now());
+            let control = {
+                let book = self.inner.installed_macos_session.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let Some(book) = book.as_ref() else { return Ok(()); };
+                let Some(control) = book.vault.as_ref() else { return Ok(()); };
+                if !control.wants(checkpoint) || control.stopped_at_checkpoint() { return Ok(()); }
+                if !control.permits(&self.inner.session_identity) || owner.interrupted() { return Ok(()); }
+                if !live(&state) || state.next_operation != 4 || !original_call(&self.inner, owner)
+                    || !book.originals.last().is_some_and(|(saved,kind)|Arc::ptr_eq(saved,owner) && *kind == Some(Operation::Initialize))
+                    || !state.slot.as_ref().is_some_and(|slot|Arc::ptr_eq(&slot.owner,owner)
+                        && slot.operation == Operation::Initialize && slot.phase == Phase::Assessing && slot.cleanup_end.is_none()) {
+                    return Err(Problem::CleanupUnknown);
+                }
+                control.clone()
+            };
+            let reached = {
+                let book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                match checkpoint { Checkpoint::BeforeGo => book.qualification_before_go(),
+                    Checkpoint::SuccessfulAddTerminal => book.qualification_added_checkpoint() }
+            }; // Provider is released before the ordinary same-slot STOP.
+            if !reached { return Ok(()); }
+            if !control.record_stop(&self.inner.session_identity) { return Err(Problem::CleanupUnknown); }
+            let at = Instant::now();
+            state.slot.as_mut().ok_or(Problem::CleanupUnknown)?.stop(Reason::UserCancelled, at);
+            // Latch immediately, even when this pump also returned done/EOF.
+            // Do not let finish_driver misclassify the already-observed STOP.
+            let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            book.fail_at(Problem::Interrupted, at); keyring_constrain_cleanup(&state, owner, &mut book); drop(book);
+            self.bump(&mut state); Ok(())
+        }
+        pub(crate) fn installed_macos_vault_snapshot(&self) -> Option<VaultSnapshot> {
+            let state = self.inner.state.try_lock().ok()?;
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            let control = book.vault.as_ref()?;
+            if !control.bound(&self.inner.session_identity) || book.originals.len() != state.next_operation as usize { return None; }
+            let (vault_state,key_present) = vault::qualification_state(&state);
+            let mut initialize = None; let mut lookup = None; let mut storage = None; let mut preview_consumed = false;
+            let mut initialize_transport = None; let mut lookup_transport = None;
+            for (owner,kind) in &book.originals {
+                if *kind == Some(Operation::Initialize) {
+                    (initialize, initialize_transport) = {
+                        let keyring = owner.keyring.try_lock().ok()?;
+                        (keyring.qualification_snapshot(), keyring.qualification_transport_snapshot())
+                    };
+                    let (observed, consumed) = vault::qualification_storage(owner)?; storage = Some(observed); preview_consumed = consumed;
+                } else if *kind == Some(Operation::Unlock) {
+                    (lookup, lookup_transport) = {
+                        let keyring = owner.keyring.try_lock().ok()?;
+                        (keyring.qualification_snapshot(), keyring.qualification_transport_snapshot())
+                    };
+                }
+            }
+            let original_bound = state.lifetime.original_bound();
+            Some(VaultSnapshot { unknown:state.unknown || state.exhausted || state.lost_observed || !original_bound,
+                document_unknown:state.unknown,exhausted:state.exhausted,lost_observed:state.lost_observed,original_bound,
+                operation_id:state.slot.as_ref().map(|s|s.owner.id),operation_phase:state.slot.as_ref().map(|s|s.phase),
+                operation_reason:state.slot.as_ref().map(|s|s.reason),operation_settlement:state.slot.as_ref().map(|s|match s.settlement {
+                    Settlement::Pending=>"pending",Settlement::Known=>"known",Settlement::Unknown=>"unknown",Settlement::LateKnown=>"late-known" }),
+                originals:book.originals.len(),originals_settled:book.originals.iter().all(|(o,_)|session_original_settled(&self.inner,o)),
+                empty:quiet(&state) && session_data_empty(&state) && state.vault.is_none(),state:vault_state,key_present,
+                initialize_preview:state.slot.as_ref().is_some_and(|slot|slot.preview.as_ref().is_some_and(|p|vault::initialize_preview_valid(&state,slot,p))),
+                preview_consumed,storage,initialize,lookup,initialize_transport,lookup_transport })
+        }
+        fn macos_vault_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
+            let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; }; let Some(book) = book.as_ref() else { return false; };
+            let Some(control) = &book.vault else { return false; }; let Some(owner) = project.owner.upgrade() else { return false; };
+            control.bound(&self.inner.session_identity) && control.completed() && state.vault.is_none()
+                && same_document(&self.inner,&project.document) && self.macos_registered(project)
+                && book.originals.len() == control.quit_id() as usize && state.next_operation == control.quit_id()
+                && book.originals.first().is_some_and(|(first,kind)|Arc::ptr_eq(first,&owner) && *kind == Some(Operation::ChooseProject))
+                && book.originals.last().is_some_and(|(last,kind)|last.id == control.quit_id() && kind.is_none())
+                && book.originals.iter().enumerate().all(|(i,(owner,_))|owner.id as usize == i + 1 && session_original_settled(&self.inner,owner))
+                && completed(&self.inner,&owner,NativeResponse::Accept,true,false).is_some_and(|r|r.selected.as_deref() == Some(project.root.path.as_path()))
+        }
+    }
+
+    fn same_project(left: &Project, right: &Project) -> bool {
+        left.id == right.id && left.name == right.name && left.path == right.path
+    }
+    impl DocumentBinding {
+        // Sample the same original document and command owner BEFORE either
+        // observation registration. These reads cannot enable either domain.
+        pub(crate) fn observe_installed_macos_normal_selection(&self) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+                || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+            let observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if observation.is_some() { return Err(BridgeError::invalid()); }
+            self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
+            self.inner.bridge.ios_archive.observe_installed_unsigned_selection()
+        }
+        pub(crate) fn register_installed_macos_session(&self, token: crate::shell::installed_observation::ios::SessionRegistration) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+                || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+            let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if observation.is_some() { return Err(BridgeError::invalid()); }
+            let input_case = token.consume(&self.inner.session_identity)?;
+            self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None,git_cli:None }); Ok(())
+        }
+        pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
+        pub(crate) fn register_installed_macos_project_fields(&self,
+            token: crate::shell::installed_observation::project_fields::Registration) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+                || self.live_session_owner_reason().is_some() || !self.inner.bridge.installed_project_selection_available()
+                || !self.inner.bridge.supervisor.can_exit() || !self.inner.bridge.edits.can_exit() { return Err(BridgeError::invalid()); }
+            let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if observation.is_some() { return Err(BridgeError::invalid()); }
+            let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None,git_cli:None }); Ok(())
+        }
+        pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
+            let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            let Some(book) = book.as_mut() else { return Ok(()); };
+            let limit = book.original_limit().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
+            if let Some(control)=&book.git_fetch {
+                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
+                    return Err(AssetError::new(Reason::Unqualified))
+                }
+            }
+            if let Some(control)=&book.git_cli {
+                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
+                    return Err(AssetError::new(Reason::Unqualified))
+                }
+            }
+            if let Some(control)=&book.git_upstream {
+                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
+                    return Err(AssetError::new(Reason::Unqualified))
+                }
+            }
+            if let Some(control)=&book.git_push {
+                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
+                    return Err(AssetError::new(Reason::Unqualified))
+                }
+            }
+            if let Some(control) = &book.tool_setup {
+                // Same exact observation may register only its ordinary
+                // project/source picks and an early or final original Quit.
+                let expected = match (owner.id, operation) {
+                    (1, Some(Operation::ChooseProject)) => true,
+                    (id, Some(Operation::ChooseAndroidSource)) => control.case().picker(id).is_some(),
+                    (id, None) => (2..=control.case().maximum_original()).contains(&id),
+                    _ => false,
+                };
+                if !control.bound(&self.inner.session_identity) || !expected { return Err(AssetError::new(Reason::Unqualified)); }
+            }
+            if let Some(control) = &book.project_fields {
+                // Binding history survives observer failure for ordinary Quit
+                // cleanup. Success still requires exactly all12 originals;
+                // never disable a known-safe early Quit to enforce a test table.
+                let expected = match (owner.id, operation) {
+                    (1, Some(Operation::ChooseProject)) | (2..=11, Some(Operation::ChooseProjectPath))
+                        | (2..=12, None) => true,
+                    _ => false,
+                };
+                if !control.bound(&self.inner.session_identity) || !expected { return Err(AssetError::new(Reason::Unqualified)); }
+            }
+            if let Some(control) = &book.vault {
+                // Lock/retirement reuses the attached original. Allow the same
+                // ordinary early Quit after a refusal, never a fabricated slot.
+                let expected = match (owner.id, operation) {
+                    (1, Some(Operation::ChooseProject)) | (2, Some(Operation::OpenVault))
+                        | (3, Some(Operation::PrepareInitialize)) | (4, Some(Operation::Initialize)) => true,
+                    (5, Some(Operation::OpenVault)) | (6, Some(Operation::Unlock)) =>
+                        control.case == crate::shell::installed_observation::vault::Case::RoundTrip,
+                    (2..=7, None) => true,
+                    _ => false,
+                };
+                let expected = if let crate::shell::installed_observation::vault::Case::UploadKey(case) = control.case {
+                    vault::installed_upload_observation::original_allowed(case, owner.id, operation)
+                }else{expected};
+                if !expected || !control.bound(&self.inner.session_identity) { return Err(AssetError::new(Reason::Unqualified)); }
+            }
+            // Closed original-registration bound: Android input journey18,
+            // existing input/P2 journeys12. Historical binding survives an
+            // observer failure so a known-safe early ordinary Quit can record;
+            // exact full-success finality is checked separately below. Never
+            // replace an unsettled predecessor with a new successful witness.
+            if book.originals.len() >= limit as usize || owner.id as usize != book.originals.len() + 1
+                || !original_call(&self.inner, owner)
+                || !book.originals.iter().all(|(old,_)| session_original_settled(&self.inner, old)) {
+                return Err(AssetError::new(Reason::CleanupUnknown));
+            }
+            book.originals.try_reserve(1).map_err(|_| AssetError::new(Reason::Capacity))?;
+            book.originals.push((owner.clone(), operation)); Ok(())
+        }
+        pub(crate) fn installed_macos_session_snapshot(&self) -> Option<SessionSnapshot> {
+            let state = self.inner.state.try_lock().ok()?;
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            if state.unknown || state.exhausted || state.lost_observed || !state.lifetime.original_bound()
+                || book.originals.len() != state.next_operation as usize { return None; }
+            Some(SessionSnapshot { status: serde_json::to_value(self.snapshot(&state)).ok()?, originals: book.originals.len(),
+                originals_settled: book.originals.iter().all(|(owner,_)| session_original_settled(&self.inner, owner)),
+                empty: quiet(&state) && session_data_empty(&state) })
+        }
+        pub(crate) fn installed_macos_file_original(&self, id: u32, accepted: bool) -> Option<InstalledNativeResponseWitness> {
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            if book.project_fields.is_some() { return None; }
+            let (owner, operation) = book.originals.iter().find(|(owner,_)| owner.id == id)?;
+            if *operation != Some(Operation::ChooseFile) || !session_original_settled(&self.inner, owner) { return None; }
+            // File choose always joins the original token child, even when
+            // its genuine native Cancel never starts source capture. Do not
+            // reuse Project's no-child cancellation predicate for this lane.
+            if !owner.child.try_lock().is_ok_and(|b| b.handle.is_none() && b.receipt == JoinReceipt::Returned)
+                || !owner.source.try_lock().is_ok_and(|b| if accepted { b.not_started() || b.settled() } else { b.not_started() }) { return None; }
+            let witness = owner.gui.installed_native_response().ok()??;
+            if witness.operation_id != id || witness.response != if accepted { NativeResponse::Accept } else { NativeResponse::Decline }
+                || !witness.callback_returned || witness.selected.is_some() != accepted
+                || !owner.gui.facts().is_some_and(|g| g.dispatched && g.created && !g.constructing && !g.showing
+                    && !g.not_created && g.response && g.refusal.is_none() && g.accepted == accepted
+                    && !g.declined && g.accepted_at.is_some() == accepted && g.selected.is_none()
+                    && g.destroyed && g.close_queued && g.close_ack && g.release_queued && g.released) { return None; }
+            Some(witness)
+        }
+        pub(crate) fn installed_macos_project_path_original(&self, id: u32, field: commands::ProjectPathField,
+            accepted: bool) -> Option<(InstalledNativeResponseWitness, bool)> {
+            let state = self.inner.state.try_lock().ok()?;
+            let slot = state.slot.as_ref()?; let binding = slot.project_path.as_ref()?;
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            if book.project_fields.is_none() || slot.owner.id != id || slot.operation != Operation::ChooseProjectPath
+                || binding.field != field || slot.phase != Phase::Idle || slot.settlement != Settlement::Known
+                || state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed { return None; }
+            let (generation, root) = self.inner.bridge.native_project(&binding.project_id).ok()?;
+            if generation != binding.generation || root != binding.root { return None; }
+            let (owner, operation) = book.originals.iter().find(|(owner,_)| owner.id == id)?;
+            if !Arc::ptr_eq(owner, &slot.owner) || *operation != Some(Operation::ChooseProjectPath)
+                || !session_original_settled(&self.inner, owner)
+                || !owner.child.try_lock().is_ok_and(|b| b.handle.is_none()
+                    && b.receipt == if accepted { JoinReceipt::Returned } else { JoinReceipt::New }) { return None; }
+            let source = owner.source.try_lock().ok()?;
+            let started = !source.not_started();
+            if (started && !source.settled()) || (!accepted && started) { return None; }
+            drop(source);
+            let witness = owner.gui.installed_native_response().ok()??;
+            if witness.operation_id != id || witness.response != if accepted { NativeResponse::Accept } else { NativeResponse::Decline }
+                || !witness.callback_returned || witness.selected.is_some() != accepted
+                || !owner.gui.facts().is_some_and(|g| g.dispatched && g.created && !g.constructing && !g.showing
+                    && !g.not_created && g.response && g.refusal.is_none() && g.accepted == accepted
+                    && g.declined == !accepted && g.accepted_at.is_some() == accepted && g.selected.is_none()
+                    && g.destroyed && g.close_queued && g.close_ack && g.release_queued && g.released) { return None; }
+            Some((witness, started))
+        }
+        pub(crate) fn installed_macos_project_path_before_probe(&self, owner: &Arc<OriginalWork>, field: commands::ProjectPathField,
+            path: &std::path::Path) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; };
+            let Some(slot) = state.slot.as_ref() else { return false; };
+            let Some(binding) = slot.project_path.as_ref() else { return false; };
+            let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; };
+            let Some(book) = book.as_ref() else { return false; };
+            if !book.project_fields.as_ref().is_some_and(|control| control.permits(&self.inner.session_identity))
+                || !Arc::ptr_eq(&slot.owner, owner) || slot.operation != Operation::ChooseProjectPath || binding.field != field
+                || slot.phase != Phase::Capturing || slot.reason != Reason::None || owner.interrupted()
+                || !live(&state) || !original_call(&self.inner, owner)
+                || !book.originals.last().is_some_and(|(saved, kind)| Arc::ptr_eq(saved, owner) && *kind == Some(Operation::ChooseProjectPath))
+                || !owner.child.try_lock().is_ok_and(|b| b.handle.is_none() && b.receipt == JoinReceipt::New)
+                || !owner.source.try_lock().is_ok_and(|b| b.not_started())
+                || !owner.gui.facts().is_some_and(|g| project_path_gui_settled(&g, true)) { return false; }
+            let Ok((generation, root)) = self.inner.bridge.native_project(&binding.project_id) else { return false; };
+            binding.registration_matches(generation, &root) && owner.gui.installed_native_response().is_ok_and(|w| w.is_some_and(|w|
+                w.operation_id == owner.id && w.response == NativeResponse::Accept && w.callback_returned && w.selected.as_deref() == Some(path)))
+        }
+        fn macos_session_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
+            let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; };
+            let Some(book) = book.as_ref() else { return false; };
+            if book.project_fields.is_some() || book.input_case.is_none() { return false; }
+            let Some(limit) = book.original_limit() else { return false; };
+            let Some(lock_id) = limit.checked_sub(1) else { return false; };
+            let Some(owner) = project.owner.upgrade() else { return false; };
+            same_document(&self.inner, &project.document) && self.macos_registered(project)
+                && book.originals.first().is_some_and(|(first,kind)| Arc::ptr_eq(first, &owner) && *kind == Some(Operation::ChooseProject))
+                && book.originals.len() == limit as usize && state.next_operation == limit
+                && book.originals.last().is_some_and(|(last,kind)| last.id == limit && kind.is_none())
+                && state.slot.as_ref().is_some_and(|slot| slot.owner.id == lock_id && slot.operation == Operation::Lock
+                    && slot.reason == Reason::UserCancelled && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id as usize == i + 1 && session_original_settled(&self.inner, owner))
+                && completed(&self.inner, &owner, NativeResponse::Accept, true, false)
+                    .is_some_and(|response| response.selected.as_deref() == Some(project.root.path.as_path()))
+        }
+        fn macos_project_fields_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
+            let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; };
+            let Some(book) = book.as_ref().filter(|book| book.project_fields.is_some() && book.input_case.is_none()) else { return false; };
+            let Some(owner) = project.owner.upgrade() else { return false; };
+            same_document(&self.inner, &project.document) && self.macos_registered(project)
+                && book.originals.len() == 12 && state.next_operation == 12
+                && book.originals.first().is_some_and(|(first,kind)| Arc::ptr_eq(first, &owner) && *kind == Some(Operation::ChooseProject))
+                && book.originals.last().is_some_and(|(last,kind)| last.id == 12 && kind.is_none())
+                && book.originals[1..11].iter().all(|(_,kind)| *kind == Some(Operation::ChooseProjectPath))
+                && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id as usize == i + 1 && session_original_settled(&self.inner, owner))
+                && completed(&self.inner, &owner, NativeResponse::Accept, true, false)
+                    .is_some_and(|response| response.selected.as_deref() == Some(project.root.path.as_path()))
+        }
+        pub(crate) async fn installed_macos_project_result(&self, id: u32, selection: &mut Option<ProjectSelectionData>) -> Result<Option<Project>, AssetError> {
+            *selection = None;
+            self.project_result_original(id, Some(selection)).await
+        }
+        fn macos_registered(&self, witness: &ProjectWitness) -> bool {
+            // Call only under this actual document's admission mutex.
+            let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
+            let Ok((generation, root)) = self.inner.bridge.native_project(&witness.project.id) else { return false; };
+            roster.generation == witness.generation && generation == witness.generation && roster.roots.len() == 1
+                && root == witness.root && roster.roots[0] == witness.root
+                && root.path.to_str() == Some(witness.project.path.as_str())
+        }
+        fn macos_selected(&self, state: &DocumentState, witness: &ProjectWitness) -> bool {
+            let (Some(slot), Some(owner)) = (&state.slot, witness.owner.upgrade()) else { return false; };
+            same_document(&self.inner, &witness.document) && Arc::ptr_eq(&slot.owner, &owner)
+                && settled_slot(slot) && slot.project.as_ref().is_some_and(|project| same_project(project, &witness.project))
+                && self.macos_registered(witness)
+                && completed(&self.inner, &owner, NativeResponse::Accept, true, false)
+                    .is_some_and(|response| response.selected.as_deref() == Some(witness.root.path.as_path()))
+        }
+        fn macos_project_loss(&self, state: &DocumentState, witness: &ProjectWitness) -> bool {
+            quiet(state) && state.lost_observed && !state.lifetime.original_bound() && state.evidence.revoked
+                && self.macos_selected(state, witness) && assets_can_exit_locked(state)
+                && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::DocumentLost
+                    && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                && self.inner.bridge.edits.installed_macos_document_lost(&witness.edit) && self.inner.bridge.edits.can_exit()
+        }
+        fn macos_picker_loss(&self, state: &DocumentState, witness: &PickerWitness) -> bool {
+            let (Some(slot), Some(owner)) = (&state.slot, witness.owner.upgrade()) else { return false; };
+            quiet(state) && state.lost_observed && !state.lifetime.original_bound() && state.evidence.revoked
+                && same_document(&self.inner, &witness.document) && Arc::ptr_eq(&slot.owner, &owner)
+                && settled_slot(slot) && slot.project.is_none() && slot.reason == Reason::DocumentLost
+                && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.review_end.is_none() && slot.discard
+                && assets_can_exit_locked(state)
+                && completed(&self.inner, &owner, NativeResponse::Other, false, false)
+                    .is_some_and(|response| response.selected.is_none())
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == witness.generation && roster.roots.is_empty())
+                && self.inner.bridge.edits.installed_macos_document_lost(&witness.edit) && self.inner.bridge.edits.can_exit()
+        }
+        pub(crate) fn installed_macos_live(&self) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; };
+            // Bootstrap is the actual WK/edit binding, not availability of
+            // Android, preflight or another unsupported service/profile.
+            live(&state) && state.next_operation == 0 && state.slot.is_none() && state.quit.is_none()
+                && self.inner.bridge.edits.installed_macos_document().is_some()
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty())
+        }
+        pub(crate) fn installed_macos_cancelled(&self, id: u32) -> Option<InstalledNativeResponseWitness> {
+            let state = self.inner.state.try_lock().ok()?; let slot = state.slot.as_ref()?;
+            if !live(&state) || state.next_operation != id || state.quit.is_some() || slot.owner.id != id
+                || !settled_slot(slot) || slot.project.is_some() || slot.reason != Reason::UserCancelled
+                || !slot.owner.stopped() || slot.cleanup_end.is_none() || slot.review_end.is_some() || !slot.discard
+                || self.inner.bridge.edits.installed_macos_document().is_none() || !self.inner.bridge.edits.can_exit()
+                || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return None; }
+            let response = completed(&self.inner, &slot.owner, NativeResponse::Decline, false, false)?;
+            response.selected.is_none().then_some(response)
+        }
+        pub(crate) fn installed_macos_project(&self, id: u32) -> Option<(Project, ProjectWitness, InstalledNativeResponseWitness)> {
+            let state = self.inner.state.try_lock().ok()?; let slot = state.slot.as_ref()?;
+            if !live(&state) || state.next_operation != id || state.quit.is_some() || slot.owner.id != id
+                || !settled_slot(slot) || slot.reason != Reason::None || slot.owner.stopped()
+                || slot.cleanup_end.is_some() || slot.discard || !self.inner.bridge.edits.can_exit() { return None; }
+            let project = slot.project.as_ref()?;
+            let response = completed(&self.inner, &slot.owner, NativeResponse::Accept, true, false)?;
+            let (generation, root) = self.inner.bridge.native_project(&project.id).ok()?;
+            if generation != 2 || response.selected.as_deref() != Some(root.path.as_path()) { return None; }
+            let witness = ProjectWitness { document: Arc::downgrade(&self.inner), owner: Arc::downgrade(&slot.owner),
+                project: project.clone(), generation, root, edit: self.inner.bridge.edits.installed_macos_document()? };
+            self.macos_registered(&witness).then(|| (project.clone(), witness, response))
+        }
+        pub(crate) fn installed_macos_picker_pending(&self, id: u32) -> Option<PickerWitness> {
+            let state = self.inner.state.try_lock().ok()?; let slot = state.slot.as_ref()?; let owner = &slot.owner;
+            if !live(&state) || state.next_operation != id || state.quit.is_some() || owner.id != id || !project_slot(slot)
+                || slot.phase != Phase::Picking || slot.settlement != Settlement::Pending || slot.reason != Reason::None
+                || slot.error.is_some() || slot.project.is_some() || slot.cleanup_end.is_some() || slot.review_end.is_some() || slot.discard
+                || owner.stopped() || owner.endpoint().is_some() || owner.ended.load(Ordering::SeqCst) || !original_call(&self.inner, owner)
+                || !owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Pending && book.handle.is_some())
+                || !owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New && book.handle.is_none())
+                || !owner.source.try_lock().is_ok_and(|book| book.not_started())
+                || owner.gui.installed_native_response().ok()?.is_some()
+                || !owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.constructing
+                    && facts.showing && !facts.response && !facts.accepted && !facts.declined && facts.accepted_at.is_none()
+                    && facts.refusal.is_none() && facts.selected.is_none() && !facts.not_created && !facts.destroyed
+                    && !facts.close_queued && !facts.close_ack && !facts.release_queued && !facts.released)
+                || !self.inner.bridge.edits.can_exit() { return None; }
+            let roster = self.inner.bridge.native_roster().ok()?;
+            if roster.generation != 1 || !roster.roots.is_empty() { return None; }
+            Some(PickerWitness { document: Arc::downgrade(&self.inner), owner: Arc::downgrade(owner), generation: roster.generation,
+                edit: self.inner.bridge.edits.installed_macos_document()? })
+        }
+        pub(crate) fn installed_macos_quit_cancelled(&self, id: u32, project: &ProjectWitness) -> Option<InstalledNativeResponseWitness> {
+            let state = self.inner.state.try_lock().ok()?; let quit = state.quit.as_ref()?;
+            if !live(&state) || state.next_operation != id || quit.id != id || !quit.stopped() || quit.endpoint().is_some()
+                || state.quit_cleanup_end.is_some() || !self.macos_selected(&state, project)
+                || !state.slot.as_ref().is_some_and(|slot| slot.owner.id < id && slot.reason == Reason::None
+                    && !slot.owner.stopped() && slot.cleanup_end.is_none() && !slot.discard)
+                || !self.inner.bridge.edits.installed_macos_document_live(&project.edit) { return None; }
+            let response = completed(&self.inner, quit, NativeResponse::Decline, false, true)?;
+            response.selected.is_none().then_some(response)
+        }
+        pub(crate) fn installed_macos_picker_lost(&self, witness: &PickerWitness) -> bool {
+            self.inner.state.try_lock().is_ok_and(|state| self.macos_picker_loss(&state, witness))
+        }
+        pub(crate) fn installed_macos_project_lost(&self, witness: &ProjectWitness) -> bool {
+            self.inner.state.try_lock().is_ok_and(|state| self.macos_project_loss(&state, witness))
+        }
+        pub(crate) fn installed_macos_installation(&self) -> Option<InstallationWitness> {
+            let state = self.inner.state.try_lock().ok()?;
+            if !live(&state) || state.next_operation != 0 || state.slot.is_some() || state.quit.is_some()
+                || !self.inner.bridge.edits.can_exit()
+                || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return None; }
+            Some(InstallationWitness { document: Arc::downgrade(&self.inner),
+                edit: self.inner.bridge.edits.installed_macos_document()? })
+        }
+        pub(crate) fn installed_macos_installation_final(&self, quit_id: u32, inspection_id: u32, witness: &InstallationWitness) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; };
+            let Some(quit) = &state.quit else { return false; };
+            let Some(slot) = &state.slot else { return false; };
+            // Dedicated no-project journey only. It observes the real ordinary
+            // Quit originals without admitting any project/picker witness.
+            if !same_document(&self.inner, &witness.document) || inspection_id.checked_add(1) != Some(quit_id)
+                || !quiet(&state) || !state.stopping || !state.quit_accepted
+                || !state.lifetime.original_bound() || state.lost_observed
+                || state.next_operation != quit_id || quit.id != quit_id
+                || state.quit_cleanup_end.is_none() || !quit.stopped()
+                || !assets_can_exit_locked(&state) || !state.evidence.revoked
+                || slot.operation != Operation::InspectInstallation || slot.owner.id != inspection_id
+                || slot.phase != Phase::Idle || slot.settlement != Settlement::Known
+                || slot.reason != Reason::Shutdown || !slot.owner.stopped() || slot.cleanup_end.is_none()
+                || !slot.discard || slot.installation_result.is_some() || slot.staged.is_some()
+                || slot.context.is_some() || slot.candidate.is_some() || slot.project.is_some()
+                || slot.evidence.is_some() || slot.project_path.is_some() || slot.images.is_some()
+                || slot.owner.installation.as_ref().is_none_or(|work| !work.settled())
+                || !slot.owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
+                || !completed(&self.inner, quit, NativeResponse::Accept, false, true).is_some_and(|response| response.selected.is_none())
+                || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return false; }
+            // Normal Quit has stopped fresh witness admission. Validate the
+            // original retained before either inspection, not a replacement.
+            self.inner.bridge.edits.installed_macos_document_live(&witness.edit)
+                && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+                && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !(self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))
+                && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+                && (self.inner.bridge.preflight.can_exit() && (((self.inner.bridge.local_store.can_exit() && self.inner.bridge.apple_provisioning.can_exit()) && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && self.inner.bridge.android_build.can_exit()
+                && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))
+        }
+        pub(crate) fn installed_macos_final(&self, id: u32, project: Option<&ProjectWitness>, picker: Option<&PickerWitness>, lost: bool) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; }; let Some(quit) = &state.quit else { return false; };
+            // quit_pending is a UI admission flag. The normal exit observer
+            // may join this quit before the relay clears that flag; ORIGINAL
+            // positive joins/resources below, not flag timing, prove finality.
+            if !quiet(&state) || !state.stopping || !state.quit_accepted || state.next_operation != id || quit.id != id
+                || state.quit_cleanup_end.is_none() || !quit.stopped() || !assets_can_exit_locked(&state)
+                || !state.slot.as_ref().is_some_and(|slot| slot.owner.id < id)
+                || !state.evidence.revoked
+                || !completed(&self.inner, quit, NativeResponse::Accept, false, true).is_some_and(|response| response.selected.is_none()) { return false; }
+            let original = match (project, picker, lost) {
+                (Some(project), None, false) => state.lifetime.original_bound() && !state.lost_observed
+                    && self.inner.bridge.edits.installed_macos_document_live(&project.edit)
+                    && (self.macos_selected(&state, project)
+                        && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
+                            && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                        || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)
+                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project) || self.macos_git_fetch_selected(&state,project) || self.macos_git_push_selected(&state,project) || self.macos_git_upstream_selected(&state,project) || self.macos_git_cli_selected(&state,project)),
+                (Some(project), None, true) => self.macos_project_loss(&state, project),
+                (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
+                _ => false,
+            };
+            original && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))))
+                && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+                && (self.inner.bridge.preflight.can_exit() && (((self.inner.bridge.local_store.can_exit() && self.inner.bridge.apple_provisioning.can_exit()) && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))))
+        }
+        pub(crate) fn installed_macos_safe_quit(&self) -> bool {
+            // Existing ordinary admission only; never reset Unknown/STOP,
+            // create consent, retry a retained panel or replace an owner.
+            self.inner.state.try_lock().is_ok_and(|state| quit_question_admitted(&state))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
+    InstallationWitness as InstalledMacInstallationWitness,
+    SessionSnapshot as InstalledMacSessionSnapshot, VaultSnapshot as InstalledMacVaultSnapshot,
+    ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
+    selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod installed_project_observation {
+    use super::*;
+    #[derive(Clone)]
+    pub(crate) struct ProjectWitness {
+        project_id: String, generation: u32, root: asset_source::RegisteredRoot,
+    }
+    pub(crate) struct EvidenceWitness {
+        pub(crate) selection: lifecycle_wire::Selection,
+        root: asset_source::RegisteredRoot, epoch: u64, purpose: EvidencePurpose,
+    }
+    pub(crate) struct LifecycleStopWitness {
+        owner: Arc<OriginalWork>, binding: EvidenceBinding, revision: u64, document_revision: u32,
+        endpoint: Option<Instant>,
+    }
+    // Private DATA observations of the existing originals only. No fixture
+    // publication, source path opening, permission, worker or new native owner.
+    fn live_closed_document(state: &DocumentState, operation: u32) -> bool {
+        state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+            && !state.stopping && !state.retiring && !state.session && !state.lock_pending
+            && !state.quit_pending && !state.quit_accepted && state.quit.is_none()
+            && !state.compatibility_picker_pending && state.next_operation == operation
+            && state.context.is_none() && state.records.is_empty() && state.assignments.is_empty()
+    }
+    fn settled_project_slot(slot: &Slot, operation: u32) -> bool {
+        slot.operation == Operation::ChooseProject && slot.owner.id == operation
+            && slot.phase == Phase::Idle && slot.settlement == Settlement::Known
+            && slot.owner.resources_settled() && slot.owner.coordinator.try_lock().is_ok_and(|book|
+                book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && slot.staged.is_none() && slot.context.is_none() && slot.candidate.is_none()
+            && slot.selection.is_none() && slot.preview.is_none() && slot.retired_payload.is_none()
+    }
+    fn completed_picker(slot: &Slot, accepted: bool) -> bool {
+        slot.owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.not_created
+            && facts.response && facts.accepted == accepted && !facts.declined
+            && facts.accepted_at.is_some() == accepted && facts.refusal.is_none()
+            && facts.destroyed && facts.released && facts.close_ack && facts.selected.is_none())
+        // The original chooser consumes its filename before the probe. A None
+        // here is transfer/consumption, not proof of which filename was read;
+        // the existing shell observer compares that actual read separately.
+    }
+    fn settled_evidence_slot(slot: &Slot, operation: u32, kind: Operation) -> bool {
+        slot.operation == kind && slot.owner.id == operation && slot.project.is_none()
+            && slot.phase == Phase::Idle && slot.settlement == Settlement::Known
+            && slot.owner.resources_settled() && slot.owner.coordinator.try_lock().is_ok_and(|book|
+                book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && slot.staged.is_none() && slot.context.is_none() && slot.candidate.is_none()
+            && slot.selection.is_none() && slot.preview.is_none() && slot.retired_payload.is_none()
+    }
+    fn settled_path_slot(slot: &Slot, operation: u32, project: &ProjectWitness, field: commands::ProjectPathField) -> bool {
+        slot.operation == Operation::ChooseProjectPath && slot.owner.id == operation
+            && slot.project_path.as_ref().is_some_and(|binding| binding.project_id == project.project_id
+                && binding.field == field && binding.generation == project.generation && binding.root == project.root)
+            && slot.phase == Phase::Idle && slot.settlement == Settlement::Known
+            && slot.owner.resources_settled() && slot.owner.coordinator.try_lock().is_ok_and(|book|
+                book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && slot.staged.is_none() && slot.context.is_none() && slot.candidate.is_none()
+            && slot.selection.is_none() && slot.preview.is_none() && slot.retired_payload.is_none()
+            && slot.project.is_none() && slot.evidence.is_none() && slot.kind.is_none()
+    }
+    impl DocumentBinding {
+        pub(super) fn observed_source_unchanged(&self, witness: &ProjectWitness) -> bool {
+            let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
+            let Ok((generation, root)) = self.inner.bridge.native_project(&witness.project_id) else { return false; };
+            generation == witness.generation && roster.generation == witness.generation
+                && roster.roots.len() == 1 && roster.roots[0] == witness.root && root == witness.root
+        }
+        fn observed_runtime_idle(&self) -> bool {
+            !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.supervisor.stopping()
+                && self.inner.bridge.supervisor.can_exit() && !self.inner.bridge.edits.disabled()
+                && !self.inner.bridge.edits.stopping() && self.inner.bridge.edits.can_exit()
+        }
+        pub(crate) fn installed_observation_cancelled(&self) -> bool {
+            self.reconcile(); let state = self.lock();
+            live_closed_document(&state, 1) && state.slot.as_ref().is_some_and(|slot|
+                settled_project_slot(slot, 1) && completed_picker(slot, false)
+                    && slot.reason == Reason::UserCancelled && slot.project.is_none()
+                    && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New && book.handle.is_none())
+                    && slot.owner.source.try_lock().is_ok_and(|book| book.not_started()))
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty())
+        }
+        pub(crate) fn installed_observation_project(&self) -> Option<Project> {
+            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if !live_closed_document(&state, 2) || !settled_project_slot(slot, 2) || !completed_picker(slot, true)
+                || slot.reason != Reason::None || slot.error.is_some() || slot.cleanup_end.is_some() || slot.owner.stopped()
+                || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|book| !book.not_started() && book.settled()) { return None; }
+            let project = slot.project.as_ref()?;
+            let roster = self.inner.bridge.native_roster().ok()?;
+            let (generation, root) = self.inner.bridge.native_project(&project.id).ok()?;
+            if roster.generation != 2 || generation != roster.generation || roster.roots.len() != 1
+                || root.path != roster.roots[0].path || root.identity != roster.roots[0].identity
+                || root.path.to_str() != Some(project.path.as_str()) { return None; }
+            // Genuine registered DTO for private opaque-id correspondence, not
+            // a constructed fixture project and never exported as telemetry.
+            Some(project.clone())
+        }
+        pub(crate) fn installed_observation_project_witness(&self, project: &Project) -> Option<ProjectWitness> {
+            // Capture only after the existing real op2 proof, not by opening a
+            // source path or creating substitute project-registration authority.
+            let observed = self.installed_observation_project()?;
+            if observed.id != project.id || observed.path != project.path { return None; }
+            let state = self.lock();
+            if !live_closed_document(&state, 2) || state.evidence.epoch != 0 || state.evidence.revoked
+                || state.evidence.selection.is_some() || state.evidence.operation.is_some()
+                || state.evidence.result.is_some() { return None; }
+            let (generation, root) = self.inner.bridge.native_project(&project.id).ok()?;
+            let witness = ProjectWitness { project_id: project.id.clone(), generation, root };
+            self.observed_source_unchanged(&witness).then_some(witness)
+        }
+        pub(crate) fn installed_observation_path(&self, project: &ProjectWitness, operation: u32,
+            field: commands::ProjectPathField, reason: Reason, relative: Option<&str>) -> bool {
+            self.reconcile(); let state = self.lock();
+            let Some(slot) = state.slot.as_ref() else { return false; };
+            let cancelled = matches!(operation, 3 | 7);
+            let selected = matches!(operation, 4 | 5 | 6 | 8);
+            let source_started = !cancelled && operation != 9;
+            let result = slot.path_result.as_ref().and_then(|value| serde_json::to_value(value).ok());
+            let expected = relative.map(|path| serde_json::json!({"projectId":project.project_id,"field":field,"relativePath":path}));
+            live_closed_document(&state, operation) && (3..=13).contains(&operation)
+                && self.observed_source_unchanged(project) && self.observed_runtime_idle()
+                && !state.github.native_work_pending() && !state.evidence.revoked && state.evidence.epoch == 0
+                && state.evidence.selection.is_none() && state.evidence.operation.is_none() && state.evidence.result.is_none()
+                && settled_path_slot(slot, operation, project, field) && slot.reason == reason && result == expected
+                && selected == relative.is_some() && slot.owner.stopped() != selected
+                && slot.owner.child.try_lock().is_ok_and(|book| book.handle.is_none()
+                    && book.receipt == (if cancelled { JoinReceipt::New } else { JoinReceipt::Returned }))
+                && slot.owner.source.try_lock().is_ok_and(|book| if source_started { !book.not_started() && book.settled() } else { book.not_started() })
+                && slot.owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.constructing
+                    && !facts.not_created && facts.response && facts.accepted == !cancelled && facts.declined == cancelled
+                    && facts.accepted_at.is_some() == !cancelled && facts.refusal.is_none() && facts.selected.is_none()
+                    && facts.close_queued && facts.close_ack && facts.release_queued && facts.destroyed && facts.released)
+        }
+        pub(crate) fn installed_observation_paths_final(&self, project: &ProjectWitness) -> bool {
+            let state = self.lock();
+            state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+                && state.next_operation == 14 && state.stopping && state.quit_accepted
+                && !state.session && !state.lock_pending && state.context.is_none()
+                && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && self.observed_source_unchanged(project) && !state.github.native_work_pending()
+                && state.evidence.revoked && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && state.slot.as_ref().is_some_and(|slot| settled_path_slot(slot, 13, project, commands::ProjectPathField::IosWorkspace)
+                    && slot.path_result.is_none() && slot.owner.child.try_lock().is_ok_and(|book|
+                        book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                    && slot.owner.source.try_lock().is_ok_and(|book| !book.not_started() && book.settled()))
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 14 && quit.resources_settled()
+                    && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
+        }
+        pub(crate) fn installed_observation_lifecycle_cancelled(&self, project: &ProjectWitness) -> bool {
+            self.reconcile_scope(Some(true)); let state = self.lock();
+            let Some(slot) = state.slot.as_ref() else { return false; };
+            live_closed_document(&state, 3) && self.observed_source_unchanged(project) && self.observed_runtime_idle()
+                && !state.github.native_work_pending() && settled_evidence_slot(slot, 3, Operation::ChooseEvidenceFolder)
+                && completed_picker(slot, false) && slot.reason == Reason::UserCancelled
+                && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                && slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
+                && !state.evidence.revoked && state.evidence.epoch == 1 && state.evidence.matches(slot)
+                && slot.evidence.as_ref().is_some_and(|binding| binding.purpose == EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate))
+                && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && release_evidence_snapshot(&state, true).phase == evidence_wire::Phase::Cancelled
+                && release_evidence_snapshot(&state, true).problem == Some(EvidenceProblem::Cancelled)
+        }
+        pub(crate) fn installed_observation_lifecycle_selected(&self, project: &ProjectWitness) -> Option<EvidenceWitness> {
+            self.reconcile_scope(Some(true)); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if !live_closed_document(&state, 4) || !self.observed_source_unchanged(project) || !self.observed_runtime_idle()
+                || state.github.native_work_pending() || !settled_evidence_slot(slot, 4, Operation::ChooseEvidenceFolder)
+                || !completed_picker(slot, true) || slot.reason != Reason::None || slot.error.is_some()
+                || slot.cleanup_end.is_some() || slot.owner.stopped()
+                || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|book| !book.not_started() && book.settled())
+                || state.evidence.revoked || state.evidence.epoch != 2 || !state.evidence.matches(slot)
+                || state.evidence.phase != evidence_wire::Phase::Selected || state.evidence.result.is_some()
+                || state.evidence.problem.is_some() { return None; }
+            let selected = state.evidence.selection.as_ref()?;
+            let purpose = EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate);
+            if selected.epoch != state.evidence.epoch || selected.purpose != purpose
+                || slot.evidence.as_ref()?.purpose != purpose { return None; }
+            Some(EvidenceWitness { selection: lifecycle_wire::Selection { selection_id: selected.view.selection_id.clone(),
+                display_name: selected.view.display_name.clone(), stage: lifecycle_wire::Stage::Candidate },
+                root: selected.root.clone(), epoch: selected.epoch, purpose })
+        }
+        pub(crate) fn installed_observation_lifecycle_observed(&self, project: &ProjectWitness,
+            evidence: &EvidenceWitness) -> Option<lifecycle_wire::Observation> {
+            self.reconcile_scope(Some(true)); let state = self.lock(); let slot = state.slot.as_ref()?;
+            let binding = slot.evidence.as_ref()?; let selected = state.evidence.selection.as_ref()?;
+            if !live_closed_document(&state, 5) || !self.observed_source_unchanged(project) || !self.observed_runtime_idle()
+                || state.github.native_work_pending() || !settled_evidence_slot(slot, 5, Operation::InspectEvidence)
+                || slot.reason != Reason::None || slot.error.is_some() || slot.cleanup_end.is_some() || slot.owner.stopped()
+                || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New && book.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
+                || !slot.owner.gui.facts().is_some_and(|facts| facts.not_created && !facts.dispatched && !facts.created && facts.released)
+                || state.evidence.phase != evidence_wire::Phase::Observed || state.evidence.problem.is_some()
+                || !state.evidence.matches(slot) || !state.evidence.selection_matches(binding)
+                || selected.epoch != evidence.epoch || selected.root != evidence.root
+                || selected.view.selection_id != evidence.selection.selection_id
+                || selected.view.display_name != evidence.selection.display_name
+                || selected.purpose != evidence.purpose || binding.purpose != evidence.purpose
+                || evidence.purpose != EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate) { return None; }
+            // Publication follows this original passive query AND evidence slot retirement.
+            match &state.evidence.result {
+                Some(EvidenceResult::Lifecycle(result)) if result.stage == evidence.selection.stage => Some(result.clone()), _ => None,
+            }
+        }
+        pub(crate) fn installed_observation_lifecycle_stop_owner(&self, project: &ProjectWitness) -> Option<LifecycleStopWitness> {
+            // Passive capture only: do not reconcile, expire, allocate or stop the original.
+            let state = self.lock(); let slot = state.slot.as_ref()?; let binding = slot.evidence.as_ref()?;
+            if !live_closed_document(&state, 6) || !self.observed_source_unchanged(project) || !self.observed_runtime_idle()
+                || state.github.native_work_pending() || state.evidence.revoked || state.evidence.epoch != 3
+                || !state.evidence.matches(slot) || state.evidence.selection.is_some() || state.evidence.result.is_some()
+                || state.evidence.problem.is_some() || binding.purpose != EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ExternalTesting)
+                || binding.kind != evidence_wire::OperationKind::Choose || binding.selection_id.is_some()
+                || binding.operation_id != 6 || binding.epoch != state.evidence.epoch
+                || slot.operation != Operation::ChooseEvidenceFolder || slot.owner.id != 6
+                || slot.phase != Phase::Picking || slot.reason != Reason::None
+                || slot.error.is_some() || slot.cleanup_end.is_some() || slot.owner.interrupted()
+                || !slot.owner.gui.facts().is_some_and(|f| f.dispatched && f.created && f.showing && !f.constructing
+                    && !f.not_created && !f.response && !f.accepted && !f.declined && f.accepted_at.is_none()
+                    && !f.destroyed && !f.released && !f.close_queued && !f.close_ack && !f.release_queued
+                    && f.selected.is_none() && f.refusal.is_none())
+                || !slot.owner.child.try_lock().is_ok_and(|b| b.receipt == JoinReceipt::Returned && b.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|b| b.not_started()) { return None; }
+            Some(LifecycleStopWitness { owner: slot.owner.clone(), binding: binding.clone(), revision: state.evidence.revision,
+                document_revision: state.revision, endpoint: slot.owner.endpoint() })
+        }
+        fn lifecycle_stop_owner_unchanged(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            self.installed_observation_lifecycle_stop_owner(project).is_some_and(|now|
+                Arc::ptr_eq(&now.owner, &original.owner) && now.binding == original.binding && now.revision == original.revision
+                    && now.document_revision == original.document_revision && now.endpoint == original.endpoint)
+        }
+        pub(crate) fn installed_observation_lifecycle_opposite(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            // Called once by the existing relay after its reservation. No observation or
+            // document guard crosses either REAL native endpoint; no renderer IPC injection.
+            if !self.lifecycle_stop_owner_unchanged(project, original) { return false; }
+            let status = self.artifact_evidence_status();
+            if !status.is_err_and(|error| error.code == "artifact_evidence_busy")
+                || !self.lifecycle_stop_owner_unchanged(project, original) { return false; }
+            let stopped = self.artifact_evidence_cancel(evidence_wire::Cancel {
+                operation_id: original.binding.operation_id.to_string(), selection_id: original.binding.selection_id.clone() });
+            stopped.is_err_and(|error| error.code == "artifact_evidence_stale_selection")
+                && self.lifecycle_stop_owner_unchanged(project, original)
+        }
+        pub(crate) fn installed_observation_lifecycle_stopped(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            self.reconcile_scope(Some(true)); let state = self.lock(); let Some(slot) = state.slot.as_ref() else { return false; };
+            live_closed_document(&state, 6) && self.observed_source_unchanged(project) && self.observed_runtime_idle()
+                && !state.github.native_work_pending() && Arc::ptr_eq(&slot.owner, &original.owner)
+                && slot.evidence.as_ref() == Some(&original.binding) && original.binding.epoch == 3
+                && original.binding.purpose == EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ExternalTesting)
+                && settled_evidence_slot(slot, 6, Operation::ChooseEvidenceFolder) && completed_picker(slot, false)
+                && slot.reason == Reason::UserCancelled && slot.owner.stopped() && slot.error.is_none()
+                && slot.cleanup_end.is_some()
+                && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                && slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
+                && !state.evidence.revoked && state.evidence.epoch == 3 && state.evidence.matches(slot)
+                && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && release_evidence_snapshot(&state, true).phase == evidence_wire::Phase::Cancelled
+                && release_evidence_snapshot(&state, true).problem == Some(EvidenceProblem::Cancelled)
+        }
+        pub(crate) fn installed_observation_lifecycle_final(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            let state = self.lock();
+            state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+                && state.next_operation == 7 && state.stopping && state.quit_accepted
+                && !state.session && !state.lock_pending && state.context.is_none()
+                && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && self.observed_source_unchanged(project) && !state.github.native_work_pending()
+                && state.evidence.revoked && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && state.slot.as_ref().is_some_and(|slot| settled_evidence_slot(slot, 6, Operation::ChooseEvidenceFolder)
+                    && Arc::ptr_eq(&slot.owner, &original.owner) && slot.evidence.as_ref() == Some(&original.binding)
+                    && state.evidence.matches(slot) && slot.reason == Reason::UserCancelled
+                    && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                    && slot.owner.source.try_lock().is_ok_and(|book| book.not_started()))
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 7 && quit.resources_settled()
+                    && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
+        }
+        pub(crate) fn installed_observation_final(&self) -> bool {
+            let state = self.lock();
+            state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+                && state.next_operation == 3 && state.stopping && state.quit_accepted
+                && !state.session && !state.lock_pending && state.context.is_none()
+                && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && state.slot.as_ref().is_some_and(|slot| settled_project_slot(slot, 2) && slot.project.is_some())
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 3 && quit.resources_settled()
+                    && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
+        }
+    }
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use installed_project_observation::{ProjectWitness as InstalledProjectWitness, EvidenceWitness as InstalledEvidenceWitness,
+    LifecycleStopWitness as InstalledLifecycleStopWitness};
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod installed_session_observation {
+    use super::*;
+    use crate::{shell::installed_observation::SessionCase, supervisor::{InstalledSessionQueryDiagnostic, SessionQueryHold}};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OriginDetail { None, Deadline, ReviewExpired, ContextStale, CleanupUnknown, UserCancelled, Shutdown,
+        DocumentLost, Other, New, Pending, Returned, Failed, Unavailable }
+    impl OriginDetail {
+        fn reason(reason: Reason) -> Self {
+            match reason {
+                Reason::Deadline => Self::Deadline, Reason::ReviewExpired => Self::ReviewExpired,
+                Reason::ContextStale => Self::ContextStale, Reason::CleanupUnknown => Self::CleanupUnknown,
+                Reason::UserCancelled => Self::UserCancelled, Reason::Shutdown => Self::Shutdown,
+                Reason::DocumentLost => Self::DocumentLost, _ => Self::Other,
+            }
+        }
+        fn child(receipt: Option<JoinReceipt>) -> Self {
+            match receipt {
+                Some(JoinReceipt::New) => Self::New, Some(JoinReceipt::Pending) => Self::Pending,
+                Some(JoinReceipt::Returned) => Self::Returned, Some(JoinReceipt::Failed) => Self::Failed,
+                None => Self::Unavailable,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::Deadline => b"deadline", Self::ReviewExpired => b"review-expired",
+                Self::ContextStale => b"context-stale", Self::CleanupUnknown => b"cleanup-unknown",
+                Self::UserCancelled => b"user-cancelled", Self::Shutdown => b"shutdown", Self::DocumentLost => b"document-lost",
+                Self::Other => b"other", Self::New => b"new", Self::Pending => b"pending", Self::Returned => b"returned",
+                Self::Failed => b"failed", Self::Unavailable => b"unavailable",
+            }
+        }
+    }
+    impl UnknownOrigin {
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::NotRecorded => b"not-recorded", Self::OperationCleanup(_) => b"op-cleanup", Self::Registry => b"registry",
+                Self::CoordinatorLock => b"coord-lock", Self::CoordinatorJoin => b"coord-join",
+                Self::SupervisorDisabled => b"supervisor-disabled", Self::StagedCollision => b"staged-collision",
+                Self::InstallRetirement => b"install-retire", Self::RetirementRetain => b"retain-retire",
+                Self::RetirementDrain => b"drain-retire", Self::StagedRefusal => b"staged-refusal",
+                Self::GatePoisoned => b"gate-poisoned", Self::Exhausted => b"exhausted",
+            }
+        }
+    }
+    pub(super) struct FirstOrigin {
+        origin: UnknownOrigin, detail: OriginDetail, original: Option<Weak<OriginalWork>>,
+    }
+    impl FirstOrigin {
+        pub(super) fn at_transition(origin: UnknownOrigin, original: Option<&Arc<OriginalWork>>) -> Option<Self> {
+            if origin == UnknownOrigin::NotRecorded { return None; }
+            let detail = match origin {
+                UnknownOrigin::OperationCleanup(reason) => OriginDetail::reason(reason),
+                UnknownOrigin::CoordinatorJoin => OriginDetail::Failed,
+                UnknownOrigin::StagedRefusal => OriginDetail::child(original.and_then(|owner|
+                    owner.child.try_lock().ok().map(|book| book.receipt))),
+                _ => OriginDetail::None,
+            };
+            // Correlation only, not ownership or proof of the source of a
+            // Supervisor-wide disablement. Never serialized or backfilled.
+            Some(Self { origin, detail, original: original.map(Arc::downgrade) })
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Failure {
+        origin: UnknownOrigin, detail: OriginDetail, bound: bool, query: InstalledSessionQueryDiagnostic,
+    }
+    impl Failure {
+        pub(crate) const fn not_recorded() -> Self {
+            Self { origin: UnknownOrigin::NotRecorded, detail: OriginDetail::None, bound: false,
+                query: InstalledSessionQueryDiagnostic::not_applicable() }
+        }
+        pub(crate) fn origin_token(self) -> &'static [u8] { self.origin.token() }
+        pub(crate) fn detail_token(self) -> &'static [u8] { self.detail.token() }
+        pub(crate) fn association_token(self) -> &'static [u8] { if self.bound { b"bound" } else { b"unassociated" } }
+        pub(crate) fn query_token(self) -> ([u8; 26], usize) { self.query.query_token() }
+        pub(crate) fn worker_token(self) -> &'static [u8] { self.query.worker_token() }
+        pub(crate) fn unknown_boundary_token(self) -> &'static [u8] { self.query.unknown_boundary_token() }
+        // Pure closed-value example for the existing frame contract, never a
+        // native receipt. These types exist only in the installed test build.
+        pub(crate) fn contract_sample() -> Self {
+            Self { origin: UnknownOrigin::SupervisorDisabled, detail: OriginDetail::None, bound: true,
+                query: InstalledSessionQueryDiagnostic::contract_sample() }
+        }
+    }
+
+    pub(super) struct Book {
+        case: SessionCase, originals: Vec<(Arc<OriginalWork>, Option<Operation>)>, choose: u8, assess: u8,
+        failure: Option<Failure>,
+    }
+    impl Book {
+        pub(super) fn new(case: SessionCase) -> Self { Self { case, originals: Vec::new(), choose: 0, assess: 0, failure: None } }
+        fn first_failure(&mut self, first: Option<&FirstOrigin>, query: impl FnOnce(&Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic) -> Failure {
+            if let Some(failure) = self.failure { return failure; }
+            let failure = match first {
+                Some(first) => Failure { origin: first.origin, detail: first.detail, bound: first.original.is_some(),
+                    query: match &first.original { Some(original) => query(original), None => InstalledSessionQueryDiagnostic::not_applicable() } },
+                None => Failure::not_recorded(),
+            };
+            // One projection at the existing first Unknown snapshot. Even
+            // unavailable DATA is final here: no retry, wait or latest-owner
+            // fallback if a book subsequently becomes accessible.
+            self.failure = Some(failure); failure
+        }
+    }
+    // No private material is copied. Native pointer/opaque-token equality is
+    // private comparison DATA and must never enter an exported receipt.
+    #[derive(Clone)]
+    pub(crate) struct Snapshot {
+        pub(crate) status: Value, pub(crate) owner: Option<Arc<OriginalWork>>,
+        pub(crate) review_end: Option<Instant>, pub(crate) cleanup_end: Option<Instant>, pub(crate) work_end: Option<Instant>,
+        pub(crate) payloads: Vec<(String, u32, usize)>, pub(crate) sources: Vec<(u32, asset_source::InstalledSourceFacts)>,
+        pub(crate) settled: bool, pub(crate) lost: bool, pub(crate) bound: bool, pub(crate) unknown: bool,
+        pub(crate) quit_pending: bool, pub(crate) quit_declined: bool, pub(crate) empty: bool,
+        pub(crate) first_failure: Option<Failure>,
+    }
+    impl Snapshot {
+        pub(crate) fn same_payloads(&self, other: &Self) -> bool { self.payloads == other.payloads }
+        pub(crate) fn same_review(&self, other: &Self) -> bool {
+            self.status["operation"]["preview"]["token"] == other.status["operation"]["preview"]["token"]
+                && self.status["context"] == other.status["context"] && self.review_end == other.review_end
+                && self.work_end == other.work_end && self.cleanup_end == other.cleanup_end
+                && self.owner.as_ref().zip(other.owner.as_ref()).is_some_and(|(a,b)| Arc::ptr_eq(a,b))
+        }
+    }
+    pub(super) fn assert_first_origin_contract() {
+        // Inert association/formatting models under the existing selector.
+        // No task, native source, query, GUI or original settlement is made.
+        fn query(failure: Failure) -> Vec<u8> { let (bytes, length) = failure.query_token(); bytes[..length].to_vec() }
+        let old = OriginalWork::new(1, false, Weak::new());
+        let new = OriginalWork::new(2, false, Weak::new());
+        let same_id = OriginalWork::new(2, false, Weak::new());
+        let mut restored = super::tests::empty_state();
+        restored.slot = Some(Slot::new(old.clone(), Operation::Prepare, None, None, None));
+        let holding = new.retirement.try_lock().unwrap();
+        let old_slot = restored.slot.take().map(Box::new);
+        let retirement = match new.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
+            Err(retirement) => retirement, Ok(()) => panic!("contended original holding was not refused"),
+        };
+        restore_failed_install_retirement(&mut restored, &new, retirement);
+        drop(holding);
+        assert!(restored.unknown && restored.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, &old)));
+        first_unknown_origin!(restored, UnknownOrigin::Registry, Some(&old));
+        let first = restored.first_origin.as_ref().unwrap();
+        assert!(first.origin == UnknownOrigin::InstallRetirement
+            && first.original.as_ref().is_some_and(|original| Weak::ptr_eq(original, &Arc::downgrade(&new))));
+
+        let mut taken = super::tests::empty_state();
+        taken.slot = Some(Slot::new(new.clone(), Operation::Prepare, None, None, None));
+        let local = taken.slot.take().unwrap();
+        first_unknown_origin!(taken, UnknownOrigin::CoordinatorJoin, Some(&local.owner));
+        taken.unknown = true;
+        assert!(taken.slot.is_none() && taken.first_origin.as_ref().is_some_and(|first|
+            first.origin == UnknownOrigin::CoordinatorJoin && first.detail == OriginDetail::Failed
+                && first.original.as_ref().is_some_and(|original| Weak::ptr_eq(original, &Arc::downgrade(&new)))));
+
+        let mut admission = super::tests::empty_state();
+        admission.slot = Some(Slot::new(old.clone(), Operation::Prepare, None, None, None));
+        first_unknown_origin!(admission, UnknownOrigin::Registry, None);
+        admission.unknown = true;
+        let unassociated = Book::new(SessionCase::Inputs).first_failure(admission.first_origin.as_ref(), |_| panic!("pre-admission query lookup"));
+        assert!(unassociated.origin_token() == b"registry" && unassociated.detail_token() == b"none"
+            && unassociated.association_token() == b"unassociated" && query(unassociated) == b"na" && unassociated.worker_token() == b"na"
+            && unassociated.unknown_boundary_token() == b"na");
+        let mut unsupported = super::tests::empty_state(); unsupported.unknown = true;
+        first_unknown_origin!(unsupported, UnknownOrigin::SupervisorDisabled, Some(&new));
+        assert!(unsupported.first_origin.is_none());
+        unsupported.unknown = false; unsupported.exhausted = true;
+        first_unknown_origin!(unsupported, UnknownOrigin::Exhausted, Some(&new));
+        assert!(unsupported.first_origin.is_none());
+        let mut absent = Book::new(SessionCase::Inputs);
+        let unavailable_origin = absent.first_failure(None, |_| panic!("absent-origin query lookup"));
+        assert!(unavailable_origin == Failure::not_recorded());
+        assert!(unavailable_origin.unknown_boundary_token() == b"na");
+        assert!(absent.first_failure(restored.first_origin.as_ref(), |_| panic!("late origin backfill")) == unavailable_origin);
+
+        let unavailable_query = crate::supervisor::assert_installed_session_query_diagnostic_contract(&new, &same_id);
+        let mut book = Book::new(SessionCase::Inputs);
+        let failure = book.first_failure(restored.first_origin.as_ref(), |original| {
+            assert!(Weak::ptr_eq(original, &Arc::downgrade(&new))); unavailable_query
+        });
+        assert!(failure.association_token() == b"bound" && query(failure) == b"unavailable" && failure.worker_token() == b"unavailable"
+            && failure.unknown_boundary_token() == b"unavailable");
+        assert!(book.first_failure(taken.first_origin.as_ref(), |_| panic!("first failure was resampled")) == failure);
+        let mut known_book = Book::new(SessionCase::Inputs);
+        let known = known_book.first_failure(restored.first_origin.as_ref(), |_| InstalledSessionQueryDiagnostic::contract_sample());
+        assert!(known.unknown_boundary_token() == b"settlement" && Failure::contract_sample().unknown_boundary_token() == b"settlement");
+        assert!(known_book.first_failure(taken.first_origin.as_ref(), |_| panic!("known boundary was resampled")) == known);
+
+        let mut expiry = super::tests::empty_state();
+        expiry.slot = Some(Slot::new(new.clone(), Operation::Prepare, None, None, None));
+        let slot = expiry.slot.as_mut().unwrap();
+        let at = Instant::now(); slot.stop(Reason::ReviewExpired, at); let cleanup = slot.cleanup_end;
+        slot.stop(Reason::Deadline, at + Duration::from_secs(1));
+        first_unknown_origin!(expiry, UnknownOrigin::OperationCleanup(slot.reason), Some(&slot.owner));
+        assert!(slot.reason == Reason::ReviewExpired && slot.cleanup_end == cleanup);
+        assert!(expiry.first_origin.as_ref().is_some_and(|first| first.detail == OriginDetail::ReviewExpired));
+        for (reason, token) in [(Reason::Deadline,b"deadline".as_slice()), (Reason::ReviewExpired,b"review-expired"),
+            (Reason::ContextStale,b"context-stale"), (Reason::CleanupUnknown,b"cleanup-unknown"), (Reason::UserCancelled,b"user-cancelled"),
+            (Reason::Shutdown,b"shutdown"), (Reason::DocumentLost,b"document-lost"), (Reason::None,b"other")] {
+            assert!(OriginDetail::reason(reason).token() == token && token.len() <= 15);
+        }
+        for (receipt, token) in [(JoinReceipt::New,b"new".as_slice()), (JoinReceipt::Pending,b"pending"),
+            (JoinReceipt::Returned,b"returned"), (JoinReceipt::Failed,b"failed")] {
+            new.child.try_lock().unwrap().receipt = receipt;
+            assert!(FirstOrigin::at_transition(UnknownOrigin::StagedRefusal, Some(&new)).unwrap().detail.token() == token);
+        }
+        let child = new.child.try_lock().unwrap();
+        assert!(FirstOrigin::at_transition(UnknownOrigin::StagedRefusal, Some(&new)).unwrap().detail == OriginDetail::Unavailable);
+        drop(child);
+        for origin in [UnknownOrigin::NotRecorded, UnknownOrigin::OperationCleanup(Reason::Deadline), UnknownOrigin::Registry,
+            UnknownOrigin::CoordinatorLock, UnknownOrigin::CoordinatorJoin, UnknownOrigin::SupervisorDisabled,
+            UnknownOrigin::StagedCollision, UnknownOrigin::InstallRetirement, UnknownOrigin::RetirementRetain,
+            UnknownOrigin::RetirementDrain, UnknownOrigin::StagedRefusal, UnknownOrigin::GatePoisoned, UnknownOrigin::Exhausted] {
+            assert!(origin.token().len() <= 19 && origin.token().is_ascii());
+        }
+        assert!(FirstOrigin::at_transition(UnknownOrigin::NotRecorded, Some(&new)).is_none());
+    }
+    fn joined(owner: &OriginalWork) -> bool {
+        owner.resources_settled() && owner.retired.load(Ordering::SeqCst)
+            && owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && owner.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
+            && owner.source.try_lock().is_ok_and(|book| book.not_started() || book.settled())
+            && owner.gui.facts().is_some_and(|facts| facts.selected.is_none() && facts.released
+                && (facts.not_created || facts.created && facts.response && facts.destroyed && facts.close_ack && facts.refusal.is_none()))
+    }
+    impl DocumentBinding {
+        pub(super) fn installed_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
+            let mut book = self.inner.installed_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            let Some(book) = book.as_mut() else { return Ok(()); };
+            if book.originals.len() >= 128 || book.originals.iter().any(|(old,_)| old.id == owner.id) { return Err(AssetError::new(Reason::Capacity)); }
+            book.originals.try_reserve(1).map_err(|_| AssetError::new(Reason::Capacity))?;
+            if operation == Some(Operation::ChooseFile) {
+                book.choose = book.choose.checked_add(1).ok_or_else(AssetError::invalid)?;
+                if book.case == SessionCase::Refusals && book.choose == 4 {
+                    let checkpoint = Arc::new(asset_source::InstalledCaptureCheckpoint::default());
+                    if !owner.source.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.installed_checkpoint(checkpoint.clone()) {
+                        return Err(AssetError::new(Reason::CleanupUnknown));
+                    }
+                    *owner.installed_capture.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))? = Some(checkpoint);
+                }
+            }
+            if operation == Some(Operation::Prepare) {
+                book.assess = book.assess.checked_add(1).ok_or_else(AssetError::invalid)?;
+                let hold = match (book.case, book.assess) {
+                    (SessionCase::Loss,1) => SessionQueryHold::Loss, (SessionCase::Deadline,1) => SessionQueryHold::Deadline,
+                    _ => SessionQueryHold::Observe,
+                };
+                self.inner.bridge.supervisor.arm_installed_session_query(owner, hold).map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            }
+            book.originals.push((owner.clone(),operation)); Ok(())
+        }
+        pub(crate) fn installed_session_snapshot(&self) -> Option<Snapshot> {
+            self.reconcile(); let state = self.lock();
+            let mut book = self.inner.installed_session.lock().ok()?; let book = book.as_mut()?;
+            let mut sources = Vec::new();
+            for (owner,kind) in &book.originals {
+                if *kind == Some(Operation::ChooseFile) {
+                    if let Ok(source) = owner.source.try_lock() { sources.push((owner.id,source.installed_facts())); }
+                }
+            }
+            let status = serde_json::to_value(self.snapshot(&state)).ok()?;
+            let first_failure = (state.unknown || state.exhausted).then(|| book.first_failure(state.first_origin.as_ref(),
+                |original| self.inner.bridge.supervisor.installed_session_query_diagnostic(original)));
+            Some(Snapshot { status, owner: state.slot.as_ref().map(|slot| slot.owner.clone()),
+                review_end: state.slot.as_ref().and_then(|slot| slot.review_end), cleanup_end: state.slot.as_ref().and_then(|slot| slot.cleanup_end),
+                work_end: state.slot.as_ref().and_then(|slot| slot.owner.endpoint()),
+                payloads: state.records.iter().map(|r| (r.key.id.0.clone(),r.key.revision,Arc::as_ptr(&r.payload) as usize)).collect(), sources,
+                settled: state.slot.as_ref().is_none_or(|slot| joined(&slot.owner)),
+                lost: state.lost_observed, bound: state.lifetime.original_bound(), unknown: state.unknown || state.exhausted,
+                quit_pending: state.quit_pending, quit_declined: state.quit.as_ref().is_some_and(|owner| owner.normally_declined()),
+                empty: session_data_empty(&state) && !state.session && !state.lock_pending && !state.retiring,
+                first_failure,
+            })
+        }
+        pub(crate) fn installed_session_capture_checkpoint(&self) -> Option<Arc<asset_source::InstalledCaptureCheckpoint>> {
+            let state = self.lock();
+            let checkpoint = state.slot.as_ref()?.owner.installed_capture.lock().ok()?.clone();
+            checkpoint
+        }
+        pub(crate) fn take_installed_session_queries(&self) -> Result<crate::supervisor::InstalledSessionQueries, BridgeError> {
+            // Forward only the original document's original Supervisor; no
+            // RuntimeConfig/owner clone can issue an observation of another R1.
+            self.inner.bridge.supervisor.take_installed_session_queries()
+        }
+        pub(crate) fn installed_session_final(&self, project: &super::installed_project_observation::ProjectWitness, loss: bool) -> bool {
+            let state = self.lock();
+            let Ok(book) = self.inner.installed_session.lock() else { return false; }; let Some(book) = book.as_ref() else { return false; };
+            !state.unknown && !state.exhausted && state.lost_observed == loss && state.lifetime.original_bound() != loss
+                // can_exit joins the original quit before the relay may clear
+                // quit_pending. The same positive originals below, not that UI
+                // admission flag's scheduling, establish finality.
+                && state.stopping && state.quit_accepted && !state.session && !state.lock_pending
+                && state.context.is_none() && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && state.evidence.revoked && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && !state.github.native_work_pending() && state.github.material_settled()
+                && !self.inner.bridge.supervisor.disabled() && self.inner.bridge.supervisor.stopping() && self.inner.bridge.supervisor.can_exit()
+                && !self.inner.bridge.edits.disabled() && self.inner.bridge.edits.stopping() && self.inner.bridge.edits.can_exit()
+                && self.observed_source_unchanged(project) && book.originals.len() == state.next_operation as usize
+                && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id == i as u32 + 1 && joined(owner))
+                && state.quit_cleanup_end.is_some() && state.quit.as_ref().is_some_and(|quit| joined(quit) && quit.stopped()
+                    && quit.gui.facts().is_some_and(|facts| facts.accepted && !facts.declined))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use installed_session_observation::{Snapshot as InstalledSessionSnapshot, Failure as InstalledSessionFailure};
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod fixture_observation {
+    use super::*;
+    // Private equality only: no extra payload/GTK/FD owner and no serialization
+    // of material, selection tokens, pointer values or original deadlines.
+    #[derive(PartialEq, Eq)]
+    pub(crate) struct Selection {
+        owner: u32, payload: usize, context: usize, token: String, record: String,
+        context_revision: u32, registry_generation: u32, review: Instant,
+    }
+    impl DocumentBinding {
+        pub(crate) fn same_original(&self, other: &Self) -> bool { Arc::ptr_eq(&self.inner, &other.inner) }
+        pub(crate) fn fixture_bootstrap(&self) -> bool {
+            let state = self.lock(); state.lifetime.original_bound() && !state.unknown && !state.stopping && !state.session
+                && state.next_operation == 0 && state.slot.is_none() && state.quit.is_none()
+        }
+        pub(crate) fn fixture_picker_preserved(&self) -> bool {
+            let state = self.lock();
+            !state.unknown && !state.stopping && !state.quit_pending && !state.retiring && !state.session && state.quit.is_none()
+                && state.lifetime.original_bound() && state.next_operation == 1 && state.slot.as_ref().is_some_and(|slot|
+                    slot.owner.id == 1 && slot.phase == Phase::Picking && slot.review_end.is_none() && slot.cleanup_end.is_none()
+                        && slot.owner.endpoint().is_none() && !slot.owner.stopped()
+                        && slot.owner.gui.facts().is_some_and(|f| f.created && f.showing && !f.response && !f.destroyed && !f.released)
+                        && slot.owner.source.try_lock().is_ok_and(|book| book.not_started()))
+        }
+        pub(crate) fn fixture_cancelled(&self) -> bool {
+            self.reconcile(); let state = self.lock();
+            !state.unknown && !state.stopping && !state.quit_pending && state.quit.is_none() && state.next_operation == 1
+                && state.slot.as_ref().is_some_and(|slot| slot.owner.id == 1 && slot.phase == Phase::Idle && slot.reason == Reason::UserCancelled
+                    && slot.owner.resources_settled() && slot.project.is_none())
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.roots.is_empty())
+        }
+        pub(crate) fn fixture_project(&self) -> Option<(Project, serde_json::Value)> {
+            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if state.unknown || state.stopping || state.quit_pending || state.next_operation != 2
+                || slot.owner.id != 2 || slot.phase != Phase::Idle || !slot.owner.resources_settled() { return None; }
+            let roster = self.inner.bridge.native_roster().ok()?;
+            if roster.roots.len() != 1 { return None; }
+            Some((slot.project.clone()?, roster.roots[0].identity.posix().ok()?.fixture_value()))
+        }
+        pub(crate) fn fixture_selection(&self) -> Option<Selection> {
+            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if state.unknown || state.stopping || state.quit_pending || state.retiring || !state.session || !state.lifetime.original_bound()
+                || slot.owner.id != 3 || slot.phase != Phase::Selected || slot.source != SourceState::Captured
+                || slot.settlement != Settlement::Known || !slot.owner.resources_settled() || slot.owner.stopped()
+                || slot.cleanup_end.is_some() || !state.records.is_empty() || !state.assignments.is_empty() { return None; }
+            let context = state.context.as_ref()?;
+            if !slot.context.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, context)) { return None; }
+            let candidate = slot.candidate.as_ref()?; let material = candidate.payload.material.as_ref()?;
+            if candidate.payload.kind != Kind::AndroidKeystore || !material.observation.is_observed()
+                || material.selected_origin().is_none() || material.bytes() != [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0] || candidate.existing.is_some() { return None; }
+            let review = slot.review_end?; if Instant::now() >= review { return None; }
+            Some(Selection { owner:slot.owner.id, payload:Arc::as_ptr(&candidate.payload) as usize,
+                context:Arc::as_ptr(context) as usize, token:slot.selection.as_ref()?.0.clone(), record:candidate.record_id.0.clone(),
+                context_revision:context.revision, registry_generation:context.registry_generation, review })
+        }
+        pub(crate) fn fixture_cancel_preserved(&self, before: &Selection) -> bool {
+            if self.fixture_selection().as_ref() != Some(before) { return false; }
+            let state = self.lock(); !state.quit_pending && !state.quit_accepted && state.next_operation == 4
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 4 && quit.normally_declined() && quit.resources_settled())
+                && !self.inner.bridge.supervisor.stopping() && !self.inner.bridge.edits.stopping()
+        }
+        pub(crate) fn fixture_final(&self) -> bool {
+            let state = self.lock(); !state.unknown && !state.exhausted && state.lifetime.original_bound() && !state.lost_observed
+                && state.next_operation == 5 && state.stopping && state.quit_accepted && !state.session && !state.lock_pending
+                && assets_can_exit_locked(&state) && state.quit.as_ref().is_some_and(|quit| quit.id == 5 && quit.resources_settled()
+                    && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use fixture_observation::Selection as FixtureSelection;
+
+#[cfg(test)]
+#[path = "android_build_wiring_tests.rs"]
+mod android_build_wiring_tests;
+
+#[cfg(test)]
+pub(crate) fn assert_installed_session_owner_contract() { tests::live_session_owner_contract(); }
+
+#[cfg(test)]
+pub(crate) fn assert_project_path_document_contracts() {
+    // Explicit-call DATA predicates/models only. No DesktopBridge/runtime,
+    // task, real GUI/source original, RNG or registered project is fabricated.
+    fn state(bound: bool) -> DocumentState {
+        let mut lifetime = DocumentLifetime::default();
+        if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+        DocumentState {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_local_check_grant: None,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+            session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }
+    }
+    fn gui(selected: bool) -> GuiFacts {
+        GuiFacts { dispatched: true, constructing: false, created: true, showing: false, response: true,
+            accepted: selected, declined: !selected, accepted_at: selected.then(Instant::now), destroyed: true, released: true,
+            not_created: false, close_queued: true, close_ack: true, release_queued: true, selected: None, refusal: None }
+    }
+    assert!(!NATIVE_QUALIFIED);
+    let ready = state(true);
+    assert!(project_path_idle_gate(&ready, true).is_ok());
+    assert_eq!(project_path_idle_gate(&ready, false).err().map(|e| e.reason), Some(Reason::Unqualified));
+    let unbound = state(false);
+    assert_eq!(common_document_gate(&unbound, false, || panic!("unbound admission reached owners")).err().map(|e| e.reason), Some(Reason::DocumentLost));
+    for (modify, expected) in [
+        ((|s: &mut DocumentState| s.unknown = true) as fn(&mut DocumentState), Reason::CleanupUnknown),
+        (|s| s.stopping = true, Reason::Shutdown), (|s| s.quit_pending = true, Reason::Busy),
+        (|s| s.retiring = true, Reason::Busy), (|s| s.lock_pending = true, Reason::Busy),
+        (|s| s.compatibility_picker_pending = true, Reason::Busy),
+        (|s| { s.lifetime.invalidate(); s.lost_observed = true; }, Reason::DocumentLost),
+    ] {
+        let mut blocked = state(true); modify(&mut blocked);
+        assert_eq!(common_document_gate(&blocked, false, || Ok(())).err().map(|e| e.reason), Some(expected));
+        assert!(!blocked.session && blocked.records.is_empty() && blocked.assignments.is_empty());
+    }
+    for reason in [Reason::Busy, Reason::Shutdown, Reason::CleanupUnknown] {
+        assert_eq!(common_document_gate(&ready, false, || Err(AssetError::new(reason))).err().map(|e| e.reason), Some(reason));
+    }
+    assert!(common_document_gate(&ready, false, || Ok(())).is_ok());
+    assert!(Operation::ChooseProjectPath.blocks_context() && !Operation::ChooseProjectPath.evidence());
+    for operation in [Operation::ChooseProject, Operation::ChooseEvidenceFolder, Operation::InspectEvidence] { assert!(operation.blocks_context()); }
+    for operation in [Operation::ChooseFile, Operation::Prepare, Operation::PrepareDelete, Operation::Commit, Operation::Bind] { assert!(!operation.blocks_context()); }
+
+    let owner = OriginalWork::new(1, false, Weak::new());
+    let mut blocked = state(true);
+    let mut slot = Slot::new(owner.clone(), Operation::ChooseProjectPath, None, None, None); slot.phase = Phase::Idle;
+    blocked.slot = Some(slot);
+    assert!(project_path_pending(&blocked)); // Idle label is not original settlement.
+    assert_eq!(project_path_idle_gate(&blocked, true).err().map(|e| e.reason), Some(Reason::Busy));
+    assert_eq!(passive_document_gate(&blocked).err().map(|e| e.code), Some("busy".into()));
+    assert_eq!(common_document_gate(&blocked, true, || Ok(())).err().map(|e| e.reason), Some(Reason::Busy));
+    owner.ended.store(true, Ordering::SeqCst);
+    owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+    assert!(owner.join_if_ended().is_none()); assert!(project_path_pending(&blocked));
+    assert!(owner.coordinator.lock().unwrap().receipt == JoinReceipt::Pending);
+    owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned; // Model facts, not a native receipt.
+    assert!(!project_path_pending(&blocked)); assert!(passive_document_gate(&blocked).is_ok());
+    assert!(!owner.project_path_settled(false) && !owner.project_path_settled(true)); // Not-created is never Cancel/success.
+    owner.retired.store(false, Ordering::SeqCst); assert!(project_path_pending(&blocked));
+    owner.retired.store(true, Ordering::SeqCst);
+    blocked.slot.as_mut().unwrap().phase = Phase::Picking; assert!(project_path_pending(&blocked));
+    blocked.slot.as_mut().unwrap().operation = Operation::ChooseFile;
+    assert!(!project_path_pending(&blocked) && passive_document_gate(&blocked).is_ok()); // No widening of unrelated passive gates.
+    blocked.slot.as_mut().unwrap().operation = Operation::ChooseProjectPath;
+    blocked.slot.as_mut().unwrap().phase = Phase::Unknown; blocked.slot.as_mut().unwrap().settlement = Settlement::LateKnown;
+    blocked.unknown = true;
+    assert_eq!(passive_document_gate(&blocked).err().map(|e| e.code), Some("cleanup_unknown".into()));
+    assert!(project_path_pending(&blocked)); // Late known settlement never restores admission.
+
+    assert!(project_path_gui_settled(&gui(true), true)); assert!(project_path_gui_settled(&gui(false), false));
+    assert!(!project_path_gui_settled(&gui(true), false) && !project_path_gui_settled(&gui(false), true));
+    for modify in [
+        (|f: &mut GuiFacts| f.dispatched = false) as fn(&mut GuiFacts), |f| f.constructing = true,
+        |f| f.created = false, |f| f.showing = true, |f| f.response = false, |f| f.destroyed = false,
+        |f| f.released = false, |f| f.not_created = true, |f| f.close_queued = false, |f| f.close_ack = false,
+        |f| f.release_queued = false, |f| f.refusal = Some(Reason::SourceRefused),
+        |f| f.selected = Some(std::path::PathBuf::from("/inert/not-a-receipt")),
+    ] {
+        for selected in [false, true] { let mut facts = gui(selected); modify(&mut facts); assert!(!project_path_gui_settled(&facts, selected)); }
+    }
+    let mut other = gui(false); other.declined = false; assert!(!project_path_gui_settled(&other, false));
+    assert_eq!(admitted_response(NativeResponse::Decline, true, false, true), (false, true));
+    for response in [NativeResponse::Accept, NativeResponse::Decline, NativeResponse::Other] {
+        assert_eq!(admitted_response(response, true, true, true), (false, false));
+        assert_eq!(admitted_response(response, false, false, true), (false, false));
+    }
+    // The existing Project/File/Evidence path still does not record a new
+    // declined receipt. Only this purpose opts into the fourth argument.
+    assert_eq!(admitted_response(NativeResponse::Decline, true, false, false), (false, false));
+    let cancelled = OriginalWork::new(2, true, Weak::new());
+    *cancelled.gui.facts().unwrap() = gui(false);
+    cancelled.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+    assert!(!cancelled.project_path_settled(false)); // Actual admitted Cancel also latches STOP.
+    cancelled.stop(); assert!(cancelled.project_path_settled(false));
+    cancelled.coordinator.lock().unwrap().receipt = JoinReceipt::Failed;
+    assert!(cancelled.resources_settled() && !cancelled.project_path_settled(false));
+    cancelled.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+    for receipt in [JoinReceipt::Pending, JoinReceipt::Returned, JoinReceipt::Failed] {
+        cancelled.child.try_lock().unwrap().receipt = receipt; assert!(!cancelled.project_path_settled(false));
+    }
+    cancelled.child.try_lock().unwrap().receipt = JoinReceipt::New;
+    cancelled.retired.store(false, Ordering::SeqCst); assert!(!cancelled.project_path_settled(false));
+    cancelled.retired.store(true, Ordering::SeqCst); assert!(cancelled.project_path_settled(false));
+    let selected = OriginalWork::new(3, true, Weak::new());
+    *selected.gui.facts().unwrap() = gui(true);
+    selected.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+    selected.child.try_lock().unwrap().receipt = JoinReceipt::Returned;
+    assert!(selected.resources_settled() && !selected.project_path_settled(true)); // No actual source probe, hence no success.
+
+    // Synthetic directory identity is comparison DATA only, not a SourceBook
+    // proof or a fixture permit for this new purpose.
+    let root = asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+    let binding = Arc::new(ProjectPathBinding { project_id: "project-1".into(), field: commands::ProjectPathField::VersionSource, root: root.clone(), generation: 7 });
+    assert!(binding.registration_matches(7, &root)); assert!(!binding.registration_matches(8, &root));
+    let changed = asset_source::RegisteredRoot { path: "/inert/other".into(), ..root };
+    assert!(!binding.registration_matches(7, &changed));
+    let mut slot = Slot::new(OriginalWork::new(4, true, Weak::new()), Operation::ChooseProjectPath, None, None, None);
+    slot.project_path = Some(binding);
+    assert!(slot.context.is_none() && slot.target.is_none() && slot.review_end.is_none() && slot.kind.is_none()
+        && slot.candidate.is_none() && slot.selection.is_none() && slot.assessment.is_none() && slot.preview.is_none()
+        && slot.project.is_none() && slot.result_record.is_none() && slot.evidence.is_none());
+    assert_eq!(serde_json::to_value(slot.operation).unwrap(), serde_json::json!("choose-project-path"));
+    slot.path_result = commands::project_path_result("project-1", commands::ProjectPathField::VersionSource, "VERSION".into()).ok();
+    let now = Instant::now(); slot.stop(Reason::Deadline, now); let first = slot.cleanup_end;
+    slot.stop(Reason::UserCancelled, now + Duration::from_secs(1));
+    assert!(slot.path_result.is_none() && slot.reason == Reason::Deadline && slot.cleanup_end == first && slot.owner.stopped());
+    assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
+}
+
+#[cfg(test)]
+pub(crate) fn assert_project_selection_gate_contract() {
+    // DATA-only truth table shared with the harness=false observer's explicit
+    // pre-GTK entry. No DesktopBridge constructor, source IO, task or native
+    // work is performed; model facts are not actual original join receipts.
+    fn state(bound: bool) -> DocumentState {
+        let mut lifetime = DocumentLifetime::default();
+        if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+        DocumentState {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_local_check_grant: None,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+            session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }
+    }
+    let reason = |state: &DocumentState| common_document_gate(state, false, || Ok(())).err().map(|error| error.reason);
+    assert!(!NATIVE_QUALIFIED, "Project profile admission cannot open the broad asset gate.");
+    let unbound = state(false);
+    assert_eq!(common_document_gate(&unbound, false, || panic!("Unbound document reached an owner gate.")).err().map(|error| error.reason), Some(Reason::DocumentLost));
+    let mut lost = state(true); lost.lifetime.invalidate(); lost.lost_observed = true;
+    assert_eq!(reason(&lost), Some(Reason::DocumentLost));
+    for (modify, expected) in [
+        ((|state: &mut DocumentState| state.unknown = true) as fn(&mut DocumentState), Reason::CleanupUnknown),
+        (|state| state.stopping = true, Reason::Shutdown),
+        (|state| state.quit_pending = true, Reason::Busy),
+        (|state| state.retiring = true, Reason::Busy),
+        (|state| state.lock_pending = true, Reason::Busy),
+        (|state| state.compatibility_picker_pending = true, Reason::Busy),
+    ] {
+        let mut blocked = state(true); modify(&mut blocked);
+        assert_eq!(reason(&blocked), Some(expected));
+        assert!(!blocked.session && blocked.records.is_empty() && blocked.assignments.is_empty());
+    }
+    let mut ready = state(true);
+    for refusal in [Reason::CleanupUnknown, Reason::Shutdown, Reason::Busy] {
+        assert_eq!(common_document_gate(&ready, false, || Err(AssetError::new(refusal))).err().map(|error| error.reason), Some(refusal));
+    }
+    assert_eq!(reason(&ready), None);
+    let platform = if cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { None } else { Some(Reason::UnsupportedPlatform) };
+    assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);
+    assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
+    assert!(idle(&ready).is_ok());
+    // Model original join/retirement facts only, not actual native settlement.
+    let owner = OriginalWork::new(1, false, Weak::new());
+    let mut slot = Slot::new(owner.clone(), Operation::ChooseProject, None, None, None); slot.phase = Phase::Idle;
+    ready.slot = Some(slot);
+    assert_eq!(idle(&ready).err().map(|error| error.reason), Some(Reason::Busy));
+    owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+    assert!(idle(&ready).is_ok());
+    owner.retired.store(false, Ordering::SeqCst);
+    assert_eq!(idle(&ready).err().map(|error| error.reason), Some(Reason::Busy));
+    owner.retired.store(true, Ordering::SeqCst);
+    ready.slot.as_mut().unwrap().phase = Phase::Capturing;
+    assert_eq!(idle(&ready).err().map(|error| error.reason), Some(Reason::Busy));
+    ready.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+    assert_eq!(common_document_gate(&ready, true, || Ok(())).err().map(|error| error.reason), Some(Reason::Busy));
+    assert!(!ready.session && ready.records.is_empty() && ready.assignments.is_empty());
+}
+
+#[cfg(test)]
+pub(crate) fn assert_installed_evidence_gate_contract() {
+    // Shared document/owner refusals are covered by the existing project gate
+    // contract. This is the added profile intersection and evidence-only tail;
+    // these memory-only models never grant a native original receipt.
+    assert!(!NATIVE_QUALIFIED);
+    for project in [false, true] {
+        for method in [false, true] {
+            assert_eq!(installed_evidence_profile(project, method), project && method);
+        }
+    }
+    let mut state = tests::empty_state(); state.session = false;
+    assert!(evidence_selection_gate(&state).is_ok());
+    state.evidence.revoked = true;
+    let before = serde_json::to_value(evidence_snapshot(&state, true)).unwrap();
+    assert_eq!(evidence_selection_gate(&state).unwrap_err().code, evidence_wire::refused(EvidenceProblem::StaleSelection).code);
+    assert_eq!(serde_json::to_value(evidence_snapshot(&state, true)).unwrap(), before);
+    state.evidence.revoked = false;
+    let owner = OriginalWork::new(1, false, Weak::new());
+    state.slot = Some(Slot::new(owner, Operation::ChooseEvidenceFolder, None, None, None));
+    let before = serde_json::to_value(evidence_snapshot(&state, true)).unwrap();
+    assert_eq!(evidence_selection_gate(&state).unwrap_err().code, evidence_wire::refused(EvidenceProblem::Busy).code);
+    assert_eq!(serde_json::to_value(evidence_snapshot(&state, true)).unwrap(), before);
+    assert!(!state.session && state.context.is_none() && state.records.is_empty() && state.assignments.is_empty());
+    tests::evidence_stop_matches_original_job_not_just_selection_or_shared_slot_body();
+    tests::evidence_cancel_preserves_source_context_records_github_and_first_cleanup_body();
+    tests::evidence_late_error_preserves_first_stop_and_original_deadline_body();
+    tests::evidence_unknown_retains_original_binding_and_cannot_become_late_success_body();
+    tests::evidence_folder_label_is_bounded_and_never_a_full_or_controlled_path_body();
+}
+
+#[cfg(test)]
+mod tests {
+    // Synthetic in-memory predicates. No DesktopBridge constructor/RNG, dialog,
+    // source path access or native receipts. One explicit Tokio test stages
+    // (but NEVER polls) the owned startup; it does not start an SDK task or I/O.
+    use super::*;
+    #[test]
+    fn project_path_shares_exclusions_but_not_asset_authority_or_synthetic_finality() { assert_project_path_document_contracts(); }
+    fn token(byte: char) -> Token { Token(byte.to_string().repeat(32)) }
+    pub(super) fn empty_state() -> DocumentState {
+        DocumentState {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_local_check_grant: None,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+            session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+            context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+            github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            vault: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }
+    }
+
+    pub(super) fn live_session_owner_contract() {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        installed_session_observation::assert_first_origin_contract();
+        for sd in [false,true] { for ed in [false,true] { for ss in [false,true] { for es in [false,true] {
+            let reason = session_owner_reason(sd,ed,ss,es);
+            let expected = if sd || ed { Some(Reason::CleanupUnknown) } else if ss || es { Some(Reason::Shutdown) } else { None };
+            assert_eq!(reason,expected);
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            let before = state.revision;
+            let changed = observe_session_owner_reason(&mut state,reason);
+            assert_eq!(changed,reason.is_some());
+            if changed { state.revision = state.revision.checked_add(1).unwrap(); }
+            assert_eq!(state.session_owner_reason,reason);
+            assert!(!observe_session_owner_reason(&mut state,reason));
+            assert_eq!(state.revision,before + u32::from(reason.is_some()));
+            assert_eq!(common_document_gate(&state,true,|| reason.map_or(Ok(()),|r| Err(AssetError::new(r)))).err().map(|e|e.reason),reason);
+            // Display observation cannot fabricate local Unknown/STOP or
+            // prevent teardown. These unchanged original predicates ignore it.
+            assert!(!state.unknown && !state.stopping && state.slot.is_none());
+            assert!(quit_question_admitted(&state));
+            state.session = false;
+            assert!(assets_can_exit_locked(&state));
+        } } } }
+    }
+    #[test]
+    fn actual_owner_reason_blocks_new_session_work_not_retirement() { live_session_owner_contract(); }
+
+    #[test]
+    fn project_selection_shares_lifecycle_checks_without_granting_an_asset_session() {
+        assert_project_selection_gate_contract();
+    }
+
+    #[test]
+    fn installed_evidence_is_separate_from_the_private_asset_profile() {
+        assert_installed_evidence_gate_contract();
+    }
+
+    #[test]
+    fn offline_preflight_startup_and_unsupported_gates_preserve_passive_services() {
+        use crate::offline_preflight_protocol::{Availability, Profile};
+        let mut state = empty_state();
+        assert!(passive_document_gate(&state).is_ok());
+        assert_eq!(preflight_document_gate(&state, Some(Profile::LinuxX64)), Some(Availability::Busy));
+        assert_eq!(preflight_document_gate(&state, None), Some(Availability::UnsupportedPlatform));
+        state.lifetime.crash_hook_installed();
+        state.lifetime.started(true);
+        state.lifetime.finished(true);
+        assert!(state.lifetime.original_bound());
+        assert!(passive_document_gate(&state).is_ok());
+        assert_eq!(preflight_document_gate(&state, Some(Profile::LinuxX64)), None);
+        state.lifetime.invalidate(); state.lost_observed = true;
+        assert_eq!(preflight_document_gate(&state, Some(Profile::LinuxX64)), Some(Availability::DocumentLost));
+        assert_eq!(preflight_document_gate(&state, None), Some(Availability::UnsupportedPlatform));
+        // This is not native binding proof: Windows/no-hook passive behavior
+        // stays separate from an executing owner's real loss/Unknown gates.
+        assert!(passive_document_gate(&state).is_ok());
+        state.quit_pending = true; assert!(passive_document_gate(&state).is_err());
+        state.quit_pending = false; state.stopping = true; assert!(passive_document_gate(&state).is_err());
+        state.stopping = false; state.unknown = true; assert!(passive_document_gate(&state).is_err());
+        state.unknown = false; state.exhausted = true; assert!(passive_document_gate(&state).is_err());
+    }
+
+    fn scalar() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
+    fn slot(target: Option<RecordKey>, review: Option<Instant>) -> Slot {
+        let mut slot = Slot::new(OriginalWork::new(1, false, Weak::new()), Operation::Prepare, None, target, review);
+        slot.kind = Some(Kind::GoogleWif); slot
+    }
+
+    fn evidence_model(id: u32) -> (DocumentState, Arc<OriginalWork>) {
+        let mut state = empty_state();
+        let owner = OriginalWork::new(id, false, Weak::new());
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe,
+            selection_id: Some("evidence-model".to_owned()), epoch: 4, purpose: EvidencePurpose::Candidate };
+        let mut work = Slot::new(owner.clone(), Operation::InspectEvidence, None, None, None); work.evidence = Some(binding.clone());
+        state.evidence.epoch = 4; state.evidence.operation = Some(binding); state.evidence.phase = evidence_wire::Phase::Observing;
+        state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id: "evidence-model".to_owned(), display_name: "Model".to_owned() },
+            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) }, epoch: 4, purpose: EvidencePurpose::Candidate });
+        state.slot = Some(work); (state, owner)
+    }
+    fn lifecycle_model(id: u32, stage: lifecycle_wire::Stage) -> (DocumentState, Arc<OriginalWork>) {
+        let (mut state, owner) = evidence_model(id);
+        let purpose = EvidencePurpose::Lifecycle(stage);
+        state.evidence.operation.as_mut().unwrap().purpose = purpose;
+        state.evidence.selection.as_mut().unwrap().purpose = purpose;
+        state.slot.as_mut().unwrap().evidence.as_mut().unwrap().purpose = purpose;
+        (state, owner)
+    }
+    #[test]
+    fn lifecycle_evidence_wrong_purpose_or_stage_cannot_stop_or_replace_original() {
+        let stage = lifecycle_wire::Stage::ExternalTesting;
+        let (mut state, owner) = lifecycle_model(9, stage); let at = Instant::now();
+        let before = serde_json::to_value(release_evidence_snapshot(&state, true).checked().unwrap()).unwrap();
+        for purpose in [EvidencePurpose::Candidate, EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate), EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ProductionSubmit)] {
+            assert!(cancel_evidence_locked(&mut state, purpose, &evidence_cancel(9), at).is_err());
+            assert!(!owner.stopped());
+            assert_eq!(serde_json::to_value(release_evidence_snapshot(&state, true).checked().unwrap()).unwrap(), before);
+        }
+        assert!(evidence_route_gate(&state, false).is_err());
+        assert!(evidence_selection_gate(&state).is_err());
+        assert!(!owner.stopped());
+        // Legacy status never reinterprets the lifecycle result/selection.
+        let legacy = evidence_snapshot(&state, true).checked().unwrap();
+        assert!(legacy.selection.is_none() && legacy.operation.is_none() && legacy.result.is_none());
+        // Even the off-lock original-data retirement window is not authority
+        // for a mismatched route to run expiry/reconciliation on that family.
+        state.retiring = true; state.slot = None;
+        assert!(evidence_route_gate(&state, false).is_err());
+        assert!(evidence_route_gate(&state, true).is_ok());
+        assert!(!owner.stopped());
+    }
+    #[test]
+    fn lifecycle_evidence_result_requires_exact_original_selection_stage_and_epoch() {
+        let (mut state, _) = lifecycle_model(10, lifecycle_wire::Stage::Candidate);
+        let fixture: Value = serde_json::from_str(include_str!("../../tests/fixtures/lifecycle-evidence.json")).unwrap();
+        let candidate = EvidenceResult::Lifecycle(lifecycle_wire::result(fixture["androidCandidate"].clone(), lifecycle_wire::Stage::Candidate).unwrap());
+        let external = EvidenceResult::Lifecycle(lifecycle_wire::result(fixture["androidExternal"].clone(), lifecycle_wire::Stage::ExternalTesting).unwrap());
+        let slot = state.slot.as_ref().unwrap(); assert!(state.evidence.accepts_result(slot, &candidate));
+        assert!(!state.evidence.accepts_result(slot, &external));
+        state.evidence.selection.as_mut().unwrap().purpose = EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ProductionSubmit);
+        assert!(!state.evidence.accepts_result(state.slot.as_ref().unwrap(), &candidate));
+        assert!(release_evidence_snapshot(&state, true).checked().is_err());
+        state.evidence.selection.as_mut().unwrap().purpose = EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate);
+        state.evidence.epoch += 1; assert!(!state.evidence.accepts_result(state.slot.as_ref().unwrap(), &candidate));
+        state.evidence.epoch -= 1; state.evidence.revoke(false);
+        assert!(!state.evidence.accepts_result(state.slot.as_ref().unwrap(), &candidate));
+    }
+    #[test]
+    fn lifecycle_evidence_stopping_waits_on_original_and_status_never_inspects_again() {
+        let stage = lifecycle_wire::Stage::ProductionSubmit;
+        let (mut state, owner) = lifecycle_model(11, stage); let at = Instant::now();
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Lifecycle(stage), &evidence_cancel(11), at).unwrap());
+        let first_end = state.slot.as_ref().unwrap().cleanup_end;
+        for _ in 0..3 {
+            let status = release_evidence_snapshot(&state, true).checked().unwrap();
+            assert_eq!(status.phase, evidence_wire::Phase::Stopping); assert!(status.result.is_none());
+            assert!(evidence_selection_gate(&state).is_err());
+            assert_eq!(state.slot.as_ref().unwrap().cleanup_end, first_end);
+        }
+        // Synthetic original join facts only; no native syscall/worker fixture.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        state.slot.as_mut().unwrap().phase = Phase::Idle;
+        settle_evidence_status(&mut state);
+        assert_eq!(release_evidence_snapshot(&state, true).checked().unwrap().phase, evidence_wire::Phase::Cancelled);
+        state.unknown = true;
+        assert_eq!(release_evidence_snapshot(&state, true).checked().unwrap().phase, evidence_wire::Phase::Unknown);
+    }
+    fn evidence_cancel(id: u32) -> evidence_wire::Cancel {
+        evidence_wire::Cancel { operation_id: id.to_string(), selection_id: Some("evidence-model".to_owned()) }
+    }
+
+    #[test]
+    fn evidence_stop_matches_original_job_not_just_selection_or_shared_slot() { evidence_stop_matches_original_job_not_just_selection_or_shared_slot_body(); }
+
+    pub(super) fn evidence_stop_matches_original_job_not_just_selection_or_shared_slot_body() {
+        let (mut state, owner) = evidence_model(2); let at = Instant::now();
+        let before = serde_json::to_value(evidence_snapshot(&state, true)).unwrap();
+        // Observe1's delayed STOP cannot affect Observe2 under the same folder.
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(1), at).is_err());
+        let mut wrong = evidence_cancel(2); wrong.selection_id = Some("evidence-other".to_owned());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &wrong, at).is_err());
+        assert_eq!(serde_json::to_value(evidence_snapshot(&state, true)).unwrap(), before); assert!(!owner.stopped());
+        state.slot.as_mut().unwrap().operation = Operation::Prepare;
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
+        state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+        state.evidence.epoch += 1;
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
+    }
+
+    #[test]
+    fn evidence_cancel_preserves_source_context_records_github_and_first_cleanup() { evidence_cancel_preserves_source_context_records_github_and_first_cleanup_body(); }
+
+    pub(super) fn evidence_cancel_preserves_source_context_records_github_and_first_cleanup_body() {
+        let (mut state, owner) = evidence_model(3); let at = Instant::now();
+        let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let context = Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 9, project_id: "source-project".to_owned(), project: root, registry_generation: 7,
+            draft: b"{\"unchanged\":true}".to_vec(), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Full });
+        state.context = Some(context.clone());
+        state.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false });
+        state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: token('a'), record_revision: 1, context_revision: 9, availability: AssignmentAvailability::Available });
+        let github = serde_json::to_value(state.github.snapshot()).unwrap(); let original_endpoint = owner.endpoint();
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(3), at).unwrap());
+        let cleanup = state.slot.as_ref().unwrap().cleanup_end;
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(3), at + WORK).unwrap());
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup); assert_eq!(owner.endpoint(), original_endpoint);
+        assert!(Arc::ptr_eq(state.context.as_ref().unwrap(), &context)); assert_eq!(state.records.len(), 1); assert!(!state.records[0].mutation_pending);
+        assert_eq!(state.assignments.len(), 1); assert!(state.assignments[0].availability == AssignmentAvailability::Available);
+        assert_eq!(serde_json::to_value(state.github.snapshot()).unwrap(), github);
+        assert!(state.evidence.selection.is_some()); assert!(owner.stopped());
+        assert_eq!(evidence_snapshot(&state, true).phase, evidence_wire::Phase::Stopping);
+        // Synthetic coordinator fact tests the publication predicate only.
+        // No task ran, and this is not native join/cleanup evidence.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        state.slot.as_mut().unwrap().phase = Phase::Idle;
+        settle_evidence_status(&mut state);
+        assert_eq!(evidence_snapshot(&state, true).phase, evidence_wire::Phase::Cancelled);
+        assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Cancelled));
+        let unrelated = OriginalWork::new(4, false, Weak::new());
+        state.slot = Some(Slot::new(unrelated.clone(), Operation::Prepare, None, None, None));
+        assert!(!cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(3), at).unwrap()); assert!(!unrelated.stopped());
+    }
+
+    #[test]
+    fn evidence_late_error_preserves_first_stop_and_original_deadline() { evidence_late_error_preserves_first_stop_and_original_deadline_body(); }
+
+    pub(super) fn evidence_late_error_preserves_first_stop_and_original_deadline_body() {
+        for first in [Reason::UserCancelled, Reason::Deadline] {
+            let (mut state, owner) = evidence_model(5); let at = Instant::now();
+            state.slot.as_mut().unwrap().stop(first, at); let cleanup = state.slot.as_ref().unwrap().cleanup_end;
+            for later in [EvidenceProblem::ObservationFailed, EvidenceProblem::Deadline, EvidenceProblem::Limit] {
+                assert!(!record_evidence_failure(&mut state, &owner, later, at + WORK));
+                assert_eq!(evidence_snapshot(&state, true).problem, Some(evidence_reason(first)));
+                assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup);
+            }
+        }
+        let (mut state, owner) = evidence_model(6); let end = owner.endpoint().unwrap();
+        assert!(record_evidence_failure(&mut state, &owner, EvidenceProblem::ObservationFailed, end + WORK));
+        assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Deadline));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end + CLEANUP));
+        let (mut state, owner) = evidence_model(7); let end = owner.endpoint().unwrap();
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(7), end + WORK).unwrap());
+        assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Deadline));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end + CLEANUP));
+    }
+
+    #[test]
+    fn evidence_unknown_retains_original_binding_and_cannot_become_late_success() { evidence_unknown_retains_original_binding_and_cannot_become_late_success_body(); }
+
+    pub(super) fn evidence_unknown_retains_original_binding_and_cannot_become_late_success_body() {
+        let (mut state, owner) = evidence_model(8); let at = Instant::now();
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(8), at).unwrap());
+        let cleanup = state.slot.as_ref().unwrap().cleanup_end;
+        assert!(record_evidence_failure(&mut state, &owner, EvidenceProblem::CleanupUnknown, at + WORK));
+        state.evidence.revoke(true);
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(8), at + WORK).unwrap());
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup);
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        let slot = state.slot.as_mut().unwrap(); slot.phase = Phase::Idle; slot.settlement = Settlement::LateKnown;
+        settle_evidence_status(&mut state);
+        let status = evidence_snapshot(&state, true);
+        assert_eq!(status.phase, evidence_wire::Phase::Unknown); assert_eq!(status.problem, Some(EvidenceProblem::CleanupUnknown));
+        assert_eq!(status.operation.unwrap().operation_id, "8"); assert!(status.selection.is_none() && status.result.is_none());
+    }
+
+    #[test]
+    fn evidence_folder_label_is_bounded_and_never_a_full_or_controlled_path() { evidence_folder_label_is_bounded_and_never_a_full_or_controlled_path_body(); }
+
+    pub(super) fn evidence_folder_label_is_bounded_and_never_a_full_or_controlled_path_body() {
+        use std::path::Path;
+        assert_eq!(evidence_display_name(Path::new("/private/source/Évidence")), "Évidence");
+        for leaf in ["hidden\u{200b}name", "soft\u{00ad}name", "bidi\u{202e}name", "slash\\name", "line\nname"] {
+            assert_eq!(evidence_display_name(&Path::new("/private/source").join(leaf)), "Selected evidence folder");
+        }
+        assert_eq!(evidence_display_name(&Path::new("/private/source").join("a".repeat(129))), "Selected evidence folder");
+        assert_eq!(evidence_display_name(Path::new("/")), "Selected evidence folder");
+    }
+
+    #[test]
+    fn late_stop_uses_original_due_endpoint_and_never_renews_review_or_cleanup() {
+        let start = Instant::now(); let review = start + REVIEW;
+        let mut slot = slot(None, Some(review)); slot.owner.set_endpoint(Some(start + WORK));
+        slot.stop(Reason::DocumentLost, start + WORK + Duration::from_secs(20));
+        assert_eq!(slot.cleanup_end, Some(start + WORK + CLEANUP));
+        slot.stop(Reason::UserCancelled, review + Duration::from_secs(20));
+        assert_eq!(slot.cleanup_end, Some(start + WORK + CLEANUP));
+        assert_eq!(slot.review_end, Some(review)); assert!(slot.owner.stopped());
+        assert_eq!(first_cleanup_end(review + WORK, Some(review + WORK), Some(review)), review + CLEANUP);
+    }
+
+    #[test]
+    fn gui_failure_stops_exact_original_without_response_or_settlement() {
+        // Actual state transition, closed DATA only: no bridge, native panel,
+        // worker, callback or purported execution/settlement receipt.
+        let at = Instant::now(); let mut state = empty_state();
+        let owner = OriginalWork::new(7, true, Weak::new()); owner.set_endpoint(None);
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        {
+            let mut facts = owner.gui.facts().unwrap();
+            facts.dispatched = true; facts.created = true; facts.showing = true;
+        }
+        let mut work = Slot::new(owner.clone(), Operation::ChooseProject, None, None, None);
+        work.phase = Phase::Picking; state.slot = Some(work);
+        assert!(!quit_question_admitted(&state));
+
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::SourceRefused, at);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &owner) && owner.stopped() && work.discard);
+        assert!(work.operation == Operation::ChooseProject && work.phase == Phase::Stopping);
+        assert_eq!(work.reason, Reason::SourceRefused);
+        assert_eq!(work.cleanup_end, Some(at + CLEANUP));
+        assert_eq!((work.review_end, owner.endpoint()), (None, None));
+        {
+            let facts = owner.gui.facts().unwrap();
+            assert_eq!(facts.refusal, Some(Reason::SourceRefused));
+            assert!(facts.dispatched && facts.created && facts.showing);
+            assert!(!facts.response && !facts.accepted && !facts.declined && facts.accepted_at.is_none());
+            assert!(!facts.not_created && !facts.destroyed && !facts.released && !facts.close_queued
+                && !facts.close_ack && !facts.release_queued && facts.selected.is_none());
+        }
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
+        assert!(owner.coordinator.lock().unwrap().receipt == JoinReceipt::Pending);
+
+        // Later receipt/lock delay does not choose a fresh cleanup endpoint;
+        // an existing Unknown or first reason cannot be repaired by STOP.
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        state.slot.as_mut().unwrap().settlement = Settlement::Unknown; state.unknown = true;
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK);
+        let work = state.slot.as_ref().unwrap();
+        assert!(state.unknown && work.phase == Phase::Unknown && work.settlement == Settlement::Unknown);
+        assert_eq!((work.reason, work.cleanup_end), (Reason::SourceRefused, Some(at + CLEANUP)));
+        assert_eq!(owner.gui.facts().unwrap().refusal, Some(Reason::SourceRefused));
+
+        // A reused numeric operation ID is never authority over a successor's
+        // Slot/quit, GUI facts, clocks or STOP bit. Only the old original stops.
+        let other = OriginalWork::new(owner.id, true, Weak::new()); other.set_endpoint(None);
+        let mut foreign = Slot::new(other.clone(), Operation::ChooseProject, None, None, None);
+        foreign.phase = Phase::Picking; state.slot = Some(foreign); state.quit = Some(other.clone());
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK + CLEANUP);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &other) && work.phase == Phase::Picking && !other.stopped());
+        assert_eq!((work.reason, work.cleanup_end, state.quit_cleanup_end), (Reason::None, None, None));
+        assert_eq!(other.gui.facts().unwrap().refusal, None);
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
+    }
+
+    #[test]
+    fn human_quit_stop_has_one_clock_without_inventing_a_work_endpoint() {
+        let at = Instant::now(); let mut state = empty_state();
+        let owner = OriginalWork::new(2, false, Weak::new()); owner.set_endpoint(None); state.quit = Some(owner.clone());
+        stop_quit(&mut state, at); stop_quit(&mut state, at + WORK);
+        assert_eq!(state.quit_cleanup_end, Some(at + CLEANUP)); assert_eq!(owner.endpoint(), None); assert!(owner.stopped());
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+        state.stopping = true;
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+        state.quit_accepted = true;
+        assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
+        stop_quit(&mut state, at + WORK + CLEANUP);
+        assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
+        state.quit = None;
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+
+
+    }
+
+    #[test]
+    fn mutation_admission_and_cancel_never_restore_prior_assignment() {
+        let key = RecordKey { id: token('a'), revision: 1 }; let payload = scalar(); let mut state = empty_state();
+        state.records.push(Record { key: key.clone(), payload: payload.clone(), mutation_pending: false });
+        state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: key.id.clone(), record_revision: 1, context_revision: 1, availability: AssignmentAvailability::Available });
+        state.slot = Some(slot(Some(key.clone()), None));
+        revoke_record(&mut state, &key);
+        if let Some(slot) = &mut state.slot { slot.stop(Reason::UserCancelled, Instant::now()); }
+        assert!(state.records[0].mutation_pending); assert!(Arc::ptr_eq(&state.records[0].payload, &payload));
+        assert!(state.assignments[0].availability == AssignmentAvailability::Unavailable);
+        invalidate_all(&mut state); assert!(state.assignments[0].availability == AssignmentAvailability::Unavailable);
+    }
+
+
+    fn input_scope(platform: Platform, stage: Stage, purpose: Purpose) -> Arc<NativeContext> {
+        Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "inert-input-project".into(),
+            project: asset_source::RegisteredRoot { path: "/inert/never-opened/project".into(),
+                identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+            registry_generation: 1, draft: b"{}".to_vec(), platform, stage, purpose })
+    }
+    fn ios_scope(stage: Stage, purpose: Purpose) -> Arc<NativeContext> { input_scope(Platform::Ios, stage, purpose) }
+    #[test]
+    fn review_and_commitment_borrow_original_fields_without_export_or_double_encoding() {
+        use crate::github_setup_protocol as wire;
+        use wire::SecretRequirement as R;
+        let native = ios_scope(Stage::Production, Purpose::Store);
+        for (kind, values, selected) in [
+            (Kind::AppleReviewContact, serde_json::json!({"contactFirstName":"Fictional", "contactLastName":"Reviewer", "contactEmail":"review@example.invalid", "contactPhone":"+15555550100"}),
+                vec![R::ContactFirstName, R::ContactLastName, R::ContactEmail, R::ContactPhone]),
+            (Kind::AppleReviewDemo, serde_json::json!({"demoUsername":"fictional-demo", "demoPassword":"fictional-password"}),
+                vec![R::DemoUsername, R::DemoPassword]),
+            (Kind::OperationCommitment, serde_json::json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "version":"fixture-v1"}),
+                vec![R::KeyBase64]),
+        ] {
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            state.context = Some(native.clone());
+            let key = RecordKey { id: token('a'), revision: 1 };
+            let payload = Arc::new(Payload { kind, material: None,
+                fields: Some(commands::own_fields(kind, &values).ok().unwrap()) });
+            state.records.push(Record { key: key.clone(), payload: payload.clone(), mutation_pending: false });
+            state.assignments.push(Assignment { kind, record_id: key.id.clone(), record_revision: 1,
+                context_revision: 1, availability: AssignmentAvailability::Available });
+            for requirement in selected {
+                let selection = wire::SecretSelection { mode: wire::SecretMode::Create,
+                    stage: wire::EnvironmentStage::Production, requirement,
+                    source: wire::SecretRecord { record_id: key.id.0.clone(), record_revision: 1, context_revision: 1 } };
+                let loan = github_secret::borrow_material(&state, &selection, &native.project_id, 1, &native.project).unwrap();
+                assert!(Arc::ptr_eq(loan.census_parts().1, &payload));
+                assert!(loan.source().material.encoding == wire::SecretEncoding::Utf8);
+                let frame = loan.frame(&[0; 32]).unwrap();
+                assert_eq!(&frame.bytes()[44..], values[requirement.field()].as_str().unwrap().as_bytes());
+                let public = serde_json::to_string(loan.source()).unwrap();
+                assert!(!public.contains(values[requirement.field()].as_str().unwrap()));
+                state.lock_pending = true;
+                assert!(!loan.current(&state, &native.project_id, 1, &native.project));
+                assert!(github_secret::borrow_material(&state, &selection, &native.project_id, 1, &native.project).is_err());
+                state.lock_pending = false;
+                let mut stale = selection.clone(); stale.source.record_revision += 1;
+                assert!(github_secret::borrow_material(&state, &stale, &native.project_id, 1, &native.project).is_err());
+                stale = selection.clone(); stale.stage = wire::EnvironmentStage::Candidate;
+                assert!(github_secret::borrow_material(&state, &stale, &native.project_id, 1, &native.project).is_err());
+                state.records[0].payload = Arc::new(Payload { kind, material: None,
+                    fields: Some(commands::own_fields(kind, &values).ok().unwrap()) });
+                assert!(!loan.current(&state, &native.project_id, 1, &native.project));
+                state.records[0].payload = payload.clone();
+                assert!(loan.current(&state, &native.project_id, 1, &native.project));
+            }
+            if kind == Kind::OperationCommitment {
+                let selection = wire::VariableSelection { mode: wire::VariableMode::Create,
+                    stage: wire::EnvironmentStage::Production, requirement: wire::VariableRequirement::CommitmentVersion,
+                    source: wire::SecretRecord { record_id: key.id.0.clone(), record_revision: 1, context_revision: 1 } };
+                let loan = github_variable::borrow_material(&state, &selection, &native.project_id, 1, &native.project).unwrap();
+                assert!(Arc::ptr_eq(loan.census_parts().1, &payload));
+                assert_eq!(loan.value().unwrap(), "fixture-v1");
+                let frame = loan.go_frame("fixture-1", &"a".repeat(64), "fictional-token").unwrap();
+                assert!(!String::from_utf8(frame).unwrap().contains(values["keyBase64"].as_str().unwrap()));
+                state.assignments[0].availability = AssignmentAvailability::Unavailable;
+                assert!(!loan.current(&state, &native.project_id, 1, &native.project));
+            }
+        }
+    }
+
+    #[test]
+    fn macos_input_context_matrix_keeps_platform_kinds_and_ios_signing_separate() {
+        let kinds = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
+            Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken,
+            Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment];
+        for stage in [Stage::Candidate, Stage::ExternalTesting, Stage::Production] {
+            for purpose in [Purpose::Full, Purpose::Store] {
+                assert!(macos_session_context(Platform::Ios, stage, purpose));
+                let context = ios_scope(stage, purpose);
+                for kind in kinds {
+                    let allowed = kind == Kind::AscP8 || stage != Stage::Candidate
+                        && [Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment].contains(&kind);
+                    assert_eq!(macos_session_kind(Platform::Ios, stage, purpose, kind), allowed);
+                    assert_eq!(session_kind_gate(&context, kind).is_ok(),
+                        !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || allowed);
+                }
+            }
+            assert_eq!(macos_session_context(Platform::Ios, stage, Purpose::Signing), stage == Stage::Candidate);
+            for kind in kinds {
+                let old_signing = stage == Stage::Candidate
+                    && [Kind::AppleP12, Kind::AppleProfile, Kind::IosFirebase, Kind::ProjectReadToken].contains(&kind);
+                assert_eq!(macos_session_kind(Platform::Ios, stage, Purpose::Signing, kind), old_signing);
+            }
+            for platform in [Platform::Android, Platform::Project] {
+                for purpose in [Purpose::Full, Purpose::Signing, Purpose::Store] {
+                    assert!(macos_session_context(platform, stage, purpose));
+                    let context = input_scope(platform, stage, purpose);
+                    for kind in kinds {
+                        let allowed = match platform {
+                            Platform::Android => [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::GoogleWif].contains(&kind),
+                            Platform::Project => kind == Kind::ProjectReadToken,
+                            Platform::Ios | Platform::Both => unreachable!(),
+                        };
+                        assert_eq!(macos_session_kind(platform, stage, purpose, kind), allowed);
+                        assert_eq!(session_kind_gate(&context, kind).is_ok(),
+                            !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || allowed);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn macos_cached_record_preview_publication_and_old_context_cannot_bypass_kind_gate() {
+        for (platform, kind, purpose, rejected) in [
+            (Platform::Ios, Kind::ProjectReadToken, Purpose::Signing,
+                [(Platform::Ios, Stage::Production, Purpose::Full), (Platform::Ios, Stage::Production, Purpose::Store)]),
+            (Platform::Android, Kind::GoogleWif, Purpose::Full,
+                [(Platform::Project, Stage::Candidate, Purpose::Full), (Platform::Ios, Stage::Candidate, Purpose::Store)]),
+            (Platform::Project, Kind::ProjectReadToken, Purpose::Signing,
+                [(Platform::Android, Stage::Candidate, Purpose::Signing), (Platform::Ios, Stage::Production, Purpose::Full)]),
+        ] {
+            let tokens = || TokenBatch { selection: token('a'), record: token('b'), preview: token('c'), bind: token('d') };
+            let key = RecordKey { id: token('e'), revision: 1 };
+            // Scalar lifecycle DATA only. No captured file, native operation or
+            // assessment receipt is invented to exercise cached-use denial.
+            let payload = Arc::new(Payload { kind, material: None, fields: None });
+            assert!(payload.usable_source());
+            let mut state = empty_state(); let source = input_scope(platform, Stage::Candidate, purpose);
+            let mut original = Slot::new(OriginalWork::new(9, false, Weak::new()), Operation::Prepare,
+                Some(source.clone()), Some(key.clone()), Some(Instant::now() + REVIEW));
+            original.kind = Some(payload.kind); state.context = Some(source.clone());
+            state.records.push(Record { key: key.clone(), payload: payload.clone(), mutation_pending: false });
+            let assignment = Assignment { kind: payload.kind, record_id: key.id.clone(), record_revision: 1,
+                context_revision: 1, availability: AssignmentAvailability::Available };
+            state.assignments.push(assignment.clone());
+            assert!(record_usable(&state, &original, &key, payload.kind));
+            assert!(record_assessed(&state, &key));
+            let preview = Preview { token: token('f'), action: Action::Bind, bind_token: None, record: Some(key.clone()),
+                subject: PreviewSubject::new(payload.kind, SubjectChange::Assign, Some(&key)) };
+            assert!(preview_subject_valid(&state, &original, &preview));
+            for (next_platform, stage, next_purpose) in rejected {
+                original.context = Some(source.clone());
+                let next = input_scope(next_platform, stage, next_purpose); state.context = Some(next.clone());
+                // Even the same numeric revision cannot make the old Arc current.
+                assert_eq!(session_slot_kind_gate(&state, &original, payload.kind).err().map(|e| e.reason), Some(Reason::ContextStale));
+                original.context = Some(next);
+                assert_eq!(session_slot_kind_gate(&state, &original, payload.kind).err().map(|e| e.reason), Some(Reason::UnsupportedFormat));
+                assert!(!record_usable(&state, &original, &key, payload.kind));
+                assert!(!record_assessed(&state, &key) && !assignment_available(&state, &assignment));
+                assert!(!preview_subject_valid(&state, &original, &preview));
+                for staged in [
+                    Staged::Selected { payload: payload.clone(), tokens: tokens() },
+                    Staged::Prepared { result: Err(AssetError::invalid().into()), tokens: tokens() },
+                    Staged::Committed { bind: Some(token('d')) }, Staged::Bound(assignment.clone()),
+                ] { assert!(session_staged_kind_gate(&state, &original, &staged).is_err()); }
+                original.context = None;
+                let deletion = Preview { token: token('f'), action: Action::Delete, bind_token: None, record: Some(key.clone()),
+                    subject: PreviewSubject::new(payload.kind, SubjectChange::Delete, Some(&key)) };
+                assert!(preview_subject_valid(&state, &original, &deletion));
+                assert!(session_staged_kind_gate(&state, &original, &Staged::Delete(tokens())).is_ok());
+            }
+        }
+    }
+    #[test]
+    fn asc_context_retirement_spends_selection_review_and_assignment_without_restoring() {
+        let mut state = empty_state(); let context = ios_scope(Stage::Candidate, Purpose::Full);
+        state.context = Some(context.clone());
+        let mut original = slot(None, Some(Instant::now() + REVIEW));
+        original.context = Some(context); original.kind = Some(Kind::AscP8);
+        original.selection = Some(token('a'));
+        original.preview = Some(Preview { token: token('b'), action: Action::Save, bind_token: Some(token('c')), record: None,
+            subject: PreviewSubject::new(Kind::AscP8, SubjectChange::New, None) });
+        state.assignments.push(Assignment { kind: Kind::AscP8, record_id: token('d'), record_revision: 1,
+            context_revision: 1, availability: AssignmentAvailability::Available });
+        state.slot = Some(original);
+        let at = Instant::now(); retire_context_authority(&mut state, at);
+        let slot = state.slot.as_ref().unwrap(); let cleanup = slot.cleanup_end;
+        assert!(slot.selection.is_none() && slot.preview.is_none() && slot.owner.stopped());
+        assert_eq!(slot.reason, Reason::ContextStale);
+        assert!(state.assignments[0].availability == AssignmentAvailability::Unavailable);
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, at + WORK);
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup);
+        assert!(state.assignments[0].availability == AssignmentAvailability::Unavailable);
+    }
+
+    #[test]
+    fn preview_subject_is_exact_and_offer_never_assigns_or_keeps_a_selection_token() {
+        let mut state = empty_state(); let mut slot = slot(None, None);
+        let context = ios_scope(Stage::Candidate, Purpose::Signing);
+        state.context = Some(context.clone()); slot.context = Some(context);
+        let payload = Arc::new(Payload { kind: Kind::ProjectReadToken, material: None, fields: None });
+        slot.kind = Some(payload.kind);
+        slot.selection = Some(token('b'));
+        slot.candidate = Some(Candidate { payload: payload.clone(), record_id: token('a'), existing: None });
+        let preview = Preview { token: token('c'), action: Action::Save, bind_token: Some(token('d')), record: None,
+            subject: PreviewSubject::new(Kind::ProjectReadToken, SubjectChange::New, None) };
+        offer_preview(&state, &mut slot, preview);
+        assert!(slot.phase == Phase::Preview && slot.selection.is_none()); assert!(state.assignments.is_empty());
+        let key = RecordKey { id: token('a'), revision: 1 };
+        state.records.push(Record { key: key.clone(), payload, mutation_pending: false });
+        slot.result_record = Some(key.clone());
+        let mut preview = Preview { token: token('d'), action: Action::Bind, bind_token: None, record: Some(key.clone()),
+            subject: PreviewSubject::new(Kind::ProjectReadToken, SubjectChange::Assign, Some(&key)) };
+        assert!(preview_subject_valid(&state, &slot, &preview)); assert!(state.assignments.is_empty());
+        if let PreviewSubject::Record { record_revision, .. } = &mut preview.subject { *record_revision = Some(0); } assert!(!preview_subject_valid(&state, &slot, &preview));
+        if let PreviewSubject::Record { record_revision, .. } = &mut preview.subject { *record_revision = None; } assert!(!preview_subject_valid(&state, &slot, &preview));
+        offer_preview(&state, &mut slot, preview);
+        assert!(slot.phase == Phase::Stopping && slot.preview.is_none()); assert!(state.assignments.is_empty());
+    }
+
+    #[test]
+    fn end_of_body_alone_cannot_substitute_for_an_original_join() {
+        let owner = OriginalWork::new(1, false, Weak::new());
+        owner.ended.store(true, Ordering::SeqCst);
+        assert_eq!(owner.join_if_ended(), None); assert!(!owner.resources_settled());
+    }
+
+    #[test]
+    fn token_batch_is_closed_distinct_and_session_charge_includes_metadata() {
+        let mut tokens = TokenBatch { selection: token('a'), record: token('b'), preview: token('c'), bind: token('d') };
+        assert!(tokens_distinct(&tokens)); tokens.bind = tokens.preview.clone(); assert!(!tokens_distinct(&tokens));
+        tokens.bind = token('G'); assert!(!tokens_distinct(&tokens));
+        assert_eq!(scalar().bytes(), RECORD_METADATA_BYTES);
+    }
+
+    #[test]
+    fn maximum_status_revision_is_reserved_for_the_one_redacted_tombstone() {
+        assert_eq!(status_successor(u32::MAX - 2), Some(u32::MAX - 1));
+        assert_eq!(status_successor(u32::MAX - 1), None); assert_eq!(status_successor(u32::MAX), None);
+    }
+
+    #[test]
+    fn a_late_lock_cannot_call_a_candidate_only_retirement_an_empty_session() {
+        let mut state = empty_state(); state.lock_pending = true;
+        state.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false });
+        assert!(!session_data_empty(&state)); assert!(state.lock_pending && state.session);
+        state.records.clear(); assert!(session_data_empty(&state));
+        // This predicate is data emptiness only, not a fabricated native join.
+    }
+
+    // Synthetic facts for predicate coverage only: no native join/GUI evidence
+    // is produced, and no owner task or filesystem operation is started.
+    fn late_unknown() -> DocumentState {
+        let mut state = empty_state();
+        state.lifetime.navigation(true); state.lifetime.started(true);
+        state.lifetime.crash_hook_installed(); state.lifetime.finished(true);
+        state.unknown = true; state.session = false;
+        let mut original = slot(None, Some(Instant::now() + REVIEW));
+        original.phase = Phase::Unknown; original.settlement = Settlement::LateKnown;
+        original.cleanup_end = Some(Instant::now());
+        original.owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        state.slot = Some(original); state
+    }
+
+    #[test]
+    fn first_unknown_quit_requires_closed_session_and_complete_original_settlement() {
+        let state = late_unknown();
+        let original = state.slot.as_ref().unwrap();
+        let endpoints = (original.cleanup_end, original.review_end, original.owner.endpoint());
+        assert!(quit_question_admitted(&state)); assert!(state.unknown);
+        assert_eq!(endpoints, (original.cleanup_end, original.review_end, original.owner.endpoint()));
+        for modify in [
+            (|s: &mut DocumentState| s.session = true) as fn(&mut DocumentState),
+            |s| s.lock_pending = true, |s| s.retiring = true, |s| s.exhausted = true,
+            |s| s.lost_observed = true, |s| { s.lifetime.invalidate(); },
+            |s| s.stopping = true, |s| s.quit_pending = true, |s| s.quit_accepted = true,
+            |s| s.slot.as_ref().unwrap().owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending,
+            |s| s.slot.as_ref().unwrap().owner.gui.facts().unwrap().not_created = false,
+            |s| s.slot.as_ref().unwrap().owner.retired.store(false, Ordering::SeqCst),
+            |s| s.slot.as_mut().unwrap().candidate = Some(Candidate { payload: scalar(), record_id: token('a'), existing: None }),
+            |s| s.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false }),
+        ] {
+            let mut state = late_unknown(); modify(&mut state); assert!(!quit_question_admitted(&state));
+        }
+        // Ordinary pre-existing behavior allows asking before an open session
+        // is discarded; only native OK initiates that shutdown.
+        assert!(quit_question_admitted(&empty_state()));
+    }
+
+    #[test]
+    fn unknown_quit_repeat_requires_genuine_decline_and_normal_original_join() {
+        let mut state = late_unknown(); let quit = OriginalWork::new(2, true, Weak::new());
+        quit.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        {
+            let mut facts = quit.gui.facts().unwrap();
+            facts.created = true; facts.response = true; facts.declined = true;
+            facts.destroyed = true; facts.released = true; facts.close_ack = true;
+        }
+        state.quit = Some(quit.clone()); state.quit_cleanup_end = Some(Instant::now());
+        let endpoint = state.quit_cleanup_end;
+        assert!(quit_question_admitted(&state));
+        for receipt in [JoinReceipt::New, JoinReceipt::Pending, JoinReceipt::Failed] {
+            quit.coordinator.lock().unwrap().receipt = receipt;
+            assert!(!quit_question_admitted(&state));
+        }
+        quit.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        for modify in [
+            (|f: &mut GuiFacts| f.declined = false) as fn(&mut GuiFacts),
+            |f| f.accepted = true, |f| f.response = false, |f| f.not_created = true,
+            |f| f.created = false, |f| f.refusal = Some(Reason::SourceRefused),
+            |f| f.close_ack = false, |f| f.destroyed = false, |f| f.released = false,
+        ] {
+            {
+                let mut facts = quit.gui.facts().unwrap();
+                facts.declined = true; facts.accepted = false; facts.response = true;
+                facts.not_created = false; facts.created = true; facts.refusal = None;
+                facts.close_ack = true; facts.destroyed = true; facts.released = true;
+                modify(&mut facts);
+            }
+            assert!(!quit_question_admitted(&state));
+        }
+        assert!(state.unknown && !state.quit_accepted && !state.stopping);
+        assert_eq!(state.quit_cleanup_end, endpoint);
+    }
+
+    #[test]
+    fn native_decline_cannot_be_inferred_from_interruption_or_a_late_accept() {
+        assert_eq!(admitted_response(NativeResponse::Accept, true, false, true), (true, false));
+        assert_eq!(admitted_response(NativeResponse::Decline, true, false, true), (false, true));
+        assert_eq!(admitted_response(NativeResponse::Decline, true, false, false), (false, false));
+        for response in [NativeResponse::Accept, NativeResponse::Decline, NativeResponse::Other] {
+            assert_eq!(admitted_response(response, true, true, true), (false, false));
+            assert_eq!(admitted_response(response, false, false, true), (false, false));
+        }
+        assert_eq!(admitted_response(NativeResponse::Other, true, false, true), (false, false));
+    }
+
+    #[test]
+    fn late_known_empty_lock_requires_reinserted_slot_and_positive_original_resources() {
+        let mut state = late_unknown(); state.session = true; state.lock_pending = true;
+        let mut original = state.slot.take().unwrap();
+        original.candidate = Some(Candidate { payload: scalar(), record_id: token('a'), existing: None });
+        state.slot = Some(original); // Actual reconcile must do this before the predicate.
+        assert!(!complete_empty_session_lock(&mut state));
+        state.slot.as_mut().unwrap().candidate = None;
+        state.retiring = true; assert!(!complete_empty_session_lock(&mut state)); state.retiring = false;
+        state.slot.as_ref().unwrap().owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        assert!(!complete_empty_session_lock(&mut state));
+        state.slot.as_ref().unwrap().owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        let original = state.slot.as_ref().unwrap();
+        let endpoints = (original.cleanup_end, original.review_end, original.owner.endpoint());
+        assert!(complete_empty_session_lock(&mut state));
+        assert!(state.unknown && !state.session && !state.lock_pending);
+        let original = state.slot.as_ref().unwrap();
+        assert_eq!(endpoints, (original.cleanup_end, original.review_end, original.owner.endpoint()));
+        assert!(!complete_empty_session_lock(&mut state));
+    }
+
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn keyring_memory_model() -> (DocumentState, Arc<OriginalWork>) {
+        let mut state = empty_state();
+        state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+        let owner = OriginalWork::new(1, false, Weak::new());
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+        state.slot = Some(slot); (state, owner)
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_charge_blocks_context_copy_and_same_owner_child_before_dispatch() {
+        // Same production reciprocal decision: an original secret worker's
+        // debit blocks fresh copies, while idle consent/ordinary Setup does not.
+        for (lookup,secret,blocked) in [(false,false,false),(true,false,true),(false,true,true),(true,true,true)]{
+            assert_eq!(allocation_conflict_gate(lookup,secret).err().map(|v|v.reason),blocked.then_some(Reason::Busy));
+        }
+        let mut unknown=empty_state();unknown.lifetime.crash_hook_installed();unknown.lifetime.started(true);unknown.lifetime.finished(true);
+        unknown.unknown=true;
+        assert_eq!(common_document_gate(&unknown,true,||Ok(())).err().map(|v|v.reason),Some(Reason::CleanupUnknown));
+        let (mut state, owner) = keyring_memory_model();
+        *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        let copied = std::cell::Cell::new(false);
+        let context_copy = (|| -> Result<(), AssetError> {
+            lookup_allocation_gate(&state)?; // Same predicate, before context() allocates a draft.
+            copied.set(true); let _ = commands::draft_bytes(&Value::Object(Map::new()))?; Ok(())
+        })();
+        assert_eq!(context_copy.err().map(|error| error.reason), Some(Reason::Busy)); assert!(!copied.get());
+        assert_eq!(common_document_gate(&state, true, || Ok(())).err().map(|error| error.reason), Some(Reason::Busy));
+        assert_eq!(prepare_copy_start(&mut state, &owner), Err(Reason::Busy));
+        assert!(!owner.large_work_started.load(Ordering::SeqCst));
+        let mut original = Box::pin(child(&owner, ChildJob::Tokens));
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(matches!(original.as_mut().poll(&mut cx), Poll::Ready(Err(Reason::Busy))));
+        drop(original);
+        let book = owner.child.try_lock().unwrap();
+        assert!(book.handle.is_none() && book.receipt == JoinReceipt::New); drop(book);
+        // STOP still works and cannot refund or relax the reciprocal predicate.
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, Instant::now());
+        assert!(owner.stopped() && owner.keyring.lock().unwrap().memory_held());
+        assert_eq!(lookup_allocation_gate(&state).err().map(|error| error.reason), Some(Reason::Busy));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_request_copy_start_is_sticky_and_busy_books_never_enter() {
+        use crate::vault_keyring_linux::{LookupInput, Problem};
+        let (mut state, owner) = keyring_memory_model();
+        assert!(prepare_copy_start(&mut state, &owner).is_ok());
+        assert!(owner.large_work_started.load(Ordering::SeqCst));
+        state.slot.as_mut().unwrap().phase = Phase::Admitting;
+        assert!(prepare_copy_start(&mut state, &owner).is_ok());
+        assert!(owner.large_work_started.load(Ordering::SeqCst));
+        let enter = || lookup_memory::enter(&state, &owner,
+            LookupInput::new(std::path::Path::new("/inert/not-opened"), "/collection", "data-vault", "data-generation").unwrap(),
+            Instant::now() + WORK);
+        // Exercise the actual nonblocking custody-lock seams before any SDK
+        // construction; these model owners have no original coordinator handle.
+        {
+            let _held = owner.child.try_lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.source.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.retirement.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.keyring.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        assert!(!owner.keyring.lock().unwrap().started());
+        assert!(!owner.keyring.lock().unwrap().memory_held());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_refund_requires_join_predicates_disposal_and_keeps_unknown_started_facts() {
+        let (mut state, owner) = keyring_memory_model();
+        *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        assert!(!owner.dispose_keyring_storage());
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        assert!(!owner.dispose_keyring_storage());
+        // These are explicit predicate DATA inputs, not fabricated native joins.
+        // Constructor refusal has positively created NO original SDK resource.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        assert!(owner.original_resources_settled() && !owner.resources_settled());
+        owner.retired.store(false, Ordering::SeqCst); assert!(!owner.dispose_keyring_storage());
+        owner.retired.store(true, Ordering::SeqCst);
+        {
+            let _draining = owner.retirement.lock().unwrap();
+            assert!(!owner.dispose_keyring_storage());
+        }
+        state.unknown = true;
+        let slot = state.slot.as_mut().unwrap(); slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+        owner.stop(); let at = owner.keyring.lock().unwrap().problem_at();
+        assert!(owner.keyring.lock().unwrap().memory_held());
+        assert!(owner.dispose_keyring_storage()); assert!(!owner.dispose_keyring_storage());
+        assert!(owner.resources_settled());
+        let book = owner.keyring.lock().unwrap();
+        assert!(book.started() && book.allocations_released() && !book.memory_held() && !book.can_begin());
+        assert_eq!(book.problem_at(), at); drop(book);
+        assert!(state.unknown && state.slot.as_ref().unwrap().phase == Phase::Unknown
+            && state.slot.as_ref().unwrap().settlement == Settlement::Unknown);
+        let other = OriginalWork::new(2, false, Weak::new());
+        other.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        *other.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::shutdown_gate_data(Instant::now() + WORK);
+        assert!(!other.dispose_keyring_storage());
+        let held = other.keyring.lock().unwrap().memory_held();
+        assert!(held && !other.resources_settled());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_gate_requires_current_original_and_never_renews_cleanup_cutoff() {
+        use crate::vault_keyring_linux::{Problem, Step};
+        let mut state = empty_state();
+        state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+        let owner = OriginalWork::new(1, false, Weak::new()); let now = Instant::now();
+        owner.set_endpoint(Some(now + WORK));
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+        state.slot = Some(slot);
+        assert_eq!(keyring_slot_gate(&state, &owner, None, now), Ok(now + WORK));
+        let other = OriginalWork::new(1, false, Weak::new()); // even the same numeric ID is not this original
+        assert_eq!(keyring_slot_gate(&state, &other, Some(Step::RemoveMatch), now), Err(Problem::Interrupted));
+        state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+        // An unrelated operation grants no new keyring work. Cleanup still
+        // belongs to the exact original and keeps its existing endpoint.
+        assert_eq!(keyring_slot_gate(&state, &owner, None, now), Err(Problem::Interrupted));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now), Err(Problem::Interrupted));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now), Ok(now + WORK));
+        state.slot.as_mut().unwrap().operation = Operation::Prepare;
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now + WORK).is_err());
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+        state.lifetime.invalidate(); state.lost_observed = true; state.stopping = true;
+        let cleanup_end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+        assert_eq!(cleanup_end, now + CLEANUP);
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now).is_err());
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end - Duration::from_nanos(1)), Ok(cleanup_end));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end), Err(Problem::CleanupUnknown));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end + Duration::from_nanos(1)), Err(Problem::CleanupUnknown));
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now), Err(Problem::CleanupUnknown));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(cleanup_end));
+        assert_eq!(owner.endpoint(), Some(now + WORK)); // checks never create/extend a lease
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_final_gate_rechecks_changes_after_stream_readiness() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem, Step};
+        use std::sync::atomic::AtomicUsize;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Change { Cutoff, SlotUnknown, DocumentUnknown, OtherOriginal, AlreadyPolled }
+        struct DataCall { polls: Arc<AtomicUsize>, drops: Arc<AtomicUsize>, ready: Arc<AtomicBool> }
+        impl Future for DataCall {
+            type Output = zbus::Result<zbus::Message>;
+            fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                if self.ready.load(Ordering::SeqCst) { Poll::Ready(Err(zbus::Error::InvalidReply)) } else { Poll::Pending }
+            }
+        }
+        impl Drop for DataCall { fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); } }
+        for step in [Step::CloseSession, Step::RemoveMatch] {
+        for change in [Change::Cutoff, Change::SlotUnknown, Change::DocumentUnknown, Change::OtherOriginal, Change::AlreadyPolled] {
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            let now = Instant::now(); let work_end = now + WORK;
+            let owner = OriginalWork::new(1, false, Weak::new()); owner.set_endpoint(Some(work_end));
+            let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+            state.slot = Some(slot);
+            let admitted_end = keyring_slot_gate(&state, &owner, Some(step), now).unwrap();
+            assert_eq!(admitted_end, work_end);
+            let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
+            let ready = Arc::new(AtomicBool::new(false));
+            *owner.keyring.lock().unwrap() = LookupBook::cleanup_step_data(step, admitted_end,
+                DataCall { polls: polls.clone(), drops: drops.clone(), ready: ready.clone() });
+            let mut cx = TaskContext::from_waker(Waker::noop());
+            {
+                let mut book = owner.keyring.lock().unwrap();
+                assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPoll)));
+                assert_eq!(polls.load(Ordering::SeqCst), 0); // Stream readiness is NOT permission to send.
+                if change == Change::AlreadyPolled {
+                    let gate = keyring_poll_gate(&state, &owner, &book, now);
+                    book.first_poll(&mut cx, gate);
+                    assert_eq!(polls.load(Ordering::SeqCst), 1);
+                }
+            }
+            // Change the ACTUAL slot after stream readiness, before final gate.
+            // This is the rejected SOURCE01 interleaving, not a replacement gate
+            // model or a fake live DBus/SDK task-settlement receipt.
+            let mut gate_at = now;
+            match change {
+                Change::Cutoff => {
+                    state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+                    gate_at = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+                    assert_eq!(gate_at, now + CLEANUP); assert!(gate_at < admitted_end);
+                }
+                Change::SlotUnknown | Change::AlreadyPolled => {
+                    let slot = state.slot.as_mut().unwrap(); slot.stop(Reason::UserCancelled, now);
+                    slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+                }
+                Change::DocumentUnknown => state.unknown = true,
+                Change::OtherOriginal => {
+                    // Same numeric ID cannot stand in for the original Arc.
+                    state.slot.as_mut().unwrap().owner = OriginalWork::new(owner.id, false, Weak::new());
+                }
+            }
+            let mut book = owner.keyring.lock().unwrap();
+            let gate = keyring_poll_gate(&state, &owner, &book, gate_at);
+            assert_eq!(gate, Err(if change == Change::OtherOriginal { Problem::Interrupted } else { Problem::CleanupUnknown }));
+            if change == Change::AlreadyPolled {
+                // The final gate now denies every NEW call, but an already-polled
+                // original bypasses re-admission and remains owned until Ready.
+                book.interrupt();
+                assert!(book.idle_data_turn(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::SeqCst), 2); assert_eq!(drops.load(Ordering::SeqCst), 0);
+                ready.store(true, Ordering::SeqCst);
+                assert!(book.idle_data_turn(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::SeqCst), 3); assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(book.idle_data_turn(&mut cx).is_pending()); // Keep the original failure, not success.
+                book.shutdown_admission_refused(Problem::CleanupUnknown); // Existing Unknown also denies NEW local shutdown.
+            } else {
+                book.first_poll(&mut cx, gate);
+                assert_eq!(polls.load(Ordering::SeqCst), 0); assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+            assert!(book.cleanup_unknown() && !book.resources_settled());
+            assert_eq!(owner.endpoint(), Some(work_end));
+        }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_pending_cleanup_contracts_to_first_stop_without_losing_original() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem, Step};
+        use std::sync::atomic::AtomicUsize;
+        struct DataCall { ready: bool, polls: Arc<AtomicUsize>, drops: Arc<AtomicUsize> }
+        impl Future for DataCall {
+            type Output = zbus::Result<zbus::Message>;
+            fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                if self.ready {
+                    let call = zbus::Message::method_call("/", "Test").unwrap().build(&()).unwrap();
+                    Poll::Ready(Ok(zbus::Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap().build(&()).unwrap()))
+                } else { Poll::Pending }
+            }
+        }
+        impl Drop for DataCall { fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); } }
+        for step in [Step::CloseSession, Step::RemoveMatch] {
+            for raw_boundary in [false, true] {
+                let (mut state, owner) = keyring_memory_model();
+                let work_end = Instant::now() + WORK; owner.set_endpoint(Some(work_end));
+                let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
+                let mut book = LookupBook::cleanup_step_data(step, work_end,
+                    DataCall { ready: raw_boundary, polls: polls.clone(), drops: drops.clone() });
+                let mut cx = TaskContext::from_waker(Waker::noop());
+                assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPoll)));
+                book.first_poll(&mut cx, keyring_poll_gate(&state, &owner, &book, Instant::now()));
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), usize::from(raw_boundary));
+
+                // The real original slot changes AFTER first poll; no sleep,
+                // alternate lifecycle model or fabricated SDK join is involved.
+                let stop_at = Instant::now();
+                assert!(keyring_problem_stop(&mut state, &owner, Some((Problem::Interrupted, stop_at))));
+                let end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+                assert_eq!(end, stop_at + CLEANUP); assert!(end < work_end);
+                book.interrupt(); let first_failure = book.problem_at();
+                keyring_constrain_cleanup(&state, &owner, &mut book);
+                let midpoint = stop_at + CLEANUP / 2;
+                assert_eq!(book.cleanup_progress_data(midpoint), (Some(midpoint), true, !raw_boundary, raw_boundary));
+                assert!(!book.cleanup_progress_data(midpoint - Duration::from_nanos(1)).1);
+                assert!(keyring_slot_gate(&state, &owner, Some(step), midpoint).is_ok());
+                assert!(keyring_slot_gate(&state, &owner, Some(Step::GetSecret), midpoint).is_err());
+                assert_eq!(keyring_slot_gate(&state, &owner, Some(step), end), Err(Problem::CleanupUnknown));
+                assert!(!state.unknown && !book.document_cleanup_unknown());
+
+                // Repeated/later failures cannot extend either clock or consume
+                // the original future/raw boundary. Another equal-ID owner is
+                // not the same slot; existing Unknown still denies new work.
+                assert!(!keyring_problem_stop(&mut state, &owner, Some((Problem::Crypto, end))));
+                keyring_constrain_cleanup(&state, &owner, &mut book);
+                assert_eq!(book.cleanup_progress_data(midpoint), (Some(midpoint), true, !raw_boundary, raw_boundary));
+                assert_eq!(book.problem_at(), first_failure);
+                assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end));
+                assert_eq!(owner.endpoint(), Some(work_end));
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), usize::from(raw_boundary));
+                assert!(!book.resources_settled() && book.memory_held());
+                let other = OriginalWork::new(owner.id, false, Weak::new());
+                assert!(keyring_slot_gate(&state, &other, Some(step), midpoint).is_err());
+                state.unknown = true;
+                assert_eq!(keyring_slot_gate(&state, &owner, Some(step), midpoint), Err(Problem::CleanupUnknown));
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_local_shutdown_has_its_own_current_slot_cutoff_and_one_use_grant() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem};
+        let mut state = empty_state();
+        let owner = OriginalWork::new(1, false, Weak::new());
+        let now = Instant::now(); let end = now + WORK;
+        owner.set_endpoint(Some(end));
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
+        slot.phase = Phase::Assessing; state.slot = Some(slot);
+        let mut book = LookupBook::shutdown_gate_data(end);
+        let original_failure_at = book.problem_at();
+        assert!(original_failure_at.is_some() && !book.cleanup_unknown());
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(book.current_step().is_none()); // It never impersonates RemoveMatch.
+        assert!(keyring_shutdown_gate(&state, &owner, &book, now).is_err());
+        assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        let grant = keyring_shutdown_gate(&state, &owner, &book, now).unwrap();
+        assert_eq!(grant.into_endpoint(), end);
+        let other = OriginalWork::new(owner.id, false, Weak::new());
+        assert!(matches!(keyring_shutdown_gate(&state, &other, &book, now), Err(Problem::Interrupted)));
+
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+        state.stopping = true; state.lost_observed = true;
+        let cleanup_end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+        assert!(cleanup_end < end);
+        assert_eq!(keyring_shutdown_gate(&state, &owner, &book, now).unwrap().into_endpoint(), cleanup_end);
+        assert!(matches!(keyring_shutdown_gate(&state, &owner, &book, cleanup_end), Err(Problem::CleanupUnknown)));
+        state.unknown = true;
+        let denied = keyring_shutdown_gate(&state, &owner, &book, now);
+        assert!(matches!(denied, Err(Problem::CleanupUnknown)));
+        book.first_poll_shutdown(&mut cx, denied);
+        assert!(!book.shutdown_waiting_first_poll() && !book.resources_settled());
+        assert!(book.cleanup_unknown());
+        assert_eq!(book.problem_at(), original_failure_at);
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(cleanup_end));
+        assert_eq!(owner.endpoint(), Some(end));
+
+        // Even an earlier, valid typed grant cannot outlive the original
+        // staged endpoint when the consumer finally reaches its first poll.
+        let mut expired = LookupBook::shutdown_gate_data(Instant::now());
+        let expired_failure_at = expired.problem_at();
+        assert!(matches!(expired.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        state.unknown = false;
+        let earlier_grant = keyring_shutdown_gate(&state, &owner, &expired, now).unwrap();
+        expired.first_poll_shutdown(&mut cx, Ok(earlier_grant));
+        assert_eq!(expired.problem(), Some(Problem::CleanupUnknown));
+        assert!(!expired.shutdown_waiting_first_poll() && !expired.resources_settled());
+        assert!(expired.cleanup_unknown());
+        assert_eq!(expired.problem_at(), expired_failure_at);
+
+        // A real typed grant cannot manufacture an absent SDK attempt or hide
+        // the already-reconciled failed removal on that impossible path.
+        let mut absent = LookupBook::shutdown_gate_data(end);
+        let absent_failure_at = absent.problem_at();
+        assert!(matches!(absent.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        let grant = keyring_shutdown_gate(&state, &owner, &absent, now).unwrap();
+        absent.first_poll_shutdown(&mut cx, Ok(grant));
+        assert!(absent.cleanup_unknown() && !absent.resources_settled());
+        assert!(!absent.shutdown_waiting_first_poll());
+        assert_eq!(absent.problem_at(), absent_failure_at);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[tokio::test]
+    async fn unstarted_keyring_preserves_session_predicate_but_entered_sdk_never_grants_finality() {
+        // Existing DATA-only receipts exercise the predicate, not native joins.
+        // The newly retained Builder future is NEVER polled or connected here.
+        let owner = OriginalWork::new(1, false, Weak::new());
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        assert!(owner.original_resources_settled());
+        let input = crate::vault_keyring_linux::LookupInput::new(std::path::Path::new("/synthetic/never-opened/bus"),
+            "/collection", "reserved-vault", "reserved-generation").unwrap();
+        owner.keyring.lock().unwrap().begin(input, Instant::now() + WORK, KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
+        assert!(!owner.original_resources_settled());
+        owner.stop(); owner.set_endpoint(Some(Instant::now()));
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Failed;
+        assert!(!owner.original_resources_settled());
+        assert!(owner.keyring.lock().unwrap().started());
+        assert!(owner.keyring.lock().unwrap().memory_held());
+        assert!(!owner.dispose_keyring_storage());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_installation_reveal_document_gate_contract() {
+    let ready = || {
+        let mut state = tests::empty_state();
+        state.lifetime.crash_hook_installed();
+        state.lifetime.started(true);
+        state.lifetime.finished(true);
+        state
+    };
+    assert!(installation_reveal_document_gate(&tests::empty_state()).is_err());
+    assert!(installation_reveal_document_gate(&ready()).is_ok());
+    for change in [
+        (|state: &mut DocumentState| { state.unknown = true; }) as fn(&mut DocumentState),
+        |state| { state.exhausted = true; },
+        |state| { state.stopping = true; },
+        |state| { state.quit_pending = true; },
+        |state| { state.retiring = true; },
+        |state| { state.lock_pending = true; },
+        |state| { state.compatibility_picker_pending = true; },
+        |state| { state.lost_observed = true; },
+        |state| { state.lifetime.invalidate(); },
+    ] {
+        let mut state = ready(); change(&mut state);
+        assert!(installation_reveal_document_gate(&state).is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn installation_reveal_requires_original_document_and_blocks_pending_lifecycle() {
+    assert_installation_reveal_document_gate_contract();
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    feature = "macos-installed-observation", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use installation::{ReadObservation as InstallationReadObservation, OriginalFacts as InstallationOriginalFacts};
+
+#[cfg(all(test, any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+#[path="asset_session_memory_tests.rs"]
+mod shared_memory_tests;
+
+#[cfg(test)]
+pub(crate) fn assert_installation_owner_contracts() { installation::assert_owner_contracts(); }
+
+#[cfg(all(test,any(target_os="linux",target_os="macos")))]
+pub(crate) fn assert_git_prepare_epoch_reconciliation_contracts() { git_local::assert_prepare_epoch_reconciliation_contracts(); }
+
+#[cfg(test)]
+#[test]
+fn installation_original_clock_routing_and_finality_contract() { assert_installation_owner_contracts(); }
+
+#[cfg(test)]
+pub(crate) fn github_setup_consent_data_checks() {
+    // Existing native DATA selection only: actual empty document/edit registry,
+    // no registered root, process, filesystem operation, token or remote call.
+    let bridge=Arc::new(DesktopBridge::new(std::path::PathBuf::from("/never-opened-setup-data")));
+    let document=DocumentBinding::new(bridge.clone());bridge.edits.initial_document("main").unwrap();
+    let edit=bridge.edits.saved_registration_guard(&document.inner.session_identity).unwrap();
+    let stamp=edit.stamp().unwrap();let expiry_stamp=edit.stamp().unwrap();
+    assert!(edit.matches(&stamp) && edit.matches(&expiry_stamp));drop(edit);
+    crate::github_setup_session::consent_data_checks(stamp,expiry_stamp);
+    // Exercise the production second-registry result boundary on the same
+    // real empty document. The earlier external gate is deliberately stale.
+    let mut state=document.lock();let now=Instant::now();
+    assert_eq!(document.github_setup_registry_result(&mut state, Ok(7u8)),Some(7));
+    assert!(!state.unknown);
+    assert!(document.github_setup_registry_result::<u8>(&mut state, Err(AssetError::new(Reason::ContextStale))).is_none());
+    assert!(!state.unknown);
+    state.github.reconcile_setup(now,GitHubReason::None,None);
+    assert_ne!(state.github.setup_status(false,now,GitHubReason::None).reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+    assert!(document.github_setup_registry_result::<u8>(&mut state, Err(AssetError::new(Reason::CleanupUnknown))).is_none());
+    assert!(state.unknown);
+    state.github.reconcile_setup(now,GitHubReason::None,None);
+    let unknown=state.github.setup_status(false,now,GitHubReason::None);
+    assert_eq!(unknown.reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+    assert!(!unknown.available && unknown.consent.is_none() && unknown.operation.is_none());
+    // A later ordinary absence cannot erase the newly latched containing
+    // failure, grant consent, or invent an original/settlement receipt.
+    assert!(document.github_setup_registry_result::<u8>(&mut state, Err(AssetError::new(Reason::ContextStale))).is_none());
+    state.github.reconcile_setup(now,GitHubReason::None,None);
+    assert_eq!(state.github.setup_status(false,now,GitHubReason::None).reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample, ColdState as InstalledUploadColdState};
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use vault::installed_backup_observation::Trace as InstalledUploadBackupTrace;
+
+fn windows_compatible_profile_current_slot(slot:&Slot,sources:&Arc<vault::profile_sources::AppleProfileSources>)->bool {
+#[cfg(any(target_os="linux",target_os="macos"))] {apple_profile::current_slot(slot,sources)}
+#[cfg(not(any(target_os="linux",target_os="macos")))] {match **sources {}}
+}
+fn windows_compatible_key_current_slot(slot:&Slot,sources:&Arc<vault::key_sources::AppleKeySources>)->bool {
+#[cfg(any(target_os="linux",target_os="macos"))] {apple_key::current_slot(slot,sources)}
+#[cfg(not(any(target_os="linux",target_os="macos")))] {match **sources {}}
+}
+#[cfg(not(any(target_os="linux",target_os="macos")))]
+impl OriginalWork {
+ pub(crate) fn request_apple_profile_stop(&self) { self.stop(); }
+ pub(crate) fn apple_profile_source_checked(&self,parent:&crate::saved_command_owner::AppleProfileSession)->bool {false}
+ pub(crate) fn apple_key_source_checked(&self,parent:&crate::saved_command_owner::AppleKeySession)->bool {false}
+ pub(crate) fn apple_key_before_pending_checked(&self,parent:&crate::saved_command_owner::AppleKeySession)->bool {false}
+ pub(crate) fn apple_p12_before_pending_checked(&self,parent:&crate::saved_command_owner::AppleKeySession)->bool {false}
+}

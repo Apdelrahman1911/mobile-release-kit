@@ -1,0 +1,569 @@
+diff --git a/desktop/src/assetSessionController.ts b/desktop/src/assetSessionController.ts
+--- a/desktop/src/assetSessionController.ts
++++ b/desktop/src/assetSessionController.ts
+@@ -4,6 +4,8 @@
+ import type { DesktopApi } from './types.ts';
+ import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields, AppleReviewContactFields, AppleReviewDemoFields, OperationCommitmentFields } from './assetSessionTypes.ts';
+ import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
++import { CredentialUploadKeyController } from './credentialUploadKeyController.ts';
++import { parseUploadKeyStatus, UPLOAD_KEY_OPERATION } from './credentialUploadKey.ts';
+ import { BACKUP_EXPORT_OPERATION, BACKUP_IMPORT_OPERATION, credentialBackupExportRequest, credentialBackupImportRequest } from './credentialBackup.ts';
+
+ function freeze<T>(value: T): T {
+@@ -78,6 +80,7 @@
+     return 'This is a project-path selection, not a credential operation. Cancel belongs to its original native picker; credential discard cannot cancel it.';
+   if (operation?.operation === 'inspect-installation')
+     return 'This is an installation check, not a credential operation. Cancel belongs to the exact original check in Environment; credential discard cannot cancel it.';
++  if (state.busy === 'prepare-upload-key') return 'Wait for the original signing setup check; it has no credential operation to cancel yet.';
+   if (state.originPending) return 'The new action has not supplied a usable acknowledgement of its original operation. Wait for its reply or check status; no cancellation has been sent for it. Cancelling the previous step would not cancel this action.';
+   if (cancellationPending(state)) return 'Cancellation has already been requested for the original operation. Wait for its cleanup status.';
+   return null;
+@@ -117,6 +120,9 @@
+     contextCurrent: false, busy: null, updatingContext: false, observing: false,
+     observationFailed: false, blocked: false, error: null, previewDeadline: null, entryGeneration: 0, selectionKind: null, cancelledOperationId: null, originPending: false, intent: null, reviewReady: false,
+   });
++  private uploadKey = new CredentialUploadKeyController();
++  private uploadReading: Promise<void> | null = null;
++  private uploadPreparationPending = false;
+   private api: DesktopApi | null = null;
+   private disposed = false;
+   private listeners = new Set<() => void>();
+@@ -145,6 +151,7 @@
+   private update(patch: Partial<AssetDisplayState>): void {
+     if (this.disposed) return;
+     this.state = freeze({ ...this.state, ...patch });
++    this.uploadKey.sync(this.state);
+     this.listeners.forEach((listener) => listener());
+   }
+   private current(status = this.state.status): boolean {
+@@ -230,7 +237,7 @@
+         }
+       }
+     }
+-    const originPending = this.intentPhase !== null && (this.intentPhase.operationId === null || this.intentPhase.uncertain);
++    const originPending = this.uploadPreparationPending || this.intentPhase !== null && (this.intentPhase.operationId === null || this.intentPhase.uncertain);
+     const old = this.state.status;
+     if (old && status.statusRevision < old.statusRevision) {
+       this.update({ originPending, reviewReady: this.reviewMatches(old) });
+@@ -344,7 +351,7 @@
+   private run(action: NonNullable<AssetDisplayState['busy']>, invoke: () => Promise<AssetStatus>, phase?: IntentPhase): boolean {
+     if (this.disposed || this.state.busy || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || action !== 'lock' && this.otherOperationReason()) return false;
+     if (phase) this.intentPhase = phase;
+-    this.update({ busy: action, error: null, originPending: phase ? true : this.state.originPending, reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
++    this.update({ busy: action, error: null, originPending: this.uploadPreparationPending || (phase ? true : this.state.originPending), reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
+     void (async () => {
+       try { this.receive(await invoke(), phase); }
+       catch (error) { if (phase) phase.uncertain = true; this.fail(error); }
+@@ -413,6 +420,84 @@
+     this.reviewCeiling = null;
+     return this.run('prepare', () => this.api!.prepareCredential(request), this.phase({ type: 'record', kind, change: replacement ? 'replace' : 'new', record: replacement }, 'prepare', 'save'));
+   }
++  uploadKeySnapshot = () => this.uploadKey.getSnapshot();
++  uploadKeySaved(expected: AssetDisplayState): boolean {
++    return expected === this.state && this.current() && this.uploadKey.saved(this.state);
++  }
++  canConfirmUploadKey(expected: AssetDisplayState): boolean {
++    return expected === this.state && !this.otherOperationReason() && this.uploadKey.canCreate(this.state, false);
++  }
++  confirmNewUploadKey(expected: AssetDisplayState, checked: boolean): boolean {
++    if (expected !== this.state || this.otherOperationReason()) return false;
++    const accepted = this.uploadKey.confirm(this.state, checked); this.update({}); return accepted;
++  }
++  async checkUploadKeyStatus(): Promise<void> {
++    if (this.disposed || this.api?.mode !== 'native' || this.uploadReading) return;
++    const request = this.uploadKey.refreshRequest(this.state);
++    if (!request) return;
++    const api = this.api;
++    const work = Promise.resolve().then(async () => {
++      try {
++        if (!api.uploadKeyStatus) { this.uploadKey.unavailable(); this.update({}); return; }
++        const result = parseUploadKeyStatus(await api.uploadKeyStatus(request));
++        // Same existing monotonic/context receiver; a side status cannot grant
++        // an operation origin or replace a newer asset observation.
++        if (!this.receive(result.assets) || !this.uploadKey.accept(result, this.state, null)) return;
++        this.update({});
++      } catch { this.uploadKey.failed(null); this.update({}); }
++    });
++    this.uploadReading = work;
++    try { await work; } finally { if (this.uploadReading === work) this.uploadReading = null; }
++  }
++  prepareUploadKey(expected: AssetDisplayState): boolean {
++    if (expected !== this.state || !this.contextReady() || expected !== this.state || !this.api?.prepareUploadKey) return false;
++    const request = this.uploadKey.prepareRequest(this.state);
++    if (!request) return false;
++    const api = this.api, localRevision = this.localRevision, failureRevision = this.failureRevision;
++    const project = this.selectedProject(), status = this.state.status, intent = this.intentPhase;
++    this.uploadPreparationPending = true;
++    const started = this.run('prepare-upload-key', async () => {
++      try {
++        // run publishes busy synchronously. A subscriber can retire context,
++        // consent, the API or a peer owner before this closure actually sends.
++        const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
++        if (peer || !current || this.disposed || this.api !== api || selected !== project ||
++            this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
++            this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
++            this.state.blocked || this.state.observationFailed || this.state.busy !== 'prepare-upload-key' ||
++            this.intentPhase !== intent || !this.uploadPreparationPending) throw new Error('stale');
++        const result = parseUploadKeyStatus(await api.prepareUploadKey!(request));
++        if (!this.receive(result.assets) || !this.uploadKey.accept(result, this.state, 'prepare')) throw new Error('stale');
++        this.uploadPreparationPending = false;
++        return result.assets;
++      } catch { this.uploadKey.failed('prepare'); this.update({}); throw { code: 'assessment_context_stale' }; }
++    });
++    if (!started) { this.uploadKey.failed('prepare'); this.update({ originPending: true }); }
++    return started;
++  }
++  createNewUploadKey(expected: AssetDisplayState): boolean {
++    if (expected !== this.state || !this.contextReady() || expected !== this.state || !this.api?.createUploadKey) return false;
++    const request = this.uploadKey.createRequest(this.state);
++    if (!request) return false;
++    const api = this.api, localRevision = this.localRevision, failureRevision = this.failureRevision;
++    const project = this.selectedProject(), status = this.state.status;
++    const phase = this.phase({ type: 'upload-key', change: 'generate' }, UPLOAD_KEY_OPERATION, null);
++    const started = this.run(UPLOAD_KEY_OPERATION, async () => {
++      try {
++        const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
++        if (peer || !current || this.disposed || this.api !== api || selected !== project ||
++            this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
++            this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
++            this.state.blocked || this.state.observationFailed || this.state.busy !== UPLOAD_KEY_OPERATION ||
++            this.intentPhase !== phase || phase.uncertain) throw new Error('stale');
++        const result = parseUploadKeyStatus(await api.createUploadKey!(request));
++        if (!this.receive(result.assets, phase) || phase.uncertain || !this.uploadKey.accept(result, this.state, 'create')) throw new Error('stale');
++        return result.assets;
++      } catch { this.uploadKey.failed('create'); this.update({}); throw { code: 'assessment_context_stale' }; }
++    }, phase);
++    if (!started) { this.uploadKey.failed('create'); this.update({ originPending: true }); }
++    return started;
++  }
+   prepareRecord(record: AssetRecordRef): boolean {
+     if (!this.contextReady() || !this.idle()) return false;
+     const intent = this.recordIntent(record, 'assign');
+@@ -471,6 +556,7 @@
+   discard(): boolean {
+     const operation = this.state.status?.operation;
+     if (!this.api || this.state.mode !== 'native' || !operation || (operation.phase === 'idle' && operation.settlement === 'known') || this.cancelling === operation.operationId || this.disposed) return false;
++    if (this.uploadPreparationPending) return false;
+     if (operation.operation === 'inspect-installation' || operation.operation === 'choose-images' || operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
+     // Each explicit phase has a fresh native ID. A prior selected/preview
+     // status cannot identify a new in-flight operation, even if an event has
+diff --git a/desktop/src/assetSessionProtocol.ts b/desktop/src/assetSessionProtocol.ts
+--- a/desktop/src/assetSessionProtocol.ts
++++ b/desktop/src/assetSessionProtocol.ts
+@@ -175,20 +175,21 @@
+     const operation = value.operation;
+     if (operation !== null) {
+       if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview', ...(object(operation) && Object.hasOwn(operation, 'backupDelivered') ? ['backupDelivered'] : [])]) ||
+-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup']) ||
++          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key']) ||
+           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
+           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
+           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
+           (operation.assessment !== null && !assessment(operation.assessment))) return null;
+       const storage = operation.storageOutcome;
+-      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup']))) return null;
+-      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup']) ||
++      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key']))) return null;
++      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup', 'generate-upload-key']) ||
+           !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
+           !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
+       if (operation.operation === 'inspect-installation' && (!one(operation.phase, ['idle', 'admitting', 'capturing', 'stopping', 'unknown']) || storage !== null)) return null;
+       if (operation.operation === 'choose-images' && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown'])) return null;
+-      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup'].includes(operation.operation as string) &&
++      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup', 'generate-upload-key'].includes(operation.operation as string) &&
+           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
++      if (operation.operation === 'generate-upload-key' && !one(operation.phase, ['idle', 'admitting', 'mutating', 'stopping', 'unknown'])) return null;
+       if (isCredentialBackupOperation(operation.operation) && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'mutating', 'stopping', 'unknown'])) return null;
+       if (Object.hasOwn(operation, 'backupDelivered') && (operation.backupDelivered !== true || operation.operation !== 'prepare-backup-export' ||
+           operation.phase !== 'idle' || operation.settlement !== 'known' || operation.reason !== 'none' || !one(operation.source, ['not-run', 'captured']) || storage !== null ||
+diff --git a/desktop/src/assetSessionTypes.ts b/desktop/src/assetSessionTypes.ts
+--- a/desktop/src/assetSessionTypes.ts
++++ b/desktop/src/assetSessionTypes.ts
+@@ -28,7 +28,7 @@
+   change: AssetRecordPreviewSubject['change'];
+   record: AssetRecordRef | null;
+ }
+-export type AssetIntent = AssetRecordIntent | { type: 'vault'; change: 'open' | 'initialize' | 'unlock' } |
++export type AssetIntent = { type: 'upload-key'; change: 'generate' } | AssetRecordIntent | { type: 'vault'; change: 'open' | 'initialize' | 'unlock' } |
+   { type: 'backup'; change: 'export'; record: AssetRecordRef } | { type: 'backup'; change: 'import'; record: null };
+ export interface AssetChooseRequest { contextRevision: number; kind: AssetFileKind; replacement: AssetRecordRef | null }
+ export interface KeystoreFields { storePassword: string | null; keyAlias: string | null; keyPassword: string | null }
+@@ -52,7 +52,7 @@
+ export type AssetReason = 'none' | 'closed' | 'unqualified' | 'unsupported-platform' | 'unsupported-filesystem' | 'unsupported-format' | 'invalid-request' | 'busy' | 'source-refused' | 'source-changed' | 'material-limit' | 'parser-limit' | 'project-overlap' | 'exclusion-unconfirmed' | 'capacity' | 'context-stale' | 'user-cancelled' | 'review-expired' | 'deadline' | 'document-lost' | 'shutdown' | 'cleanup-unknown' |
+   'vault-uninitialized' | 'vault-key-missing' | 'vault-keyring-locked' | 'vault-keyring-denied' | 'vault-keyring-unavailable' | 'vault-provider-unsupported' | 'vault-corrupt' | 'vault-interrupted' | 'vault-durability-unknown';
+ export type AssetPhase = 'idle' | 'admitting' | 'picking' | 'capturing' | 'selected' | 'assessing' | 'preview' | 'mutating' | 'stopping' | 'unknown';
+-export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup';
++export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key';
+ export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
+ export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token' | 'contactFirstName' | 'contactLastName' | 'contactEmail' | 'contactPhone' | 'demoUsername' | 'demoPassword' | 'keyBase64' | 'version';
+ export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
+@@ -97,6 +97,10 @@
+ }
+
+ export interface AssetSessionApi {
++  // Optional on older bridges: missing methods never imply availability.
++  uploadKeyStatus?: import('./credentialUploadKey.ts').UploadKeyApi['uploadKeyStatus'];
++  prepareUploadKey?: import('./credentialUploadKey.ts').UploadKeyApi['prepareUploadKey'];
++  createUploadKey?: import('./credentialUploadKey.ts').UploadKeyApi['createUploadKey'];
+   assetStatus(): Promise<AssetStatus>;
+   openAssetSession(mode?: 'session' | 'encrypted'): Promise<AssetStatus>;
+   prepareVaultInitialize(): Promise<AssetStatus>;
+@@ -118,7 +122,7 @@
+   status: AssetStatus | null;
+   scope: AssetScope;
+   contextCurrent: boolean;
+-  busy: AssetOperationName | 'open' | null;
++  busy: AssetOperationName | 'open' | 'prepare-upload-key' | null;
+   updatingContext: boolean;
+   observing: boolean;
+   observationFailed: boolean;
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -1,3 +1,4 @@
++import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
+ import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
+ import { STORE_EXECUTE_EVENT, encodeLocalStoreExecuteRequest, parseLocalStoreExecuteStatus, localStoreExecuteError, type StoreExecuteCommand } from './localStoreExecuteProtocol.ts';
+ import type { LocalStoreReconcileStatus } from './localStoreReconcileTypes.ts';
+@@ -321,6 +322,12 @@
+     try { return await invoke<T>(command, args); }
+     catch (error) { throw apiError(error); }
+   };
++  const uploadKeyCall = async (command: UploadKeyCommand, args: unknown): Promise<UploadKeyStatus> => {
++    try {
++      if (!uploadKeyRequestFits(command, args)) throw { code: 'asset_invalid_request' };
++      return parseUploadKeyStatus(await call<unknown>(command, structuredClone(args) as Record<string, unknown>));
++    } catch (error) { throw assetError(error); }
++  };
+   const assetCall = async (command: AssetCommand, args: Record<string, unknown>): Promise<AssetStatus> => {
+     try {
+       if (!assetRequestFits(command, args)) throw { code: 'asset_invalid_request' };
+@@ -793,6 +800,9 @@
+         return await listen(GITHUB_RELEASE_EVENT, (value) => onStatus(parseGitHubReleaseStatus(value)));
+       } catch (error) { throw githubReleaseError(error); }
+     },
++    uploadKeyStatus: (request) => uploadKeyCall('upload_key_status', request),
++    prepareUploadKey: (request) => uploadKeyCall('upload_key_prepare', request),
++    createUploadKey: (request) => uploadKeyCall('upload_key_create', request),
+     assetStatus: () => assetCall('vault_status', {}),
+     openAssetSession: (storageMode = 'session') => assetCall('vault_open', { mode: storageMode }),
+     prepareVaultInitialize: () => assetCall('vault_prepare_initialize', {}),
+diff --git a/desktop/src-tauri/src/application_service_host.rs b/desktop/src-tauri/src/application_service_host.rs
+--- a/desktop/src-tauri/src/application_service_host.rs
++++ b/desktop/src-tauri/src/application_service_host.rs
+@@ -23,6 +23,9 @@
+ #[path = "application_service_identity_history.rs"]
+ mod identity_history;
+ pub(crate) use identity_history::{IdentityCapture, IdentityObservation, IdentitySource, identity_history_document_backing_bytes};
++
++#[path = "application_service_upload_key.rs"]
++mod upload_key;
+
+ const ACCESS_LIFETIME: Duration = Duration::from_secs(3600);
+ // Work admission is not the user lease. Bounded synchronous native calls have
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -66,7 +66,7 @@
+ #[path = "asset_session_keyring_macos.rs"]
+ mod keyring_macos;
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+-pub(crate) use vault::{KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
++pub(crate) use vault::{upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
+
+ // A borrowed original session record is not a serialized credential or a new
+ // credential owner. Only this document module can construct the signed loan.
+@@ -807,6 +807,8 @@
+     !operation.evidence() && !operation.project_path() && !operation.android_source() && !operation.artifact() && !operation.images() && !operation.installation()
+ }
+ fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
++    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++    if vault::upload_key_setup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
+     if project_path_pending(state) || images::pending(state) || installation::pending(state) || version_allocation::pending(state) {
+         return Err(AssetError::new(if state.unknown { Reason::CleanupUnknown } else { Reason::Busy }));
+@@ -2461,6 +2463,8 @@
+     Ok(())
+ }
+ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl FnOnce() -> Result<(), AssetError>) -> Result<(), AssetError> {
++    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++    if vault::upload_key_setup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
+     // Shared native lifecycle/state checks only. The caller retains the real
+     // document mutex; each route must still apply its own qualification gate.
+@@ -4569,7 +4573,7 @@
+
+ fn idle(state: &DocumentState) -> Result<(), AssetError> {
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+-    if vault::backup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
++    if vault::backup_pending(state) || vault::upload_key_setup_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled()) { return Err(AssetError::new(Reason::Busy)); } Ok(())
+ }
+ fn encrypted_mode(_state: &DocumentState) -> bool {
+diff --git a/desktop/src-tauri/src/asset_session_vault.rs b/desktop/src-tauri/src/asset_session_vault.rs
+--- a/desktop/src-tauri/src/asset_session_vault.rs
++++ b/desktop/src-tauri/src/asset_session_vault.rs
+@@ -6,6 +6,7 @@
+ #[path = "credential_assignment_native.rs"]
+ mod assignment_native;
+ use assignment_native::upload_key;
++pub(crate) use upload_key::controls as upload_key_controls;
+ pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
+ pub(super) use upload_key::parent_stop as upload_key_parent_stop;
+ #[path = "credential_backup_native.rs"]
+@@ -101,12 +102,13 @@
+     state: State, reason: Reason, revoked: bool, read_only: bool, registry_generation: u32, release_end: Option<Instant>,
+     pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT],
+     upload_key_observation: Option<upload_key::UploadKeyObservation>,
++    upload_key_setup: upload_key_controls::Setup,
+ }
+ impl Session {
+     fn new(store: Arc<Mutex<store::StoreBook>>, generation: u32) -> Self {
+         Self { store, root: None, header: None, identity: None, key: None, rows: Vec::new(), inventory: Vec::new(),
+             state: State::Unknown, reason: Reason::None, revoked: false, read_only: false, registry_generation: generation, release_end: None,
+-            bound: std::array::from_fn(|_| None), upload_key_observation: None }
++            bound: std::array::from_fn(|_| None), upload_key_observation: None, upload_key_setup: Default::default() }
+     }
+     fn writable(&self) -> bool { !self.revoked && !self.read_only && self.state == State::Unlocked && self.key.is_some() }
+     fn row(&self, key: &RecordKey) -> Option<&Descriptor> { self.rows.iter().find(|row| row.matches(key)) }
+@@ -118,7 +120,7 @@
+         // Direct data_bytes consumers also need these actual pointees, not
+         // merely the inline Box handles. Shared Arc backing is visited apart.
+         total = total.checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?;
+-        Some(total)
++        total.checked_add(self.upload_key_setup.retained_bytes()?)
+     }
+     pub(super) fn store(&self) -> &Arc<Mutex<store::StoreBook>> { &self.store }
+     pub(super) fn key(&self) -> Option<&Arc<crypto::VaultKey>> { self.key.as_ref() }
+@@ -190,6 +192,7 @@
+     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
+     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
+     upload_key_new_published: bool,
++    upload_key_context: Option<(u32, StoredRef)>,
+     // Nonsecret current-display stamp; the ordinary private working reference
+     // is cleared by retirement. This grants no loan, retry or disposal right.
+     backup_export_context: Option<(u32, StoredRef)>,
+@@ -197,6 +200,9 @@
+
+ pub(super) fn mode(state: &DocumentState) -> bool { state.vault.is_some() }
+ pub(super) fn writable(state: &DocumentState) -> bool { state.vault.as_ref().is_some_and(Session::writable) }
++pub(super) fn upload_key_setup_pending(state: &DocumentState) -> bool {
++    state.vault.as_ref().is_some_and(|session| session.upload_key_setup.pending())
++}
+ pub(super) fn backup_pending(state: &DocumentState) -> bool {
+     state.slot.as_ref().is_some_and(|slot| slot.owner.vault.try_lock()
+         .map_or(true, |work| work.backup_blocks_reuse() || work.upload_key_blocks_reuse()))
+@@ -439,6 +445,8 @@
+                 })();
+                 match observed {
+                     Ok(observation) => {
++                        slot.vault.upload_key_context = upload_key_controls::publication_stamp(slot,
++                            row.as_ref().expect("validated generated row"), session.identity.expect("validated generated identity"));
+                         session.upload_key_observation = Some(observation);
+                         slot.vault.upload_key_new_published = true;
+                     },
+diff --git a/desktop/src-tauri/src/credential_upload_key.rs b/desktop/src-tauri/src/credential_upload_key.rs
+--- a/desktop/src-tauri/src/credential_upload_key.rs
++++ b/desktop/src-tauri/src/credential_upload_key.rs
+@@ -16,6 +16,8 @@
+ // Source/portable checks do not qualify private native generation. Entry and
+ // status must use this SAME fixed predicate, never installed-vault alone.
+ const NATIVE_UPLOAD_KEY_QUALIFIED: bool = false;
++#[path = "credential_upload_key_controls.rs"]
++pub(crate) mod controls;
+ // The generated container is fixed and small. Reserving the entire remaining
+ // vault allowance before the real inspector returns would spuriously deny a
+ // normal measured native graph. This smaller, source-derived workspace grants
+@@ -251,6 +253,9 @@
+     native: SavedCommandOwner,
+     preparation: Arc<UploadKeyPreparation>,
+     service: Arc<ApplicationService>,
++    setup: Arc<controls::PreparedSetup>,
++    native_use: OnceLock<crate::application_service_host::NativeStateLease>,
++    native_use_retired: AtomicBool,
+     observed: NativeObservation,
+     preference_revision: u64,
+     roster: ProjectRoster,
+@@ -273,7 +278,8 @@
+     fn retained_bytes(&self) -> Option<usize> {
+         const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
+         let mut bytes = std::mem::size_of::<Self>().checked_add(ARC_CELLS)?;
+-        bytes = bytes.checked_add(self.preparation.retained_bytes()?)?;
++        bytes = bytes.checked_add(self.preparation.retained_bytes()?)?
++            .checked_add(controls::retained_use_bytes(self)?)?;
+         for text in [
+             &self.observed.project.project_id,
+             &self.observed.project.canonical_root,
+@@ -694,6 +700,9 @@
+             if !run.private_disposed() {
+                 return false;
+             }
++            // This is after actual private disposal AND every original job,
++            // including final journal readback/publication. No token-first cycle.
++            if !controls::retire_use(held) { return false; }
+             let clock = held.clock.clone();
+             self.inner = None; // Actual zeroizing private Fields/candidate holding dropped first.
+                                // Only the same-original publication + all-join disposal proof can
+@@ -818,6 +827,8 @@
+             }
+             // ORIGINAL shared-state IO in the original native writer, outside
+             // every document/native-registry lock. No detached gate task.
++            let retained = self.held.upgrade().ok_or(Reason::VaultInterrupted)?;
++            controls::check_use(&retained)?;
+             self.reservation
+                 .current(&self.state)
+                 .map_err(|error| preference_error(error).reason)?;
+@@ -893,6 +904,7 @@
+         tools: Arc<crate::saved_command_owner::UploadKeyToolLoan>,
+         context_revision: u32,
+         native_availability: wire::Availability,
++        consent: controls::Consent,
+     ) -> Result<AssetStatus, AssetError> {
+         if !available(self) || native_availability != wire::Availability::Available {
+             return Err(AssetError::new(Reason::Unqualified));
+@@ -903,6 +915,8 @@
+             self.expire(&mut state, Instant::now());
+             self.durable_gate(&state, true)?;
+             idle(&state)?;
++            consent.current(self, &state)?;
++            if !consent.service_matches(&service) { return Err(AssetError::new(Reason::ContextStale)); }
+             let context = state
+                 .context
+                 .as_ref()
+@@ -916,10 +930,9 @@
+             }
+             context
+         };
+-        // Shared-state locks/IO never run under the original Document lock.
+-        let known = service
+-            .native_binding(&context.project_id)
+-            .map_err(service_error)?;
++        // Private SAME-ready native binding, not a renderer/project-ID lookup.
++        // First journal IO belongs to the retained coordinator NativeStateLease.
++        let known = consent.project_binding();
+         let (observed, saved, key, storage, roster) = {
+             let mut state = self.lock();
+             self.expire(&mut state, Instant::now());
+@@ -954,12 +967,9 @@
+             let roster = self.vault_roster(&mut state)?;
+             (observed, saved, key, storage, roster)
+         };
+-        let preference = persistence::observe(
+-            service.state_directory(),
+-            &observed.project,
+-            Role::AndroidUpload,
+-        )
+-        .map_err(preference_error)?;
++        // Explicit setup's reference-only observation is not authority. The
++        // actual reservation re-reads/CAS-checks it under NativeUse before RNG.
++        let preference = consent.preference();
+         let plan = observed
+             .with_continuity(Continuity::NewApplicationConfirmed, |value| {
+                 setup::classify(value, preference.preference.as_ref())
+@@ -1152,6 +1162,9 @@
+             native: native.clone(),
+             preparation,
+             service,
++            setup: consent.preparation().clone(),
++            native_use: OnceLock::new(),
++            native_use_retired: AtomicBool::new(false),
+             observed,
+             preference_revision: preference.store_revision,
+             roster,
+@@ -1249,6 +1262,7 @@
+     mutating: bool,
+ ) -> Result<(), Reason> {
+     current_gate(document, state, owner)?;
++    controls::current_prepared(document, state, &held.setup).map_err(|error| error.reason)?;
+     let slot = state.slot.as_ref().ok_or(Reason::ContextStale)?;
+     let session = state.vault.as_ref().ok_or(Reason::Closed)?;
+     let key = held.key.upgrade().ok_or(Reason::VaultKeyMissing)?;
+@@ -1558,6 +1572,8 @@
+         let state = document.lock();
+         rematch(document, &state, owner, held, false)?;
+     }
++    controls::begin_use(held)?; // SAME original coordinator, before any journal/private work.
++    controls::check_use(held)?;
+     held.progress()?
+         .enter(ProgressPhase::Admitted, ProgressPhase::Reserving)?;
+     let context = held.preparation.context();
+@@ -1731,6 +1747,7 @@
+         certificate_sha256: Some(crate::service_protocol::hex(&certificate)),
+         operation_id: reservation.operation_id().to_owned(),
+     };
++    controls::check_use(held)?;
+     let revision = persistence::record_saved(
+         held.service.state_directory(),
+         reservation.store_revision(),
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -23,6 +23,7 @@
+         Ok(Self(value.to_owned()))
+     }
+     pub fn as_str(&self) -> &str { &self.0 }
++    pub(crate) fn retained_bytes(&self) -> usize { self.0.capacity() }
+     pub(crate) fn random() -> Result<Self, Error> {
+         let mut bytes = [0u8; 16];
+         getrandom::fill(&mut bytes).map_err(|_| Error::Unavailable)?;
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2200,6 +2200,49 @@
+     }.await;
+     installed_session_result!(session_observed, Prepare, &result); result
+ }
++// Only this fixed nonsecret status DTO is serialized. On unsupported targets
++// the vault child is absent and the whole closed command refuses; no fallback
++// tool, key material, path or generic process API is admitted.
++#[tauri::command]
++async fn upload_key_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
++    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
++    asset_window(&webview)?;
++    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++    {
++        let args = crate::asset_session::upload_key_controls::context_request(asset_body(&request)?)?;
++        serde_json::to_value(state.document.upload_key_status(args)?).map_err(|_| AssetError::invalid())
++    }
++    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
++    { let _ = request; Err(AssetError::new(Reason::UnsupportedPlatform)) }
++}
++#[tauri::command]
++async fn upload_key_prepare(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
++    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
++    asset_window(&webview)?;
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
++    {
++        let args = crate::asset_session::upload_key_controls::context_request(asset_body(&request)?)?;
++        let location = app.path().app_local_data_dir().map_err(|_| AssetError::new(Reason::ExclusionUnconfirmed))?;
++        let document = state.document.clone(); drop(state); drop(request);
++        let result = document.prepare_upload_key_setup(args, &location).await?;
++        serde_json::to_value(result).map_err(|_| AssetError::invalid())
++    }
++    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
++    { let _ = (app, request); Err(AssetError::new(Reason::UnsupportedPlatform)) }
++}
++#[tauri::command]
++async fn upload_key_create(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
++    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
++    asset_window(&webview)?;
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
++    {
++        let args = crate::asset_session::upload_key_controls::create_request(asset_body(&request)?)?;
++        serde_json::to_value(state.document.create_upload_key(args)?).map_err(|_| AssetError::invalid())
++    }
++    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
++    { let _ = request; Err(AssetError::new(Reason::UnsupportedPlatform)) }
++}
++
+ #[tauri::command]
+ async fn vault_backup_export(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
+@@ -4375,6 +4418,7 @@
+             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
+             github_history_status, github_history_start, github_history_cancel,
+             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
++            upload_key_status, upload_key_prepare, upload_key_create,
+             vault_prepare_delete, vault_backup_export, vault_backup_import, vault_commit, vault_bind, vault_discard, vault_lock,
+             ];
+             handler(invoke)

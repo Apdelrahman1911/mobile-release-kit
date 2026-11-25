@@ -1,0 +1,98 @@
+name: Bug report
+description: Report something in Mobile Release Kit that does not work as expected.
+title: "[Bug]: "
+labels:
+  - "type:bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem.
+
+        **This issue is public.** Do not paste passwords, tokens, API keys, keystores,
+        signing certificates, provisioning profiles, service-account keys or other
+        credentials. Replace personal paths, user names and machine names with
+        placeholders such as `<HOME>` or `<PROJECT>`.
+
+        To report a security vulnerability, do not use this form. Use the repository's
+        **Security** tab → **Report a vulnerability** instead (see SECURITY.md).
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Which operating system are you using?
+      options:
+        - Windows 11
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: Operating system version
+      description: For example macOS 15.5, Ubuntu 24.04, or Windows 11 24H2.
+    validations:
+      required: false
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: The desktop app version, or the CLI version or full commit SHA if the problem is in the CLI toolkit.
+      placeholder: "x.y.z"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      description: How did you install Mobile Release Kit?
+      options:
+        - Desktop installer from GitHub Releases
+        - CLI toolkit (pipx or pip)
+        - Built from source
+        - Other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the steps that lead to the problem.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead? Include the exact error message if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Optional. Remove tokens, keys, credentials and personal paths before pasting.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I have removed tokens, keys, credentials and personal paths from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

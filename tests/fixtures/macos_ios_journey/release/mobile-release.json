@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "version": {
+    "source": "public/version.xcconfig",
+    "nameKey": "VERSION_NAME",
+    "buildKey": "BUILD_NUMBER"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "production"
+  },
+  "android": {
+    "enabled": false
+  },
+  "ios": {
+    "enabled": true,
+    "project": "MRKFixture.xcodeproj",
+    "scheme": "MRKFixture",
+    "archiveConfiguration": "Debug",
+    "bundleId": "org.mrk.iosfixture",
+    "identityStatus": "unverified"
+  },
+  "metadata": {
+    "root": "public/store",
+    "androidLocales": [
+      "en-US",
+      "fr-FR"
+    ],
+    "iosLocales": [
+      "en-US"
+    ]
+  },
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "projectChecks": {
+    "preflight": [],
+    "androidArtifact": [],
+    "iosArtifact": []
+  }
+}

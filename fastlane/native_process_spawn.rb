@@ -149,9 +149,18 @@ module MobileReleaseKit
         declared_abi.fetch("constants").fetch("NSIG")
       end
 
+      def expected_ruby_release
+        return RUBY_RELEASE unless RbConfig::CONFIG.fetch("host_os").start_with?("darwin")
+
+        gemfile = File.expand_path("../Gemfile", __dir__)
+        return RUBY_RELEASE unless File.file?(gemfile)
+
+        File.binread(gemfile, 64 * 1024).include?("\nruby \"3.3.14\"\n") ? "3.3.14" : RUBY_RELEASE
+      end
+
       def runtime_info
         reusable!
-        raise Error.new("runtime") unless RUBY_ENGINE == "ruby" && RUBY_VERSION == RUBY_RELEASE
+        raise Error.new("runtime") unless RUBY_ENGINE == "ruby" && RUBY_VERSION == expected_ruby_release
 
         abi = declared_abi
         origin = fiddle_origin!

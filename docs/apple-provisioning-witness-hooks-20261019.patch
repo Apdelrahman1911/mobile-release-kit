@@ -1,0 +1,13 @@
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -49,6 +49,9 @@
+ #[path = "saved_command_store.rs"]
+ mod store;
+ pub(crate) use store::document_backing_bytes as store_document_backing_bytes;
++#[path = "saved_command_apple_provisioning.rs"]
++mod apple_provisioning;
++pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined};
+
+ #[path = "saved_command_android_catalog.rs"]
+ mod android_catalog;

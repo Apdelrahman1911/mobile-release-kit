@@ -1,0 +1,95 @@
+diff --git a/desktop/src-tauri/src/service_git_repository_protocol.rs b/desktop/src-tauri/src/service_git_repository_protocol.rs
+--- a/desktop/src-tauri/src/service_git_repository_protocol.rs
++++ b/desktop/src-tauri/src/service_git_repository_protocol.rs
+@@ -54,9 +54,34 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub struct UpstreamIdentity { pub name:String, pub email:String }
++// Transport-only DATA validation: the installed CLI deliberately does not
++// link GitLocal/native protocol modules. Native construction and its own
++// Action::valid check belong to service_git_repository_native::action.
++fn upstream_alias(v:&str)->bool { !v.is_empty() && v.len()<=64 && v.as_bytes()[0].is_ascii_alphanumeric()
++    && v.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)) }
++fn upstream_repository(v:&str)->bool {
++    let Some((owner,name))=v.split_once('/') else{return false};
++    !owner.is_empty() && owner.len()<=39 && owner.as_bytes()[0].is_ascii_alphanumeric()
++        && owner.as_bytes()[owner.len()-1].is_ascii_alphanumeric()
++        && owner.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')
++        && !name.is_empty() && name.len()<=100 && name.as_bytes()[0].is_ascii_alphanumeric()
++        && name.as_bytes()[name.len()-1].is_ascii_alphanumeric()
++        && name.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b))
++}
+ impl UpstreamIdentity {
+-    pub(crate) fn native(&self)->crate::git_upstream_protocol::Identity {
+-        crate::git_upstream_protocol::Identity{name:self.name.clone(),email:self.email.clone()}
++    fn valid(&self)->bool {
++        self.name.len()<=128 && !self.name.chars().any(|c|c=='\u{7f}'||c<' ')
++            && self.name.chars().next().is_some_and(char::is_alphanumeric)
++            && self.name.chars().last().is_some_and(char::is_alphanumeric)
++            && !self.name.chars().any(|c|matches!(c,'<'|'>'|'"'|'\''|'\\'|'#'|';'))
++            && self.email.len()<=254 && self.email.split('@').count()==2
++            && self.email.split('@').all(|v|!v.is_empty())
++            && self.email.split_once('@').is_some_and(|(local,domain)|local.as_bytes()[0].is_ascii_alphanumeric()
++                && local.bytes().all(|b|b.is_ascii_alphanumeric()||b"._+%-".contains(&b))
++                && domain.len()>=2&&domain.as_bytes()[0].is_ascii_alphanumeric()
++                && domain.bytes().all(|b|b.is_ascii_alphanumeric()||b".-".contains(&b))) && self.email.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
++            && self.email.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
++            && self.email.bytes().all(|b|b.is_ascii_alphanumeric()||b"@._+%-".contains(&b))
+     }
+ }
+
+@@ -100,17 +125,14 @@
+     },
+ }
+ impl Action {
+-    pub(crate) fn upstream_action(&self)->Option<crate::git_upstream_protocol::Action> {
+-        let Self::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=self else{return None};
+-        Some(crate::git_upstream_protocol::Action{kind:crate::git_upstream_protocol::Kind::SetUpstream,
+-            expected_revision:expected_revision.clone(),expected_reference_revision:expected_reference_revision.clone(),
+-            branch:branch.clone(),head:head.clone(),remote:remote.clone(),repository:repository.clone(),
+-            identity:identity.as_ref().map(UpstreamIdentity::native)})
+-    }
+     pub fn validate(&self) -> Result<(), Error> {
+         let valid = match self {
+             Self::Initialize {} => true,
+-            Self::SetUpstream {..}=>self.upstream_action().is_some_and(|v|v.valid()),
++            Self::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=>
++                p::digest(expected_revision)&&p::digest(expected_reference_revision)&&oid(head)
++                    &&head.bytes().any(|v|v!=b'0')&&upstream_alias(remote)
++                    &&branch.strip_prefix("refs/heads/").is_some_and(name)
++                    &&upstream_repository(repository)&&identity.as_ref().is_none_or(UpstreamIdentity::valid),
+             Self::BranchCreate {
+                 expected_revision,
+                 expected_reference_revision,
+@@ -440,7 +462,7 @@
+         let valid = match &self.preview {
+             Preview::SetUpstream {head,branch:current,remote,repository,config_changed,missing_directory_count,unchanged}=>
+                 oid(head)&&head.len()==40&&head.bytes().any(|v|v!=b'0')&&branch(current)
+-                &&crate::git_upstream_protocol::alias(remote)&&crate::git_upstream_protocol::repository(repository)
++                &&upstream_alias(remote)&&upstream_repository(repository)
+                 &&*missing_directory_count<=64&&*unchanged==(!*config_changed&&*missing_directory_count==0),
+             Preview::Initialize {
+                 initial_branch,
+diff --git a/desktop/src-tauri/src/service_git_repository_native.rs b/desktop/src-tauri/src/service_git_repository_native.rs
+--- a/desktop/src-tauri/src/service_git_repository_native.rs
++++ b/desktop/src-tauri/src/service_git_repository_native.rs
+@@ -3,13 +3,17 @@
+ use super::*;
+ use crate::{
+     git_branch_protocol as branch, git_fast_forward_protocol as ff, git_init_protocol as init,
+-    git_rename_protocol as rename, git_switch_protocol as switch,
++    git_rename_protocol as rename, git_switch_protocol as switch, git_upstream_protocol as upstream,
+ };
+
+ pub(super) fn action(selected: &repository::Action) -> Result<local::Action, BridgeError> {
+     selected.validate().map_err(public)?;
+     let action = match selected {
+-        repository::Action::SetUpstream {..}=>local::Action::Upstream(selected.upstream_action().ok_or_else(BridgeError::invalid)?),
++        repository::Action::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=>
++            local::Action::Upstream(upstream::Action {kind:upstream::Kind::SetUpstream,
++                expected_revision:expected_revision.clone(),expected_reference_revision:expected_reference_revision.clone(),
++                branch:branch.clone(),head:head.clone(),remote:remote.clone(),repository:repository.clone(),
++                identity:identity.as_ref().map(|i|upstream::Identity{name:i.name.clone(),email:i.email.clone()})}),
+         repository::Action::Initialize {} => local::Action::Initialize(init::Action {
+             kind: init::Kind::Initialize,
+         }),

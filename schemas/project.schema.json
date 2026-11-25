@@ -145,6 +145,10 @@
         "projectReadTokenRequired": {
           "type": "boolean",
           "default": false
+        },
+        "localStoreEnabled": {
+          "type": "boolean",
+          "default": false
         }
       }
     },
