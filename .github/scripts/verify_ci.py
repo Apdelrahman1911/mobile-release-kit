@@ -3579,6 +3579,17 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             # Expiry still consumes the same original deadline, never a new one.
             if deadline is not None:
                 check_clock(deadline)
+    if step is not None and step.id == "python-full" and step.native_partition == "poison-recovery-profile-cleanup":
+        label = "MRK_FIXED_IMPORT_DRIFT="
+        rows = [line[len(label):] for line in text.splitlines() if line.startswith(label)]
+        if len(rows) == 1 and len(rows[0]) <= 4096:
+            row = strict_json(rows[0])
+            allowed = {"mobile_release." + path.removeprefix("src/mobile_release/")[:-3].replace("/", ".")
+                       for path in _source_files if path.startswith("src/mobile_release/")}
+            if type(row) is dict and set(row) == {"added", "missing"} and all(
+                    type(names) is list and len(names) <= 32 and all(
+                        type(name) is str and name in allowed for name in names) for names in row.values()):
+                value["fixed_import_drift"] = row
     prefix = "MRK_CHECK_RESULT="
     limit = (512 if step is not None and step.id == "python-full" else 256) * 1024
     for line in result.stdout.decode("utf-8", "replace").splitlines():
@@ -4552,6 +4563,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         for row in details["partitions"]:
             active = row
             partition = row["partition"]
+            if partition != "poison-recovery-profile-cleanup":
+                continue
             healthy = partition == "healthy"
             details["stage"] = partition
             check_clock(cutoff)
@@ -4606,6 +4619,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 raise VerificationError("PYTHON_CAPTURE_RESULT")
             row.update(status="PASS", tests=len(observed), completed=list(observed))
             completed.extend(observed)
+        details["stage"] = "focused-observations-only"
+        raise VerificationError("FOCUSED_DIAGNOSTIC_NOT_A_GATE_RECEIPT")
         details["stage"] = "union"
         check_clock(cutoff)
         if (tuple(sorted(completed + list(delegated))) != inventories["all"]

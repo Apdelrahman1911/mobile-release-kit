@@ -712,6 +712,10 @@ def _isolated_reporting_bindings(partition: str) -> tuple:
     loaded = {name for name in sys.modules if name in {"mobile_release", "unit", "workflow"}
               or name.startswith(("mobile_release.", "unit.", "workflow."))}
     if loaded != required:
+        if partition == "poison-recovery-profile-cleanup":
+            drift = {"added": sorted(loaded - required), "missing": sorted(required - loaded)}
+            sys.stderr.write("MRK_FIXED_IMPORT_DRIFT=" + json.dumps(drift, sort_keys=True) + "\n")
+            sys.stderr.flush()
         raise AssertionError("isolated singleton module bindings differ from its fixed family")
     bindings = []
     for name, module in tuple(sys.modules.items()):
