@@ -1291,7 +1291,7 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
     def test_source_envelope_has_exact_finite_typed_bounds(self):
         controller = controller_module()
         self.assertEqual((controller.SOURCE_MAX_FILES, controller.SOURCE_MAX_FILE_BYTES,
-                          controller.SOURCE_MAX_TOTAL_BYTES), (2048, 32 * 1024**2, 128 * 1024**2))
+                          controller.SOURCE_MAX_TOTAL_BYTES), (4128, 32 * 1024**2, 160 * 1024**2))
         self.assertEqual(controller.read_regular.__kwdefaults__["maximum"], 8 * 1024**2)
         self.assertEqual(controller.DISK_RESERVE, 4 * 1024**3 + 512 * 1024**2)
         empty_leaves = {str(i): {"bytes": 0} for i in range(2048)}

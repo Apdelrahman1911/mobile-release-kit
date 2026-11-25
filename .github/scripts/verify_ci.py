@@ -33,9 +33,11 @@ from types import MappingProxyType
 
 AGGREGATE_SECONDS = 3300
 DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
-SOURCE_MAX_FILES = 2048
+# The integrated Desktop checkout is about 4,100 blobs and 149 MiB. Bound
+# the complete snapshot independently of per-file identity checks.
+SOURCE_MAX_FILES = 4128
 SOURCE_MAX_FILE_BYTES = 32 * 1024**2
-SOURCE_MAX_TOTAL_BYTES = 128 * 1024**2
+SOURCE_MAX_TOTAL_BYTES = 160 * 1024**2
 MINITEST_FOOTER = (r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
                    r"(\d{1,9}) errors, (\d{1,9}) skips[ \t]*$")
 NATIVE_DIAGNOSTIC_PREFIX = "MRK_NATIVE_DIAGNOSTIC="

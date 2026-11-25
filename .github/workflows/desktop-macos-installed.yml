@@ -3669,9 +3669,64 @@ jobs:
           "${{ steps.python.outputs.python-path }}" -B -m unittest tests.desktop.test_macos_candidate_parts tests.desktop.test_macos_candidate_part_transport tests.desktop.test_macos_candidate_parts_workflow tests.desktop.test_macos_desktop_update tests.desktop.test_macos_candidate_stages tests.desktop.test_macos_optional_arrays tests.desktop.test_runtime_preparation.MacCoreBytecodeDataTests
   desktop-local-carrier:
     name: Desktop local preparation
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && inputs.operation == 'local-desktop-carrier'
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && inputs.operation == 'local-desktop-carrier' &&
+      (github.ref == 'refs/heads/verify/desktop-macos-candidate' ||
+       (github.ref == 'refs/heads/main' && github.ref_protected && inputs.prepared_source == github.sha &&
+        inputs.target == 'aarch64-apple-darwin'))
     uses: ./.github/workflows/desktop-macos-candidate-tests.yml
     secrets: inherit
+
+  attest-main-release-media:
+    name: Attest the frozen main release media
+    needs: desktop-local-carrier
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.ref_protected && inputs.operation == 'local-desktop-carrier' &&
+      inputs.prepared_source == github.sha && inputs.target == 'aarch64-apple-darwin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: macos-release-frozen-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frozen-release
+      - name: Match the exact source, runs, media and checksum roster
+        env:
+          PRODUCER_RUN: ${{ inputs.prepared_run }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          python3 -I -B desktop/tools/macos_release_media.py verify "$RUNNER_TEMP/frozen-release" \
+            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --build-run "$PRODUCER_RUN" --carrier-run "$GITHUB_RUN_ID"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/frozen-release/*.dmg
+            ${{ runner.temp }}/frozen-release/RELEASE-MANIFEST.json
+            ${{ runner.temp }}/frozen-release/SHA256SUMS
+      - name: Verify each retained asset against its GitHub build attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for asset in "$RUNNER_TEMP"/frozen-release/*; do
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
+              --source-digest "$GITHUB_SHA" --deny-self-hosted-runners \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
+          done
 
   candidate-desktop-update:
     name: Desktop update

@@ -3332,14 +3332,18 @@ class Operation:
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
+        self.main_desktop_carrier = False
         if prepared is not None:
-            from desktop.tools.macos_prepared_package import PreparedBinding
+            from desktop.tools.macos_prepared_package import PreparedBinding, ordinary_desktop_carrier
+            self.main_desktop_carrier = (environment.get("GITHUB_REF") == MAIN_RELEASE_REF
+                                         and ordinary_desktop_carrier(environment))
             need(type(prepared) is PreparedBinding and phase in ("package-install", "finalize-image") + REMOVE_PHASES
                  and prepared.origin["target"] == target
                  and (phase == "package-install" or prepared.same_source
                       or phase in REMOVE_PHASES and prepared.removal_compatible)
                  and (phase not in REMOVE_PHASES or environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-                      and environment.get("GITHUB_REF") == CANDIDATE_REF), "prepared-fixed-owner-purpose")
+                      and (environment.get("GITHUB_REF") == CANDIDATE_REF or self.main_desktop_carrier)),
+                 "prepared-fixed-owner-purpose")
             prepared.finalization_environment(environment)  # Exact current caller, no env mutation.
             if phase in REMOVE_PHASES and not prepared.same_source:
                 prepared.removal_carrier_source(environment)
@@ -5992,11 +5996,12 @@ class Operation:
         need(self.phase in FINAL_IMAGE_PHASES and self.signing is not None
              and (self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
                   or (self.phase == "finalize-image"
-                      and self.environment.get("GITHUB_REF") in ("refs/heads/verify/desktop-macos-installed", CANDIDATE_REF))
+                      and (self.environment.get("GITHUB_REF") in ("refs/heads/verify/desktop-macos-installed", CANDIDATE_REF)
+                           or self.main_desktop_carrier))
                   or (self.phase == "finalize-remove-image" and self.removal
                       and self.prepared_binding is not None
                       and self.environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-                      and self.environment.get("GITHUB_REF") == CANDIDATE_REF)
+                      and (self.environment.get("GITHUB_REF") == CANDIDATE_REF or self.main_desktop_carrier))
                   or (self.phase == "finalize-remove-image" and self.removal
                       and self.candidate_removal_context is not None and self.candidate_removal_root is not None
                       and self.environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -10508,7 +10513,7 @@ class Operation:
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
                 allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF))
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF, MAIN_RELEASE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in STORE_SIGNING_PHASES:
@@ -11918,7 +11923,7 @@ def main():
         main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
                                      allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                                     and os.environ.get("GITHUB_REF") not in (APP_SIGNATURE_REF, CANDIDATE_REF, XCODE_SETUP_REF))
+                                     and os.environ.get("GITHUB_REF") not in (APP_SIGNATURE_REF, CANDIDATE_REF, XCODE_SETUP_REF, MAIN_RELEASE_REF))
         if phase in FINAL_PACKAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         main_stage = "owner-load"

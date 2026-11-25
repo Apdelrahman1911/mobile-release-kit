@@ -302,11 +302,21 @@ REMOVAL_CARRIER_FILES = frozenset({
 })
 
 
+def main_desktop_carrier(environment):
+    return (environment.get('GITHUB_REF') == 'refs/heads/' + MAIN_BRANCH
+            and environment.get('GITHUB_REF_PROTECTED') == 'true'
+            and environment.get('MRK_MACOS_LOCAL_DESKTOP_CARRIER') == 'true'
+            and environment.get('MRK_MACOS_PREPARED_RESUME') == 'true'
+            and environment.get('MRK_MACOS_NATIVE_SCOPE') == 'disabled'
+            and environment.get('MRK_MACOS_TARGET') == TARGETS[0])
+
+
 def ordinary_desktop_carrier(environment):
+    ref = environment.get('GITHUB_REF')
     return (environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
             and environment.get('GITHUB_REPOSITORY') == REPOSITORY
-            and environment.get('GITHUB_REF') == 'refs/heads/' + BRANCH
-            and environment.get('GITHUB_WORKFLOW_REF') == REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + BRANCH
+            and (ref == 'refs/heads/' + BRANCH or main_desktop_carrier(environment))
+            and environment.get('GITHUB_WORKFLOW_REF') == REPOSITORY + '/' + WORKFLOW + '@' + ref
             and hex_data(environment.get('GITHUB_SHA'), 40)
             and environment.get('GITHUB_WORKFLOW_SHA') == environment.get('GITHUB_SHA')
             and environment.get('MRK_MACOS_LOCAL_DESKTOP_CARRIER') == 'true'
@@ -421,7 +431,8 @@ class PreparedBinding:
         # DATA argument for the old receipt parser ONLY, NEVER a process env.
         return {**environment, 'GITHUB_SHA': old['source'], 'GITHUB_WORKFLOW_SHA': old['source'],
                 'GITHUB_RUN_ID': old['runId'], 'GITHUB_RUN_ATTEMPT': old['runAttempt'],
-                'GITHUB_WORKFLOW_REF': REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + BRANCH,
+                'GITHUB_WORKFLOW_REF': REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + (
+                    MAIN_BRANCH if main_desktop_carrier(environment) else BRANCH),
                 'MRK_MACOS_INSTALL_SOURCE_COMMIT': old['source']}
 
 
@@ -879,7 +890,7 @@ def reclaim_prepared_allocator(op):
     need(status == 0, 'prepared-allocator-reclaim')
 
 
-def retained_producer_attempt_data(body, source, run, target, *, native_scope=None):
+def retained_producer_attempt_data(body, source, run, target, *, native_scope=None, branch=BRANCH):
     """Nominate one original attempt from a complete immutable artifact page.
 
     This finite ordinal grants no producer or native authority. The unchanged
@@ -910,7 +921,7 @@ def retained_producer_attempt_data(body, source, run, target, *, native_scope=No
          and type(row.get('digest')) is str and row['digest'].startswith('sha256:')
          and hex_data(row['digest'][7:]) and type(producer) is dict
          and type(producer.get('id')) is int and producer['id'] == int(run)
-         and producer.get('head_sha') == source and producer.get('head_branch') == BRANCH,
+         and producer.get('head_sha') == source and producer.get('head_branch') == branch,
          'prepared-service-artifact')
     return attempt
 
@@ -976,7 +987,7 @@ def selected_compiled_observer_data(artifacts, jobs, run_body, package_origin):
     return selected
 
 
-def retained_image_attempt_data(body, source, run, target):
+def retained_image_attempt_data(body, source, run, target, *, branch=BRANCH):
     from desktop.tools import macos_candidate_parts as parts
     need(hex_data(source, 40) and decimal(run) and target == TARGETS[0], 'prepared-desktop-originals')
     value = decode(body, 8 * MIB)
@@ -991,7 +1002,7 @@ def retained_image_attempt_data(body, source, run, target):
          and type(a.get('size_in_bytes')) is int and 22 <= a['size_in_bytes'] <= parts.TOTAL_LIMIT
          and type(a.get('digest')) is str and re.fullmatch('sha256:[0-9a-f]{64}', a['digest'])
          and a.get('workflow_run', {}).get('id') == int(run)
-         and a['workflow_run'].get('head_sha') == source and a['workflow_run'].get('head_branch') == BRANCH,
+         and a['workflow_run'].get('head_sha') == source and a['workflow_run'].get('head_branch') == branch,
          'prepared-desktop-originals')
     return a['name'][len(prefix):]
 
@@ -1363,8 +1374,10 @@ def main():
         from desktop.tools import macos_android_helper_package as helper
         environment = dict(os.environ)
         work = admit_host(helper, environment, args)
+        main_carrier = main_desktop_carrier(environment)
+        branch = MAIN_BRANCH if main_carrier else BRANCH
         need(environment['GITHUB_REF'] == 'refs/heads/' + BRANCH
-             or environment['GITHUB_REF'] == 'refs/heads/' + MAIN_BRANCH and args.phase == 'export',
+             or environment['GITHUB_REF'] == 'refs/heads/' + MAIN_BRANCH and (args.phase == 'export' or main_carrier),
              'prepared-fixed-candidate-route')
         stager = helper.load_data(root, 'stage_macos_installed.py', '_mrk_prepared_stager')
         need(stager.read(root / '.git/HEAD', 64) == (environment['GITHUB_SHA'] + '\n').encode('ascii'), 'prepared-current-source')
@@ -1372,6 +1385,7 @@ def main():
         owner = qualification.load_owner(root)
         if args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select'):
             need(hex_data(args.producer_source, 40) and decimal(args.producer_run), 'prepared-selection-context')
+            need(not main_carrier or args.producer_source == environment['GITHUB_SHA'], 'prepared-current-source')
             operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
             try:
                 operation.prepared_staging = True
@@ -1390,13 +1404,13 @@ def main():
                 artifact_body = small('prepared-artifacts.json')
                 if args.phase == 'producer-attempt':
                     producer_attempt = retained_producer_attempt_data(artifact_body, args.producer_source,
-                        args.producer_run, args.target, native_scope=native_origin(environment).get('nativeScope'))
+                        args.producer_run, args.target, native_scope=native_origin(environment).get('nativeScope'), branch=branch)
                 elif args.phase == 'observer-attempt':
                     producer_attempt = retained_observer_artifact_data(artifact_body, args.producer_source,
                         args.producer_run, args.target, native_origin(environment).get('nativeScope'))[1]
                 elif args.phase == 'image-attempt':
                     need(not native_origin(environment), 'prepared-desktop-originals')
-                    producer_attempt = retained_image_attempt_data(artifact_body, args.producer_source, args.producer_run, args.target)
+                    producer_attempt = retained_image_attempt_data(artifact_body, args.producer_source, args.producer_run, args.target, branch=branch)
                 else:
                     job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target,
                         completed=True, native_scope=native_origin(environment).get('nativeScope'), artifacts=artifact_body)
@@ -1408,7 +1422,7 @@ def main():
                     artifact = selected_artifact_data(artifact_body, origin)
                     need(job['run_attempt'] == int(retained_producer_attempt_data(artifact_body,
                          args.producer_source, args.producer_run, args.target,
-                         native_scope=native_origin(environment).get('nativeScope'))), 'prepared-job-context')
+                         native_scope=native_origin(environment).get('nativeScope'), branch=branch)), 'prepared-job-context')
                     directory = operation.package_directory('prepared-service')
                     operation.package_file(directory, 'job.json', canonical(job))
                     operation.package_file(directory, 'artifact.json', canonical(artifact))
@@ -1449,6 +1463,7 @@ def main():
         operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
         values, binding = acquire_checkpoint(operation, consumer,
                                              require_remove_install=args.phase == 'finalize-remove-package')
+        need(not main_carrier or binding.same_source, 'prepared-current-source')
         built_root = root if binding.same_source else root / 'prepared-built-source'
         need(stager.read(built_root / '.git/HEAD', 64) == (binding.source + '\n').encode('ascii'), 'prepared-built-source')
         carrier_stager = stager if not binding.same_source and binding.removal_compatible else None
@@ -1476,6 +1491,7 @@ def main():
         # fresh package-install owner returned 0 for the dispatched Desktop route.
         need(args.phase == 'package-install' or args.phase in REMOVAL_PHASES and environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
              and not native_origin(environment)
+             or args.phase == 'finalize-image' and main_carrier and binding.same_source
              or environment['GITHUB_EVENT_NAME'] == 'push' and binding.same_source, 'prepared-cross-source-install-only')
         operation = helper.Operation(owner, built_root, work, args.phase, environment, stager,
                                      target=args.target, prepared=binding, carrier_stager=carrier_stager)
@@ -1509,16 +1525,19 @@ def admit_host(helper, environment, args):
         return helper.admit(environment, target=args.target, phase='package-install')
     # Diagnostic-only current harness. Never change the actual event/source or
     # let ordinary helper.admit accept dispatch/artifact claims as push evidence.
-    need(args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install', *REMOVAL_PHASES) and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
+    main_carrier = main_desktop_carrier(environment)
+    need((args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install', *REMOVAL_PHASES)
+          or args.phase == 'finalize-image' and main_carrier) and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
          'prepared-dispatch-install-only')
     machine, arch, _ = helper.build_profile(args.target)
     source = environment.get('GITHUB_SHA')
     need(sys.platform == 'darwin' and sys.maxsize == 2**63-1 and os.uname().machine == machine
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and hex_data(source, 40), 'prepared-hosted-platform')
+    ref = 'refs/heads/' + (MAIN_BRANCH if main_carrier else BRANCH)
     required = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH=arch,
-        GITHUB_REPOSITORY=REPOSITORY, GITHUB_REF='refs/heads/' + BRANCH, GITHUB_WORKSPACE=str(helper.CHECKOUT),
-        GITHUB_WORKFLOW_SHA=source, GITHUB_WORKFLOW_REF=REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + BRANCH,
+        GITHUB_REPOSITORY=REPOSITORY, GITHUB_REF=ref, GITHUB_WORKSPACE=str(helper.CHECKOUT),
+        GITHUB_WORKFLOW_SHA=source, GITHUB_WORKFLOW_REF=REPOSITORY + '/' + WORKFLOW + '@' + ref,
         MRK_EXPECTED_SHA=source, MRK_MACOS_INSTALL_SOURCE_COMMIT=source, MRK_MACOS_PACKAGE_ROLE='ordinary-image',
         MRK_MACOS_STORE_RUNTIME='signed-component', MRK_MACOS_SAME_PACKAGE_SCOPE='disabled',
         RUSTUP_TOOLCHAIN=helper.rust_toolchain(args.target), DEVELOPER_DIR='/Library/Developer/CommandLineTools',

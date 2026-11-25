@@ -1649,7 +1649,7 @@ def project_inventory(value, body, context, *, collect_paths=None):
     need(set(value) == {"source", "tree", "files"} and value["source"] == context["source"])
     tree = hex_value(value["tree"], 40)
     rows = value["files"]
-    need(type(rows) is list and 0 < len(rows) <= 4095)
+    need(type(rows) is list and 0 < len(rows) <= 4128)
     paths = set()
     for row in rows:
         need(type(row) is dict and set(row) == {"path", "gitMode", "blob", "size", "sha256"})
