@@ -1,4 +1,4 @@
-name: Disposable macOS native verification with pinned Xcode 27.1
+name: Disposable macOS 26 issuer comparison with TLS server policy
 
 on:
   workflow_dispatch:
@@ -11,84 +11,137 @@ on:
 permissions:
   contents: read
 
-env:
-  PYTHONSAFEPATH: '1'
-
 jobs:
-  native-profiles-comparison:
+  compare-issuer-clients:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
       inputs.verification_target == 'macos'
-    runs-on: xcode-27
-    timeout-minutes: 60
-    permissions:
-      contents: read
+    runs-on: macos-26
+    timeout-minutes: 6
     env:
-      MRK_DIAGNOSTIC_BASIS_COMMIT: 4f4b59555edd6758438246245147a0c5ba00ffa0
-      MRK_DIAGNOSTIC_BASIS_TREE: e4f810f5c9cb1d3b5a1408d5d3d4315e8ebf0d5d
+      REVIEWED_SOURCE: c47ac447531bbc8426ec766907263e17f330e907
+      REVIEWED_TREE: 202803431c745eacd7476c240f999c17734f99bf
     steps:
-      - name: Require a disposable GitHub-hosted runner
+      - name: Admit a disposable macOS 26 ARM64 runner
         env:
-          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        shell: bash
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
-          [[ "$(sw_vers -productVersion)" == 27.* ]]
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ env.REVIEWED_SOURCE }}
           persist-credentials: false
-          ref: ${{ env.MRK_DIAGNOSTIC_BASIS_COMMIT }}
-      - name: Set up Python
-        id: python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Set up the fixed Python 3.12 compatibility runtime
-        id: python312
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
-      - name: Set up the fixed Python 3.13 compatibility runtime
-        id: python313
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
-      - name: Set up the fixed Python 3.14 compatibility runtime
-        id: python314
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-      - name: Set up pinned Ruby without project installation
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
-        with:
-          ruby-version: '3.3.12'
-          bundler: none
-          bundler-cache: false
-      - name: Require isolated macOS source and installed-wheel verification
+      - name: Observe issuer behavior on exactly the reviewed source
         env:
-          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
-          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
-          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
-          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
-        shell: bash
+          MRK_REVIEWED_SOURCE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$MRK_DIAGNOSTIC_BASIS_COMMIT" ]]
-          [[ "$(git rev-parse 'HEAD^{tree}')" == "$MRK_DIAGNOSTIC_BASIS_TREE" ]]
-          xcode_version="$(DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer /usr/bin/xcodebuild -version)"
-          [[ "$xcode_version" == $'Xcode 27.1\nBuild version 27A9275' ]]
-          ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
-          sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
-            "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
-            --platform macos --source "$GITHUB_WORKSPACE" \
-            --python "$MRK_PYTHON" --ruby "$ruby_executable" \
-            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
-            --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
-            --commit "$MRK_DIAGNOSTIC_BASIS_COMMIT" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
-            --scope native-python --summary "$GITHUB_STEP_SUMMARY"
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$REVIEWED_TREE" ]]
+          python -I -B - <<'PY'
+          """Compare bounded synthetic Basic X.509 and TLS server AIA on a hosted Mac."""
+          import hashlib
+          import importlib.util
+          import inspect
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import tempfile
+          import textwrap
+          import time
+
+          source = Path(os.environ['MRK_REVIEWED_SOURCE']).resolve(strict=True)
+          helper = source / '.github/scripts/ci_native_authority.py'
+          spec = importlib.util.spec_from_file_location('original_native_aia', helper)
+          authority = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(authority)
+          base = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          version = subprocess.check_output(['/usr/bin/sw_vers', '-productVersion'], text=True, timeout=3).strip()
+          if os.getuid() == 0 or os.uname().machine != 'arm64' or not version.startswith('26.'):
+              raise RuntimeError('disposable ARM64 macOS 26 runner required')
+
+
+          def scratch(work):
+              node = work.lstat()
+              if (work.parent != base or work.resolve(strict=True) != work or not work.name.startswith('mrk-aia-server-')
+                      or node.st_uid != os.getuid() or not stat.S_ISDIR(node.st_mode) or stat.S_IMODE(node.st_mode) != 0o700):
+                  raise RuntimeError('diagnostic scratch custody differs')
+              return work
+
+
+          def replace_once(text, old, new):
+              if text.count(old) != 1:
+                  raise RuntimeError('reviewed probe input differs')
+              return text.replace(old, new, 1)
+
+
+          def tls_fixture():
+              original = inspect.getsource(authority.prepare_aia)
+              updated = replace_once(original, 'f"authorityInfoAccess=caIssuers;URI:{url}',
+                                     'f"extendedKeyUsage=serverAuth\\nsubjectAltName=DNS:localhost,IP:127.0.0.1\\n'
+                                     'authorityInfoAccess=caIssuers;URI:{url}')
+              namespace = dict(vars(authority))
+              exec(compile(updated, str(helper), 'exec'), namespace)
+              return namespace['prepare_aia']
+
+
+          def tls_constructor():
+              original = textwrap.dedent(inspect.getsource(authority._Trust.__init__))
+              changed = replace_once(original, 'policy_create = bind(security, "SecPolicyCreateBasicX509", P, [])',
+                                     'policy_create = bind(security, "SecPolicyCreateSSL", P, [C.c_ubyte, P])\n'
+                                     '    create_host = bind(foundation, "CFStringCreateWithCString", P, [P, C.c_char_p, C.c_uint32])')
+              changed = replace_once(changed, 'policy = self._own(policy_create())',
+                                     'host = self._own(create_host(None, b"localhost", 0x08000100))\n'
+                                     '        policy = self._own(policy_create(1, host))')
+              namespace = dict(vars(authority))
+              exec(compile(changed, str(helper), 'exec'), namespace)
+              return namespace['__init__']
+
+
+          def exercise(prepare, constructor):
+              basic_constructor = authority._Trust.__init__
+              observations = []
+              with tempfile.TemporaryDirectory(dir=base, prefix='mrk-aia-server-') as directory:
+                  work = scratch(Path(directory))
+                  os.chdir(work)
+                  deadline = time.monotonic() + 65
+                  responder = authority._Responder(deadline)
+                  try:
+                      prepare(responder.port, deadline)
+                      fixtures = authority._fixtures(work, responder.port, deadline)
+                      responder.start({row['route']: row['issuer'] for row in fixtures})
+                      authority._Trust.__init__ = constructor
+                      rows = [authority._evaluate_case(fixture, deadline, observations) for fixture in fixtures]
+                      baseline, _ = authority._evaluate_offline_contrast(fixtures[0], deadline)
+                  finally:
+                      authority._Trust.__init__ = basic_constructor
+                      responder.close()
+                      os.chdir(source)
+              expected_requests = [(row['route'], hashlib.sha256(row['issuer']).hexdigest())
+                                   for row in fixtures if row['case'] in ('online','mutant')]
+              return {
+                  'fullChainOffline': {key: baseline[key] for key in ('accepted','network','keychains','result')},
+                  'requestsMatch': responder.requests == expected_requests,
+                  'cases': [{**{key: row[key] for key in ('case','network','keychains','accepted','result')},
+                             'chainCount': len(row['chain']), 'trustError': {key: error[key] for key in ('status','code')},
+                             'requestCount': sum(route == fixture['route'] for route, _ in responder.requests)}
+                            for row, fixture, error in zip(rows, fixtures, observations)],
+              }
+
+
+          authority._scratch = scratch
+          prepare_tls = tls_fixture()
+          constructor_tls = tls_constructor()
+          results = {'basic': exercise(authority.prepare_aia, authority._Trust.__init__),
+                     'tlsServer': exercise(prepare_tls, constructor_tls)}
+          print(json.dumps({'scope': 'synthetic issuer observation only', 'os': version, 'results': results}, sort_keys=True))
+          PY
