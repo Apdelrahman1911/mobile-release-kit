@@ -152,7 +152,7 @@ class StoreConsumerFilesystem(unittest.TestCase):
         # Fresh supplier/capsule/service authentication boundaries are inert;
         # real CLI, provider custody, preparation, TAR correspondence and latching run.
         from test_macos_installed_staging import history_provider_macho_fixture
-        with fixture(target=target) as f:
+        with fixture(target=target, command_bytecode=target == TOOL.ARM_TARGET) as f:
             chosen = python_selection()
             chosen['signedPythonSha256'] = TOOL.digest(f.supplier['python/bin/python3'][0])
             selected = TOOL.signed_store_selection_data(TOOL.canonical(selection()), target=target)

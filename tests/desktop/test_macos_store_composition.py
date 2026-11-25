@@ -16,27 +16,39 @@ import test_macos_store_staging as store_staging
 
 
 @contextlib.contextmanager
-def fixture(*, target=TOOL.ARM_TARGET):
+def fixture(*, target=TOOL.ARM_TARGET, command_bytecode=False):
     assert os.geteuid() != 0, "Run filesystem cases as a nonroot test user"
-    helper = (Path(__file__).resolve().parents[2] / "desktop/tools/prepare_runtime.py").read_bytes()
-    intel_release = (TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json").read_bytes()
+    source = Path(__file__).resolve().parents[2]
+    helper = (source / TOOL.CURRENT_HELPER_SOURCE).read_bytes()
+    intel_release = (source / "desktop/macos-installed-inputs/build-release-intel.json").read_bytes()
+    # The real projection requires the reviewed public roots and Ruby pin.
+    # All executable supplier files and Store lane bodies remain inert.
+    ca_source = (source / TOOL.CURRENT_CA_SOURCE).read_bytes()
+    dependencies = {name: (source / name).read_bytes() for name in ("Gemfile", "Gemfile.lock")}
+    component_dependencies = {
+        name: body.replace(b"3.3.12", b"3.3.14", 1) if target == TOOL.ARM_TARGET else body
+        for name, body in dependencies.items()
+    }
     with tempfile.TemporaryDirectory(prefix="mrk-store-composition-") as directory:
         root = Path(directory)
         checkout = root / "checkout"
         engine = b"# Inert selected core, never executed\n"
-        tooling = {"Gemfile": b"# fixed synthetic dependencies\n", "Gemfile.lock": b"fixed lock\n",
+        tooling = {**dependencies,
                    "fastlane/Fastfile": b"# fixed lane\n", "fastlane/run_lane.rb": b"# current lane runner\n",
                    "fastlane/native_process_spawn.rb": b"# inert source only\n"}
         inputs = {"src/mobile_release/__init__.py": b'__version__ = "0.3.0"\n',
                   "src/mobile_release/_desktop_engine.py": engine,
                   "src/mobile_release/tooling.py": ("REQUIRED_TOOLING_FILES = " + repr(tuple(tooling)) + "\n").encode(),
-                  TOOL.CURRENT_CA_SOURCE: b"synthetic CA, not usable TLS material\n",
+                  TOOL.CURRENT_CA_SOURCE: ca_source,
                   TOOL.CURRENT_HELPER_SOURCE: helper,
                   "desktop/macos-installed-inputs/build-release-intel.json": intel_release, **tooling}
         store_bootstraps = {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py",
                             "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py",
                             "apple_provisioning_bootstrap.py"}
         inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | store_bootstraps})
+        if command_bytecode:
+            for name in TOOL.CURRENT_COMMAND_BYTECODE_FILES:
+                inputs.setdefault("src/" + name, b"# inert command source, never executed\n")
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +60,8 @@ def fixture(*, target=TOOL.ARM_TARGET):
         component = root / "component"
         component.mkdir()
         component_files = store_staging.StoreStaging().fixture(target)
-        component_files.update({"store/tooling/" + name: (body, 0o444) for name, body in tooling.items()})
+        component_tooling = {**tooling, **component_dependencies}
+        component_files.update({"store/tooling/" + name: (body, 0o444) for name, body in component_tooling.items()})
         component_files["store/tooling/fastlane/run_lane.rb"] = (b"# obsolete runner\n", 0o444)
         component_files["store/tooling/obsolete.rb"] = (b"# not part of current core\n", 0o444)
         for name, (body, mode) in component_files.items():
@@ -58,6 +71,10 @@ def fixture(*, target=TOOL.ARM_TARGET):
             path.chmod(mode)
         supplier = {"python/bin/python3": (b"INERT PYTHON, NEVER EXECUTED\n", 0o555),
                     "python/licenses/notice.txt": (b"inert supplier notice\n", 0o444)}
+        if command_bytecode:
+            stdlib = Path(os.__file__).parent
+            supplier.update({TOOL.CURRENT_STDLIB_ROOT + name: ((stdlib / name).read_bytes(), 0o444)
+                             for name in TOOL.CURRENT_COMMAND_STDLIB_BYTECODE_FILES})
         python_root = root / "python-input"
         python_root.mkdir()
         receipt = root / "supplier.json"
@@ -67,7 +84,7 @@ def fixture(*, target=TOOL.ARM_TARGET):
               mock.patch.object(TOOL, "CURRENT_PROTOCOL", TOOL.digest(engine)),
               mock.patch.object(TOOL, "fresh_supplier", return_value=fresh)):
             yield SimpleNamespace(root=root, checkout=checkout, component=component,
-                supplier=supplier, python_root=python_root, receipt=receipt, tooling=tooling)
+                supplier=supplier, python_root=python_root, receipt=receipt, tooling=component_tooling)
 
 
 def args(f, suffix, *, store=True, final=False):
