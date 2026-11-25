@@ -1,4 +1,4 @@
-name: Disposable macOS 26 issuer transport diagnostics
+name: Disposable macOS issuer trust decision comparison
 
 on:
   workflow_dispatch:
@@ -20,7 +20,15 @@ jobs:
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
       inputs.verification_target == 'macos'
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            os-major: '26'
+          - runner: xcode-27
+            os-major: '27'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -33,19 +41,21 @@ jobs:
       - name: Observe trustd while evaluating the same synthetic issuer controls
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_OS_MAJOR: ${{ matrix.os-major }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
-          [[ "$(sw_vers -productVersion)" == 26.* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(sw_vers -productVersion)" == "$EXPECTED_OS_MAJOR".* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ -z "$(git status --porcelain)" ]]
           [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
+          printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "${ImageVersion:-unknown}"
           umask 077
           capture="$(mktemp -d "$RUNNER_TEMP/mrk-trustd.XXXXXX")"
           trap 'rm -rf -- "$capture"' EXIT
           (
             ulimit -f 4096
-            exec sudo -n /usr/bin/log stream --style ndjson --level debug --timeout 40 \
-              --predicate 'process == "trustd" AND (category == "caissuer" OR category == "http" OR subsystem == "com.apple.CFNetwork" OR subsystem == "com.apple.network")'
+            exec sudo -n /usr/bin/log stream --style ndjson --level debug --timeout 20 \
+              --predicate 'process == "trustd" AND (category == "caissuer" OR category == "http" OR category == "trust" OR category == "async" OR category == "trustd" OR subsystem == "com.apple.CFNetwork" OR subsystem == "com.apple.network")'
           ) >"$capture/events" 2>"$capture/collector-errors" &
           collector=$!
           sleep 2
@@ -68,6 +78,13 @@ jobs:
               "host-backoff": "skipping host due to too many recent timeouts",
               "request-timeout": "trustd triggered evaluation timeout",
               "no-request-issued": "no request issued",
+              "policy-allows-network": "network access re-enabled by policy",
+              "policy-denies-network": "network access disabled by policy",
+              "environment-denies-network": "network access not allowed in this environment",
+              "variant-denies-network": "variant does not allow network",
+              "issuer-fetch-skipped-expired": "skipping caissuer fetch for expired",
+              "evaluation-awaits-reply": "waiting for async reply",
+              "evaluation-completed": "completed:",
               "local-network-denied": "local network prohibited",
               "restricted-network": "network is disallowed",
               "transport-security": "app transport security",
@@ -99,7 +116,8 @@ jobs:
                       at = None
                   timed_events += at is not None
                   lower = message.lower()
-                  event_markers = {key for key, marker in patterns.items() if marker in lower}
+                  event_markers = {key for key, marker in patterns.items() if marker in lower
+                                   and (key != "evaluation-completed" or event.get("category") == "trust")}
                   event_codes = set(re.findall(r"NSURLErrorDomain\s+Code=(-10\d{2}|-120\d)\b", message))
                   for _route, _denied, start, end, window_markers, window_codes in windows:
                       if at is not None and start <= at <= end:

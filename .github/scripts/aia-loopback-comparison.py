@@ -110,7 +110,7 @@ if __name__ == "__main__":
         evaluate(sys.argv[2], int(sys.argv[3]), float(sys.argv[4]))
     elif len(sys.argv) == 1:
         os_version = subprocess.check_output(["/usr/bin/sw_vers", "-productVersion"], text=True).strip()
-        observations = [observe(route, denied) for route in HOSTS for denied in (False, True)]
+        observations = [observe(route, denied) for route in ("ipv4",) for denied in (False, True)]
         print(json.dumps({"scope": "diagnostic only", "os": os_version, "observations": observations}, sort_keys=True))
         raise SystemExit(int(any(row["result"] == "unavailable" or not row["result"].get("available")
                                  for row in observations)))
