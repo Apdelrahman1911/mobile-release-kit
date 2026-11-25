@@ -347,7 +347,8 @@ mod tests {
         let accepted: Vec<_> = (2..).take(ACCEPTED_PREDECESSOR_LIMIT).map(release).collect();
         many["acceptedPredecessors"] = json!(accepted);
         assert_eq!(ReleaseSetData::parse_data(&bytes(&many)).unwrap().predecessor_data().len(), ACCEPTED_PREDECESSOR_LIMIT);
-        many["acceptedPredecessors"].as_array_mut().unwrap().push(release(ACCEPTED_PREDECESSOR_LIMIT + 2));
+        let excess = u32::try_from(ACCEPTED_PREDECESSOR_LIMIT + 2).unwrap();
+        many["acceptedPredecessors"].as_array_mut().unwrap().push(release(excess));
         assert_eq!(ReleaseSetData::parse_data(&bytes(&many)).unwrap_err(), DataError::Limit);
         // Actual expected target, not receipt-selected architecture. Existing
         // validation remains common to both selected SOURCE profiles.
