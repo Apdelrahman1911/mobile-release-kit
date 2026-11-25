@@ -252,13 +252,15 @@ fn read_exact_data(mut at:usize,mut out:&mut[u8],read:&mut impl FnMut(usize,&mut
 }
 
 
-// Proposed addition to a reviewed successor of macos_fresh_recovery.rs only.
-// Compile-time fixture paths must be exact manifest-bound local DATA files.
+// Use the source-tracked fixtures also checked by the dedicated compile audit.
 #[cfg(test)]
 mod output_enrollment_tests {
     use super::*;
     use serde_json::Value;
-    fn corpus()->Value {serde_json::from_str(include_str!(env!("MRK_OUTPUT_DATA_CORPUS"))).unwrap()}
+    fn corpus()->Value {
+        serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/fixtures/macos-output-data/corpus.json"))).unwrap()
+    }
     fn unhex(value:&str)->Vec<u8>{
         assert_eq!(value.len()%2,0);
         value.as_bytes().chunks_exact(2).map(|v|u8::from_str_radix(std::str::from_utf8(v).unwrap(),16).unwrap()).collect()
@@ -334,12 +336,14 @@ mod output_enrollment_tests {
     }
     #[test]
     fn full_public_inventory_path_quotes_8521(){
-        let raw=include_bytes!(env!("MRK_OUTPUT_DATA_INVENTORY"));
+        let raw=include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/fixtures/macos-output-data/inventory.json"));
         assert_eq!(digest(raw),"beb7a406091cef70e0e7799450bab1cd90a969436d7c1ae231b3c49b133a350a");
         let document:Value=serde_json::from_slice(raw).unwrap();
         let inventory=record::Inventory::parse_for_release(raw,document["runtimeManifestSha256"].as_str().unwrap(),document["release"].as_str().unwrap()).unwrap();
         let index=inventory.index().unwrap();assert_eq!((index.files.len(),index.directories.len(),index.payload_bytes),(7230,1279,331902994));
-        let rows:Value=serde_json::from_str(include_str!(env!("MRK_OUTPUT_DATA_PATH_QUOTES"))).unwrap();
+        let rows:Value=serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/fixtures/macos-output-data/path-quotes.json"))).unwrap();
         assert_eq!(rows.as_array().unwrap().len(),8521);let mut sum=0;
         let mut quoted_files=BTreeSet::new();let mut quoted_dirs=BTreeSet::new();
         for row in rows.as_array().unwrap(){
