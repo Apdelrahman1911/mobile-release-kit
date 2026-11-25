@@ -1,5 +1,6 @@
 """Diagnostic-only comparison for a disposable, unsigned hosted macOS run."""
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -34,7 +35,38 @@ def evaluate(work, port, deadline):
     print(authority.AIA_PREFIX.decode("ascii") + json.dumps(authority.evaluate_aia(port, deadline), separators=(",", ":")))
 
 
-def exercise(name, isolated):
+def system_events(routes):
+    predicate = ('process == "trustd" AND (category == "http" OR category == "caissuer")')
+    result = subprocess.run(["/usr/bin/log", "show", "--last", "2m", "--info", "--debug",
+                             "--style", "compact", "--predicate", predicate], capture_output=True,
+                            timeout=15, check=False)
+    if result.returncode or len(result.stdout) > 256 * 1024:
+        return {"available": False}
+    matched = [line for line in result.stdout.decode("utf-8", "replace").splitlines()
+               if any(route in line for route in routes)]
+    return {"available": True, "matchingEvents": len(matched),
+            "requestEvents": sum("request for uri:" in line for line in matched),
+            "downloadFailures": sum("Failed to download issuer" in line for line in matched),
+            "returnedParents": sum("found parents for" in line for line in matched),
+            "urlErrorCodes": sorted({int(code) for line in matched for code in
+                                     re.findall(r"NSURLErrorDomain Code=(-1[0-9]{3})", line)})}
+
+
+def prepare_loopback(host, port, deadline):
+    if host == "127.0.0.1":
+        authority.prepare_aia(port, deadline)
+        return
+    if host != "localhost":
+        raise RuntimeError("unexpected fixed loopback host")
+    original = inspect.getsource(authority.prepare_aia)
+    if original.count("http://127.0.0.1:") != 1:
+        raise RuntimeError("original fixed loopback fixture URL changed")
+    namespace = dict(vars(authority))
+    exec(compile(original.replace("http://127.0.0.1:", "http://localhost:"), str(HELPER), "exec"), namespace)
+    namespace["prepare_aia"](port, deadline)
+
+
+def exercise(name, isolated, host):
     deadline = time.monotonic() + 85
     former = Path.cwd()
     script = Path(__file__).resolve()
@@ -45,7 +77,7 @@ def exercise(name, isolated):
         try:
             authority._scratch = diagnostic_scratch
             os.chdir(work)
-            authority.prepare_aia(responder.port, deadline)
+            prepare_loopback(host, responder.port, deadline)
             fixtures = authority._fixtures(work, responder.port, deadline)
             responder.start({row["route"]: row["issuer"] for row in fixtures})
             offline = next(row for row in fixtures if row["case"] == "product-offline")
@@ -75,7 +107,7 @@ def exercise(name, isolated):
             responder.close()
             observation = authority._aia_comparison_note(child.stdout, fixtures, responder.requests)
             return {"case": name, "controllerReachedResponder": True, "childReturn": child.returncode,
-                    "result": observation,
+                    "result": observation, "system": system_events([row["route"] for row in fixtures]),
                     "elapsedSeconds": round(time.monotonic() - (deadline - 85), 3)}
         finally:
             os.chdir(former)
@@ -91,7 +123,7 @@ if __name__ == "__main__":
             raise RuntimeError("requires the fixed nonroot hosted Apple Silicon account")
         report = {"scope": "test-only runner diagnostic", "os": subprocess.check_output(
             ["/usr/bin/sw_vers", "-productVersion"], text=True).strip(),
-            "runs": [exercise("direct-network-denied", True), exercise("runner-network-policy", False)]}
+            "runs": [exercise("literal-loopback", False, "127.0.0.1"), exercise("named-loopback", False, "localhost")]}
         print(json.dumps(report, sort_keys=True))
     else:
         raise RuntimeError("unexpected diagnostic route")
