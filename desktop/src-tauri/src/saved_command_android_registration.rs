@@ -160,7 +160,7 @@ impl ControlSlot {
             Err(error) => { drop(error.into_inner()); self.poisoned(); return Err(BridgeError::cleanup_unknown()); },
         };
         if self.is_unknown() { return Err(BridgeError::cleanup_unknown()); }
-        if Self::pending(&book) {
+        if Self::pending(&book) || book.admission.is_some() {
             return Err(BridgeError::new("busy", "Wait for the original lifecycle projection."));
         }
         // All ten publisher records and the dedicated cancel lane are empty.
@@ -490,6 +490,25 @@ impl ControlSlot {
         assert!(matches!(slot.reserve_reconciliation(), Err(error) if error == BridgeError::cleanup_unknown()));
         assert!(slot.is_unknown());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn optional_reconciliation_yields_to_an_admission_claim() {
+    let slot = Arc::new(ControlSlot::default());
+    let admission = slot.claim(0, None).unwrap();
+    assert!(matches!(slot.reserve_reconciliation(), Err(error) if error.code == "busy"));
+    assert!(slot.current_claim(&admission));
+    assert!(slot.retained_bytes().is_some());
+
+    // Real lifecycle actions retain priority over pending admission.
+    let quit = slot.reserve(PublisherKind::Quit, true).unwrap();
+    assert!(!slot.current_claim(&admission));
+    assert!(slot.retained_bytes().is_none());
+    quit.reject();
+    assert!(slot.current_claim(&admission));
+    drop(admission);
+    slot.reserve_reconciliation().unwrap().reject();
 }
 
 #[derive(Clone,Copy,PartialEq,Eq)]

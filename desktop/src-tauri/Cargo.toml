@@ -1,6 +1,6 @@
 [package]
 name = "mobile-release-kit-desktop"
-version = "0.2.10"
+version = "0.2.11"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -225,9 +225,19 @@ opt-level = 3
 debug-assertions = true
 overflow-checks = true
 
+[profile.test.package."sha2:0.11.0"]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
 # The shared normal/observer connection build uses the dev profile. Preserve
 # complete byte hashing under the same original runtime admission deadlines.
 [profile.dev.package."sha2:0.10.9"]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package."sha2:0.11.0"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true

@@ -222,6 +222,8 @@ export function installationPreparationError(error: unknown): ApiError {
     const descriptor = typeof error === 'object' && error !== null ? Object.getOwnPropertyDescriptor(error, 'code') : undefined;
     if (descriptor && 'value' in descriptor) code = descriptor.value;
   } catch { /* Raw native/provider rejection data is never retained. */ }
+  if (code === 'macos_maintenance_not_admitted') return { code,
+    message: 'Preparation did not start. Refresh preparation status before explicitly trying again.', retryable: false };
   if (code === 'macos_maintenance_unavailable') return { code,
     message: 'Preparation requires the normal installed app, its configured Android helper and settled work. Refresh status before trying again. Project signing settings cannot enable an unavailable app profile.', retryable: false };
   if (code === 'busy' || code === 'quit_pending' || code === 'macos_maintenance_busy') return { code: 'macos_maintenance_busy',

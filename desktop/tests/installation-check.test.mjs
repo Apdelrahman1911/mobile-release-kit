@@ -365,6 +365,27 @@ test('failed preparation keeps its error and replay veto when automatic or expli
   }
 });
 
+test('confirmed pre-admission refusal allows explicit refresh and renewed consent', async () => {
+  const h = prepHarness();
+  try {
+    h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.controller.start(true), true); await flush();
+    h.last('start').reject({ code: 'macos_maintenance_not_admitted', message: 'INERT_PRIVATE_CANARY' }); await flush();
+    assert.equal(h.controller.snapshot().error.code, 'macos_maintenance_not_admitted');
+    assert.equal(h.controller.retainsAttempt(), false);
+    assert.equal(h.by('start').length, 1);
+    assert.equal(h.by('status').length, 1);
+    assert.equal(h.controller.start(true), false);
+    void h.controller.refresh(); h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.controller.snapshot().error, null);
+    assert.equal(h.controller.start(false), false);
+    assert.equal(h.controller.start(true), true); await flush();
+    assert.equal(h.by('start').length, 2);
+    h.last('start').resolve(prepRunning(1)); await flush();
+    assert.equal(h.controller.retainsAttempt(), true);
+  } finally { h.controller.dispose(); }
+});
+
 test('failed preparation from a refused baseline clears only on a valid newer native original', async () => {
   const h = prepHarness();
   try {

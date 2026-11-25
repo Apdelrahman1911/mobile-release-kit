@@ -217,14 +217,15 @@ export class InstallationPreparationController {
       this.accept(next);
     }).catch((error: unknown) => {
       const failure = installationPreparationError(error);
-      this.failedStart = { generation, error: failure };
+      if (failure.code !== 'macos_maintenance_not_admitted') this.failedStart = { generation, error: failure };
       this.update({ error: failure });
     })
       .finally(() => {
         this.pending = false; this.refreshAgain = false; this.update({ starting: false });
         // Lost/malformed acknowledgement gets a read-only reconciliation, not
         // another Start, native cancellation, helper registration or renderer Quit.
-        if (!this.disposed) void this.refresh();
+        // A confirmed pre-admission refusal stays visible until a status refresh.
+        if (!this.disposed && this.view.error?.code !== 'macos_maintenance_not_admitted') void this.refresh();
       });
     return true;
   }

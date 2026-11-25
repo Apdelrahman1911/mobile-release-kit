@@ -53,23 +53,23 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         # App shutdown is coordinated explicitly, never by Installer forcing it.
         self.assertIsNone(root.find("pkg-ref/must-close/app"))
 
-    def test_component_binding_remains_the_fixed_ordinary_fresh_only_package(self):
+    def test_component_binding_remains_the_fixed_ordinary_product(self):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
         refs = list(root.iter("pkg-ref"))
-        self.assertEqual(len(refs), 3)
+        self.assertEqual(len(refs), 2)
         self.assertTrue(all(node.get("id") == "dev.mobile-release-kit.desktop.installed" for node in refs))
         component = [node for node in refs if node.text and node.text.strip()]
         self.assertEqual(len(component), 1)
         self.assertEqual(component[0].text.strip(), "MobileReleaseKit.pkg")
         self.assertEqual(component[0].get("auth"), "root")
         plist = plistlib.loads((INPUTS / "Info.plist").read_bytes())
-        self.assertEqual(component[0].get("version"), plist["CFBundleVersion"])
         selected = json.loads((INPUTS / "build-release.json").read_bytes())
         self.assertEqual(set(selected), {"schemaVersion", "packageVersion", "release"})
         self.assertEqual(selected["schemaVersion"], 1)
         self.assertTrue(selected["release"].isascii())
         self.assertTrue(0 < len(selected["release"]) < 64)
-        self.assertEqual(component[0].get("version"), selected["packageVersion"])
+        self.assertEqual(component[0].get("version"), "__MRK_PACKAGE_VERSION__")
+        self.assertEqual(plist["CFBundleVersion"], selected["packageVersion"])
         tauri = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_bytes())
         self.assertEqual(tauri["version"], selected["packageVersion"])
         postinstall = (INPUTS / "postinstall").read_text()
@@ -89,14 +89,18 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('#[path = "macos_install_fixed_paths.rs"]', paths)
         self.assertNotRegex(paths, r'pub const (?:PACKAGE_VERSION|RELEASE):')
         build = (ROOT / "desktop/src-tauri/build.rs").read_text()
-        self.assertIn('fn main() {\n    macos_build_release_data();', build)
-        self.assertIn('include_bytes!("../macos-installed-inputs/build-release.json")', build)
+        self.assertIn('macos_build_release_data(&target, &target_os);', build.split('fn main()', 1)[1])
+        selection_source = (ROOT / "desktop/src-tauri/src/macos_build_release.rs").read_text()
+        self.assertIn('include_bytes!("../../macos-installed-inputs/build-release.json")', selection_source)
+        self.assertIn('BuildRelease::from_source(target, target_os)', build)
         self.assertIn('env::var("CARGO_PKG_VERSION")', build)
         self.assertIn('include_bytes!("tauri.conf.json")', build)
-        self.assertEqual(build.count('fn macos_build_release_data()'), 1)
-        self.assertEqual(build.count('macos_build_release_data();'), 1)
+        self.assertEqual(build.count('fn macos_build_release_data('), 1)
+        self.assertEqual(build.count('macos_build_release_data(&target, &target_os);'), 1)
         library = (ROOT / "desktop/src-tauri/src/lib.rs").read_text()
-        self.assertIn('pub mod macos_install_paths;', library)
+        self.assertIn('include!("lib_platform_data.rs");', library)
+        platform_data = (ROOT / "desktop/src-tauri/src/lib_platform_data.rs").read_text()
+        self.assertIn('pub mod macos_install_paths;', platform_data)
         installer = (ROOT / "desktop/src-tauri/src/bin/macos_install.rs").read_text()
         self.assertIn('macos_install_paths as paths', installer)
         for target in ('installed_shell_observation.rs', 'session_gtk_qualification.rs'):
@@ -125,7 +129,8 @@ class MacMaintenancePreparationTests(unittest.TestCase):
             self.assertEqual(manifest["dependencies"]["mobile-release-kit-desktop"]["features"], [feature])
             self.assertIn(library + ".dylib", stable)
         package = (ROOT / "desktop/tools/macos_android_helper_package.py").read_text()
-        self.assertIn('self.release_entry = self.source_original("desktop/macos-installed-inputs/build-release.json"', package)
+        self.assertIn('self.release_entry = self.source_original(self.release_input, "source-image-release", self.stager.BUILD_RELEASE_LIMIT)', package)
+        self.assertIn('self.stager.build_release_data(body, target=self.target)', package)
         self.assertIn('self.read(self.release_entry) == release_body', package)
         self.assertIn('MRK_MACOS_INSTALL_SOURCE_COMMIT=environment["GITHUB_SHA"], MRK_IMAGE_RELEASE_ID=release', package)
         self.assertIn('source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]', package)
@@ -140,9 +145,10 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
         self.assertEqual(root.find("readme").attrib, {"file": "InstallerReadMe.html", "mime-type": "text/html"})
         text = (INPUTS / "InstallerReadMe.html").read_text()
-        for term in ["fresh installation", "exact same-package", "explicitly authorized predecessor", "Uninstall is unavailable", "engineering-v1", "credential vault", "Keychain",
-                     "signing originals", "provider registrations", "moved copies", "partial-installation evidence",
-                     "does not prove", "never run as root", "separately", "reviewed recovery route"]:
+        for term in ["Prepare app to quit", "Install.pkg", "hidden signature files", "fixed managed location",
+                     "Keep existing installation and recovery files, projects and saved credentials",
+                     "Do not delete managed folders or change their permissions", "same release's original Install disk image",
+                     "Show All Logs", "Review a log before sharing it", "not proof that installation or recovery finished"]:
             self.assertIn(term, text)
         self.assertNotRegex(text.lower(), r'<(?:script|form|button|iframe|img)\b|(?:href|src)\s*=|javascript:')
 
@@ -218,7 +224,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertLess(view.index('let state=self.lock()'), view.index('expected.is_some_and('))
         self.assertLess(view.index('expected.is_some_and('), view.index('Ok(PreparationStatus{'))
         self.assertIn('new_work_closed:state.maintenance.closed()', view)
-        public = document.split('impl DocumentBinding {\n    pub(crate) fn installation_preparation_status', 1)[1]
+        public = document.split('impl DocumentBinding {\n    pub(crate) fn installation_preparation_status', 1)[1].split('#[cfg(test)]', 1)[0]
         for authority in ['.release()', '.request_quit(', 'completion=', 'closed=false', 'Completion{']:
             self.assertNotIn(authority, public)
         self.assertIn('if completion.may_reopen()', document)
@@ -245,7 +251,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('type="checkbox"', ui)
         self.assertIn('HelpButton content={installationPreparationHelp}', ui)
         self.assertIn('Preparing to quit does not authorize installation changes.', ui)
-        self.assertIn('Uninstall is not yet available', ui)
+        self.assertIn('Removal requires a separate matching verified removal image', ui)
         self.assertIn('if (this.pending) { this.refreshAgain = true; return; }', controller)
         self.assertIn('next.operationId !== before.operationId', controller)
         self.assertIn("['prepared', 'refused', 'unknown'].includes(before.phase)", controller)
@@ -256,9 +262,9 @@ class MacMaintenancePreparationTests(unittest.TestCase):
     def test_private_writer_keeps_original_custody_and_does_not_activate_maintenance(self):
         """SOURCE boundary, not proof of Darwin lock, child or package finality."""
         source = (ROOT / 'desktop/src-tauri/src/bin/macos_install.rs').read_text()
-        marker = '    #[cfg(not(feature = "macos-installed-installer-fixture"))]\n    pub(super) fn run() -> i32 {'
+        marker = '    pub(super) fn run() -> i32 { worker::entry() }'
         private, ordinary = source.split('    mod worker {', 1)[1].split(marker, 1)
-        ordinary = ordinary.split('    // Exactly eight separately named cases', 1)[0]
+        ordinary = marker + ordinary.split('    // Exactly eight separately named cases', 1)[0]
         self.assertIn('worker::entry()', ordinary)
         self.assertNotIn('Install::new(', ordinary)
         self.assertNotIn('finish_transport(', ordinary)
@@ -279,20 +285,22 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('result.len() < ARGUMENT_COUNT_LIMIT', arguments)
         self.assertIn('value.into_string()', arguments)
         self.assertNotIn('to_string_lossy', arguments)
-        self.assertIn('[_,source,completed] if source.starts_with', arguments)
-        self.assertIn('[_,role,endpoint,invocation] if role == ROLE', arguments)
+        self.assertIn('(CompiledEntryRole::Installer,[_,source,completed])', arguments)
+        self.assertIn("source.starts_with('/') && completed.starts_with('/')", arguments)
+        self.assertIn('(CompiledEntryRole::Installer,[_,worker,endpoint,invocation]) if worker == ROLE', arguments)
         completed = private.split('fn completed_entry(', 1)[1].split('fn ', 1)[0]
         self.assertIn('Deadline::from_entry(started).and_then(Parent::new)', completed)
         self.assertNotIn('Deadline::start', completed)
         self.assertNotIn('Install::new(', completed)
         self.assertLess(completed.index('parent.run_completed('), completed.index('parent.record_maintenance_export('))
         self.assertLess(completed.index('parent.record_maintenance_export('), completed.index('parent.settle_parent_originals()'))
-        self.assertEqual(source.count('fn install_prepared('), 1)
+        self.assertEqual(source.count('fn stage_payload('), 1)
         self.assertEqual(source.count('self.copy_tree("app", prepared.input, stage,'), 1)
         self.assertEqual(source.count('self.copy_tree("runtime", prepared.input, stage,'), 1)
-        self.assertIn('self.install_prepared(prepared, &invocation)', source)
-        self.assertIn('book.install_prepared(prepared,&args[3])', private)
-        for guard in ['const TOTAL: u64 = 120 * SECOND', 'const SETTLEMENT: u64 = 10 * SECOND',
+        self.assertEqual(source.count('book.stage_payload(&observed.prepared,invocation,admission)'), 1)
+        self.assertIn('PreparedWorker::Maintenance(observed) => maintenance::execute(', private)
+        self.assertIn('PreparedWorker::ArchivedMaintenance(observed)=>maintenance::execute(', private)
+        for guard in ['const TOTAL: u64 = compiled_total_data(', 'const SETTLEMENT: u64 = 10 * SECOND',
                       'ClockId::CLOCK_MONOTONIC', 'start.checked_add(TOTAL) == Some(end)',
                       'now < self.last.get()', 'end.checked_sub(TOTAL)',
                       'self.book.shared_deadline().and_then(Deadline::check_work)',
@@ -306,10 +314,12 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('Stdio::from(duplicate)', private)
         self.assertIn('OFlag::O_ACCMODE == OFlag::O_RDONLY', private)
         self.assertIn('pread(fd,&mut bytes[used..],used as i64)', private)
-        self.assertEqual(private.count('.spawn()'), 1)
+        self.assertEqual(private.count('.spawn()'), 2)
         self.assertIn('self.child.as_mut().map(Child::try_wait)', private)
         self.assertIn('self.child.as_mut().map(Child::kill)', private)
         admission = private.split('fn admit_and_go(', 1)[1].split('fn collect(', 1)[0]
+        self.assertEqual(admission.count('.spawn()'), 1)
+        self.assertIn('ok_or("removal-fixture-command")?.spawn()', private)
         self.assertLess(admission.index('self.book.gate.exclusive_acquired'), admission.index('.spawn()'))
         self.assertLess(admission.index('let output_owned = self.book.control_original'),
                         admission.index('input_owned?; output_owned?;'))
@@ -318,7 +328,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         dispatch = private.split('fn dispatch_private(', 1)[1].split('#[cfg(test)]', 1)[0]
         self.assertLess(dispatch.index('Deadline::inherit(end)'), dispatch.index('read_frame(stdin.as_fd()'))
         self.assertLess(dispatch.index('command_eof(stdin.as_fd()'), dispatch.index('book.worker_go_eof = true'))
-        self.assertLess(dispatch.index('book.worker_go_eof = true'), dispatch.index('book.install_prepared'))
+        self.assertLess(dispatch.index('book.worker_go_eof = true'), dispatch.index('maintenance::execute('))
         for held in ['parentCommandEndpoint', 'parentResultEndpoint', 'writerCommandEndpoint', 'writerResultEndpoint',
                      'worker-pipe-post', 'worker-source-binding', 'worker-gate-binding']:
             self.assertIn(held, private)
@@ -335,7 +345,6 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         # owner. Ordinary entry now uses that owner, but source checks cannot
         # attest Context forwarding, signing, native calls or outer finality.
         actions = source.split('    mod maintenance {', 1)[1].split('    // B2 is deliberately private', 1)[0]
-        self.assertEqual(source.count('fn stage_payload('), 1)
         self.assertEqual(source.count('fn record_file('), 1)
         self.assertIn('ActionData::SamePackageNoop', actions)
         self.assertIn('ActionData::RestoreFixedApp', actions)
@@ -352,14 +361,17 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('fn run_maintenance(', private)
         self.assertIn('self.run_selected(source,Some((selected,request_id)))', private)
         # A request ID is correlation only. The original same-clock parent
-        # reserves one fixed EXCL output before intent/GO and never reuses the
-        # old per-release export owner or attests its own future return.
-        self.assertLess(admission.index('RequestExport::reserve'), admission.index('observed.create_intent'))
-        self.assertLess(admission.index('observed.create_intent'), admission.index('.spawn()'))
+        # Fresh must persist its birth and intent before publishing the
+        # request slot. Existing installations reserve before their intent.
+        request_setup = private.split('fn create_intent_and_reserve_request(', 1)[1].split('fn spawn_admitted_writer', 1)[0]
+        self.assertLess(request_setup.index('observed.create_intent'), request_setup.index('RequestExport::reserve'))
+        self.assertLess(request_setup.index('RequestExport::reserve'), request_setup.index('if !fresh'))
+        self.assertLess(request_setup.index('if !fresh'), request_setup.index('.create_intent', request_setup.index('if !fresh')))
+        self.assertLess(admission.index('self.create_intent_and_reserve_request('), admission.index('self.spawn_admitted_writer('))
         self.assertIn('request.empty_original(&self.book)?', admission)
-        export = private.split('struct RequestExport {', 1)[1].split('struct Parent {', 1)[0]
+        export = private.split('struct RequestExport {', 1)[1].split('struct ProducerAdmission {', 1)[0]
         for original in ['transaction::export_name_data(request_id)',
-                         'book.create_file(support,&name,Role::ReceiptWriter)',
+                         'book.create_public_receipt_file(support,&name)',
                          'self.empty_original(book)?', 'self.attempted = true',
                          'book.record_reserved_file(self.writer,&bytes.0)',
                          'book.persist(self.support,false)', 'book.forward_close(reader,']:
@@ -374,11 +386,11 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         joined_capsule = private.split('fn record_maintenance_capsule(', 1)[1].split('fn ', 1)[0]
         self.assertIn('joined: &JoinedWriter', joined_capsule)
         self.assertIn('maintenance::state_after_join', joined_capsule)
-        self.assertIn('CapsuleData::encode_data', joined_capsule)
+        self.assertIn('CapsuleData::encode_with_launcher_data', joined_capsule)
         self.assertIn('maintenance::persist_capsule', joined_capsule)
         self.assertIn('"parentFinality":"pending-original-closes-and-outer-return"', joined_capsule)
         self.assertLess(joined_capsule.index('maintenance-original-join-required'), joined_capsule.index('observed.publish_controls('))
-        self.assertLess(joined_capsule.index('observed.publish_controls('), joined_capsule.index('CapsuleData::encode_data'))
+        self.assertLess(joined_capsule.index('observed.publish_controls('), joined_capsule.index('CapsuleData::encode_with_launcher_data'))
         controls = actions.split('fn publish_controls(', 1)[1].split('pub(super) fn previous(', 1)[0]
         for held in ['self.incoming_controls(book,descriptor,signature)?', 'book.record_file(',
                      'book.persist(self.prepared.destination,false)?', 'held_bytes(book,first,descriptor)?',
@@ -410,11 +422,11 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertLess(verifier.index('payload.settled()'), verifier.index('Ok(parsed.release_set_data().clone())'))
         inspect = reader.split('fn inspect(', 1)[1].split('pub(crate) fn run(', 1)[0]
         self.assertLess(inspect.index('!crate::installation::NORMAL_MAC_PROFILE'), inspect.index('native::real_user()'))
-        self.assertLess(inspect.index('self.installed_selection('), inspect.index('data::Record::parse_for_release_data('))
+        self.assertLess(inspect.index('self.installed_selection('), inspect.index('data::Record::parse_observed_for_release_data('))
         finish = reader.split('fn run_selected(', 1)[1].split('\nfn immediate_child', 1)[0]
         self.assertLess(finish.index('producer.settle('), finish.index('book.settle('))
         self.assertIn('let cleaned = producer_cleaned && self.book.as_mut()', finish)
-        self.assertLess(finish.index('if cleaned {'), finish.index('self.producer.take()'))
+        self.assertLess(finish.index('if cleaned && !final_expired {'), finish.index('self.producer.take()'))
         self.assertLess(finish.index('self.producer.take()'), finish.index('self.storage_disposed = true'))
         # The isolated helper never enters this app inspection path. Prove the
         # actual role/entry chain instead of enabling producer/signing APIs in
