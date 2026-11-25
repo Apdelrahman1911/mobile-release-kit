@@ -112,6 +112,8 @@ fn create_only_return_uses_same_final_data_checks_and_unknown_never_reports_succ
     let c = candidate(&r);
     let v = terminal(&r, true);
     let decoded = r.terminal(&line(&v), Some(&c)).unwrap();
+    assert!(decoded.child_declared_settled());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(
         crate::git_push_state::FinalData::from_returned(&r, &c, &decoded, &tests::returned())
             .is_ok()

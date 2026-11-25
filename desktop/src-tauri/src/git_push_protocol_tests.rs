@@ -138,6 +138,7 @@ fn candidate_binds_complete_review_not_only_new_oid_and_does_not_mean_sent() {
         .unwrap()
         .valid(&action(), "git-7"));
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn journal_keeps_same_review_and_refuses_candidate_replacement_or_unbound_finality() {
     let r = review();

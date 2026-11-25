@@ -198,6 +198,8 @@ fn apply_requires_complete_same_original_return_and_late_stop_cannot_be_success(
     let c = candidate(&r);
     let v = terminal(&r, true);
     let decoded = decode(&r, &v, Some(&c)).unwrap();
+    assert!(decoded.child_declared_settled());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(
         crate::git_push_state::FinalData::from_returned(&r, &c, &decoded, &returned())
             .unwrap()

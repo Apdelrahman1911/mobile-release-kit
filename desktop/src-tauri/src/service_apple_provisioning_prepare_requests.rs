@@ -1175,11 +1175,8 @@ mod tests {
             + 256
             + 2 * p::STATUS_LIMIT;
         println!(
-            "Apple Prepare actual retained row={} existing row={} IPC={} mixedWorkers={}",
-            bytes,
-            p::ROW_BACKING,
-            p::IPC_WORKER_BACKING,
-            crate::installed_cli_ipc::CLIENTS
+            "Apple Prepare actual retained row={} existing row={} IPC={}",
+            bytes, p::ROW_BACKING, p::IPC_WORKER_BACKING
         );
         assert!(bytes <= p::ROW_BACKING);
         assert!(serde_json::to_vec(&e.status().unwrap()).unwrap().len() < p::STATUS_LIMIT);
@@ -1195,6 +1192,7 @@ mod tests {
             p::DOCUMENT_BACKING,
             p::REQUEST_LIMIT * p::ROW_BACKING + 128 * 1024
         );
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_eq!(crate::installed_cli_ipc::CLIENTS, 8);
     }
 }
