@@ -18,20 +18,15 @@ jobs:
       github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
       inputs.verification_target == 'macos'
     timeout-minutes: 8
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, macos-15]
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26
     steps:
       - name: Admit a disposable Apple Silicon runner
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          SELECTED_RUNNER: ${{ matrix.runner }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
-          [[ "$(sw_vers -productVersion)" == "${SELECTED_RUNNER#macos-}".* ]]
+          [[ "$(sw_vers -productVersion)" == 26.* ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
@@ -39,14 +34,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Compare original synthetic issuer behavior with the Basic X.509 and TLS client policies
+      - name: Compare original synthetic issuer behavior with live Apple trust-service events
         run: |
           set -euo pipefail
           python -I -B .github/scripts/aia-comparison.py | tee "$RUNNER_TEMP/aia-comparison.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: ${{ !cancelled() }}
         with:
-          name: synthetic-macos-issuer-policy-${{ matrix.runner }}
+          name: synthetic-macos-issuer-live
           path: ${{ runner.temp }}/aia-comparison.json
           if-no-files-found: error
           retention-days: 14

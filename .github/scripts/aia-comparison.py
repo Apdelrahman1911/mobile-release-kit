@@ -1,6 +1,6 @@
 """Diagnostic-only comparison for a disposable, unsigned hosted macOS run."""
+import contextlib
 import importlib.util
-import inspect
 import json
 import os
 from pathlib import Path
@@ -9,7 +9,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 import urllib.request
 
@@ -29,58 +28,53 @@ def diagnostic_scratch(work):
     return work
 
 
-def evaluate(work, port, deadline, policy):
-    if policy == "tls-client":
-        body = textwrap.dedent(inspect.getsource(authority._Trust.__init__))
-        lookup = 'policy_create = bind(security, "SecPolicyCreateBasicX509", P, [])'
-        creation = "policy = self._own(policy_create())"
-        if body.count(lookup) != 1 or body.count(creation) != 1:
-            raise RuntimeError("original policy closure changed")
-        body = body.replace(lookup, 'policy_create = bind(security, "SecPolicyCreateSSL", P, [C.c_ubyte, P])')
-        body = body.replace(creation, "policy = self._own(policy_create(0, None))")
-        namespace = dict(vars(authority))
-        exec(compile(body, str(HELPER), "exec"), namespace)
-        authority._Trust.__init__ = namespace["__init__"]
-    elif policy != "basic":
-        raise RuntimeError("unexpected observation policy")
+def evaluate(work, port, deadline):
     diagnostic_scratch(work)
     os.chdir(work)
     authority._scratch = diagnostic_scratch
     print(authority.AIA_PREFIX.decode("ascii") + json.dumps(authority.evaluate_aia(port, deadline), separators=(",", ":")))
 
 
-def system_events(routes):
-    predicate = ('process == "trustd" AND (category == "http" OR category == "caissuer")')
-    result = subprocess.run(["/usr/bin/log", "show", "--last", "2m", "--info", "--debug",
-                             "--style", "compact", "--predicate", predicate], capture_output=True,
-                            timeout=15, check=False)
-    if result.returncode or len(result.stdout) > 256 * 1024:
-        return {"available": False}
-    matched = [line for line in result.stdout.decode("utf-8", "replace").splitlines()
-               if any(route in line for route in routes)]
-    return {"available": True, "matchingEvents": len(matched),
-            "requestEvents": sum("request for uri:" in line for line in matched),
-            "downloadFailures": sum("Failed to download issuer" in line for line in matched),
-            "returnedParents": sum("found parents for" in line for line in matched),
-            "urlErrorCodes": sorted({int(code) for line in matched for code in
-                                     re.findall(r"NSURLErrorDomain Code=(-1[0-9]{3})", line)})}
+@contextlib.contextmanager
+def live_trust_events(routes):
+    predicate = ('(process == "trustd" OR process == "trustd.agent") '
+                 'AND (category == "http" OR category == "caissuer")')
+    notes = {"available": False}
+    # No raw system messages enter the report or an uploaded file.
+    with tempfile.TemporaryFile(dir=BASE) as capture:
+        with subprocess.Popen(["/usr/bin/log", "stream", "--timeout", "7", "--level", "debug",
+                               "--style", "compact", "--predicate", predicate],
+                              stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.DEVNULL) as stream:
+            try:
+                time.sleep(0.5)
+                yield notes
+            finally:
+                try:
+                    result = stream.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    stream.kill()
+                    stream.wait(timeout=2)
+                    result = -1
+                capture.seek(0)
+                raw = capture.read(256 * 1024 + 1)
+                if result == 0 and len(raw) <= 256 * 1024:
+                    lines = raw.decode("utf-8", "replace").splitlines()
+                    matching = [line for line in lines if any(route in line for route in routes)]
+                    markers = {"request": "request for uri:", "downloadFailure": "Failed to download issuer",
+                               "parentsFound": "found parents for", "timedOut": "evaluation timeout",
+                               "networkPolicyRefusal": "network access not allowed in this environment",
+                               "networkDisabled": "network access disabled by policy",
+                               "noRequest": "no request issued"}
+                    notes.update(available=True,
+                                 fixtureScoped={key: sum(marker in line for line in matching)
+                                                for key, marker in markers.items()},
+                                 allTrustEvents={key: sum(marker in line for line in lines)
+                                                 for key, marker in markers.items()},
+                                 fixtureUrlErrors=sorted({int(code) for line in matching for code in
+                                    re.findall(r"NSURLErrorDomain Code=(-1[0-9]{3})", line)}))
 
 
-def prepare_loopback(host, port, deadline):
-    if host == "127.0.0.1":
-        authority.prepare_aia(port, deadline)
-        return
-    if host != "localhost":
-        raise RuntimeError("unexpected fixed loopback host")
-    original = inspect.getsource(authority.prepare_aia)
-    if original.count("http://127.0.0.1:") != 1:
-        raise RuntimeError("original fixed loopback fixture URL changed")
-    namespace = dict(vars(authority))
-    exec(compile(original.replace("http://127.0.0.1:", "http://localhost:"), str(HELPER), "exec"), namespace)
-    namespace["prepare_aia"](port, deadline)
-
-
-def exercise(name, isolated, host, policy):
+def exercise(name, isolated):
     deadline = time.monotonic() + 85
     former = Path.cwd()
     script = Path(__file__).resolve()
@@ -91,7 +85,7 @@ def exercise(name, isolated, host, policy):
         try:
             authority._scratch = diagnostic_scratch
             os.chdir(work)
-            prepare_loopback(host, responder.port, deadline)
+            authority.prepare_aia(responder.port, deadline)
             fixtures = authority._fixtures(work, responder.port, deadline)
             responder.start({row["route"]: row["issuer"] for row in fixtures})
             offline = next(row for row in fixtures if row["case"] == "product-offline")
@@ -106,13 +100,14 @@ def exercise(name, isolated, host, policy):
                 raise RuntimeError("original loopback responder did not account for the reachability control")
             responder.requests.clear()
             command = [sys.executable, "-I", "-B", str(script), "evaluate", str(work),
-                       str(responder.port), repr(deadline), policy]
+                       str(responder.port), repr(deadline)]
             if isolated:
                 command = ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default) (deny network*)", *command]
             # Fresh synthetic anchors and a loopback URL, with no job token or signing inputs.
-            child = subprocess.run(command, cwd=former, env={"PATH": "/usr/bin:/bin",
-                "RUNNER_TEMP": str(BASE), "HOME": str(work), "LC_ALL": "C"}, capture_output=True,
-                timeout=max(1, deadline - time.monotonic()), check=False)
+            with live_trust_events([row["route"] for row in fixtures]) as system:
+                child = subprocess.run(command, cwd=former, env={"PATH": "/usr/bin:/bin",
+                    "RUNNER_TEMP": str(BASE), "HOME": str(work), "LC_ALL": "C"}, capture_output=True,
+                    timeout=max(1, deadline - time.monotonic()), check=False)
             if child.returncode != 0 or child.stderr or not 0 < len(child.stdout) <= 8192:
                 return {"case": name, "controllerReachedResponder": True, "childReturn": child.returncode,
                         "boundedOutput": 0 < len(child.stdout) <= 8192, "stderrBytes": len(child.stderr),
@@ -121,7 +116,7 @@ def exercise(name, isolated, host, policy):
             responder.close()
             observation = authority._aia_comparison_note(child.stdout, fixtures, responder.requests)
             return {"case": name, "controllerReachedResponder": True, "childReturn": child.returncode,
-                    "result": observation, "system": system_events([row["route"] for row in fixtures]),
+                    "result": observation, "system": system,
                     "elapsedSeconds": round(time.monotonic() - (deadline - 85), 3)}
         finally:
             os.chdir(former)
@@ -130,15 +125,14 @@ def exercise(name, isolated, host, policy):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 6 and sys.argv[1] == "evaluate":
-        evaluate(Path(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.argv[5])
+    if len(sys.argv) == 5 and sys.argv[1] == "evaluate":
+        evaluate(Path(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]))
     elif len(sys.argv) == 1:
         if sys.platform != "darwin" or os.uname().machine != "arm64" or os.getuid() == 0:
             raise RuntimeError("requires the fixed nonroot hosted Apple Silicon account")
         report = {"scope": "test-only runner diagnostic", "os": subprocess.check_output(
             ["/usr/bin/sw_vers", "-productVersion"], text=True).strip(),
-            "runs": [exercise("basic-x509", False, "127.0.0.1", "basic"),
-                     exercise("tls-client", False, "127.0.0.1", "tls-client")]}
+            "runs": [exercise("default-process", False), exercise("direct-network-denied", True)]}
         print(json.dumps(report, sort_keys=True))
     else:
         raise RuntimeError("unexpected diagnostic route")
