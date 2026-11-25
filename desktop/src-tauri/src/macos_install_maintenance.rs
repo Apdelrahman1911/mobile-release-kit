@@ -16,7 +16,7 @@ pub const INPUT_LIMIT: usize = 16 * 1024;
 pub const PREDECESSOR_LIMIT: usize = 8;
 // The signed list can name more starting releases than one installed history
 // can retain. Keep the existing limit on generations and their disk budget.
-const ACCEPTED_PREDECESSOR_LIMIT: usize = 10;
+const ACCEPTED_PREDECESSOR_LIMIT: usize = 11;
 const PROFILE: &str = "fixed-macos26-arm64-maintenance-v2";
 fn profile(target: MaintenanceTargetData) -> &'static str {
     match target { MaintenanceTargetData::Arm64 => PROFILE,
@@ -347,7 +347,7 @@ mod tests {
         let accepted: Vec<_> = (2..).take(ACCEPTED_PREDECESSOR_LIMIT).map(release).collect();
         many["acceptedPredecessors"] = json!(accepted);
         assert_eq!(ReleaseSetData::parse_data(&bytes(&many)).unwrap().predecessor_data().len(), ACCEPTED_PREDECESSOR_LIMIT);
-        many["acceptedPredecessors"].as_array_mut().unwrap().push(release(12));
+        many["acceptedPredecessors"].as_array_mut().unwrap().push(release(ACCEPTED_PREDECESSOR_LIMIT + 2));
         assert_eq!(ReleaseSetData::parse_data(&bytes(&many)).unwrap_err(), DataError::Limit);
         // Actual expected target, not receipt-selected architecture. Existing
         // validation remains common to both selected SOURCE profiles.
