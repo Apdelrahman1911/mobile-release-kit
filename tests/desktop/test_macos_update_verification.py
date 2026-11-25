@@ -260,8 +260,8 @@ class UpdateDataTests(unittest.TestCase):
         import textwrap
 
         workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
-        script = textwrap.dedent(workflow.split("        run: &mrk_update_credentials |\n", 1)[1]
-                                 .split("\n      - name:", 1)[0])
+        step = workflow.split("        id: update_p0_credentials\n", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
         for segment in ("update-p0-bootstrap", "update-p1-resume"):
             for scenario in ("success", "test-fails", "summary-fails", "test-status-fails",
                              "original-and-status-fail", "summary-status-fails", "missing-context"):
@@ -579,16 +579,12 @@ class UpdateDataTests(unittest.TestCase):
         # Real existing descriptor-bound owner IO, hashes, POST and consuming
         # closes. No original process, mount, signing or Installer is started.
         def operation(root, selected):
-            op = HELPER.Operation.__new__(HELPER.Operation)
-            op.entries = []; op.entry_registry = {}; op.errors = []; op.directories = {}
-            op.setup_package = op.setup_verify = op.prepared_staging = False
-            op.prepared_binding = op.candidate_removal_context = op.store_signing = None
-            op.app_absence = None; op.work = root; op.source_entry = None; op.phase = DATA.PHASE
+            environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                           "GITHUB_WORKFLOW_REF": "inert-data-fixture", "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+            op = HELPER.Operation(None, root, root, DATA.PHASE, environment, STAGER)
             op.update = {"nomination": selected, "imageOriginal": None, "readonlyMount": None}
             op.update_api = HELPER; op.update_module = DATA
-            op.package_sources = []; op.package_outputs = []; op.package_roots = []; op.package_clock = lambda: 1
-            op.calls = []; op.stager_io_pending = None; op.credential_known = lambda: True
-            op.credential_failed = op.signing_mutation_pending = False
+            op.package_clock = lambda: 1
             return op
 
         for fault in (None, "flat", "missing", "extra-root", "extra-child", "case", "hash-install", "hash-removal",
@@ -606,7 +602,9 @@ class UpdateDataTests(unittest.TestCase):
                 if fault == "missing": (download / "remove-preview/REMOVE.md").unlink()
                 elif fault == "extra-root": (download / "extra").write_bytes(b"inert")
                 elif fault == "extra-child": (download / "preview/extra").write_bytes(b"inert")
-                elif fault == "case": (download / "Preview").mkdir()
+                elif fault == "case":
+                    (download / "preview").rename(download / "case-original")
+                    (download / "case-original").rename(download / "Preview")
                 elif fault in ("hash-install", "hash-removal"):
                     altered = leaf if fault == "hash-install" else download / "remove-preview/REMOVE.md"
                     altered.write_bytes(b"X" * altered.stat().st_size)
@@ -958,12 +956,12 @@ class UpdateDataTests(unittest.TestCase):
                 return actual_open(root if name == "/" and kwargs.get("dir_fd") is None else name, flags, *args, **kwargs)
             def stat_root(name, *args, **kwargs):
                 return actual_stat(root if name == "/" and kwargs.get("dir_fd") is None else name, *args, **kwargs)
-            operation = HELPER.Operation.__new__(HELPER.Operation)
-            operation.entries = []; operation.entry_registry = {}; operation.errors = []
-            operation.app_absence = None
+            environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                           "GITHUB_WORKFLOW_REF": "inert-data-fixture", "GITHUB_RUN_ID": "123",
+                           "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_GUI_HOME": "/home"}
+            operation = HELPER.Operation(None, root, root, DATA.PHASE, environment, STAGER)
             operation.update = {"sentinelEntries": []}
             operation.update_api = HELPER
-            operation.environment = {"MRK_MACOS_GUI_HOME": "/home", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
             operation.package_clock = lambda: 1
             try:
                 with mock.patch.object(DATA.os, "open", side_effect=open_root), mock.patch.object(DATA.os, "stat", side_effect=stat_root), \
