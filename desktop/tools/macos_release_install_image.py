@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
@@ -198,8 +199,21 @@ def validate_and_encrypt(root):
              == (SOURCE, MEMBERS["Install.pkg"], "0.2.10", RELEASE), "installed identity mismatch")
         run("installed bundle strict signature", ["/usr/bin/codesign", "--verify", "--deep", "--strict",
                                                   str(app_root / "Mobile Release Kit.app")])
+        print("Verified quarantined Gatekeeper, mounted original bytes and fresh Installer", flush=True)
     finally:
-        run("detach exact install image", ["/usr/bin/hdiutil", "detach", str(mount)])
+        # Installer can briefly retain a reference after its client exits.
+        for delay in (0, 1, 2, 4, 8, 16):
+            time.sleep(delay)
+            result = subprocess.run(["/usr/bin/hdiutil", "detach", str(mount)],
+                                    capture_output=True, timeout=35)
+            if result.returncode == 0:
+                did_detach = True
+                break
+            need(result.returncode == 16, "unexpected image detach failure")
+        else:
+            did_detach = False
+            print("Installer still holds the read-only mount. Hosted runner teardown will retire it.",
+                  flush=True)
     recipient = base64.b64decode(os.environ["MRK_PRIVATE_RECIPIENT"], validate=True)
     need(0 < len(recipient) <= 4096 and recipient.startswith(b"-----BEGIN CERTIFICATE-----\n"),
          "invalid transport recipient")
@@ -216,6 +230,7 @@ def validate_and_encrypt(root):
                "signedByTeam": TEAM, "signerLeafSha256": CERTIFICATE,
                "notary": json.loads((root / "submission.json").read_bytes()),
                "quarantinedGatekeeper": True, "stapleVerified": True, "installedExactCandidate": True,
+               "detachedAfterInstall": did_detach,
                "encryptedExportSha256": digest(envelope), "workflowRun": os.environ["GITHUB_RUN_ID"],
                "workflowSource": os.environ["GITHUB_SHA"]}
     (out / "distribution-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
