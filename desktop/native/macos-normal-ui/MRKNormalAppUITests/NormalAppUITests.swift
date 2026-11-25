@@ -6584,12 +6584,12 @@ final class NormalAppUITests: XCTestCase {
         guard let (app, window, renderer) = launched else { throw Refusal.condition("recovery launch returned no original") }
         try stage("project-open") {
             try press(renderer, "Choose project folder", renderer: renderer, failures: Self.guidedWorkspaceFailures, timeout: 24)
-            let picker = try nativeSheet(window, title: "Choose a mobile project folder")
+            let picker = try waitForGuidedProjectPicker(window)
             try goToFolder(picker, path: project)
             try nativeOpen(picker)
             try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
-                                timeout: 24, failures: Self.guidedWorkspaceFailures)
+                                timeout: 24, failures: Self.guidedWorkspaceFailures + ["Project read details"])
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)

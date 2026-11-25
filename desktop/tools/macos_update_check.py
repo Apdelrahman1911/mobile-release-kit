@@ -562,7 +562,7 @@ class BootstrapJournal:
             self.record("marker-reader-error", error=type(error).__name__)
 
 
-def capture_durable_contention(work, journal, finished):
+def capture_durable_contention(journal, finished):
     if not journal.app_info.wait(35) or finished.is_set():
         journal.record("pressure-no-app-info")
         return
@@ -571,37 +571,28 @@ def capture_durable_contention(work, journal, finished):
         journal.record("pressure-payload-unconfirmed")
         return
     load = []
-    destination = work / "bootstrap-stack.private"
     benchmark = ("import hashlib,time\nblock=bytes(32*1024*1024)\n"
                  "until=time.monotonic()+13\n"
                  "while time.monotonic()<until: hashlib.sha256(block).digest()\n")
     try:
-        for _ in range(max(1, min((os.cpu_count() or 2) - 1, 3))):
+        for _ in range(max(1, min(os.cpu_count() or 2, 4))):
             load.append(subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", benchmark],
                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.DEVNULL))
         journal.record("pressure-started", workers=len(load))
-        try:
-            result = subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "6", "5",
-                 "-mayDie", "-file", str(destination)],
-                capture_output=True, timeout=16,
-            )
-            sample_state = str(result.returncode)
-        except subprocess.TimeoutExpired:
-            sample_state = "timeout"
-        signatures = ("installed_runtime", "supervisor", "vault_acl", "sha256", "posix_spawn",
-                      "wait_for_response", "capabilities", "SecStaticCode")
-        matches = {}
-        if destination.is_file():
-            with destination.open("rb") as sample:
-                raw = sample.read(8 * 1024 * 1024)
-            graph = raw.partition(b"Call graph:")[2].partition(b"Total number in stack")[0]
-            matches = {name: graph.count(name.encode()) for name in signatures if name.encode() in graph}
+        process_list = ",".join(str(worker.pid) for worker in load)
+        for _ in range(8):
+            if finished.wait(0.25):
+                break
+            sample, _ = run(["/bin/ps", "-o", "time=", "-p", process_list], 3)
+            times = sample.stdout.splitlines()
+            active = sum(any(digit in "123456789" for digit in elapsed) for elapsed in times)
+            if sample.returncode == 0 and active == len(load):
+                journal.record("pressure-cpu-observed", activeWorkers=active)
+                break
         for child in load:
             child.wait(timeout=15)
-        journal.record("pressure-finished", sampleStatus=sample_state, samplePresent=destination.is_file(),
-                       stackMarkerCounts=matches, workerExits=[child.returncode for child in load])
+        journal.record("pressure-finished", workerExits=[child.returncode for child in load])
     except (OSError, subprocess.TimeoutExpired) as error:
         journal.record("pressure-error", error=type(error).__name__)
     finally:
@@ -622,8 +613,8 @@ def durable_bootstrap(work, evidence, label):
         reader = threading.Thread(target=journal.read_markers, args=(trace, stop), daemon=True)
         reader.start()
         pressure = None
-        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "contention":
-            pressure = threading.Thread(target=capture_durable_contention, args=(work, journal, stop), daemon=True)
+        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE", "").startswith("contention"):
+            pressure = threading.Thread(target=capture_durable_contention, args=(journal, stop), daemon=True)
             pressure.start()
         try:
             yield trace, journal
@@ -1078,14 +1069,14 @@ def fresh_check(selection, work, evidence, steps, result):
             records = [json.loads(line) for line in journal]
             need(any(row["event"] == "MRK_DESKTOP_CAPABILITIES=available" for row in records)
                  and records[-1].get("readerDrained") is True, "cold-bootstrap-evidence-incomplete")
-            if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "contention":
+            if os.environ.get("MRK_COLD_RUNTIME_SAMPLE", "").startswith("contention"):
                 stages = {entry["event"]: entry for entry in records}
-                began = stages.get("pressure-started", {}).get("elapsedSeconds")
+                active = stages.get("pressure-cpu-observed", {})
                 completed = stages.get("pressure-finished", {})
                 available = stages["MRK_DESKTOP_CAPABILITIES=available"]["elapsedSeconds"]
-                need(began is not None and began < available and completed.get("samplePresent") is True
-                     and completed.get("sampleStatus") == "0"
-                     and completed["workerExits"] and all(code == 0 for code in completed["workerExits"])
+                need(active.get("elapsedSeconds", float("inf")) < available
+                     and active.get("activeWorkers") == stages["pressure-started"]["workers"]
+                     and completed.get("workerExits") and all(code == 0 for code in completed["workerExits"])
                      and records[-1]["pressureDrained"], "cold-contention-evidence-incomplete")
         if os.environ.get("MRK_CHECK_FULL_FRESH_AFTER_TRACE") != "true":
             result["diagnosticOnly"] = True
@@ -1268,7 +1259,20 @@ def seed_signed_gui_recovery(row, folder, work, env, result):
     prepared = json.loads((folder / "PREPARED.json").read_text())
     fixture, python, core_sha256 = prepare_signed_core_fixture(runtime, work, Path(__file__).resolve().parents[2],
                                                               prepared["runtimeManifestSha256"])
-    project = Path(tempfile.mkdtemp(prefix="mrk-normal-project-", dir="/private/tmp")) / "project"
+    parent = Path(tempfile.mkdtemp(prefix="mrk-normal-project-", dir="/private/tmp"))
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        original = os.fstat(fd)
+        need(os.path.samestat(original, parent.lstat()) and original.st_uid == os.getuid()
+             and stat.S_IMODE(original.st_mode) == 0o700 and not os.listdir(fd), "recovery-ui-fresh-parent")
+        if original.st_gid != os.getgid():
+            os.fchown(fd, -1, os.getgid())
+        need(os.fstat(fd).st_gid == os.getgid() and os.path.samestat(original, parent.lstat()),
+             "recovery-ui-parent-primary-group")
+    finally:
+        os.close(fd)
+    result["recoveryFixturePrimaryGroup"] = True
+    project = parent / "project"
     seed = """import pathlib, sys
 root, project = map(pathlib.Path, sys.argv[1:])
 sys.path[:0] = [str(root / 'src'), str(root)]
