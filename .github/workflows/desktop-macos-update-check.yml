@@ -28,7 +28,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-focus-recovery-panel]') && '-final-recovery-panel' || contains(github.event.head_commit.message, '[macos-final-release-followup]') && '-final-diagnostics' || contains(github.event.head_commit.message, '[macos-archived-upgrade-only]') && '-archived-upgrade-only' || contains(github.event.head_commit.message, '[macos-recovered-upgrade-diagnostic]') && '-recovered-upgrade-diagnostic' || contains(github.event.head_commit.message, '[macos-full-fresh-only]') && '-full-fresh' || contains(github.event.head_commit.message, '[macos-cold-runtime-durable]') && '-durable-fresh' || contains(github.event.head_commit.message, '[macos-post-recovery-acceptance]') && '-signed-acceptance' || contains(github.event.head_commit.message, '[macos-live-removal-diag]') && '-live-removal-diag' || contains(github.event.head_commit.message, '[macos-live-shared-parent]') && '-live-shared-parent' || contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-retained-prepare-only]') && '-retained-prepare' || contains(github.event.head_commit.message, '[macos-physical-cli-only]') && '-physical-cli' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && '-archive-recovery' || contains(github.event.head_commit.message, '[macos-repeat-cli-diagnostics]') && '-repeat-cli' || contains(github.event.head_commit.message, '[macos-cold-runtime-contention]') && '-cold-contention' || '' }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-release-data-comparison]') && '-release-data' || contains(github.event.head_commit.message, '[macos-focus-recovery-panel]') && '-final-recovery-panel' || contains(github.event.head_commit.message, '[macos-final-release-followup]') && '-final-diagnostics' || contains(github.event.head_commit.message, '[macos-archived-upgrade-only]') && '-archived-upgrade-only' || contains(github.event.head_commit.message, '[macos-recovered-upgrade-diagnostic]') && '-recovered-upgrade-diagnostic' || contains(github.event.head_commit.message, '[macos-full-fresh-only]') && '-full-fresh' || contains(github.event.head_commit.message, '[macos-cold-runtime-durable]') && '-durable-fresh' || contains(github.event.head_commit.message, '[macos-post-recovery-acceptance]') && '-signed-acceptance' || contains(github.event.head_commit.message, '[macos-live-removal-diag]') && '-live-removal-diag' || contains(github.event.head_commit.message, '[macos-live-shared-parent]') && '-live-shared-parent' || contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-retained-prepare-only]') && '-retained-prepare' || contains(github.event.head_commit.message, '[macos-physical-cli-only]') && '-physical-cli' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && '-archive-recovery' || contains(github.event.head_commit.message, '[macos-repeat-cli-diagnostics]') && '-repeat-cli' || contains(github.event.head_commit.message, '[macos-cold-runtime-contention]') && '-cold-contention' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -86,7 +86,7 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-signed-core-recovery]') && fromJSON('["core-recovery"]')
           || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && fromJSON('["recovery-xctest"]')
           || fromJSON('["update","fresh","remove","uninstaller"]') }}
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check' && !contains(github.event.head_commit.message, '[macos-release-data-comparison]')
     runs-on: macos-26
     timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 45 }}
     env:
@@ -153,3 +153,58 @@ jobs:
           path: ${{ env.MRK_UPDATE_WORK }}/evidence
           if-no-files-found: warn
           retention-days: 30
+
+  release-data-comparison:
+    if: ${{ github.repository == 'Apdelrahman1911/mobile-release-kit' && contains(github.event.head_commit.message, '[macos-release-data-comparison]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ['6bde41073ab878ab83f1e70ac46bfac7d0b7c185', 'ce9380df50c0a6bc6a51f6e23eba1e0ac7ccf89a']
+    name: Release packaging data controls, ${{ matrix.source }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      MRK_DATA_CANDIDATE: ${{ matrix.source }}
+    steps:
+      - name: Check out the exact retained source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+
+      - name: Select the already pinned Mac packaging test interpreter
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14.7'
+
+      - name: Compare the exact packaging and maintenance fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$MRK_DATA_CANDIDATE"
+          tmp="$(mktemp -d "$RUNNER_TEMP/mrk-data-controls.XXXXXXXX")"
+          out="$RUNNER_TEMP/mrk-data-evidence"
+          mkdir "$out"
+          chgrp "$(id -gn)" "$tmp"
+          export TMPDIR="$tmp"
+          export PYTHONDONTWRITEBYTECODE=1
+          printf 'source=%s\n' "$MRK_DATA_CANDIDATE" > "$out/identity.txt"
+          sw_vers >> "$out/identity.txt"
+          python3 --version >> "$out/identity.txt"
+          set +e
+          python3 -B -m unittest tests.desktop.test_macos_install_maintenance tests.desktop.test_macos_installed_staging tests.desktop.test_macos_desktop_update > "$out/tests.log" 2>&1
+          code=$?
+          set -e
+          printf '%s\n' "$code" > "$out/exit.txt"
+          sed -n '/^FAIL:/p; /^ERROR:/p; /^Ran /p; /^FAILED /p; /^OK/p' "$out/tests.log"
+          exit "$code"
+
+      - name: Retain disposable test output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-data-controls-${{ matrix.source }}
+          path: ${{ runner.temp }}/mrk-data-evidence
+          retention-days: 14
+          if-no-files-found: error
