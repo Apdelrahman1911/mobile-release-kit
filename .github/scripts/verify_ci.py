@@ -3564,6 +3564,14 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     value["locations"] = [[name, int(line)] for name, line in re.findall(
         r'File "[^"\r\n]*/(ci_sandbox\.py|ci_checks\.py)", line ([0-9]{1,6})', text)][-8:]
     value["exception_types"] = re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", text)[-8:]
+    if step is not None and paths is not None and step.id == "python-full" and step.native_partition in {
+            "poison-command-preguard-127", "poison-command-guarded-import"}:
+        filenames = {str(paths.source / ("tests/workflow/" + name)): name for name in
+                     ("command_bootstrap_fixture.py", "run_native_profile_checks.py", "test_command_loader_loss.py",
+                      "profile_process_fixture.py")}
+        value["focused_original_frames"] = _native_bound_failure_locations(text, filenames, deadline=deadline)
+        value["focused_original_native_diagnostic"] = native_failure_diagnostic(
+            text, _python_expected or (), deadline=deadline)
     if (result.ok is False and step is not None and paths is not None and step.parser == "native"
             and step.id in {"native-profile-source", "native-profile-wheel"}):
         try:
@@ -4551,6 +4559,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         for row in details["partitions"]:
             active = row
             partition = row["partition"]
+            if partition not in {"poison-command-preguard-127", "poison-command-guarded-import"}:
+                continue
             healthy = partition == "healthy"
             details["stage"] = partition
             check_clock(cutoff)
@@ -4605,6 +4615,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 raise VerificationError("PYTHON_CAPTURE_RESULT")
             row.update(status="PASS", tests=len(observed), completed=list(observed))
             completed.extend(observed)
+        details["stage"] = "focused-observations-only"
+        raise VerificationError("FOCUSED_DIAGNOSTIC_NOT_A_GATE_RECEIPT")
         details["stage"] = "union"
         check_clock(cutoff)
         if (tuple(sorted(completed + list(delegated))) != inventories["all"]
