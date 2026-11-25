@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import urllib.request
 
@@ -28,7 +29,20 @@ def diagnostic_scratch(work):
     return work
 
 
-def evaluate(work, port, deadline):
+def evaluate(work, port, deadline, policy):
+    if policy == "tls-client":
+        body = textwrap.dedent(inspect.getsource(authority._Trust.__init__))
+        lookup = 'policy_create = bind(security, "SecPolicyCreateBasicX509", P, [])'
+        creation = "policy = self._own(policy_create())"
+        if body.count(lookup) != 1 or body.count(creation) != 1:
+            raise RuntimeError("original policy closure changed")
+        body = body.replace(lookup, 'policy_create = bind(security, "SecPolicyCreateSSL", P, [C.c_ubyte, P])')
+        body = body.replace(creation, "policy = self._own(policy_create(0, None))")
+        namespace = dict(vars(authority))
+        exec(compile(body, str(HELPER), "exec"), namespace)
+        authority._Trust.__init__ = namespace["__init__"]
+    elif policy != "basic":
+        raise RuntimeError("unexpected observation policy")
     diagnostic_scratch(work)
     os.chdir(work)
     authority._scratch = diagnostic_scratch
@@ -66,7 +80,7 @@ def prepare_loopback(host, port, deadline):
     namespace["prepare_aia"](port, deadline)
 
 
-def exercise(name, isolated, host):
+def exercise(name, isolated, host, policy):
     deadline = time.monotonic() + 85
     former = Path.cwd()
     script = Path(__file__).resolve()
@@ -92,7 +106,7 @@ def exercise(name, isolated, host):
                 raise RuntimeError("original loopback responder did not account for the reachability control")
             responder.requests.clear()
             command = [sys.executable, "-I", "-B", str(script), "evaluate", str(work),
-                       str(responder.port), repr(deadline)]
+                       str(responder.port), repr(deadline), policy]
             if isolated:
                 command = ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default) (deny network*)", *command]
             # Fresh synthetic anchors and a loopback URL, with no job token or signing inputs.
@@ -116,14 +130,15 @@ def exercise(name, isolated, host):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "evaluate":
-        evaluate(Path(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]))
+    if len(sys.argv) == 6 and sys.argv[1] == "evaluate":
+        evaluate(Path(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.argv[5])
     elif len(sys.argv) == 1:
         if sys.platform != "darwin" or os.uname().machine != "arm64" or os.getuid() == 0:
             raise RuntimeError("requires the fixed nonroot hosted Apple Silicon account")
         report = {"scope": "test-only runner diagnostic", "os": subprocess.check_output(
             ["/usr/bin/sw_vers", "-productVersion"], text=True).strip(),
-            "runs": [exercise("literal-loopback", False, "127.0.0.1"), exercise("named-loopback", False, "localhost")]}
+            "runs": [exercise("basic-x509", False, "127.0.0.1", "basic"),
+                     exercise("tls-client", False, "127.0.0.1", "tls-client")]}
         print(json.dumps(report, sort_keys=True))
     else:
         raise RuntimeError("unexpected diagnostic route")
