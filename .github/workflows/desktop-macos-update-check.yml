@@ -36,7 +36,7 @@ jobs:
           git rev-parse HEAD "HEAD^{tree}" > "$evidence/source.txt"
           sw_vers >> "$evidence/source.txt"
           set +e
-          python3 -B -m unittest tests.desktop.test_macos_install_maintenance tests.desktop.test_macos_installed_staging tests.desktop.test_macos_desktop_update > "$evidence/tests.log" 2>&1
+          python3 -B -m unittest tests.desktop.test_macos_install_maintenance tests.desktop.test_macos_installed_staging tests.desktop.test_macos_desktop_update tests.desktop.test_macos_update_verification tests.desktop.test_macos_source_packaging_inputs > "$evidence/tests.log" 2>&1
           result=$?
           set -e
           sed -n '/^FAIL:/p; /^ERROR:/p; /^Ran /p; /^FAILED /p; /^OK/p' "$evidence/tests.log"
