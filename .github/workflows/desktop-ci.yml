@@ -197,7 +197,46 @@ jobs:
       - name: Install the Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
       - name: Run native library tests
-        run: cargo test --locked --lib --no-default-features
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" != macOS ]]; then
+            exec cargo test --locked --lib --no-default-features
+          fi
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+
+          # The hosted Xcode may be under a group-writable /Applications or
+          # owned by the runner. Stage just the directory originals inspected
+          # by the upload test. The companion Installer gate tests real Xcode.
+          namespace=/Library/MobileReleaseKitDeveloper
+          [[ ! -e "$namespace" && ! -L "$namespace" ]] || exit 1
+          created=0
+          directories=("$namespace" "$namespace/Xcode.app" "$namespace/Xcode.app/Contents"
+                       "$namespace/Xcode.app/Contents/Developer")
+          identities=()
+          retire_upload_fixture() {
+            status=$?
+            trap - EXIT
+            for (( index=created-1; index>=0; index-- )); do
+              path="${directories[index]}"
+              if [[ ! -d "$path" || -L "$path" ||
+                    "$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$path")" != "${identities[index]}" ]] ||
+                 ! sudo -n /bin/rmdir "$path"; then
+                printf '%s\n' 'Upload fixture changed or is nonempty. Leave it for disposable runner teardown.' >&2
+                exit 1
+              fi
+            done
+            exit "$status"
+          }
+          trap retire_upload_fixture EXIT
+          for path in "${directories[@]}"; do
+            sudo -n /bin/mkdir -m 0755 "$path"
+            identities+=("$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$path")")
+            created=$((created+1))
+            [[ ! -L "$path" && "${identities[created-1]}" == *:0:755 ]] || exit 1
+          done
+          cargo test --locked --lib --no-default-features
       - name: Test the credential-free private APFS vault lifecycle (ARM)
         if: matrix.os == 'macos-26'
         timeout-minutes: 3
