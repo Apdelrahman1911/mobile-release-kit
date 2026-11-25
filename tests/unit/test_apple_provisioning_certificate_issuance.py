@@ -16,7 +16,7 @@ from mobile_release import apple_provisioning_api as api
 from mobile_release import apple_provisioning_certificate_issuance as issuance
 from mobile_release.apple_provisioning import PendingMutation
 from mobile_release.apple_provisioning_signing import observe_signing
-from tests.unit.test_apple_provisioning import (
+from .test_apple_provisioning import (
     BUNDLE, CERT_BYTES, CONTEXT, CSR, KEY, NOW, TARGET, FakeOwner, FakeProvider,
     approval, binding, bundle, certificate, response,
 )

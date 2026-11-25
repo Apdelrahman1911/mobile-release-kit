@@ -8,7 +8,7 @@ import unittest
 from mobile_release import _desktop_edit_protocol as shared
 from mobile_release import _desktop_identity_protocol as wire
 from mobile_release import project_identity as core
-from tests.unit.test_project_identity import ANDROID, IOS, OLD, NEW, android, ios
+from .test_project_identity import ANDROID, IOS, OLD, NEW, android, ios
 
 SESSION, TOKEN = "1" * 32, "3" * 32
 REGISTERED = {"device": "1", "inode": "2", "mode": 0o40755, "uid": 1000, "gid": 1001}

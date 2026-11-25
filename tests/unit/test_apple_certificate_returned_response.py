@@ -4,8 +4,8 @@ import unittest
 
 from mobile_release import apple_provisioning_api as api
 from mobile_release import apple_provisioning_certificate_issuance as issuance
-from tests.unit.test_apple_provisioning_certificate_issuance import attempt, later
-from tests.unit.test_apple_provisioning import NOW, approval, binding, response
+from .test_apple_provisioning import NOW, approval, binding, response
+from .test_apple_provisioning_certificate_issuance import attempt, later
 
 
 class ReturnedCertificateTests(unittest.TestCase):
