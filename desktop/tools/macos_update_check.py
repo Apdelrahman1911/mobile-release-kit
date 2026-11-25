@@ -1041,6 +1041,7 @@ def fresh_check(selection, work, evidence, steps, result):
                                        "e8db6d235daecfd3648852dfd143c4717e72dcae"),
             "macos26-arm64-desktop-16": ("6bde41073ab878ab83f1e70ac46bfac7d0b7c185",
                                        "410f788d127278fa8041417c4dba039596714141"),
+            "macos26-arm64-desktop-18": ("3aa536dfbb23f846377112a2e217f84dd44d83f5", "8cde7dfc96a0788ed70ed74f25b41d3a3f4a0aeb"),
             "macos26-arm64-desktop-17": ("c7f5b2a2a6a41a3b930ff0d937198cd25abcb48d",
                                        "526b16a692a2df7a8ed29028d84c76f60050cb3e"),
         }.get(row["release"])
