@@ -13,7 +13,7 @@ import urllib.request
 
 HELPER = Path(__file__).resolve().with_name("ci_native_authority.py")
 BASE = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
-HOSTS = {"ipv4": "127.0.0.1", "ipv6": "[::1]"}
+HOSTS = {"ipv4": "127.0.0.1", "ipv6": "[::1]", "localhost": "localhost"}
 
 
 def scratch(path):
@@ -38,6 +38,11 @@ def authority_for(route):
             if text.count(original) != 1:
                 raise RuntimeError("original responder shape differs")
             text = text.replace(original, replacement)
+    elif route == "localhost":
+        before = "http://127.0.0.1:{port}"
+        if text.count(before) != 1:
+            raise RuntimeError("original fixture URL differs")
+        text = text.replace(before, "http://localhost:{port}")
     elif route != "ipv4":
         raise RuntimeError("unexpected loopback selector")
     authority = types.ModuleType("_mrk_aia_transport_diagnostic")
@@ -82,14 +87,17 @@ def observe(route, deny_direct_network):
                     str(responder.port), repr(deadline)]
             if deny_direct_network:
                 argv = ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default) (deny network*)", *argv]
+            evaluation_start = time.time_ns()
             child = subprocess.run(argv, cwd=work, env={"PATH": "/usr/bin:/bin", "RUNNER_TEMP": str(BASE),
                     "HOME": str(work), "LC_ALL": "C"}, capture_output=True, check=False,
                     timeout=authority._remaining(deadline))
+            evaluation_end = time.time_ns()
         finally:
             os.chdir(previous)
             responder.close()
         note = {"route": route, "directNetworkDenied": deny_direct_network, "controllerReachedResponder": True,
-                "childReturn": child.returncode, "elapsedSeconds": round(time.monotonic() - start, 3)}
+                "childReturn": child.returncode, "elapsedSeconds": round(time.monotonic() - start, 3),
+                "evaluationStartUnixNs": evaluation_start, "evaluationEndUnixNs": evaluation_end}
         if child.returncode or child.stderr or not 0 < len(child.stdout) <= 8192:
             return {**note, "result": "unavailable", "stderrBytes": len(child.stderr)}
         return {**note, "result": authority._aia_comparison_note(child.stdout, fixtures, responder.requests)}

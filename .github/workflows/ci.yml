@@ -44,17 +44,18 @@ jobs:
           trap 'rm -rf -- "$capture"' EXIT
           (
             ulimit -f 4096
-            exec sudo -n /usr/bin/log stream --style ndjson --level debug --timeout 28 \
+            exec sudo -n /usr/bin/log stream --style ndjson --level debug --timeout 40 \
               --predicate 'process == "trustd" AND (category == "caissuer" OR category == "http" OR subsystem == "com.apple.CFNetwork" OR subsystem == "com.apple.network")'
           ) >"$capture/events" 2>"$capture/collector-errors" &
           collector=$!
           sleep 2
           probe_status=0
-          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C python -I -B .github/scripts/aia-loopback-comparison.py || probe_status=$?
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C python -I -B .github/scripts/aia-loopback-comparison.py >"$capture/probe" || probe_status=$?
           collector_status=0
           wait "$collector" || collector_status=$?
-          python -I -B - "$capture/events" "$probe_status" "$collector_status" <<'PY'
+          python -I -B - "$capture/events" "$capture/probe" "$probe_status" "$collector_status" <<'PY'
           from collections import Counter
+          from datetime import datetime
           import json
           import re
           import sys
@@ -72,6 +73,15 @@ jobs:
               "transport-security": "app transport security",
           }
           counts, codes = Counter(), Counter()
+          with open(sys.argv[2], encoding="utf-8") as result_file:
+              document = result_file.read(262144)
+          rows = json.loads(document)["observations"] if document else []
+          windows = [
+              (row["route"], row["directNetworkDenied"], row["evaluationStartUnixNs"],
+               row["evaluationEndUnixNs"], Counter(), Counter())
+              for row in rows
+          ]
+          timed_events = 0
           events = fixture_events = 0
           with open(sys.argv[1], encoding="utf-8") as rows:
               for raw in rows:
@@ -83,18 +93,33 @@ jobs:
                   if not isinstance(message, str):
                       continue
                   events += 1
+                  try:
+                      at = round(datetime.fromisoformat(event["timestamp"]).timestamp() * 10**9)
+                  except (KeyError, TypeError, ValueError):
+                      at = None
+                  timed_events += at is not None
                   lower = message.lower()
+                  event_markers = {key for key, marker in patterns.items() if marker in lower}
+                  event_codes = set(re.findall(r"NSURLErrorDomain\s+Code=(-10\d{2}|-120\d)\b", message))
+                  for _route, _denied, start, end, window_markers, window_codes in windows:
+                      if at is not None and start <= at <= end:
+                          window_markers.update(event_markers)
+                          window_codes.update(event_codes)
                   fixture_events += "/mrk-aia/" in lower
-                  for key, marker in patterns.items():
-                      if marker in lower:
-                          counts[key] += 1
-                  if "failed to download issuer" in lower or "/mrk-aia/" in lower:
-                      for code in set(re.findall(r"NSURLErrorDomain\s+Code=(-10\d{2}|-120\d)\b", message)):
-                          codes[code] += 1
+                  counts.update(event_markers)
+                  if "issuer-download-failed" in event_markers or "/mrk-aia/" in lower:
+                      codes.update(event_codes)
+          if document:
+              print(json.dumps(json.loads(document), sort_keys=True))
           print("MRK_TRUSTD_COMPARISON=" + json.dumps({
-              "collectorReturn": int(sys.argv[3]), "eventCount": events,
+              "collectorReturn": int(sys.argv[4]), "eventCount": events, "timedEventCount": timed_events,
               "fixtureUrlVisibleCount": fixture_events, "markerCounts": counts,
-              "issuerUrlErrorCounts": codes, "probeReturn": int(sys.argv[2]),
+              "issuerUrlErrorCounts": codes, "probeReturn": int(sys.argv[3]),
+              "evaluationWindows": [
+                  {"route": route, "directNetworkDenied": denied, "markerCounts": markers,
+                   "urlErrorCounts": errors}
+                  for route, denied, _start, _end, markers, errors in windows
+              ],
           }, sort_keys=True))
           PY
           [[ "$probe_status" == 0 && "$collector_status" == 0 ]]
