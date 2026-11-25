@@ -957,11 +957,18 @@ class _IOSSnapshotOwner(FiniteScratch):
 _LaneSnapshotOwner = _IOSSnapshotOwner
 
 
-@contextmanager
-def _source_entries(number: int, *, owner=None, deadline=None):
+def _is_local_candidate_owner(owner) -> bool:
+    if owner is None or type(owner) is _IOSSnapshotOwner:
+        return False
     from .local_ios_candidate import LocalIOSBuildHandoff
     from .local_ios_candidate_review import IOSCandidateBundleReview
-    if type(owner) in (LocalIOSBuildHandoff, IOSCandidateBundleReview):
+
+    return type(owner) in (LocalIOSBuildHandoff, IOSCandidateBundleReview)
+
+
+@contextmanager
+def _source_entries(number: int, *, owner=None, deadline=None):
+    if _is_local_candidate_owner(owner):
         with owner.entries(number) as iterator:
             yield iterator
         return
@@ -988,9 +995,7 @@ def _source_entries(number: int, *, owner=None, deadline=None):
 
 @contextmanager
 def _source_descriptor(path, flags, *, parent=None, owner=None, deadline=None):
-    from .local_ios_candidate import LocalIOSBuildHandoff
-    from .local_ios_candidate_review import IOSCandidateBundleReview
-    if type(owner) in (LocalIOSBuildHandoff, IOSCandidateBundleReview):
+    if _is_local_candidate_owner(owner):
         with owner.descriptor(path, flags, parent=parent) as number:
             yield number
         return
@@ -1474,10 +1479,14 @@ def typed_plist(path: Path, *, deadline: InspectionDeadline | None = None) -> An
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     try:
-        from .ios_archive_operation import _IOSInspectionDeadline
         artifact = _artifact_operation(deadline)
         maximum = 256 * 1024 if artifact is not None else MAX_PLIST_BYTES
-        if type(deadline) is _IOSInspectionDeadline or artifact is not None:
+        use_owned_descriptor = artifact is not None
+        if not use_owned_descriptor and type(deadline) is not InspectionDeadline:
+            from .ios_archive_operation import _IOSInspectionDeadline
+
+            use_owned_descriptor = type(deadline) is _IOSInspectionDeadline
+        if use_owned_descriptor:
             with deadline.descriptor(path) as number:
                 before = os.fstat(number)
                 _require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum,

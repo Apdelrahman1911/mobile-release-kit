@@ -401,21 +401,27 @@ class DefaultCancellation:
 
     @property
     def _store_prepare_source(self):
-        source=self._saved_command_input()
+        source = self._saved_command_input()
+        if source is None:
+            return None
         from ._desktop_saved_command_control import SavedCommandDomain
-        return source if source is not None and source.domain is SavedCommandDomain.LocalStorePrepare else None
+        return source if source.domain is SavedCommandDomain.LocalStorePrepare else None
 
     @property
     def _store_execute_source(self):
-        source=self._saved_command_input()
+        source = self._saved_command_input()
+        if source is None:
+            return None
         from ._desktop_saved_command_control import SavedCommandDomain
-        return source if source is not None and source.domain is SavedCommandDomain.LocalStoreExecute else None
+        return source if source.domain is SavedCommandDomain.LocalStoreExecute else None
 
     @property
     def _store_reconcile_source(self):
-        source=self._saved_command_input()
+        source = self._saved_command_input()
+        if source is None:
+            return None
         from ._desktop_saved_command_control import SavedCommandDomain
-        return source if source is not None and source.domain is SavedCommandDomain.LocalStoreReconcile else None
+        return source if source.domain is SavedCommandDomain.LocalStoreReconcile else None
 
     @property
     def _store_execution_source(self):
@@ -428,8 +434,10 @@ class DefaultCancellation:
     @property
     def _local_history_source(self) -> Any:
         source = self._saved_command_input()
+        if source is None:
+            return None
         from ._desktop_saved_command_control import SavedCommandDomain
-        return source if source is not None and source.domain is SavedCommandDomain.LocalReleaseHistory else None
+        return source if source.domain is SavedCommandDomain.LocalReleaseHistory else None
 
     def _install_store_preflight_source(self, source: Any) -> None:
         from ._desktop_store_preflight_control import StorePreflightInput

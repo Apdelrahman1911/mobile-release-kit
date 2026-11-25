@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import io
 import os
 import plistlib
@@ -283,6 +284,23 @@ class IOSSetCorrespondenceTests(unittest.TestCase):
             path.write_bytes(content)
             with self.assertRaises(ValidationError):
                 typed_plist(path)
+
+    def test_ordinary_inspection_does_not_load_desktop_owners(self):
+        path = self.root / "Info.plist"
+        body = {"CFBundleIdentifier": "dev.synthetic.fixture"}
+        path.write_bytes(plistlib.dumps(body))
+        paths = artifact_set(self.root)
+        original_import = builtins.__import__
+        desktop_modules = {"ios_archive_operation", "local_ios_candidate", "local_ios_candidate_review"}
+
+        def import_dependency(name, globals=None, locals=None, fromlist=(), level=0):
+            if name.removeprefix("mobile_release.") in desktop_modules:
+                self.fail(f"ordinary iOS inspection imported {name}")
+            return original_import(name, globals, locals, fromlist, level)
+
+        with patch.object(builtins, "__import__", import_dependency):
+            self.assertEqual(typed_plist(path), ("dict", (("CFBundleIdentifier", ("str", body["CFBundleIdentifier"])),)))
+            self.assertEqual(self.inspect(paths)["nativePaths"], 5)
 
     def test_shared_correspondence_plist_reader_rejects_entire_malformed_xml_corpus(self):
         path = self.root / "Info.plist"
