@@ -522,6 +522,7 @@ class BootstrapJournal:
         self.sink = sink
         self.started = started
         self.lock = threading.Lock()
+        self.app_info = threading.Event()
 
     def record(self, event, origin="runner", **facts):
         with self.lock:
@@ -530,6 +531,8 @@ class BootstrapJournal:
             self.sink.write(json.dumps(record, separators=(",", ":")) + "\n")
             self.sink.flush()
             os.fsync(self.sink.fileno())
+            if event == "MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter":
+                self.app_info.set()
 
     def read_markers(self, trace, stop):
         budget = 1024 * 1024
@@ -559,6 +562,55 @@ class BootstrapJournal:
             self.record("marker-reader-error", error=type(error).__name__)
 
 
+def capture_durable_contention(work, journal, finished):
+    if not journal.app_info.wait(35) or finished.is_set():
+        journal.record("pressure-no-app-info")
+        return
+    pids = payload_pids()
+    if len(pids) != 1:
+        journal.record("pressure-payload-unconfirmed")
+        return
+    load = []
+    destination = work / "bootstrap-stack.private"
+    benchmark = ("import hashlib,time\nblock=bytes(32*1024*1024)\n"
+                 "until=time.monotonic()+13\n"
+                 "while time.monotonic()<until: hashlib.sha256(block).digest()\n")
+    try:
+        for _ in range(max(1, min((os.cpu_count() or 2) - 1, 3))):
+            load.append(subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", benchmark],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL))
+        journal.record("pressure-started", workers=len(load))
+        try:
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "6", "5",
+                 "-mayDie", "-file", str(destination)],
+                capture_output=True, timeout=16,
+            )
+            sample_state = str(result.returncode)
+        except subprocess.TimeoutExpired:
+            sample_state = "timeout"
+        signatures = ("installed_runtime", "supervisor", "vault_acl", "sha256", "posix_spawn",
+                      "wait_for_response", "capabilities", "SecStaticCode")
+        matches = {}
+        if destination.is_file():
+            with destination.open("rb") as sample:
+                raw = sample.read(8 * 1024 * 1024)
+            graph = raw.partition(b"Call graph:")[2].partition(b"Total number in stack")[0]
+            matches = {name: graph.count(name.encode()) for name in signatures if name.encode() in graph}
+        for child in load:
+            child.wait(timeout=15)
+        journal.record("pressure-finished", sampleStatus=sample_state, samplePresent=destination.is_file(),
+                       stackMarkerCounts=matches, workerExits=[child.returncode for child in load])
+    except (OSError, subprocess.TimeoutExpired) as error:
+        journal.record("pressure-error", error=type(error).__name__)
+    finally:
+        for child in load:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
+
 @contextmanager
 def durable_bootstrap(work, evidence, label):
     trace = work / f"{label}-bootstrap-stderr.private"
@@ -569,6 +621,10 @@ def durable_bootstrap(work, evidence, label):
         journal.record("capture-start")
         reader = threading.Thread(target=journal.read_markers, args=(trace, stop), daemon=True)
         reader.start()
+        pressure = None
+        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "contention":
+            pressure = threading.Thread(target=capture_durable_contention, args=(work, journal, stop), daemon=True)
+            pressure.start()
         try:
             yield trace, journal
         except subprocess.TimeoutExpired as error:
@@ -580,7 +636,11 @@ def durable_bootstrap(work, evidence, label):
         finally:
             stop.set()
             reader.join(timeout=3)
-            journal.record("capture-finished", readerDrained=not reader.is_alive())
+            if pressure is not None:
+                journal.app_info.set()
+                pressure.join(timeout=23)
+            journal.record("capture-finished", readerDrained=not reader.is_alive(),
+                           pressureDrained=pressure is None or not pressure.is_alive())
 
 
 def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0, steady_interval=1):
@@ -870,6 +930,14 @@ def main():
     try:
         selection = load_selection(args.selection)
         result["selection"] = selection
+        if os.environ.get("MRK_RELEASE_QUALIFICATION") == "true":
+            chosen = selection["next"]
+            need((chosen["packageVersion"], chosen["release"], chosen["packageSha256"]) == (
+                "0.2.10", "macos26-arm64-desktop-16",
+                "8f4dcf34a87c2d0966c51b2786b951eec1c22a17c516e30ba54ac664bc227dbe",
+            ), "release-qualification-selection")
+            result["hostOs"] = run(["/usr/bin/sw_vers", "-productVersion"], 20)[0].stdout.strip()
+            result["hostArchitecture"] = run(["/usr/bin/uname", "-m"], 20)[0].stdout.strip()
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
@@ -1010,6 +1078,15 @@ def fresh_check(selection, work, evidence, steps, result):
             records = [json.loads(line) for line in journal]
             need(any(row["event"] == "MRK_DESKTOP_CAPABILITIES=available" for row in records)
                  and records[-1].get("readerDrained") is True, "cold-bootstrap-evidence-incomplete")
+            if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "contention":
+                stages = {entry["event"]: entry for entry in records}
+                began = stages.get("pressure-started", {}).get("elapsedSeconds")
+                completed = stages.get("pressure-finished", {})
+                available = stages["MRK_DESKTOP_CAPABILITIES=available"]["elapsedSeconds"]
+                need(began is not None and began < available and completed.get("samplePresent") is True
+                     and completed.get("sampleStatus") == "0"
+                     and completed["workerExits"] and all(code == 0 for code in completed["workerExits"])
+                     and records[-1]["pressureDrained"], "cold-contention-evidence-incomplete")
         if os.environ.get("MRK_CHECK_FULL_FRESH_AFTER_TRACE") != "true":
             result["diagnosticOnly"] = True
             return
