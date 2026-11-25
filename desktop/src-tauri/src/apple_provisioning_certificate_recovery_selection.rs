@@ -155,6 +155,7 @@ mod tests {
         binding.context.key_record_id = Some(certificate.source_key.record_id.clone());
         binding.context.key_record_revision = Some(1);
     }
+    #[cfg(unix)]
     #[test]
     fn restored_key_history_compares_both_hashes_without_rewriting_old_rows_or_key_saved() {
         let mut binding = binding(Mode::CertificateReview);
@@ -184,6 +185,7 @@ mod tests {
         assert!(account.key_rows[0].intent.destination == old.intent.source_key);
         assert!(certificate_prior(&account,&binding.scope,&binding.context).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn restored_key_hashes_cannot_disclose_foreign_project_root_or_target() {
         for field in 0..7 {
@@ -210,6 +212,7 @@ mod tests {
             assert!(certificate_prior(&account,&binding.scope,&reconcile_context(&binding,reference)).is_err());
         }
     }
+    #[cfg(unix)]
     #[test]
     fn restored_prior_stays_reconcile_only_and_both_key_hashes_are_rechecked() {
         let mut binding = binding(Mode::CertificateReview);
@@ -241,6 +244,7 @@ mod tests {
         account.certificate_rows[0].intent.source_key.revision_id = "0".repeat(32);
         assert!(certificate_prior(&account,&binding.scope,&binding.context).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn certificate_history_is_redacted_current_fullref_data_and_preserves_pending() {
         let binding=binding(Mode::CertificateReview);let mut account=account(&binding.scope);
@@ -259,6 +263,7 @@ mod tests {
         assert!(certificate_prior(&account,&binding.scope,&reconcile_context(&binding,reference)).is_err()); // Name is an explicit local choice, not silently rewritten.
         assert!(account.certificate_rows[0]==old && account.certificate_rows[0].unresolved());
     }
+    #[cfg(unix)]
     #[test]
     fn certificate_history_does_not_disclose_other_key_project_root_team_or_account() {
         for field in 0..7 {
@@ -279,6 +284,7 @@ mod tests {
                 assert!(history.attempts.is_empty() && history.hidden_unresolved==1); }
         }
     }
+    #[cfg(unix)]
     #[test]
     fn certificate_prior_keeps_original_unknown_and_whole_roster_refuses_duplicates_or_overflow() {
         let binding=binding(Mode::CertificateReview);let mut account=account(&binding.scope);
@@ -319,6 +325,7 @@ mod tests {
             disposition:KeyDisposition::Cancelled,cancel_requested:true },native_settlement:NativeSettlement::Known };
         row.validate().unwrap();row
     }
+    #[cfg(unix)]
     #[test]
     fn key_saved_history_is_extra_fullref_gate_not_current_loan_or_restored_authority() {
         let binding=binding(Mode::CertificateReview);let mut account=account(&binding.scope);
@@ -340,6 +347,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn durable_recovery_selection_keeps_pending_and_has_a_distinct_certificate_origin() {
         use crate::apple_provisioning_journal::{KeyRecoveryRecord,KeyRecoveryOrigin,key_row_sha256};

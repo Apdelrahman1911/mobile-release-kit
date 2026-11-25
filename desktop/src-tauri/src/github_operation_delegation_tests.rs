@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 pub(crate) fn root() -> RegisteredRoot {
-    RegisteredRoot { path: "/never-opened-operation-delegation".into(),
+    RegisteredRoot { path: crate::test_absolute_path!("/never-opened-operation-delegation").into(),
         identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) }
 }
 pub(crate) fn editor(doc: &Arc<()>) -> EditOwner {

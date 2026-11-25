@@ -1354,7 +1354,8 @@ pub(crate) mod tests {
     #[test]
     fn native_request_pairs_exact_mac_profile_with_sdk_and_signing_data() {
         let developer = Path::new("/Applications/Xcode_Inert.app/Contents/Developer");
-        let sdk = developer.join("Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk");
+        let sdk = Path::new(concat!("/Applications/Xcode_Inert.app/Contents/Developer/",
+            "Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk"));
         let directory = RootIdentity { device:"1".into(), inode:"2".into(), mode:0o040755, uid:0, gid:0 };
         let tool = ToolIdentity { device:"1".into(),inode:"3".into(),mode:0o100555,uid:0,gid:0,links:1,size:512,
             mtime_ns:"4".into(),ctime_ns:"5".into() };
@@ -1366,7 +1367,7 @@ pub(crate) mod tests {
             (Profile::MacArm64, "macos-arm64", "ios-full-xcode-macos-arm64-v1", Profile::MacX64),
             (Profile::MacX64, "macos-x86_64", "ios-full-xcode-macos-x86_64-v1", Profile::MacArm64),
         ] {
-            let binding = ToolchainBinding::new_data(profile, developer, directory.clone(), tool.clone(), &sdk, directory.clone()).unwrap();
+            let binding = ToolchainBinding::new_data(profile, developer, directory.clone(), tool.clone(), sdk, directory.clone()).unwrap();
             assert!(binding.matches_profile(profile));
             assert!(!binding.matches_profile(opposite));
             let unsigned = context(); let signed = signed_context();

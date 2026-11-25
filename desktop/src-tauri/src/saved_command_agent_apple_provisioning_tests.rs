@@ -116,7 +116,7 @@ fn link() -> (Arc<Binding>, requests::Inbox, Arc<()>) {
         runtime_id: "fixture".into(),
         review_id: id('a'),
         review: r.clone(),
-        root: "/never-opened-apple-cli".into(),
+        root: crate::test_absolute_path!("/never-opened-apple-cli").into(),
         device: 1,
         inode: 2,
         observation_revision: 1,

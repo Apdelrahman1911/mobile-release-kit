@@ -158,6 +158,21 @@ compile_error!("Ubuntu publisher requires its isolated Linux x86_64 GNU Cargo ro
 // Shared unchanged DATA modules remain at the same crate paths for both graphs.
 pub mod error;
 mod bounded_json_seed;
+
+// Inert fixture paths for tests of the host's absolute-path predicates. Keep
+// POSIX wire-format fixtures as literals, even when testing them on Windows.
+#[cfg(test)]
+macro_rules! test_absolute_path {
+    ($path:literal) => {{
+        #[cfg(windows)]
+        { concat!("C:", $path) }
+        #[cfg(not(windows))]
+        { $path }
+    }};
+}
+#[cfg(test)]
+pub(crate) use test_absolute_path;
+
 #[cfg(not(all(
     target_os = "linux", target_arch = "x86_64", target_env = "gnu",
     feature = "ubuntu-runtime-publisher",

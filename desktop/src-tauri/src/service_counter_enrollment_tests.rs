@@ -42,7 +42,7 @@ fn scope(doc: &Arc<()>, kind: p::Kind) -> Arc<NativeScope> {
     NativeScope::new(
         id(1),
         "project-1".into(),
-        "/never-opened-enrollment-row".into(),
+        crate::test_absolute_path!("/never-opened-enrollment-row").into(),
         1,
         2,
         3,

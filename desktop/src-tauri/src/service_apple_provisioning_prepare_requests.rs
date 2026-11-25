@@ -710,7 +710,7 @@ mod tests {
         crate::agent_local_checks::SavedPoint {
             project_id: id(1),
             runtime_id: "p1".into(),
-            root: "/inert/apple-prepare-never-opened".into(),
+            root: crate::test_absolute_path!("/inert/apple-prepare-never-opened").into(),
             device: 1,
             inode: 2,
             revision: 1,
@@ -1057,7 +1057,7 @@ mod tests {
                 2 => p.config.as_mut().unwrap().sha256 = "z".repeat(64),
                 3 => p.runtime_id = "p".repeat(65),
                 4 => p.root = "relative".into(),
-                5 => p.root = format!("/{}", "p".repeat(4096)).into(),
+            5 => p.root = format!("{}{}", crate::test_absolute_path!("/"), "p".repeat(4096)).into(),
                 6 => p.inode = 0,
                 _ => p.revision = 0,
             }

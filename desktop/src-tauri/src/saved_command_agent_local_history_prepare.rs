@@ -255,7 +255,7 @@ mod tests {
     }
     fn installed() -> (Fixture, Claim) {
         let config =
-            RuntimeConfig::packaged(PathBuf::from("/never-opened-history-prepare-fixture"));
+            RuntimeConfig::packaged(PathBuf::from(crate::test_absolute_path!("/never-opened-history-prepare-fixture")));
         let owner = SavedCommandOwner::new(config.clone(), SavedCommandDomain::LocalReleaseHistory);
         let edit = crate::edit_owner::EditOwner::new(config);
         let document = Arc::new(());
@@ -268,7 +268,7 @@ mod tests {
             .stamp()
             .unwrap();
         let root = RegisteredRoot {
-            path: PathBuf::from("/never-opened-history-prepare-fixture"),
+            path: PathBuf::from(crate::test_absolute_path!("/never-opened-history-prepare-fixture")),
             identity: crate::asset_source::ProjectIdentity::Posix(
                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
             ),

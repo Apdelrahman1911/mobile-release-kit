@@ -662,12 +662,14 @@ mod tests {
     #[test]
     fn supplied_time_is_half_open_without_rounding_or_clock_refresh() {
         let (der, spki) = inputs(&fixture());
+        // Windows SystemTime represents FILETIME in 100 ns units.
+        let step = Duration::from_nanos(if cfg!(windows) { 100 } else { 1 });
         for (time, valid) in [
-            (when(BEFORE) - Duration::from_nanos(1), false),
+            (when(BEFORE) - step, false),
             (when(BEFORE), true),
-            (when(AFTER) - Duration::from_nanos(1), true),
+            (when(AFTER) - step, true),
             (when(AFTER), false),
-            (when(AFTER) + Duration::from_nanos(1), false),
+            (when(AFTER) + step, false),
         ] {
             let result = inspect_certificate_candidate(&der, &TEAM, &spki, time, &mut || false);
             if valid {

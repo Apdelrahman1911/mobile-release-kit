@@ -9448,9 +9448,12 @@ mod tests {
     pub(super) fn evidence_folder_label_is_bounded_and_never_a_full_or_controlled_path_body() {
         use std::path::Path;
         assert_eq!(evidence_display_name(Path::new("/private/source/Évidence")), "Évidence");
-        for leaf in ["hidden\u{200b}name", "soft\u{00ad}name", "bidi\u{202e}name", "slash\\name", "line\nname"] {
+        for leaf in ["hidden\u{200b}name", "soft\u{00ad}name", "bidi\u{202e}name", "line\nname"] {
             assert_eq!(evidence_display_name(&Path::new("/private/source").join(leaf)), "Selected evidence folder");
         }
+        let backslash = Path::new("/private/source").join("slash\\name");
+        // Windows treats a backslash as a path separator.
+        assert_eq!(evidence_display_name(&backslash), if cfg!(windows) { "name" } else { "Selected evidence folder" });
         assert_eq!(evidence_display_name(&Path::new("/private/source").join("a".repeat(129))), "Selected evidence folder");
         assert_eq!(evidence_display_name(Path::new("/")), "Selected evidence folder");
     }

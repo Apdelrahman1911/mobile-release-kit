@@ -20,7 +20,7 @@ impl Fixture {
             .allow(NativeScope {
                 project_id: id(2),
                 runtime_id: "project-1".into(),
-                root: PathBuf::from("/synthetic-project"),
+                root: PathBuf::from(crate::test_absolute_path!("/synthetic-project")),
                 device: 1,
                 inode: 2,
                 registration: 1,
@@ -54,7 +54,7 @@ impl Fixture {
                 &SavedPoint {
                     project_id: id(2),
                     runtime_id: "project-1".into(),
-                    root: PathBuf::from("/synthetic-project"),
+                    root: PathBuf::from(crate::test_absolute_path!("/synthetic-project")),
                     device: 1,
                     inode: 2,
                     revision: 1,

@@ -146,6 +146,7 @@ pub(in crate::apple_provisioning_journal) fn reseal(value: &mut ProfileSetupInte
     value.plan_sha256 = value.plan_hash().unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn profile_vectors_match_real_python_selected_resources_without_authority() {
     for reuse in [false, true] {
@@ -287,6 +288,7 @@ fn sparse_post_receipt_does_not_count_as_a_download_or_save_arm() {
     restored.sequence = 3;
     assert!(restored.follows(&response, &value).is_err());
 }
+#[cfg(unix)]
 #[test]
 fn save_unknown_and_exact_destination_are_independent_absorbing_fences() {
     let value = intent(true);

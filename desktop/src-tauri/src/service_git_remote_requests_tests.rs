@@ -13,7 +13,7 @@ fn selected_scope(doc: &Arc<()>, selection: remote::Selection) -> Arc<NativeScop
     Arc::new(NativeScope {
         project_id: id('a'),
         runtime_id: "project-1".into(),
-        root: "/inert/remote".into(),
+        root: crate::test_absolute_path!("/inert/remote").into(),
         device: 1,
         inode: 2,
         registration: 1,

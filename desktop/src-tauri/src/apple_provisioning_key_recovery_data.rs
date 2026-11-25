@@ -176,6 +176,7 @@ pub(in crate::apple_provisioning_journal) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn exact_durable_reference_is_required_and_old_pending_never_changes() {
         let row = old_row();
@@ -201,6 +202,7 @@ pub(in crate::apple_provisioning_journal) mod tests {
         assert!(validate_key_recoveries(&[value.clone(), value], &[row]).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn armed_written_unknown_and_foreign_scope_do_not_gain_an_association() {
         let row = old_row();

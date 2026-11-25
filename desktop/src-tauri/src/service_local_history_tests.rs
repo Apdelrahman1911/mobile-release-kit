@@ -20,7 +20,7 @@ fn scope(f: &Fixture) -> Arc<queue::Scope> {
         runtime_id: "p1".into(),
         review_id: id('4'),
         review: selected(),
-        root: "/inert/never-opened".into(),
+        root: crate::test_absolute_path!("/inert/never-opened").into(),
         device: 1,
         inode: 2,
         observation_revision: 0,

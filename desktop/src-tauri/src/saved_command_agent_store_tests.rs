@@ -23,7 +23,7 @@ fn projected(c: Context) -> RunProjection {
 }
 fn root() -> RegisteredRoot {
     RegisteredRoot {
-        path: "/inert/never-opened".into(),
+        path: crate::test_absolute_path!("/inert/never-opened").into(),
         identity: crate::asset_source::ProjectIdentity::Posix(
             crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
         ),

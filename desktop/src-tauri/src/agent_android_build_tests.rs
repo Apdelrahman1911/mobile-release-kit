@@ -39,7 +39,7 @@ impl Fixture {
         let scope = Arc::new(NativeScope {
             project_id: id(2),
             runtime_id: "project-1".into(),
-            root: "/synthetic/project".into(),
+            root: crate::test_absolute_path!("/synthetic/project").into(),
             device: 3,
             inode: 4,
             registration: 1,

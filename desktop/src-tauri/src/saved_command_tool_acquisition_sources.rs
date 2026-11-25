@@ -347,7 +347,14 @@ mod tests {
     fn folder_location_is_fixed_component_data_not_a_renderer_path_or_source_receipt() {
         let root = Path::new("/native-appdata/tool-cache-v1/archives/tool-012345678901234567890123456789ab/sources");
         for (role, suffix) in [(source_wire::Role::Jdk,"jdk.jdk"),(source_wire::Role::Sdk,"android-sdk"),(source_wire::Role::Gradle,"gradle")] {
-            assert_eq!(bounded_initial(root, role).unwrap(), root.join(suffix));
+            #[cfg(unix)]
+            assert_eq!(bounded_initial(root, role), Some(root.join(suffix)));
+            #[cfg(windows)]
+            {
+                assert!(bounded_initial(root, role).is_none());
+                let drive = PathBuf::from(crate::test_absolute_path!("/native-appdata")).join(suffix);
+                assert!(bounded_initial(&drive, role).is_none());
+            }
         }
         for path in ["relative", "/bad/../cache", "/bad//cache", "/bad/./cache", "/bad\0/cache"] {
             assert!(bounded_initial(Path::new(path), source_wire::Role::Jdk).is_none());

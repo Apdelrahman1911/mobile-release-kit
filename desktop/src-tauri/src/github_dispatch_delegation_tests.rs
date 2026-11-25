@@ -24,7 +24,7 @@ fn selections()->Vec<Value> {
     ]
 }
 fn input(v:Value)->Input {serde_json::from_value::<Selection>(v).unwrap().input().unwrap()}
-fn root()->RegisteredRoot {RegisteredRoot{path:"/never-opened-dispatch-capture".into(),
+fn root()->RegisteredRoot {RegisteredRoot{path:crate::test_absolute_path!("/never-opened-dispatch-capture").into(),
     identity:crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity())}}
 fn observed<T>(value:T)->Fact<T>{Fact{state:FactState::Observed,value:Some(value),
     observed_at:Some("2026-09-17T12:00:01Z".into()),reason:Reason::None}}
@@ -125,7 +125,7 @@ fn original_record_witness_rechecks_full_rows_and_same_private_edit_owner() {
 #[test]
 fn producer_weak_entry_queries_final_facts_not_the_retired_consumer_scope() {
     let doc=Arc::new(());let at=Instant::now();let id=|n:u64|Id::parse(&format!("{n:032x}")).unwrap();
-    let scope=r::NativeScope::new(id(1),"project-1".into(),"/never-opened-producer".into(),1,2,3,
+    let scope=r::NativeScope::new(id(1),"project-1".into(),crate::test_absolute_path!("/never-opened-producer").into(),1,2,3,
         p::Review::PreflightPending(p::dispatch::RequestReference{session_id:"github-session-1".into(),expected_revision:4,request_sha256:"b".repeat(64)}),
         Arc::new(()),at+Duration::from_secs(60),Arc::new(crate::service_version_reserve_requests::ReadPermission::new(at+Duration::from_secs(80))),
         Arc::downgrade(&doc),tokio::sync::watch::channel(1).0);

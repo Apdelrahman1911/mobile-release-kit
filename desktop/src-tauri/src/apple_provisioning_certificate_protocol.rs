@@ -547,6 +547,7 @@ pub(in crate::apple_provisioning_protocol) mod tests {
             "status":record.status,"reason":record.reason,"retryAllowed":false,"credentialReady":false,"cancellationRequested":record.cancel_requested},
         "comparison":null,"p12Saved":false,"profileSaved":false,"credentialReady":false,"revocationChecked":false}) }
 
+    #[cfg(unix)]
     #[test]
     fn certificate_full_stream_retains_sparse_receipt_then_policy_without_native_authority() {
         let binding=binding(Mode::CertificateCreate); let mut decoder=Decoder::new(binding.clone());
@@ -581,6 +582,7 @@ pub(in crate::apple_provisioning_protocol) mod tests {
         assert!(!decoder.settled());
     }
 
+    #[cfg(unix)]
     #[test]
     fn certificate_identity_needs_key_once_and_second_batch_needs_original_receipt() {
         let binding=binding(Mode::CertificateCreate);
@@ -611,6 +613,7 @@ pub(in crate::apple_provisioning_protocol) mod tests {
         assert!(decoder.push(&frame(&old,1,"certificate-key",key(&binding))).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn certificate_public_consent_and_lifetime_cannot_borrow_local_key_or_profile_grammar() {
         let binding=binding(Mode::CertificateCreate);

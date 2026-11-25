@@ -16,7 +16,7 @@ impl Fixture {
         let scope = Arc::new(NativeScope {
             project_id: id('a'),
             runtime_id: "project-1".into(),
-            root: PathBuf::from("/inert-local-check"),
+            root: PathBuf::from(crate::test_absolute_path!("/inert-local-check")),
             device: 1,
             inode: 2,
             registration: 1,
@@ -483,7 +483,8 @@ fn full_terminal(revision: u32) -> Operation {
 fn all32_failed_history_claims_share_exact_terminal_without_replay_or_public_mutation() {
     let mut f = Fixture::new();
     let scope = Arc::get_mut(&mut f.scope).unwrap();
-    scope.root = PathBuf::from(format!("/{}", "r".repeat(ROOT_HEAP_BYTES - 1)));
+    let root = crate::test_absolute_path!("/");
+    scope.root = PathBuf::from(format!("{root}{}", "r".repeat(ROOT_HEAP_BYTES - root.len())));
     scope.runtime_id = "r".repeat(64);
     let mut original_queries = Vec::new();
     for n in 1..=LIMIT {

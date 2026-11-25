@@ -267,7 +267,7 @@ fn scope(document: &Arc<()>) -> Arc<NativeScope> {
     Arc::new(NativeScope {
         project_id: id('a'),
         runtime_id: "project-1".into(),
-        root: "/inert/git-index".into(),
+        root: crate::test_absolute_path!("/inert/git-index").into(),
         device: 1,
         inode: 2,
         registration: 1,

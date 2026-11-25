@@ -112,6 +112,9 @@ pub(in crate::apple_provisioning_journal) fn unknown(
     value
 }
 
+// Positive journal vectors require the same original absolute POSIX root as the
+// native provisioning workflow. A Windows drive does not supply that identity.
+#[cfg(unix)]
 #[test]
 fn fixed_bundle_plan_matches_actual_python_ascii_hash_vector() {
     let intent = intent();
@@ -127,6 +130,21 @@ fn fixed_bundle_plan_matches_actual_python_ascii_hash_vector() {
         intent.context.project_id,
         intent.provenance.project_binding.project_id.as_str()
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn native_provisioning_journal_refuses_both_rooted_and_drive_qualified_windows_shapes() {
+    let mut intent = intent();
+    assert!(!Path::new(&intent.provenance.registered_root.path).is_absolute());
+    assert!(intent.validate().is_err());
+
+    let absolute = crate::test_absolute_path!("/synthetic/reference-only");
+    assert!(Path::new(absolute).is_absolute());
+    intent.provenance.registered_root.path = absolute.into();
+    intent.provenance.project_binding.canonical_root = absolute.into();
+    assert!(!intent.provenance.valid());
+    assert!(intent.validate().is_err());
 }
 
 #[test]
@@ -290,6 +308,7 @@ fn original_response_ids_are_monotonic_and_terminal_does_not_restart() {
         .is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn terminal_child_data_never_erases_account_pending_or_unknown_native_axis() {
     let intent = intent();

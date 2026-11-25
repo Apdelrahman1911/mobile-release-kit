@@ -16,7 +16,7 @@ impl F {
         let scope = NativeScope::new(
             id('1'),
             "project-1".into(),
-            "/fixed-inert-project".into(),
+            crate::test_absolute_path!("/fixed-inert-project").into(),
             1,
             2,
             3,
@@ -296,7 +296,8 @@ fn retained_scope(f: &F, kind: p::Kind) -> Arc<NativeScope> {
     let mut runtime = String::with_capacity(128);
     runtime.push_str(&"x".repeat(64));
     let mut root = std::path::PathBuf::with_capacity(8192);
-    root.push(format!("/{}", "x".repeat(4095)));
+    let prefix = crate::test_absolute_path!("/");
+    root.push(format!("{prefix}{}", "x".repeat(4096 - prefix.len())));
     let mut review = f.scope.review.clone();
     review = p::Review::from_prepared(kind, review.prepared().unwrap().clone()).unwrap();
     review.prepared_mut().unwrap().session_id = String::with_capacity(128);
@@ -332,7 +333,7 @@ fn short_metadata_with_overbound_physical_capacity_is_not_admitted() {
         match field {
             0 => {
                 s.root = std::path::PathBuf::with_capacity(8193);
-                s.root.push("/short");
+                s.root.push(crate::test_absolute_path!("/short"));
             }
             1 => {
                 s.runtime_id = String::with_capacity(129);

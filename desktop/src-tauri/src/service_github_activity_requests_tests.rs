@@ -19,7 +19,7 @@ impl Fixture {
         let scope = NativeScope::new(
             id('1'),
             "project-1".into(),
-            "/never-opened-activity-entry".into(),
+            crate::test_absolute_path!("/never-opened-activity-entry").into(),
             1,
             2,
             1,
