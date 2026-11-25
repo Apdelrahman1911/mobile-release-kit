@@ -1968,6 +1968,20 @@ mod catalogue_budget_tests {
         genuine_catalogue_fits_fresh_inspect_retained_review_and_register_data();
     }
     pub(super) fn genuine_catalogue_fits_fresh_inspect_retained_review_and_register_data(){
+        // This fixture constructs several large inline ZIP scratch values in
+        // one debug call chain. Give the test its own bounded stack so libtest
+        // can report the real allocation assertions on both Mac architectures.
+        let worker = std::thread::Builder::new()
+            .name("android-catalogue-budget-test".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(assert_catalogue_budget)
+            .expect("start the catalogue budget test thread");
+        if let Err(failure) = worker.join() {
+            std::panic::resume_unwind(failure);
+        }
+    }
+
+    fn assert_catalogue_budget(){
         let project_id="synthetic-catalogue-budget-project";
         let project=RegisteredRoot{path:"/synthetic-catalogue-budget-project-never-opened".into(),
             identity:crate::asset_source::ProjectIdentity::Posix(
