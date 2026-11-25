@@ -315,8 +315,10 @@ TOOLING_REPOSITORY = "example/mobile-release-kit"
 TOOLING_SHA = "1" * 40
 HELP_OPTIONS = {
     "workflow": {"--help"},
-    "android_upload_validation": {"--aab", "--app-root", "--config-path", "--help", "--intent-sha256", "--operation-intent"},
-    "ios_upload_validation": {"--ipa", "--app-root", "--config-path", "--help", "--intent-sha256", "--operation-intent"},
+    "android_upload_validation": {"--aab", "--app-root", "--config-path", "--help", "--intent-sha256",
+                                  "--local-operation-intent", "--local-registered-tools-json", "--operation-intent"},
+    "ios_upload_validation": {"--ipa", "--app-root", "--config-path", "--help", "--intent-sha256",
+                              "--local-operation-intent", "--local-registered-tools-json", "--operation-intent"},
 }
 JDK_CASES = (
     ("outside-warning-window", "-1d", "209", True),
@@ -1246,6 +1248,8 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
         if selection != "full":
             inspect_installed_wheel(source_root, deadline=deadline)
         allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
+        monotonic_ns = time.monotonic_ns
+        started_ns = monotonic_ns()
 
         class Result(unittest.TextTestResult):
             def startTest(self, test):
@@ -1257,6 +1261,10 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 _require(type(identifier) is str and identifier in expected
                          and identifier not in {item["id"] for item in observations}, "TEST_STARTED_ID")
                 observations.append({"id": identifier, "outcome": "incomplete"})
+                if selection == "full":
+                    # Stderr survives a timeout before the final JSON report.
+                    elapsed_ms = (monotonic_ns() - started_ns) // 1_000_000
+                    self.stream.writeln(f"\nMRK_PYTHON_ELAPSED_MS={elapsed_ms}")
                 super().startTest(test)
 
             def record(self, test, outcome, error=None):

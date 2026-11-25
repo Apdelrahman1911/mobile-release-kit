@@ -2010,17 +2010,16 @@ def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
             outcome = outcomes.get(token) if closed else None
         if identifier is not None:
             observed = {"id": identifier}
-            # Optional ordinary-native stopwatch data belongs only to this
-            # complete header's immediately preceding physical line. Never
-            # carry it across body text or a truncated window. It describes a
-            # reported callback, not entry, completion, finality or a deadline.
-            if closed and index:
+            # Optional timing is scoped to this header's immediately preceding
+            # line. The Linux runner can time an exact standard start header
+            # before its outcome arrives. No timing is a completion receipt.
+            if index:
                 preceding = lines[index - 1]
                 if preceding.endswith(b"\r"):
                     preceding = preceding[:-1]
-                prefix = b"MRK_NATIVE_ELAPSED_MS="
-                if preceding.startswith(prefix):
-                    scalar = preceding[len(prefix):]
+                prefix, separator, scalar = preceding.partition(b"=")
+                if separator and (closed and prefix == b"MRK_NATIVE_ELAPSED_MS"
+                                  or prefix == b"MRK_PYTHON_ELAPSED_MS"):
                     if re.fullmatch(rb"(?:0|[1-9][0-9]{0,6})", scalar):
                         elapsed = int(scalar)
                         if elapsed <= 3_600_000:
