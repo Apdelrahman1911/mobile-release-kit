@@ -1312,7 +1312,8 @@ class CISandboxPureTests(unittest.TestCase):
             session._argv([str(session.python)], 180)
 
     def test_python_full_profile_is_exact_and_admits_inputs_and_memory_before_collection(self):
-        cases = ("valid", "ordinary", "unknown-profile", "wrong-platform", "not-admitted", "admitting", "wrong-cwd", "wrong-seconds",
+        cases = ("valid", "ordinary", "unknown-profile", "wrong-platform", "not-admitted", "admitting", "wrong-cwd",
+                 "old-seconds", "excess-seconds",
                  "wrong-cpu", "wrong-output-limit", "unlatched", "cancel-control", "extra-argument",
                  "argument-0", "argument-1", "argument-3", "argument-5", "argument-7", "argument-9", "argument-11",
                  "input-failure", "memory-failure")
@@ -1331,9 +1332,10 @@ class CISandboxPureTests(unittest.TestCase):
                     command.append("--unapproved-reader")
                 session.admitted = case != "not-admitted"
                 session._admitting = case == "admitting"
-                kwargs = dict(cwd=session.work, env={}, seconds=900, output_limit=8 * self.module.MiB,
+                kwargs = dict(cwd=session.work, env={}, seconds=2100, output_limit=8 * self.module.MiB,
                               cpu_seconds=300, profile="ordinary" if case == "ordinary" else "python-full")
-                changes = {"wrong-cwd": {"cwd": session.source}, "wrong-seconds": {"seconds": 899},
+                changes = {"wrong-cwd": {"cwd": session.source}, "old-seconds": {"seconds": 900},
+                           "excess-seconds": {"seconds": 2101},
                            "wrong-cpu": {"cpu_seconds": 299}, "wrong-output-limit": {"output_limit": self.module.MiB},
                            "unknown-profile": {"profile": "caller-selected-profile"}}
                 kwargs.update(changes.get(case, {}))
@@ -5804,7 +5806,9 @@ class CISandboxPureTests(unittest.TestCase):
                               "sha256": hashlib.sha256(b"unchanged").hexdigest(), "root_owned": True, "maximum": 16 * self.module.MiB}
                 state["files"] = {state["policy"]: saved_file}
                 if mode == "file-budget":
-                    state["files"].update({session.bootstrap / f"original-{index}.dat": dict(saved_file) for index in range(1023)})
+                    # The policy already occupies one slot of the 1,152-file limit.
+                    state["files"].update({session.bootstrap / f"original-{index}.dat": dict(saved_file)
+                                           for index in range(1151)})
                 elif mode == "byte-budget":
                     state["files"][state["policy"]] = {**saved_file, "identity": (*saved_file["identity"][:6], 128 * self.module.MiB, 11, 12)}
                 original_files = {path: dict(row) for path, row in state["files"].items()}

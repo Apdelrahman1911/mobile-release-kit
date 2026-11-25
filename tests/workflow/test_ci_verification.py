@@ -727,7 +727,7 @@ class CIControllerContractTests(unittest.TestCase):
         rig.step = controller.Step(name, argv=(str(python), "-I", "-B", str(paths.checks), "--check", name,
             "--source-root", str(ROOT), "--work-root", str(paths.work / "checks"), "--deadline", repr(deadline)),
             cwd=paths.work, env=tuple(sorted(controller.native_phase_environment(paths, "linux", phase).items())),
-            seconds=900, parser="check")
+            seconds=2100 if phase == "source" else 900, parser="check")
 
         def identities(source, selection, partition, *, deadline):
             self.assertEqual(source, ROOT)
@@ -1480,8 +1480,9 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_fixed_linux_python_storage_profile_is_selected_only_for_full_discovery(self):
         profiles = []
-        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
-            with self.subTest(phase=phase):
+        for phase, original_deadline, cutoff in (("source", 2500.0, 2200.0), ("source", 1800.0, 1800.0),
+                                                 ("wheel", 800.0, 800.0)):
+            with self.subTest(phase=phase, aggregate_deadline=original_deadline):
                 rig = self._python_gate_fixture(phase, deadline=original_deadline)
                 parts = (*rig.controller.PYTHON_SINGLETON_PARTITIONS, "healthy")
                 result = self._perform_native_fixture(rig, platform="linux", deadline=original_deadline)
@@ -1514,7 +1515,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["profile"], "python-full" if parts[index] == "healthy" and phase == "source" else "ordinary")
                     self.assertEqual(options["cpu_seconds"], 300 if parts[index] == "healthy" and phase == "source" else 180)
-                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["seconds"], 2100 if index == healthy_index and phase == "source" else 900)
                     self.assertEqual(options["absolute_deadline"], cutoff)
                     self.assertEqual(options["output_limit"], 8 * 1024**2)
                     self.assertEqual(options["cwd"], rig.paths.work)
@@ -1534,7 +1535,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(rig.events[position - 1], ("idle", cutoff))
                     end = positions[index + 1] if index + 1 < len(positions) else len(rig.events)
                     self.assertIn(("idle", cutoff), rig.events[position + 1:end])
-        self.assertEqual(profiles.count("python-full"), 1)
+        self.assertEqual(profiles.count("python-full"), 2)
 
     def test_python_gate_rejects_contract_partition_and_singleton_origin_drift(self):
         for phase in ("source", "wheel"):
@@ -1628,7 +1629,7 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_python_gate_stops_after_each_failed_original_and_keeps_one_cutoff(self):
         parts = (*controller_module().PYTHON_SINGLETON_PARTITIONS, "healthy")
-        for phase in ("source", "wheel"):
+        for phase, cutoff in (("source", 2200.0), ("wheel", 1000.0)):
             for failed, partition in enumerate(parts):
                 for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "cleanup", "idle", "deadline"):
                     with self.subTest(phase=phase, partition=partition, fault=fault):
@@ -1640,7 +1641,7 @@ class CIControllerContractTests(unittest.TestCase):
                         if fault == "idle":
                             rig.idle_error, rig.idle_failure_after = OSError("PRIVATE_IDLE_ERROR"), failed + 1
                         elif fault == "deadline":
-                            rig.run_advance = 901.0 / (failed + 1)
+                            rig.run_advance = (cutoff - rig.now + 1) / (failed + 1)
                         else:
                             rig.changes[partition] = fields[fault]
                         result = self._perform_native_fixture(rig, platform="linux")
@@ -1654,12 +1655,12 @@ class CIControllerContractTests(unittest.TestCase):
                         for index, capture in enumerate(rig.captures):
                             for field, value in rig.controller.capture_observations(capture).items():
                                 self.assertEqual(rows[index]["capture"][field], value)
-                        self.assertTrue(all(event[2]["absolute_deadline"] == 1000.0
+                        self.assertTrue(all(event[2]["absolute_deadline"] == cutoff
                                             for event in rig.events if event[0] == "run"))
                         if fault == "deadline":
                             self.assertEqual(result.error, "AGGREGATE_DEADLINE")
 
-        for phase in ("source", "wheel"):
+        for phase, cutoff in (("source", 2200.0), ("wheel", 1000.0)):
             with self.subTest(phase=phase, expiry="final-union"):
                 rig = self._python_gate_fixture(phase)
                 reconciliations = []
@@ -1668,7 +1669,7 @@ class CIControllerContractTests(unittest.TestCase):
                     result = sorted(values, *args, **kwargs)
                     if len(rig.captures) == len(parts) and tuple(result) == rig.inventories["all"]:
                         reconciliations.append(True)
-                        rig.now = 1000.0
+                        rig.now = cutoff
                     return result
 
                 with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
@@ -1791,7 +1792,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
         self.assertEqual(value["last_observed_start"], {"id": first})  # Partial marker was discarded, not adopted.
 
-        for phase in ("source", "wheel"):
+        for phase, cutoff in (("source", 2200.0), ("wheel", 1000.0)):
             for diagnostic_error in (False, True):
                 with self.subTest(phase=phase, optional_diagnostic_error=diagnostic_error):
                     rig = self._python_gate_fixture(phase)
@@ -1799,7 +1800,7 @@ class CIControllerContractTests(unittest.TestCase):
                     raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b" ... "
                     # The singleton prefix must finish before the same original
                     # cutoff; only the intended healthy failure crosses it.
-                    rig.run_advance = 901.0 / len(parts)
+                    rig.run_advance = (cutoff - rig.now + 1) / len(parts)
                     rig.changes["healthy"] = dict(ok=False, returncode=None, waited=False, stdout_eof=False,
                         stderr_eof=False, domain_finality=False, stdout=b"", stderr=raw,
                         persisted=(0, len(raw)), timed_out=True,

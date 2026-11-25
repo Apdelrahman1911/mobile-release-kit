@@ -32,6 +32,7 @@ from types import MappingProxyType
 
 
 AGGREGATE_SECONDS = 3300
+PYTHON_FULL_SECONDS = 2100
 DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
 # The integrated Desktop checkout is about 4,100 blobs and 149 MiB. Bound
 # the complete snapshot independently of per-file identity checks.
@@ -1155,7 +1156,7 @@ def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
         "MOBILE_RELEASE_TEST_PYTHON": str(paths.source_python),
     }
     if platform == "macos":
-        env["DEVELOPER_DIR"] = "/Applications/Xcode_26.3.app/Contents/Developer"
+        env["DEVELOPER_DIR"] = "/Applications/Xcode_27.1.app/Contents/Developer"
     if paths.java_home is not None:
         env["JAVA_HOME"] = str(paths.java_home)
     return tuple(sorted(env.items()))
@@ -1233,7 +1234,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platf
     command("source-pip-check", python(paths.source_python, "-m", "pip", "check"))
     command("bundle-check", (*paths.bundle, "check"))
     check("python-pr-journal", paths.source_python, seconds=90)
-    check("python-full", paths.source_python, seconds=900)
+    check("python-full", paths.source_python, seconds=PYTHON_FULL_SECONDS)
     native = paths.source / "tests/workflow/run_native_profile_checks.py"
     command("native-tools", ("/usr/bin/xcodebuild", "-version"), parser="xcode")
     command("native-profile-source", python(paths.source_python, native), seconds=1500, parser="native")
@@ -1865,9 +1866,9 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("NATIVE_PYTHON_INVENTORY")
         details.update(tests=len(expected), completed=list(observed))
     elif step.parser == "xcode":
-        if stdout.strip().splitlines() != ["Xcode 26.3", "Build version 17C529"]:
+        if stdout.strip().splitlines() != ["Xcode 27.1", "Build version 27A9275"]:
             raise VerificationError("XCODE_VERSION")
-        details["version"] = "Xcode26.3/17C529"
+        details["version"] = "Xcode27.1/27A9275"
     elif step.parser == "check":
         lines = [line[len("MRK_CHECK_RESULT="):] for line in stdout.splitlines() if line.startswith("MRK_CHECK_RESULT=")]
         limit = (512 if step.id == "python-full" else 256) * 1024
@@ -4064,7 +4065,7 @@ def retain_native_header(paths: Paths, session, checks, platform: str, state: Na
     # GCC's assembler/linker must never search mutable work, venv or Bundler
     # directories. No CPATH/GCC_EXEC_PREFIX/COMPILER_PATH or arbitrary -B/-I.
     env = {"PATH": "/usr/bin:/bin"} if platform == "linux" else {
-        "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+        "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
     }
     version_argv = (compiler, "--version") if platform == "linux" else (compiler, "--no-default-config", "--version")
     version = original_native_capture(session, version_argv, paths, rows, "compiler-version",
@@ -4513,18 +4514,19 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
     originals = []
     try:
         check_clock(deadline)
-        cutoff = min(deadline, started + 900.0)
         source_files = tuple(name for name in (source_inventory or {})
                              if name.endswith(".py") and name.startswith(("src/mobile_release/", "tests/")))
         phase = {"python-full": "source", "python-wheel": "wheel"}.get(step.id)
         if platform != "linux" or phase is None:
             raise VerificationError("PYTHON_GATE_CONTRACT")
+        seconds = PYTHON_FULL_SECONDS if phase == "source" else 900
+        cutoff = min(deadline, started + seconds)
         selection = "full" if phase == "source" else "wheel"
         python = paths.source_python if phase == "source" else paths.wheel_python
         env = tuple(sorted(native_phase_environment(paths, platform, phase).items()))
         expected = Step(step.id, argv=(str(python), "-I", "-B", str(paths.checks), "--check", step.id,
             "--source-root", str(paths.source), "--work-root", str(paths.work / "checks"), "--deadline", repr(deadline)),
-            cwd=paths.work, env=env, seconds=900, parser="check")
+            cwd=paths.work, env=env, seconds=seconds, parser="check")
         if step != expected:
             raise VerificationError("PYTHON_GATE_CONTRACT")
         session.ensure_idle(deadline=cutoff)
@@ -4561,11 +4563,11 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             details["stage"] = partition
             check_clock(cutoff)
             session.ensure_idle(deadline=cutoff)
-            part = step if healthy else dataclasses.replace(step, parser="native", native_partition=partition,
+            part = step if healthy else dataclasses.replace(step, parser="native", native_partition=partition, seconds=900,
                 argv=(str(python), "-I", "-S", "-B", str(paths.source / "tests/workflow/run_native_profile_checks.py"),
                       f"--{partition}-{phase}"))
             row["status"] = "RUNNING"
-            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
+            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=part.seconds,
                 output_limit=8 * 1024**2, cpu_seconds=300 if healthy and selection == "full" else 180,
                 profile="python-full" if healthy and selection == "full" else "ordinary", absolute_deadline=cutoff,
                 dispose_retained_domain=partition in PYTHON_POISON_PARTITIONS)

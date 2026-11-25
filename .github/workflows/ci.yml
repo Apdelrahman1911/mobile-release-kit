@@ -1,4 +1,5 @@
-name: Disposable native Git fixture finality comparison
+name: Disposable macOS native verification with pinned Xcode 27.1
+
 on:
   workflow_dispatch:
     inputs:
@@ -10,98 +11,110 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONSAFEPATH: '1'
+
 jobs:
-  native-git-fixture:
+  native-profiles-comparison:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
       inputs.verification_target == 'macos'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-26
-            os: '26'
-          - runner: xcode-27
-            os: '27'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 6
+    runs-on: xcode-27
+    timeout-minutes: 60
+    permissions:
+      contents: read
     env:
-      BASIS_COMMIT: 84fb76e16cfbd13d7a21530487268582e5933c8d
+      MRK_DIAGNOSTIC_BASIS_COMMIT: df368458f5c0ce20ea0eba5109570a59e8dd9894
+      MRK_DIAGNOSTIC_BASIS_TREE: 0f1f5402e6f344a5346bfa76174c980293a9a309
+    steps:
+      - name: Require a disposable GitHub-hosted runner
+        env:
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
+          [[ "$(sw_vers -productVersion)" == 27.* ]]
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MRK_DIAGNOSTIC_BASIS_COMMIT }}
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Set up the fixed Python 3.12 compatibility runtime
+        id: python312
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up the fixed Python 3.13 compatibility runtime
+        id: python313
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up the fixed Python 3.14 compatibility runtime
+        id: python314
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Set up pinned Ruby without project installation
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler: none
+          bundler-cache: false
+      - name: Require isolated macOS source and installed-wheel verification
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$MRK_DIAGNOSTIC_BASIS_COMMIT" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$MRK_DIAGNOSTIC_BASIS_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          xcode_version="$(DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer /usr/bin/xcodebuild -version)"
+          [[ "$xcode_version" == $'Xcode 27.1\nBuild version 27A9275' ]]
+          ruby_executable="$(command -v ruby)"
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
+          sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
+            "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
+            --platform macos --source "$GITHUB_WORKSPACE" \
+            --python "$MRK_PYTHON" --ruby "$ruby_executable" \
+            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
+            --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
+            --commit "$MRK_DIAGNOSTIC_BASIS_COMMIT" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
+            --scope native-python --summary "$GITHUB_STEP_SUMMARY"
+
+  issuer-loopback-transport:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
+      inputs.verification_target == 'macos'
+    runs-on: macos-26
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ env.BASIS_COMMIT }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        id: python
         with:
           python-version: '3.11'
-      - name: Run the exact original Git descendant fixture
-        shell: bash
+      - name: Compare IPv4 and IPv6 with the exact synthetic issuer controls
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          EXPECTED_OS: ${{ matrix.os }}
-          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
-          [[ "$(sw_vers -productVersion)" == "$EXPECTED_OS".* ]]
-          [[ "$(git rev-parse HEAD)" == "$BASIS_COMMIT" && -z "$(git status --porcelain)" ]]
-          umask 077
-          scratch="$(mktemp -d "$RUNNER_TEMP/mrk-git-probe.XXXXXXXX")"
-          mkdir "$scratch/home" "$scratch/tmp"
-          printf 'os=%s source=%s tree=%s\n' "$(sw_vers -productVersion)" "$BASIS_COMMIT" "$(git rev-parse 'HEAD^{tree}')"
-          env -i HOME="$scratch/home" TMPDIR="$scratch/tmp" PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
-            /usr/bin/git --version
-          env -i HOME="$scratch/home" TMPDIR="$scratch/tmp" PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
-            "$MRK_PYTHON" -I -B - <<'PY'
-          from contextlib import contextmanager
-          import json
-          from pathlib import Path
-          import sys
-          import unittest
-          from unittest.mock import patch
-
-          checkout = Path.cwd().resolve()
-          sys.path[:0] = [str(checkout / part) for part in ("src", "tests")]
-          from unit import test_owned_process_callers as original
-
-          fixture = original.BuildDiscoveryCallerTests(
-              "test_real_git_discovery_suppresses_hooks_and_explicit_commands_reap_descendants"
-          )
-          bound = original.bounded_commands
-          final = original.all_original_commands_final
-          active_mode = None
-          published_modes = set()
-
-          @contextmanager
-          def observe_mode(mode, heartbeat):
-              global active_mode
-              active_mode = mode
-              with bound(mode, heartbeat) as outcomes:
-                  yield outcomes
-
-          def observe_finality(outcomes):
-              result = final(outcomes)
-              if active_mode not in published_modes:
-                  published_modes.add(active_mode)
-                  print("MRK_GIT_FIXTURE=" + json.dumps({
-                      "mode": active_mode, "final": result,
-                      "outcomes": [None if row is None else {
-                          "final": row.original_finality is not None,
-                          "termination": row.termination,
-                          "returncode": row.returncode,
-                          "integrity": row.result_integrity,
-                          "tool_attempted": row.run_tool.attempted,
-                          "tool_retired": row.run_tool.retired,
-                      } for row in outcomes],
-                  }, sort_keys=True), flush=True)
-              return result
-
-          with patch.object(original, "bounded_commands", observe_mode), \
-                  patch.object(original, "all_original_commands_final", observe_finality):
-              result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([fixture]))
-          raise SystemExit(int(not result.wasSuccessful() or len(published_modes) != 4))
-          PY
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ -z "$(git status --porcelain)" ]]
+          exec env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C python -I -B .github/scripts/aia-loopback-comparison.py
