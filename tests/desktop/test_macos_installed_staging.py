@@ -4584,13 +4584,11 @@ sys.exit(status)
             with self.subTest(returnedOutput=case), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); path = root / "owned"; path.mkdir(mode=0o700)
                 named = path / "synthetic.pkg"; named.write_bytes(prefix); named.chmod(0o600)
-                operation = object.__new__(module.Operation)
-                operation.entries = []; operation.entry_registry = {}; operation.errors = []
-                operation.app_absence = operation.update = None
-                operation.setup_package = operation.setup_verify = False
-                operation.prepared_binding = operation.candidate_removal_context = None
-                operation.prepared_staging = False
-                operation.stager = TOOL; operation.notary_clock = lambda **kwargs: None
+                environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                               "GITHUB_WORKFLOW_REF": "inert-data-fixture", "GITHUB_RUN_ID": "1",
+                               "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}
+                operation = module.Operation(None, root, path, "finalize-package", environment, TOOL)
+                operation.notary_clock = lambda **kwargs: None
                 parent = operation.register(os.open(path, module.READ_FLAGS | os.O_DIRECTORY), "parent", "directory")
                 parent["identity"] = module.directory_identity(os.fstat(parent["fd"]))
                 operation.work_entry = parent; operation.source_entry = None; operation.work = path
@@ -5111,6 +5109,12 @@ sys.exit(status)
                     return path.is_relative_to(root)
                 def opened(path, flags, *args, **kwargs):
                     return real_open(root if path == "/" else path, flags, *args, **kwargs)
+                original_directory = operation.removal_open_directory
+                def directory(parent, name, role, **kwargs):
+                    if parent is not None:
+                        return original_directory(parent, name, role, **kwargs)
+                    with mock.patch.object(module.os, "open", side_effect=opened):
+                        return original_directory(parent, name, role, **kwargs)
                 def lst(path, *args, **kwargs):
                     if path == "/":
                         return root_info(real_lstat(root, *args, **kwargs))
@@ -5145,7 +5149,7 @@ sys.exit(status)
                 with mock.patch.object(module.time,"monotonic_ns",side_effect=lambda:state.clock[0]), \
                      mock.patch.object(operation,"normal_mount_host",side_effect=host), \
                      mock.patch.object(operation,"setup_verification_consume_returned",side_effect=before_repeat), \
-                     mock.patch.object(module.os,"open",side_effect=opened),mock.patch.object(module.os,"lstat",side_effect=lst), \
+                     mock.patch.object(operation,"removal_open_directory",side_effect=directory),mock.patch.object(module.os,"lstat",side_effect=lst), \
                      mock.patch.object(module.os,"fstat",side_effect=fst), \
                      mock.patch.object(module.os,"stat",side_effect=st):
                     if fault in (None,"cursor-unavailable"):
@@ -11205,8 +11209,8 @@ sys.exit(status)
                 owner.run_owned = command
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
                 def inspect(stdout_body, stderr_body, actual_checkout, *, package_version=None):
-                    self.assertEqual(package_version, "0.1.2")
-                    parser_calls.append(True)
+                    parser_calls.append(package_version)
+                    self.assertEqual(package_version, TOOL.source_build_selection(operation.target).package_version)
                     self.assertIs(stdout_body, captured_stdout)
                     self.assertIs(stderr_body, captured_stderr)
                     self.assertEqual(actual_checkout, str(checkout))
@@ -11221,7 +11225,9 @@ sys.exit(status)
                     else:
                         with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
                             operation.execute()
-                self.assertEqual(len(parser_calls), 1 if kind in ("captured", "parser-error") else 0)
+                expected_version = TOOL.source_build_selection(operation.target).package_version
+                self.assertEqual(parser_calls, [expected_version] if kind in ("captured", "parser-error") else [],
+                                 (operation.receipt.get("failure"), operation.calls))
                 if kind == "captured":
                     self.assertEqual(operation.compiler_failure["rows"], rust["rows"] + [
                         {"kind": "clang", "code": None, "source": native_root + "/src/native.m", "line": 31, "column": 9}])
@@ -12715,10 +12721,11 @@ class MacInstalledData(unittest.TestCase):
 
     def xcode_native_distribution(self, version):
         # Actual unsigned productbuild structure from run 39067503871/1.
-        # Project only the version attributes injected by PackageKit.
+        # Project version and the source's current one-sided OS floor.
         captured = (Path(__file__).absolute().parents[1] / "fixtures/macos-xcode-product-distribution.xml").read_bytes()
         self.assertEqual(captured.count(b'="0.1.2"'), 2)
-        return captured.replace(b'="0.1.2"', b'="' + version.encode("ascii") + b'"')
+        self.assertEqual(captured.count(b' before="27.0"'), 1)
+        return captured.replace(b' before="27.0"', b'').replace(b'="0.1.2"', b'="' + version.encode("ascii") + b'"')
 
     def test_xcode_product_native_bundle_annotation_is_source_bound(self):
         for target in TOOL.MAC_TARGETS:
@@ -12727,12 +12734,13 @@ class MacInstalledData(unittest.TestCase):
             captured = self.xcode_native_distribution(selection.package_version)
             TOOL.install_product_distribution(captured, expected, xcode_setup=True)
         # Verify against an independently selected version with unchanged shape.
-        alternate = TOOL.BuildSelection(target, "1.2.3", selection.release)
+        expected_version = b'version="' + selection.package_version.encode("ascii") + b'"'
+        self.assertEqual(expected.count(expected_version), 1)
         TOOL.install_product_distribution(self.xcode_native_distribution("1.2.3"),
-            TOOL.xcode_setup_sources(alternate)["Distribution.xml"], xcode_setup=True)
+            expected.replace(expected_version, b'version="1.2.3"'), xcode_setup=True)
         for mutation in ("id", "path", "version", "extra-attribute", "extra-bundle", "nested",
                          "text", "tail", "wrapper-attribute", "reference-attribute", "reference-text",
-                         "not-final", "paired-version", "active-action"):
+                         "not-final", "paired-version", "stale-os-ceiling", "active-action"):
             changed = TOOL.ET.fromstring(captured)
             metadata = changed.findall("pkg-ref")[1]
             wrapper, carrier = metadata[0], metadata[0][0]
@@ -12750,6 +12758,7 @@ class MacInstalledData(unittest.TestCase):
             elif mutation == "not-final": changed.remove(metadata); changed.insert(0, metadata)
             elif mutation == "paired-version":
                 carrier.set("CFBundleVersion", "9.9.9"); changed.find("pkg-ref").set("version", "9.9.9")
+            elif mutation == "stale-os-ceiling": changed.find("./volume-check/allowed-os-versions/os-version").set("before", "27.0")
             elif mutation == "active-action": TOOL.ET.SubElement(changed, "installation-check", {"script": "true"})
             with self.subTest(mutation=mutation), self.assertRaisesRegex(TOOL.Refused, "^install-product-distribution$"):
                 TOOL.install_product_distribution(TOOL.ET.tostring(changed), expected, xcode_setup=True)
@@ -13103,17 +13112,29 @@ class MacInstalledData(unittest.TestCase):
         for target in TOOL.MAC_TARGETS:
             selection = TOOL.source_build_selection(target)
             program = entry_macho_fixture(target=target)
-            inventory = b"INERT fixed inventory DATA\n"
-            hook = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
-            files = {"postinstall": (hook, 0o555), "mrk-macos-app-absence-fixture": (program, 0o555),
-                     "input/" + TOOL.INSTALLATION_INVENTORY_NAME: (inventory, 0o444), "input/data": (b"DATA", 0o444)}
+            _record, inventory, _root, _release = installation_record_fixture(selection=selection)
+            document = TOOL.decode(inventory)
+            hook = (b'#!/bin/sh\nset -eu\numask 077\n[ "${3:-}" = / ] || exit 1\n'
+                    b'case "${1:-}" in /*) ;; *) exit 1 ;; esac\n'
+                    b'case "$0" in\n    ./postinstall) scripts=. ;;\n'
+                    b'    /*/postinstall) scripts=${0%/*} ;;\n    *) exit 1 ;;\nesac\n'
+                    b'cd -P "$scripts" 2>/dev/null || exit 1\n'
+                    b'exec ./mrk-macos-app-absence-fixture "$PWD/input" "$1"\n')
+            data_name = "input/app/Contents/Info.plist"
+            files = {"postinstall": (hook, 0o555), "mrk-macos-app-absence-fixture": (program, 0o555)}
+            for row in document["files"]:
+                if row["path"].startswith("app/"):
+                    row.update(size=4, sha256=TOOL.digest(b"DATA"))
+                    files["input/" + row["path"]] = (b"DATA", 0o555 if row["executable"] else 0o444)
+            inventory = TOOL.canonical(document)
+            files["input/" + TOOL.INSTALLATION_INVENTORY_NAME] = (inventory, 0o444)
             info = package_data(selection=selection)[1]["PackageInfo"].replace(
                 TOOL.PACKAGE_ID.encode(), (TOOL.PACKAGE_ID + "-app-absence-fixture").encode())
             def members(uid=0, gid=0, changed=None):
                 values = files if changed is None else changed
                 archive = odc(".", stat.S_IFDIR | 0o755, uid=uid, gid=gid)
-                archive += odc("./input", stat.S_IFDIR | 0o555, uid=uid, gid=gid)
-                archive += odc("./input/runtime", stat.S_IFDIR | 0o555, uid=uid, gid=gid)
+                for name in sorted(set(TOOL.directories(values)) | {"input/runtime"}):
+                    archive += odc("./" + name, stat.S_IFDIR | 0o555, uid=uid, gid=gid)
                 for name, (body, mode) in sorted(values.items()):
                     archive += odc("./" + name, stat.S_IFREG | mode, body, uid=uid, gid=gid)
                 return {"PackageInfo": info, "Scripts": archive + odc("TRAILER!!!", 0)}
@@ -13127,17 +13148,17 @@ class MacInstalledData(unittest.TestCase):
                   mock.patch.object(TOOL, "read_at", return_value=(original, SimpleNamespace(st_uid=501, st_gid=20))),
                   mock.patch.object(TOOL, "read", return_value=final) as read):
                 compact = TOOL.app_absence_original_command(args)
-                self.assertEqual(set(compact["rows"]), set(files) | {"input", "input/runtime"})
-                self.assertEqual(compact["rows"]["input/data"], {"size": 4, "sha256": TOOL.digest(b"DATA"), "mode": 0o444})
+                self.assertEqual(set(compact["rows"]), set(files) | set(TOOL.directories(files)) | {"input/runtime"})
+                self.assertEqual(compact["rows"][data_name], {"size": 4, "sha256": TOOL.digest(b"DATA"), "mode": 0o444})
                 self.assertEqual([key for key, value in compact.items() if isinstance(value, bytes)], ["packageInfo"])
                 value = TOOL.app_absence_final_command(args, compact)
                 self.assertEqual(value["packageSha256"], TOOL.digest(final))
                 self.assertEqual(value["originalPackageSha256"], TOOL.digest(original))
                 self.assertEqual(value["qualification"], "nonshipping-app-absence-fixture-not-installed")
                 wrong = [members(501, 20), dict(members(), Payload=b"forbidden"),
-                         dict(members(), PackageInfo=info+b"\n"), members(changed=dict(files, **{"input/data": (b"DIFF", 0o444)})),
-                         members(changed=dict(files, **{"input/data": (b"DATA", 0o555)})),
-                         members(changed={k: v for k, v in files.items() if k != "input/data"})]
+                         dict(members(), PackageInfo=info+b"\n"), members(changed=dict(files, **{data_name: (b"DIFF", 0o444)})),
+                         members(changed=dict(files, **{data_name: (b"DATA", 0o555)})),
+                         members(changed={k: v for k, v in files.items() if k != data_name})]
                 for row in wrong:
                     read.return_value = MacAndroidHelperPackagingData.final_package_xar(self, row)
                     with self.assertRaises(TOOL.Refused): TOOL.app_absence_final_command(args, compact)
@@ -18872,7 +18893,7 @@ class MacNormalPreviewData(unittest.TestCase):
             signed_tree.return_value = intel_observer_app
             runtime_reader.reset_mock(); output.reset_mock()
             result = TOOL.input_command(intel_observer_args)
-            runtime_reader.assert_called_once_with(args.runtime, args.expected_manifest, current=True, target=intel_target, observation_role=False)
+            runtime_reader.assert_called_once_with(args.runtime, args.expected_manifest, current=True, target=intel_target, observation_role=True)
             self.assertEqual(result["packageRole"], "installed-shell-observation")
             files = output.call_args.args[1]
             self.assertEqual(TOOL.decode(files["install-inventory.json"][0])["release"], intel_release)

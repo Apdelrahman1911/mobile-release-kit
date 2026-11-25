@@ -369,7 +369,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertLess(request_setup.index('if !fresh'), request_setup.index('.create_intent', request_setup.index('if !fresh')))
         self.assertLess(admission.index('self.create_intent_and_reserve_request('), admission.index('self.spawn_admitted_writer('))
         self.assertIn('request.empty_original(&self.book)?', admission)
-        export = private.split('struct RequestExport {', 1)[1].split('struct Parent {', 1)[0]
+        export = private.split('struct RequestExport {', 1)[1].split('struct ProducerAdmission {', 1)[0]
         for original in ['transaction::export_name_data(request_id)',
                          'book.create_public_receipt_file(support,&name)',
                          'self.empty_original(book)?', 'self.attempted = true',
@@ -386,11 +386,11 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         joined_capsule = private.split('fn record_maintenance_capsule(', 1)[1].split('fn ', 1)[0]
         self.assertIn('joined: &JoinedWriter', joined_capsule)
         self.assertIn('maintenance::state_after_join', joined_capsule)
-        self.assertIn('CapsuleData::encode_data', joined_capsule)
+        self.assertIn('CapsuleData::encode_with_launcher_data', joined_capsule)
         self.assertIn('maintenance::persist_capsule', joined_capsule)
         self.assertIn('"parentFinality":"pending-original-closes-and-outer-return"', joined_capsule)
         self.assertLess(joined_capsule.index('maintenance-original-join-required'), joined_capsule.index('observed.publish_controls('))
-        self.assertLess(joined_capsule.index('observed.publish_controls('), joined_capsule.index('CapsuleData::encode_data'))
+        self.assertLess(joined_capsule.index('observed.publish_controls('), joined_capsule.index('CapsuleData::encode_with_launcher_data'))
         controls = actions.split('fn publish_controls(', 1)[1].split('pub(super) fn previous(', 1)[0]
         for held in ['self.incoming_controls(book,descriptor,signature)?', 'book.record_file(',
                      'book.persist(self.prepared.destination,false)?', 'held_bytes(book,first,descriptor)?',
@@ -422,11 +422,11 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertLess(verifier.index('payload.settled()'), verifier.index('Ok(parsed.release_set_data().clone())'))
         inspect = reader.split('fn inspect(', 1)[1].split('pub(crate) fn run(', 1)[0]
         self.assertLess(inspect.index('!crate::installation::NORMAL_MAC_PROFILE'), inspect.index('native::real_user()'))
-        self.assertLess(inspect.index('self.installed_selection('), inspect.index('data::Record::parse_for_release_data('))
+        self.assertLess(inspect.index('self.installed_selection('), inspect.index('data::Record::parse_observed_for_release_data('))
         finish = reader.split('fn run_selected(', 1)[1].split('\nfn immediate_child', 1)[0]
         self.assertLess(finish.index('producer.settle('), finish.index('book.settle('))
         self.assertIn('let cleaned = producer_cleaned && self.book.as_mut()', finish)
-        self.assertLess(finish.index('if cleaned {'), finish.index('self.producer.take()'))
+        self.assertLess(finish.index('if cleaned && !final_expired {'), finish.index('self.producer.take()'))
         self.assertLess(finish.index('self.producer.take()'), finish.index('self.storage_disposed = true'))
         # The isolated helper never enters this app inspection path. Prove the
         # actual role/entry chain instead of enabling producer/signing APIs in

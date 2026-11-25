@@ -1880,9 +1880,9 @@ def current_store_source_names(body):
   return names
 
 
-def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False,
-          git_observation=False, target=ARM_TARGET, expected_source=None):
-  """Capture DATA, including the committed CA's one explicit projection map."""
+def current_source_capture(*, history_provider=False, store_runtime=False, fetch_observation=False,
+          push_observation=False, git_observation=False):
+  """Capture and digest source bytes without running a source helper."""
   need(type(history_provider) is bool, "current-history-provider-profile")
   need(type(store_runtime) is bool, "current-store-runtime-profile")
   observation_bootstraps = _git_observation_bootstraps(fetch_observation, push_observation, git_observation)
@@ -1917,7 +1917,14 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
   need(captured[CURRENT_CA_SOURCE][0], "current-ca-empty")
   rows = [{"path": name, "size": len(body), "sha256": digest(body)}
       for name, (body, _) in sorted(captured.items())]
-  source_digest = digest(canonical(rows))
+  return captured, digest(canonical(rows))
+
+
+def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False,
+          git_observation=False, target=ARM_TARGET, expected_source=None):
+  """Project captured DATA, including the committed CA's one explicit map."""
+  captured, source_digest = current_source_capture(history_provider=history_provider, store_runtime=store_runtime,
+    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation)
   if expected_source is not None:
     need(source_digest == expected_source, "current-reviewed-source-mismatch")
   preparer = current_preparer(captured)
@@ -2361,9 +2368,9 @@ def current_runtime_command(args):
       need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
                "qualification": "prepared-not-native-verified"}, "current-preparer-result")
       need(tree(source, current_root_mode=0o555) == projection
-         and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation,
-                  push_observation=push_observation, git_observation=git_observation, target=target,
-                  expected_source=source_digest) == (captured, projection, source_digest),
+         and current_source_capture(history_provider=provider_enabled, store_runtime=store_enabled,
+                  fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation)
+                  == (captured, source_digest),
          "current-source-post-changed")
       if fresh_inputs is not None:
         need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
