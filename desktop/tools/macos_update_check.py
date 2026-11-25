@@ -934,6 +934,12 @@ def main():
                  == ("0.2.11", "macos26-arm64-desktop-17", "45556678054"), "signed-intermittent-selection")
             result["hostOs"] = run(["/usr/bin/sw_vers", "-productVersion"], 20)[0].stdout.strip()
             result["hostArchitecture"] = run(["/usr/bin/uname", "-m"], 20)[0].stdout.strip()
+        if os.environ.get("MRK_APFS_ARCHIVE_ACCEPTANCE") == "true":
+            chosen = selection["next"]
+            need((chosen["packageVersion"], chosen["release"], chosen["runId"])
+                 == ("0.2.12", "macos26-arm64-desktop-18", "45599087818"), "apfs-archive-selection")
+            result["hostOs"] = run(["/usr/bin/sw_vers", "-productVersion"], 20)[0].stdout.strip()
+            result["hostArchitecture"] = run(["/usr/bin/uname", "-m"], 20)[0].stdout.strip()
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
@@ -2479,6 +2485,72 @@ def archived_upgrade_check(selection, work, evidence, steps, result):
              for line in result["prepareAppTrace"]), "archived-upgrade-native-settlement")
     need(android_helper_status() == 113 and removal_archive_identities() == journals,
          "archived-upgrade-quit-journal-preservation")
+
+    if os.environ.get("MRK_APFS_ARCHIVE_ACCEPTANCE") == "true":
+        remove_after_archived_upgrade(selection, work, evidence, steps, result, new_folder,
+                                      journals, seeded, credential)
+
+
+def remove_after_archived_upgrade(selection, work, evidence, steps, result, folder,
+                                  prior_journals, seeded, credential):
+    """Verify the fixed signed remover and reinstaller on an upgraded archive roster."""
+    assert all(name.startswith(".remove-") and hex_field(name[8:], 32) for name in prior_journals)
+    row = selection["next"]
+    remove_work = work / "archived-current-removal"
+    remove_work.mkdir(mode=0o700)
+    mount, _ = removal_image(selection["removal"], remove_work, steps)
+    try:
+        package = json.loads((mount / "remove-producer.json").read_bytes())
+        current = json.loads((folder / "producer-root/producer.json").read_bytes())["releaseSet"]["current"]
+        need(package["sourceCommit"] == current["sourceCommit"]
+             and package["installedProducerSha256"] == digest(folder / "producer-root/producer.json")
+             and package["packageSha256"] == digest(mount / "Remove.pkg"), "archived-current-remove-pair")
+        result["matchedRemovePackageSha256"] = package["packageSha256"]
+        state = STATE / "installation-v2.json"
+        state_sha = digest(state)
+        removed = live_remove(mount, work, evidence, steps, "archived-current-remove", observe_release=row["release"])
+        result["candidateRemoveReturn"] = removed["returncode"]
+        need(removed["returncode"] == 0, "archived-current-remove")
+        need(not APP.exists() and not LAUNCHER.exists() and not payload_pids(), "archived-current-payload-still-present")
+        need(digest(state)==state_sha, "archived-current-installation-state-changed")
+        receipt = STATE.parent / ("MobileReleaseKit-RemovalComplete-v1-" + state_sha)
+        expected = f"Mobile Release Kit removal complete v1\n{state_sha}\n".encode()
+        metadata = receipt.lstat()
+        need(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == metadata.st_gid == 0
+             and metadata.st_nlink == 1 and metadata.st_mode & 0o022 == 0
+             and metadata.st_size == len(expected) and receipt.read_bytes() == expected,
+             "archived-current-native-receipt")
+        result["candidateNativeCompletionReceiptVerified"] = True
+        after = removal_archive_identities()
+        added = set(after) - set(prior_journals)
+        need(len(added) == 1 and all(after.get(name) == identity for name, identity in prior_journals.items()),
+             "archived-current-original-journal-changed")
+        name, = added
+        need(name.startswith(".remove-") and hex_field(name[8:], 32), "archived-current-journal-name")
+        terminal, _ = run(["/usr/bin/sudo", "-n", "/bin/cat",
+                           str(STATE / name / "payload-absent-observed.json")], 15, check=True)
+        need(0 < len(terminal.stdout) <= 4096, "archived-current-terminal-size")
+        raw = json.loads(terminal.stdout)
+        need(raw["prefix"] == "payload-absent-observed", "archived-current-terminal-record")
+        result["candidateRemovalTerminalSha256"] = hashlib.sha256(terminal.stdout.encode()).hexdigest()
+        result["priorJournalsPreservedAfterCandidateRemoval"] = True
+        result["candidateRemovalDataPreserved"] = (all(manifest().get(key) == value for key, value in seeded.items())
+                                                      and update_credential_matches(credential))
+        need(result["candidateRemovalDataPreserved"], "archived-current-keep-data-changed")
+        result["candidateReinstallReturn"] = install("archived-current-reinstall", folder, steps, evidence=evidence)
+        need(result["candidateReinstallReturn"] == 0, "archived-current-reinstall")
+        installed = result["candidateReinstalled"] = installed_state()
+        need(installed["packageSha256"] == row["packageSha256"], "archived-current-reinstall-identity")
+        need(removal_archive_identities() == after, "archived-current-reinstall-journal-changed")
+        result["allJournalsPreservedAfterCandidateReinstall"] = len(after)
+        result["candidateReinstallRuntime"] = launch_smoke("archived-current-reinstalled", work, evidence, steps,
+                                                           observe=first_launch_observe)
+        require_runtime(result["candidateReinstallRuntime"], "archived-current-reinstall-runtime")
+        result["candidateReinstallDataPreserved"] = (all(manifest().get(key) == value for key, value in seeded.items())
+                                                      and update_credential_matches(credential))
+        need(result["candidateReinstallDataPreserved"], "archived-current-reinstall-data-changed")
+    finally:
+        detach_macl_fixture(mount, "archived-current-removal", steps, result)
 
 
 def retained_transition_check(selection, work, evidence, steps, result):
