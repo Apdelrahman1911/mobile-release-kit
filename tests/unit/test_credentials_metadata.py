@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ast
+import builtins
 import json
 import os
 import plistlib
@@ -632,11 +633,21 @@ class CredentialMetadataTests(unittest.TestCase):
             key = private_root / "AuthKey.p8"
             key.write_bytes(b"private-p8-content")
             key.chmod(0o600)
-            environment = store_lane_environment(
-                config,
-                values={"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(key)},
-                platforms=("ios",),
-            )
+            original_import = builtins.__import__
+
+            def import_dependency(name, globals=None, locals=None, fromlist=(), level=0):
+                if name.rsplit(".", 1)[-1] in {
+                    "_desktop_android_signing_material", "_desktop_ios_signing_material",
+                }:
+                    self.fail("ordinary Store credentials imported the Desktop signing owners")
+                return original_import(name, globals, locals, fromlist, level)
+
+            with patch.object(builtins, "__import__", import_dependency):
+                environment = store_lane_environment(
+                    config,
+                    values={"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(key)},
+                    platforms=("ios",),
+                )
             self.assertEqual(
                 base64.b64decode(environment["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"]),
                 b"private-p8-content",

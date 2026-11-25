@@ -295,6 +295,20 @@ def resolve_credential_values(
     return resolved
 
 
+def _captured_signing_platform(values: Mapping[str, str]) -> str | None:
+    if type(values) is dict:
+        # Environment and credential-file values cannot carry Desktop custody.
+        return None
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    from ._desktop_ios_signing_material import CapturedBuildValues
+
+    if type(values) is CapturedBuildValues:
+        return "ios"
+    if type(values) is CapturedAndroidBuildValues:
+        return "android"
+    return None
+
+
 def credential_values_for_purpose(
     config: ReleaseConfig,
     values: Mapping[str, str],
@@ -307,18 +321,17 @@ def credential_values_for_purpose(
 
     allowed: set[str] = set()
     selected = tuple(platforms)
-    from ._desktop_ios_signing_material import CapturedBuildValues
-    from ._desktop_android_signing_material import CapturedAndroidBuildValues
-    if type(values) is CapturedBuildValues and (selected != ("ios",) or purpose != "signing"):
+    captured_platform = _captured_signing_platform(values)
+    if captured_platform == "ios" and (selected != ("ios",) or purpose != "signing"):
         raise CredentialError("captured iOS material requires its exact iOS signing purpose")
-    if type(values) is CapturedAndroidBuildValues and (selected != ("android",) or purpose != "signing"):
+    if captured_platform == "android" and (selected != ("android",) or purpose != "signing"):
         raise CredentialError("captured Android material requires its exact Android signing purpose")
     for item in requirements(config, stage, purpose=purpose, platforms=selected):
         allowed.add(item.name)
         allowed.update(item.alternatives)
     if purpose == "store" and "android" in selected:
         allowed.add("GOOGLE_APPLICATION_CREDENTIALS")
-    if type(values) in (CapturedBuildValues, CapturedAndroidBuildValues):
+    if captured_platform is not None:
         # Captured file bytes are not environment/renderer mapping values.
         # Preserve their original source while applying the SAME core policy.
         return values.select(allowed)
@@ -533,9 +546,7 @@ def _selected_material_bytes(
     project_root: Path, cancellation: _ProfileCancellation | None = None,
 ) -> bytes | None:
     """Select an external source once, never return its filename to consumers."""
-    from ._desktop_ios_signing_material import CapturedBuildValues
-    from ._desktop_android_signing_material import CapturedAndroidBuildValues
-    if type(values) in (CapturedBuildValues, CapturedAndroidBuildValues):
+    if _captured_signing_platform(values) is not None:
         return values.material(base64_name, root=project_root, cancellation=cancellation)
     if values.get(base64_name) and values.get(path_name):
         raise CredentialError("private material has mutually exclusive input sources")
