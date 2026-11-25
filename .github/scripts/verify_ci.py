@@ -3579,17 +3579,26 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             # Expiry still consumes the same original deadline, never a new one.
             if deadline is not None:
                 check_clock(deadline)
-    if step is not None and step.id == "python-full" and step.native_partition == "poison-recovery-profile-cleanup":
+    if step is not None and step.id == "python-full" and step.native_partition in {"poison-recovery-profile-cleanup", "poison-recovery-inspection-deadline", "poison-recovery-readback-deadline"}:
         label = "MRK_FIXED_IMPORT_DRIFT="
         rows = [line[len(label):] for line in text.splitlines() if line.startswith(label)]
         if len(rows) == 1 and len(rows[0]) <= 4096:
             row = strict_json(rows[0])
-            allowed = {"mobile_release." + path.removeprefix("src/mobile_release/")[:-3].replace("/", ".")
-                       for path in _source_files if path.startswith("src/mobile_release/")}
+            allowed = set()
+            for source_name in _source_files:
+                if source_name.startswith("src/mobile_release/"):
+                    module = source_name.removeprefix("src/")[:-3]
+                elif source_name.startswith(("tests/unit/", "tests/workflow/")):
+                    module = source_name.removeprefix("tests/")[:-3]
+                else:
+                    continue
+                allowed.add(module.removesuffix("/__init__").replace("/", "."))
             if type(row) is dict and set(row) == {"added", "missing"} and all(
-                    type(names) is list and len(names) <= 32 and all(
-                        type(name) is str and name in allowed for name in names) for names in row.values()):
-                value["fixed_import_drift"] = row
+                    type(names) is list and len(names) <= 64 and all(
+                        type(name) is str for name in names) for names in row.values()):
+                value["fixed_import_drift"] = {key: [name for name in names if name in allowed]
+                                               for key, names in row.items()}
+                value["unattributed_import_drift"] = sum(name not in allowed for names in row.values() for name in names)
     prefix = "MRK_CHECK_RESULT="
     limit = (512 if step is not None and step.id == "python-full" else 256) * 1024
     for line in result.stdout.decode("utf-8", "replace").splitlines():
@@ -4563,7 +4572,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         for row in details["partitions"]:
             active = row
             partition = row["partition"]
-            if partition != "poison-recovery-profile-cleanup":
+            if partition not in {"poison-recovery-profile-cleanup", "poison-recovery-inspection-deadline", "poison-recovery-readback-deadline"}:
                 continue
             healthy = partition == "healthy"
             details["stage"] = partition

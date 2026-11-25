@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import io
 import os
 import plistlib
@@ -283,6 +284,20 @@ class IOSSetCorrespondenceTests(unittest.TestCase):
             path.write_bytes(content)
             with self.assertRaises(ValidationError):
                 typed_plist(path)
+
+    def test_ordinary_plist_read_does_not_load_the_desktop_archive_owner(self):
+        path = self.root / "Info.plist"
+        body = {"CFBundleIdentifier": "dev.synthetic.fixture"}
+        path.write_bytes(plistlib.dumps(body))
+        original_import = builtins.__import__
+
+        def import_dependency(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in {"ios_archive_operation", "mobile_release.ios_archive_operation"}:
+                self.fail("ordinary plist inspection imported the Desktop archive owner")
+            return original_import(name, globals, locals, fromlist, level)
+
+        with patch.object(builtins, "__import__", import_dependency):
+            self.assertEqual(typed_plist(path), ("dict", (("CFBundleIdentifier", ("str", body["CFBundleIdentifier"])),)))
 
     def test_shared_correspondence_plist_reader_rejects_entire_malformed_xml_corpus(self):
         path = self.root / "Info.plist"
