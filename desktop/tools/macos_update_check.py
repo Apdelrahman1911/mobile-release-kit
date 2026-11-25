@@ -2584,7 +2584,9 @@ def workspace_cli_check(selection, work, evidence, steps, result):
         result["firstConnection"] = overview
         need(overview["runtimeCard"] == "bundled" and not overview["workspaceErrorMarkers"], "workspace-first-connection")
         need(overview["cliStatus"]["returncode"] == 3 and overview["cliStatus"]["guidance"], "workspace-default-denial")
-        click_when_ready(pid, work, "Dashboard")
+        nav = click_when_ready(pid, work, "Overview", "AXButton")
+        result["overviewNavigation"] = nav
+        need(nav.get("clicked") == "Overview", "workspace-overview-navigation")
         opened = click_when_ready(pid, work, "Choose project folder", "AXButton")
         need(opened.get("clicked") == "Choose project folder", "workspace-open-project-picker")
         script = work / "project-picker.js"
