@@ -1,4 +1,4 @@
-name: Disposable macOS native verification with pinned Xcode 27.1
+name: Disposable macOS 26 issuer transport diagnostics
 
 on:
   workflow_dispatch:
@@ -15,89 +15,10 @@ env:
   PYTHONSAFEPATH: '1'
 
 jobs:
-  native-profiles-comparison:
-    if: >-
-      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
-      inputs.verification_target == 'macos'
-    runs-on: xcode-27
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    env:
-      MRK_DIAGNOSTIC_BASIS_COMMIT: df368458f5c0ce20ea0eba5109570a59e8dd9894
-      MRK_DIAGNOSTIC_BASIS_TREE: 0f1f5402e6f344a5346bfa76174c980293a9a309
-    steps:
-      - name: Require a disposable GitHub-hosted runner
-        env:
-          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
-          [[ "$(sw_vers -productVersion)" == 27.* ]]
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ env.MRK_DIAGNOSTIC_BASIS_COMMIT }}
-      - name: Set up Python
-        id: python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.11'
-      - name: Set up the fixed Python 3.12 compatibility runtime
-        id: python312
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
-      - name: Set up the fixed Python 3.13 compatibility runtime
-        id: python313
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
-      - name: Set up the fixed Python 3.14 compatibility runtime
-        id: python314
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-      - name: Set up pinned Ruby without project installation
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
-        with:
-          ruby-version: '3.3.12'
-          bundler: none
-          bundler-cache: false
-      - name: Require isolated macOS source and installed-wheel verification
-        env:
-          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
-          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
-          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
-          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$MRK_DIAGNOSTIC_BASIS_COMMIT" ]]
-          [[ "$(git rev-parse 'HEAD^{tree}')" == "$MRK_DIAGNOSTIC_BASIS_TREE" ]]
-          [[ -z "$(git status --porcelain)" ]]
-          xcode_version="$(DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer /usr/bin/xcodebuild -version)"
-          [[ "$xcode_version" == $'Xcode 27.1\nBuild version 27A9275' ]]
-          ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
-          sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
-            "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
-            --platform macos --source "$GITHUB_WORKSPACE" \
-            --python "$MRK_PYTHON" --ruby "$ruby_executable" \
-            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
-            --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
-            --commit "$MRK_DIAGNOSTIC_BASIS_COMMIT" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
-            --scope native-python --summary "$GITHUB_STEP_SUMMARY"
-
   issuer-loopback-transport:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
+      github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
       inputs.verification_target == 'macos'
     runs-on: macos-26
     timeout-minutes: 8
@@ -109,7 +30,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Compare IPv4 and IPv6 with the exact synthetic issuer controls
+      - name: Observe trustd while evaluating the same synthetic issuer controls
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
@@ -117,4 +38,63 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
           [[ "$(sw_vers -productVersion)" == 26.* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ -z "$(git status --porcelain)" ]]
-          exec env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C python -I -B .github/scripts/aia-loopback-comparison.py
+          [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
+          umask 077
+          capture="$(mktemp -d "$RUNNER_TEMP/mrk-trustd.XXXXXX")"
+          trap 'rm -rf -- "$capture"' EXIT
+          (
+            ulimit -f 4096
+            exec sudo -n /usr/bin/log stream --style ndjson --level debug --timeout 28 \
+              --predicate 'process == "trustd" AND (category == "caissuer" OR category == "http" OR subsystem == "com.apple.CFNetwork" OR subsystem == "com.apple.network")'
+          ) >"$capture/events" 2>"$capture/collector-errors" &
+          collector=$!
+          sleep 2
+          probe_status=0
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C python -I -B .github/scripts/aia-loopback-comparison.py || probe_status=$?
+          collector_status=0
+          wait "$collector" || collector_status=$?
+          python -I -B - "$capture/events" "$probe_status" "$collector_status" <<'PY'
+          from collections import Counter
+          import json
+          import re
+          import sys
+
+          patterns = {
+              "issuer-request-scheduled": "request for uri:",
+              "issuer-download-failed": "failed to download issuer",
+              "issuer-obtained": "found parents for",
+              "issuer-url-missing": "certificate has no caissuer urls",
+              "host-backoff": "skipping host due to too many recent timeouts",
+              "request-timeout": "trustd triggered evaluation timeout",
+              "no-request-issued": "no request issued",
+              "local-network-denied": "local network prohibited",
+              "restricted-network": "network is disallowed",
+              "transport-security": "app transport security",
+          }
+          counts, codes = Counter(), Counter()
+          events = fixture_events = 0
+          with open(sys.argv[1], encoding="utf-8") as rows:
+              for raw in rows:
+                  try:
+                      event = json.loads(raw)
+                  except ValueError:
+                      continue
+                  message = event.get("eventMessage") if isinstance(event, dict) else None
+                  if not isinstance(message, str):
+                      continue
+                  events += 1
+                  lower = message.lower()
+                  fixture_events += "/mrk-aia/" in lower
+                  for key, marker in patterns.items():
+                      if marker in lower:
+                          counts[key] += 1
+                  if "failed to download issuer" in lower or "/mrk-aia/" in lower:
+                      for code in set(re.findall(r"NSURLErrorDomain\s+Code=(-10\d{2}|-120\d)\b", message)):
+                          codes[code] += 1
+          print("MRK_TRUSTD_COMPARISON=" + json.dumps({
+              "collectorReturn": int(sys.argv[3]), "eventCount": events,
+              "fixtureUrlVisibleCount": fixture_events, "markerCounts": counts,
+              "issuerUrlErrorCounts": codes, "probeReturn": int(sys.argv[2]),
+          }, sort_keys=True))
+          PY
+          [[ "$probe_status" == 0 && "$collector_status" == 0 ]]
