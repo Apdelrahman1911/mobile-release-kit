@@ -4517,7 +4517,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         source_files = tuple(name for name in (source_inventory or {})
                              if name.endswith(".py") and name.startswith(("src/mobile_release/", "tests/")))
         phase = {"python-full": "source", "python-wheel": "wheel"}.get(step.id)
-        if platform != "linux" or phase is None:
+        if platform != "linux" or phase != "source":
             raise VerificationError("PYTHON_GATE_CONTRACT")
         seconds = PYTHON_FULL_SECONDS if phase == "source" else 900
         cutoff = min(deadline, started + seconds)
@@ -4550,7 +4550,10 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("PYTHON_CAPTURE_UNION")
-        progress_scope = python_progress_scope(inventories["healthy"])
+        scoped_tests = checks.FOCUSED_LINUX_CASES
+        if not set(scoped_tests) <= set(inventories["healthy"]):
+            raise VerificationError("FOCUSED_CASES_OUTSIDE_ORIGINAL_INVENTORY")
+        progress_scope = python_progress_scope(scoped_tests)
         details["stage"] = "package"
         package = (paths.work / "source-build/src/mobile_release" if phase == "source"
                    else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -4560,6 +4563,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             active = row
             partition = row["partition"]
             healthy = partition == "healthy"
+            if not healthy:
+                continue
             details["stage"] = partition
             check_clock(cutoff)
             session.ensure_idle(deadline=cutoff)
@@ -4573,11 +4578,16 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 dispose_retained_domain=partition in PYTHON_POISON_PARTITIONS)
             originals.append(value)
             row["capture"] = capture_observations(value)
+            diagnostics = []
+            for record in value.stderr.splitlines():
+                if record.startswith(b"MRK_FOCUSED_CASE=") and len(record) < 256 and len(diagnostics) < 12:
+                    diagnostics.append(json.loads(record.partition(b"=")[2]))
+            row["focused_case_notes"] = diagnostics
             primary = None
             try:
                 require_original_finality(value)
                 parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff,
-                                       _python_expected=inventories[partition])
+                                       _python_expected=scoped_tests)
                 if not healthy:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
                         executable=python, prefix=paths.python.parent.parent)
@@ -4598,7 +4608,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                         row["python_progress_error"] = error_details(exc)
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
-                        deadline=cutoff, platform=platform, _python_expected=inventories[partition],
+                        deadline=cutoff, platform=platform, _python_expected=scoped_tests,
                         _source_files=source_files)
                 except BaseException as exc:
                     row["diagnostic_error"] = error_details(exc)
@@ -4609,10 +4619,12 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 observed = tuple(sorted(item["id"] for item in row["summary"]["tests"]))
             else:
                 observed = tuple(parsed.details["completed"])
-            if observed != inventories[partition]:
+            if observed != scoped_tests:
                 raise VerificationError("PYTHON_CAPTURE_RESULT")
             row.update(status="PASS", tests=len(observed), completed=list(observed))
             completed.extend(observed)
+        details["stage"] = "focused-observations-only"
+        raise VerificationError("FOCUSED_DIAGNOSTIC_NOT_A_GATE_RECEIPT")
         details["stage"] = "union"
         check_clock(cutoff)
         if (tuple(sorted(completed + list(delegated))) != inventories["all"]

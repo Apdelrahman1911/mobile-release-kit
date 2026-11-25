@@ -1255,6 +1255,12 @@ def run_pr_journal_check(source_root: Path, work_root: Path, deadline: float, ob
     return {"executed": 1}
 
 
+FOCUSED_LINUX_CASES = (
+    "unit.test_ios_current_tools_macos.CurrentIPAToolsTests.test_realistic_depth_reuses_original_ancestry_without_reopening",
+    "unit.test_local_signing_persistent.PersistentSigningTests.test_actual_case_wait_eof_barrier_crash_and_deadline_settle_before_return",
+)
+
+
 def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list,
                      *, work_root: Path | None = None) -> dict:
     failures, callbacks, profile = [], [], None
@@ -1270,6 +1276,9 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
         complete = expected_python_ids(source_root, selection, deadline=deadline)
         delegated, _required = signing_regression_metadata(source_root, "ubuntu-24.04", deadline=deadline)
         expected = _python_capture_partition(complete, "healthy", delegated)
+        if selection == "full":
+            _require(set(FOCUSED_LINUX_CASES) <= set(expected), "FOCUSED_CASES_OUTSIDE_ORIGINAL_INVENTORY")
+            expected = FOCUSED_LINUX_CASES
         if selection != "full":
             inspect_installed_wheel(source_root, deadline=deadline)
         allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
