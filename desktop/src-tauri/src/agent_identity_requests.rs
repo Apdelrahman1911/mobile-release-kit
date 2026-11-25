@@ -781,11 +781,11 @@ mod tests {
             session: id(n + 1),
         }
     }
-    fn scope(document: &Arc<()>) -> NativeScope {
+    fn scope(document: &Arc<()>, root: &str) -> NativeScope {
         NativeScope {
             project_id: id(2),
             runtime_id: "project-1".into(),
-            root: crate::test_absolute_path!("/inert/identity-fixture").into(),
+            root: root.into(),
             device: 7,
             inode: 8,
             registration: 9,
@@ -797,19 +797,47 @@ mod tests {
         SavedPoint {
             project_id: id(2),
             runtime_id: "project-1".into(),
-            root: crate::test_absolute_path!("/inert/identity-fixture").into(),
+            root: "/inert/identity-fixture".into(),
             device: 7,
             inode: 8,
             revision: 3,
             fresh: true,
         }
     }
+    // A live identity lease requires a POSIX project registration.
+    #[cfg(unix)]
     fn ready() -> (Inbox, Arc<()>) {
         let document = Arc::new(());
         let inbox = Inbox::new(id(1));
-        inbox.allow(scope(&document)).unwrap();
+        inbox.allow(scope(&document, "/inert/identity-fixture")).unwrap();
         (inbox, document)
     }
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_cannot_create_a_native_identity_lease() {
+        let document = Arc::new(());
+        let inbox = Inbox::new(id(1));
+        for (root, absolute) in [
+            (r"C:\inert\identity-fixture", true),
+            (r"\\server\share\identity-fixture", true),
+            (r"\\?\C:\inert\identity-fixture", true),
+            ("/inert/identity-fixture", false),
+        ] {
+            let scope = scope(&document, root);
+            assert_eq!(scope.root.is_absolute(), absolute, "{root}");
+            assert_eq!(
+                inbox.allow(scope).err(),
+                Some(Error::InvalidRequest),
+                "{root}"
+            );
+            assert!(!inbox.gui_status().unwrap().lease.enabled, "{root}");
+        }
+        assert_eq!(
+            inbox.submit(origin(30), input(4), &point()).err(),
+            Some(Error::AccessDenied)
+        );
+    }
+    #[cfg(unix)]
     #[test]
     fn catalogue_retains_intents_without_private_changes_or_phase_transitions() {
         let (inbox, _document) = ready();
@@ -867,6 +895,7 @@ mod tests {
         let duplicate = r#"{"selection":{"platform":"android","target":":app","project":null},"desiredIdentity":"com.example.a","desiredIdentity":"com.example.b","identityIntent":"new-application"}"#;
         assert!(serde_json::from_str::<Change>(duplicate).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn fresh_connection_retry_only_observes_original_intent() {
         let (inbox, _document) = ready();
@@ -886,6 +915,7 @@ mod tests {
             Some(Error::Busy)
         );
     }
+    #[cfg(unix)]
     #[test]
     fn stale_observation_alias_or_instance_never_queues() {
         let (inbox, _document) = ready();
@@ -914,6 +944,7 @@ mod tests {
             Some(Error::Conflict)
         );
     }
+    #[cfg(unix)]
     #[test]
     fn approval_is_one_use_and_never_an_operation_receipt() {
         let (inbox, _document) = ready();
@@ -933,6 +964,7 @@ mod tests {
             IntentState::RefusedBeforeClaim
         ));
     }
+    #[cfg(unix)]
     #[test]
     fn postclaim_and_unreturned_failures_cannot_become_not_started() {
         let (inbox, _document) = ready();
@@ -958,6 +990,7 @@ mod tests {
             IntentState::AdmissionUnconfirmed
         ));
     }
+    #[cfg(unix)]
     #[test]
     fn original_handoff_releases_only_proposal_slot_and_never_finality() {
         let (inbox, _document) = ready();
@@ -980,6 +1013,7 @@ mod tests {
         assert!(status.operation_id == Some(id(50)));
         assert!(status.validate().is_ok());
     }
+    #[cfg(unix)]
     #[test]
     fn revoke_and_expiry_never_renew_or_hide_original_link() {
         let (inbox, _document) = ready();
@@ -1016,6 +1050,7 @@ mod tests {
             Some(Error::AccessDenied)
         );
     }
+    #[cfg(unix)]
     #[test]
     fn complete_ledger_never_evicts_old_request_ids() {
         let (inbox, _document) = ready();
@@ -1036,6 +1071,7 @@ mod tests {
         ));
         assert!(document_backing_bytes() < 4 * 1024 * 1024);
     }
+    #[cfg(unix)]
     #[test]
     fn restart_does_not_restore_or_replay_an_intent() {
         let (inbox, _document) = ready();
@@ -1061,6 +1097,7 @@ mod tests {
             Some(Error::Conflict)
         );
     }
+    #[cfg(unix)]
     #[test]
     fn poisoned_inbox_permanently_fences_original_review_without_reverse_lock() {
         let (inbox, _document) = ready();
@@ -1085,6 +1122,7 @@ mod tests {
         inbox.close();
         assert!(entry.status().operation_id == Some(id(50)));
     }
+    #[cfg(unix)]
     #[test]
     fn stale_saved_point_can_observe_same_request_but_never_enqueue_new_work() {
         let (inbox, _document) = ready();
