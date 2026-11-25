@@ -4573,6 +4573,20 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 dispose_retained_domain=partition in PYTHON_POISON_PARTITIONS)
             originals.append(value)
             row["capture"] = capture_observations(value)
+            if healthy and phase == "source":
+                diagnostics = []
+                for record in value.stderr.splitlines():
+                    if not record.startswith(b"MRK_FOCUSED_CASE=") or len(record) > 340 or len(diagnostics) >= 16:
+                        continue
+                    try:
+                        observation = json.loads(record.partition(b"=")[2])
+                    except ValueError:
+                        continue
+                    if (isinstance(observation, dict)
+                            and observation.get("case") in {"healthy", "crash", "deadline"}
+                            and observation.get("role") in {"worker", "anchor", "launcher", "launcher-final"}):
+                        diagnostics.append(observation)
+                row["anchor_diagnostics"] = diagnostics
             primary = None
             try:
                 require_original_finality(value)
@@ -4618,9 +4632,9 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         if (tuple(sorted(completed + list(delegated))) != inventories["all"]
                 or len(completed) + len(delegated) != len(set(completed) | set(delegated))):
             raise VerificationError("PYTHON_CAPTURE_UNION")
-        details.update(stage="complete", tests=len(completed), completed=sorted(completed))
+        details.update(stage="diagnostic-source-only", tests=len(completed), completed=sorted(completed))
         check_clock(cutoff)
-        return CheckResult(True, details)
+        raise VerificationError("FOCUSED_DIAGNOSTIC_NOT_A_GATE_RECEIPT")
     except BaseException as exc:
         if active is not None and active["status"] == "RUNNING":
             active["status"] = "FAIL"

@@ -256,6 +256,31 @@ def observe_adapter_target_result(result):
         pass  # Never retain the result/raw streams or change the original primary.
 
 
+def _focused_record(row):
+    try:
+        os.write(2, b"\nMRK_FOCUSED_CASE=" + json.dumps(row).encode("ascii") + b"\n")
+    except BaseException:
+        pass  # Optional diagnostics do not affect custody or the original exception.
+
+
+def _focused_note(name, role, error, run_deadline):
+    # This branch studies only the original synthetic fixture. Report no inputs.
+    if name not in {"healthy", "crash", "deadline"}:
+        return
+    try:
+        frames = [frame.lineno for frame in traceback.extract_tb(error.__traceback__)
+                  if frame.filename == __file__][-5:]
+        kind = ("deadline" if str(error) == "case owner: original case endpoint expired"
+                else "assertion" if type(error) is AssertionError else "os-error"
+                if isinstance(error, OSError) else "other")
+        row = dict(case=name, role=role, kind=kind, lines=frames,
+                   errno=error.errno if isinstance(error, OSError) else None,
+                   runExpired=time.monotonic() >= run_deadline)
+        _focused_record(row)
+    except BaseException:
+        pass
+
+
 def require(condition, message):
     if not condition:
         raise AssertionError("case owner: " + message)
@@ -428,6 +453,7 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json, *, h
         remaining(deadline)
         code = 0
     except BaseException as error:
+        _focused_note(name, "worker", error, deadline)
         code = WORKER_ERROR  # The original failure precedes every optional projection.
         try:
             matrix_diagnostic.emit_worker(matrix_context,
@@ -533,7 +559,8 @@ def _anchor(handles, launcher, home_group, root, name, task, run_deadline, hard,
                     break
             require(loss or bytes(owner_data) == b"RELEASE\n", "anchor release invalid")
         code = 0
-    except BaseException:
+    except BaseException as error:
+        _focused_note(name, "anchor", error, run_deadline)
         # Revoke the original barrier first. A child that never received RUN
         # can only fail/exit; it cannot use a later cleanup grace to begin work.
         handles.close("w-runw")
@@ -650,6 +677,7 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
         require((anchor_expired and worker_code == -signal.SIGKILL) if expect == -signal.SIGKILL else
                 (not anchor_expired and not observed_expiry), "original run deadline cannot become late success")
     except BaseException as error:
+        _focused_note(name, "launcher", error, run_deadline)
         primary = error
     finally:
         handles.close("l-controlw")  # Genuine EOF makes original A stop.
@@ -692,6 +720,15 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
                 progress.close(cleanup_errors)
     try:
         if primary is not None:
+            if name in {"healthy", "crash", "deadline"}:
+                try:
+                    code = os.waitstatus_to_exitcode(anchor.status) if anchor.status is not None else None
+                    _focused_record(dict(case=name, role="launcher-final", armed=armed, settled=settled, eof=eof,
+                                         anchorExit=code, anchorWaitUnknown=anchor.unknown,
+                                         workerExit=worker_code, runExpired=observed_expiry,
+                                         cleanupErrors=len(cleanup_errors)))
+                except BaseException:
+                    pass  # No added wait, signal, result inference or cleanup.
             primary._case_cleanup_errors = tuple(cleanup_errors)
             if cleanup_errors:
                 primary.add_note("independent case cleanup errors: " + ",".join(type(error).__name__ for error in cleanup_errors))
