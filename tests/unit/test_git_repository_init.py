@@ -106,7 +106,7 @@ class Owner:
             self.on_intent(intent)
 
 
-class InitFixture(unittest.TestCase):
+class InitFixture:
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="mrk-git-init-inert-")
         self.addCleanup(temporary.cleanup)
@@ -166,7 +166,7 @@ class InitFixture(unittest.TestCase):
             self.assertEqual(caught.exception.reason, reason)
 
 
-class InitTests(InitFixture):
+class InitTests(InitFixture, unittest.TestCase):
     def test_prepare_is_readonly_without_git_or_candidate(self):
         before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*"))
         repository = self.repository()

@@ -6531,6 +6531,30 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(checks.CheckError, "TEST_PATTERN_INVENTORY"):
                 checks.expected_python_ids(source, "wheel")
 
+    def test_full_static_inventory_matches_core_discovery_and_fits_its_result_bound(self):
+        checks = ci_module("ci_checks")
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-discovery-") as temporary:
+            source = Path(temporary)
+            unit = source / "tests/unit"
+            desktop = source / "tests/desktop"
+            unit.mkdir(parents=True)
+            desktop.mkdir()
+            (unit / "__init__.py").touch()
+            (unit / "test_core.py").write_text(
+                "import unittest\nclass Core(unittest.TestCase):\n    def test_case(self): pass\n")
+            (desktop / "test_independent.py").write_text("raise AssertionError('standalone desktop test')\n")
+            # Inventory can reach its exact Linux skip check without parsing
+            # the standalone directory. The fixed skip roster stays mandatory.
+            with self.assertRaisesRegex(checks.CheckError, "TEST_NATIVE_INVENTORY_DRIFT"):
+                checks.expected_python_ids(source)
+            (unit / "test_bad.py").write_text("class Unsupported:\n    def test_case(self): pass\n")
+            with self.assertRaisesRegex(checks.CheckError, "TEST_UNSUPPORTED_CLASS"):
+                checks.expected_python_ids(source)
+        snapshot, _ = checks.python_capture_snapshot(ROOT, "full", deadline=time.monotonic() + 30)
+        observations = [{"id": identifier, "outcome": "ok"} for identifier in snapshot["healthy"]]
+        result = {"check": "python-full", "ok": True, "details": {}, "tests": observations}
+        self.assertLess(len(checks._json_bytes(result)), checks.MAX_FULL_RESULT_BYTES)
+
     def wheel_members(self, checks):
         """Ordinary ZIP data fixture; never installed and not backend evidence."""
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]

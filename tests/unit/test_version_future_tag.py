@@ -16,20 +16,20 @@ from mobile_release import _github_connection_transport as http
 from mobile_release.config import ReleaseVersion
 from mobile_release.github_preflight import HttpRequest
 
-from test_version_allocation import (COMMIT, NOW, Journal, Repository, initial, observations,
-                                    reply, request, CurrentInventoryLedgerTests)
+import test_version_allocation as allocation_fixture
+from test_version_allocation import COMMIT, NOW, Journal, Repository, initial, observations, reply, request
 
 TAG = "refs/tags/release-1.2"
 
 
 def selected(candidate="00000000-0000-4000-8000-000000000004", future=TAG):
-    ordinary = CurrentInventoryLedgerTests().selected(candidate=candidate)
+    ordinary = allocation_fixture.CurrentInventoryLedgerTests().selected(candidate=candidate)
     return replace(ordinary, version_policy=replace(ordinary.version_policy,
         rules=(p.RefRule("refs/heads/main", "major"), p.RefRule(future, "build"))), future_tag=future)
 
 
 def inventory():
-    return CurrentInventoryLedgerTests().observed()
+    return allocation_fixture.CurrentInventoryLedgerTests().observed()
 
 
 def binding(row, **changes):
@@ -158,7 +158,8 @@ class FutureTagTests(unittest.TestCase):
         self.assertEqual(bound.reservations, ledger.reservations)
         self.assertEqual(bound.head_sha256, ledger.head_sha256)
         self.assertEqual(a.Ledger.parse(bound.to_bytes(), self.authority), bound)
-        next_request = CurrentInventoryLedgerTests().selected(candidate="00000000-0000-4000-8000-000000000005")
+        next_request = allocation_fixture.CurrentInventoryLedgerTests().selected(
+            candidate="00000000-0000-4000-8000-000000000005")
         after = bound.append(next_request, inventory(), now=NOW)
         self.assertEqual(after.tag_bindings, (claim,))
         self.assertEqual(after.value()["schemaVersion"], 5)

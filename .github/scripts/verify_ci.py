@@ -1868,7 +1868,8 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
         details["version"] = "Xcode26.3/17C529"
     elif step.parser == "check":
         lines = [line[len("MRK_CHECK_RESULT="):] for line in stdout.splitlines() if line.startswith("MRK_CHECK_RESULT=")]
-        if len(lines) != 1 or len(lines[0]) > 256 * 1024:
+        limit = (512 if step.id == "python-full" else 256) * 1024
+        if len(lines) != 1 or len(lines[0]) > limit:
             raise VerificationError("CHECK_SUMMARY_BOUND")
         summary = strict_json(lines[0])
         if (type(summary) is not dict or set(summary) != {"check", "ok", "tests", "details"}
@@ -3575,8 +3576,10 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             # Expiry still consumes the same original deadline, never a new one.
             if deadline is not None:
                 check_clock(deadline)
+    prefix = "MRK_CHECK_RESULT="
+    limit = (512 if step is not None and step.id == "python-full" else 256) * 1024
     for line in result.stdout.decode("utf-8", "replace").splitlines():
-        if not line.startswith("MRK_CHECK_RESULT=") or len(line) > 256 * 1024:
+        if not line.startswith(prefix) or len(line) - len(prefix) > limit:
             continue
         try:
             data = strict_json(line.split("=", 1)[1])
@@ -4614,7 +4617,12 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         if active is not None and active["status"] == "RUNNING":
             active["status"] = "FAIL"
         details["failure"] = error_details(exc)
-        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "PYTHON_GATE_FAILURE")
+        code = exc.code if isinstance(exc, VerificationError) else "PYTHON_GATE_FAILURE"
+        if (type(exc) is getattr(checks, "CheckError", None) and len(exc.args) == 1
+                and type(exc.args[0]) is str and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", exc.args[0])):
+            code = exc.args[0]
+            details["failure"]["error"] = code
+        return CheckResult(False, details, code)
 
 
 def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, platform: str,

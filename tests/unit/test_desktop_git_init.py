@@ -90,7 +90,7 @@ class InitProtocolTests(unittest.TestCase):
                               first_failure_ns=100_000_000_000, cleanup_end_ns=110_000_000_000)
 
 
-class InitWorkerTests(InitFixture):
+class InitWorkerTests(InitFixture, unittest.TestCase):
     @contextmanager
     def operation(self, phase="apply"):
         engine = _Engine(time.monotonic())

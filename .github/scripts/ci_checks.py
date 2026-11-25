@@ -47,6 +47,7 @@ MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_TREE_ENTRIES = 2048
 MAX_STREAM_BYTES = 8 * 1024 * 1024
 MAX_RESULT_BYTES = 256 * 1024
+MAX_FULL_RESULT_BYTES = 512 * 1024
 MAX_NATIVE_ABI_BYTES = 8192
 # The Desktop API is part of the same first-party distribution. Keep its
 # package/resource shape closed; a recursive wildcard is not package authority.
@@ -967,7 +968,12 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
     tests = Path(source_root) / "tests"
     patterns = WHEEL_PATTERNS if selection == "wheel" else NATIVE_PATTERNS
     paths = sorted(tests.rglob("test*.py"))
-    if selection != "full":
+    if selection == "full":
+        # unittest descends into Python packages. The desktop workflow runs
+        # its own standalone modules from the non-package desktop directory.
+        paths = [path for path in paths if all((parent / "__init__.py").is_file()
+                 for parent in path.parents if parent != tests and parent.is_relative_to(tests))]
+    else:
         paths = [path for path in paths if path.name in patterns]
         _require(sorted(path.name for path in paths) == sorted(patterns), "TEST_PATTERN_INVENTORY")
     result = []
@@ -1211,6 +1217,17 @@ def _failure_callback(identifier: str, outcome: str, error, expected) -> dict:
             "errno": number if type(number) is int and 0 < number < 4096 else None}
 
 
+@contextlib.contextmanager
+def _core_test_imports(source_root: Path):
+    """Resolve shared test fixtures from the admitted, immutable source view."""
+    original = sys.path[:]
+    sys.path.extend(str(source_root / "tests" / name) for name in ("unit", "workflow", "desktop"))
+    try:
+        yield
+    finally:
+        sys.path[:] = original
+
+
 def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list,
                      *, work_root: Path | None = None) -> dict:
     failures, callbacks, profile = [], [], None
@@ -1303,7 +1320,8 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 else:
                     yield test
 
-        with contextlib.redirect_stdout(sys.stderr):
+        imports = _core_test_imports(source_root) if selection == "full" else contextlib.nullcontext()
+        with imports, contextlib.redirect_stdout(sys.stderr):
             suite = unittest.TestSuite()
             for pattern in ("test*.py",) if selection == "full" else WHEEL_PATTERNS:
                 loader = unittest.TestLoader()
@@ -1893,7 +1911,8 @@ def main(argv: list[str] | None = None) -> int:
             if profile is not None:
                 report["details"]["storage_profile"] = profile
     encoded = _json_bytes(report)
-    _require(len(encoded) <= MAX_RESULT_BYTES, "CHECK_RESULT_LIMIT")
+    result_limit = MAX_FULL_RESULT_BYTES if args.check == "python-full" else MAX_RESULT_BYTES
+    _require(len(encoded) <= result_limit, "CHECK_RESULT_LIMIT")
     sys.stdout.write(RESULT_PREFIX + encoded.decode("ascii") + "\n")
     sys.stdout.flush()
     return 0 if report["ok"] else 1

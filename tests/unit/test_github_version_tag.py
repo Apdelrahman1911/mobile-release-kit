@@ -14,7 +14,8 @@ from mobile_release import _github_play_cleanup_transport as transport
 from mobile_release._github_connection_transport import ReadResult, _ResponseRole, _role_limits, _ExchangeProfile
 from mobile_release.config import default_config_data
 from test_github_play_cleanup import Fixture, MemoryJournal, A, B, C, TREE_A, TREE_B, contents, tree
-from test_version_allocation import CurrentInventoryLedgerTests, NOW
+import test_version_allocation as allocation_fixture
+from test_version_allocation import NOW
 
 TAG = 'refs/tags/release-1.4'
 class TagFixture(Fixture):
@@ -25,14 +26,14 @@ class TagFixture(Fixture):
         self.config = p.canonical(config); self.version_path = config['version']['source']
         self.version = b'VERSION_NAME=1.4.0\nBUILD_NUMBER=10\n'
         self.source = tag.saved_source(self.config)
-        item = CurrentInventoryLedgerTests().selected()
+        item = allocation_fixture.CurrentInventoryLedgerTests().selected()
         self.request = replace(item, project_id=self.authority.project_id,
             base_version=p.ReleaseVersion('1.4.0', 10),
             identity_revision=hashlib.sha256(self.config).hexdigest(), future_tag=TAG,
             source=p.policy.SourceBinding(A, TREE_A, 'refs/heads/main', self.source.saved_sha256, hashlib.sha256(self.version).hexdigest()),
             version_policy=replace(item.version_policy, rules=(p.policy.RefRule(TAG, 'build'),)))
         observations = tuple(replace(o, identity_revision=self.request.identity_revision)
-            for o in CurrentInventoryLedgerTests().observed())
+            for o in allocation_fixture.CurrentInventoryLedgerTests().observed())
         self.ledger = self.ledger.append(self.request, observations, now=NOW)
         self.row = self.ledger.reservations[-1]
         self.checkpoint = p.allocation.Checkpoint(1, self.ledger.head_sha256, C)
