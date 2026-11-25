@@ -1474,10 +1474,14 @@ def typed_plist(path: Path, *, deadline: InspectionDeadline | None = None) -> An
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     try:
-        from .ios_archive_operation import _IOSInspectionDeadline
         artifact = _artifact_operation(deadline)
         maximum = 256 * 1024 if artifact is not None else MAX_PLIST_BYTES
-        if type(deadline) is _IOSInspectionDeadline or artifact is not None:
+        use_owned_descriptor = artifact is not None
+        if not use_owned_descriptor and type(deadline) is not InspectionDeadline:
+            from .ios_archive_operation import _IOSInspectionDeadline
+
+            use_owned_descriptor = type(deadline) is _IOSInspectionDeadline
+        if use_owned_descriptor:
             with deadline.descriptor(path) as number:
                 before = os.fstat(number)
                 _require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum,
