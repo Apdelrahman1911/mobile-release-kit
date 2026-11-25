@@ -1094,7 +1094,8 @@ def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]
         raise VerificationError("UNSUPPORTED_VERIFICATION_SCOPE")
     if platform == "linux":
         return (*_BEFORE_TESTS, "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
-                "python-full", *(row[0] for row in RUBY_SUITES), "ruby-packaged-capture-source", STORE_NATIVE_GATES[0],
+                "python-pr-journal", "python-full", *(row[0] for row in RUBY_SUITES),
+                "ruby-packaged-capture-source", STORE_NATIVE_GATES[0],
                 "fastfile", "actionlint", "jdk-signers", *_WHEEL, "native-process-abi-wheel",
                 *COMPATIBILITY_WHEEL_GATES, "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel",
                 STORE_NATIVE_GATES[1], "python-wheel", "source-integrity")
@@ -1231,6 +1232,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platf
             "--find-links", paths.inputs / "python", "--no-deps", "--editable", paths.work / "source-build"), seconds=900)
     command("source-pip-check", python(paths.source_python, "-m", "pip", "check"))
     command("bundle-check", (*paths.bundle, "check"))
+    check("python-pr-journal", paths.source_python, seconds=90)
     check("python-full", paths.source_python, seconds=900)
     native = paths.source / "tests/workflow/run_native_profile_checks.py"
     command("native-tools", ("/usr/bin/xcodebuild", "-version"), parser="xcode")
@@ -1878,7 +1880,11 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("CHECK_SUMMARY_REJECTED")
         # The source-anchored entrypoint checks actual methods/outcomes; parent
         # independently verifies expected complete identities after real finality.
-        if step.id in ("python-full", "python-wheel"):
+        if step.id == "python-pr-journal":
+            if (platform != "linux" or summary["tests"] != [{"id": checks.PR_JOURNAL_CASE, "outcome": "ok"}]
+                    or summary["details"] != {"executed": 1} or type(summary["details"].get("executed")) is not int):
+                raise VerificationError("PR_JOURNAL_COMPLETION")
+        elif step.id in ("python-full", "python-wheel"):
             selection = "full" if step.id == "python-full" else "wheel"
             expected = (_python_expected if _python_expected is not None else
                         checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline))

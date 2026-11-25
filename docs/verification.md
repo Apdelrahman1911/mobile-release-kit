@@ -492,6 +492,11 @@ real ZIP64 test asserts exact logical length, sparse allocated blocks and actual
 production parsing/stdlib extraction. Namespace disposal is not product cleanup
 and cannot convert failed or incomplete test outcomes into success.
 
+The Linux `python-pr-journal` gate runs the real pull-request journal cold-reopen
+fixture under the ordinary sandbox's private temporary directory. The journal
+checks every ancestor, so the sticky mounts in `python-full` cannot host this
+fixture. Its required result binds the exact case and original process finality.
+
 Acceptance requires the actual original launcher wait, zero return code, both
 stream EOFs, bounded and reconciled persisted bytes, and an empty reserved-identity
 process domain. A PASS-shaped footer, closed stream, or discovered PID cannot

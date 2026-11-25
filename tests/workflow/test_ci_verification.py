@@ -2585,6 +2585,33 @@ class CIControllerContractTests(unittest.TestCase):
                         self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
                     controller.parse_capture(rig.step, capture(rows), rig.paths, "linux", rig.checks)
 
+    def test_pull_request_journal_gate_requires_its_exact_test_and_finality(self):
+        controller, checks = controller_module(), ci_module("ci_checks")
+        paths = fixture_paths(controller)
+        step = next(step for step in controller.catalog(paths, "linux", deadline=12345.0)
+                    if step.id == "python-pr-journal")
+        self.assertEqual(step.argv, (str(paths.source_python), "-I", "-B", str(paths.checks),
+                                    "--check", step.id, "--source-root", str(paths.source),
+                                    "--work-root", str(paths.work / "checks"), "--deadline", "12345.0"))
+        self.assertEqual(step.seconds, 90)
+        complete = {"check": step.id, "ok": True, "tests": [{"id": checks.PR_JOURNAL_CASE, "outcome": "ok"}],
+                    "details": {"executed": 1}}
+
+        def capture(summary, *, finality=True):
+            raw = ("MRK_CHECK_RESULT=" + json.dumps(summary) + "\n").encode()
+            return SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True,
+                                   stderr_eof=True, domain_finality=finality, primary_error=None, cleanup_errors=(),
+                                   stdout=raw, stderr=b"", persisted=(len(raw), 0), duration=0.1,
+                                   timed_out=False, cancelled=False)
+
+        self.assertTrue(controller.parse_capture(step, capture(complete), paths, "linux", checks).ok)
+        for invalid in ({**complete, "tests": []}, {**complete, "details": {"executed": True}},
+                        {**complete, "tests": [{"id": checks.PR_JOURNAL_CASE, "outcome": "skip"}]}):
+            with self.assertRaisesRegex(controller.VerificationError, "PR_JOURNAL_COMPLETION"):
+                controller.parse_capture(step, capture(invalid), paths, "linux", checks)
+        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+            controller.parse_capture(step, capture(complete, finality=False), paths, "linux", checks)
+
     def test_complete_fixed_gate_inventory_cannot_omit_duplicate_or_reorder_a_step(self):
         controller = controller_module()
         android = controller.ruby_capture_ids(ROOT, "ruby-android_upload_validation")
@@ -2609,7 +2636,7 @@ class CIControllerContractTests(unittest.TestCase):
         compatibility_source = ("python-compat-312-source", "python-compat-313-source", "python-compat-314-source")
         compatibility_wheel = ("python-compat-312-wheel", "python-compat-313-wheel", "python-compat-314-wheel")
         expected = {
-            "linux": (*before, "native-process-abi-source", *compatibility_source, "python-full", *ruby,
+            "linux": (*before, "native-process-abi-source", *compatibility_source, "python-pr-journal", "python-full", *ruby,
                       "ruby-packaged-capture-source", "store-lane-native-source", "fastfile", "actionlint", "jdk-signers", *wheel,
                       "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
                       "ruby-packaged-capture-wheel", "store-lane-native-wheel", "python-wheel", "source-integrity"),
@@ -2629,7 +2656,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
         self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
         catalogs = {}
-        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 61),
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 62),
                                                ("macos", "platform", expected["macos"], 41),
                                                ("macos", "native-python", native_python, 31),
                                                ("macos", "native-support", native_support, 39)):

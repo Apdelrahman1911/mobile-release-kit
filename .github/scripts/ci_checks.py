@@ -41,7 +41,9 @@ import zipfile
 
 VERSION = "0.3.0"
 RESULT_PREFIX = "MRK_CHECK_RESULT="
-CHECKS = ("python-full", "python-wheel", "wheel-smoke", "jdk-signers")
+CHECKS = ("python-pr-journal", "python-full", "python-wheel", "wheel-smoke", "jdk-signers")
+PR_JOURNAL_CASE = ("unit.test_github_pull_request_mode.PullRequestModeTests."
+                   "verify_actual_exclusive_journal_cold_reopen_preserves_ready_bytes_and_cross_mode_fence")
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_TREE_ENTRIES = 2048
@@ -1230,6 +1232,29 @@ def _core_test_imports(source_root: Path):
         sys.path[:] = original
 
 
+def run_pr_journal_check(source_root: Path, work_root: Path, deadline: float, observations: list) -> dict:
+    """Run the real journal under ordinary isolation with its private temp root."""
+    _remaining(deadline, 3300)
+    _require(sys.platform == "linux" and work_root.name == "checks"
+             and os.environ.get("TMPDIR") == str(work_root.parent / "tmp"), "PR_JOURNAL_CONTEXT")
+    with _core_test_imports(source_root), contextlib.redirect_stdout(sys.stderr):
+        sys.path.insert(0, str(source_root / "tests"))
+        loader = unittest.TestLoader()
+        suite = loader.loadTestsFromName(PR_JOURNAL_CASE)
+        _require(not loader.errors and tuple(test.id() for test in suite) == (PR_JOURNAL_CASE,),
+                 "PR_JOURNAL_INVENTORY")
+        fixture = sys.modules[PR_JOURNAL_CASE.rsplit(".", 2)[0]]
+        journal = sys.modules["mobile_release._github_pull_request_journal"]
+        _require(Path(fixture.__file__).resolve() == source_root / "tests/unit/test_github_pull_request_mode.py"
+                 and Path(journal.__file__).resolve() == work_root.parent / "source-build/src/mobile_release"
+                 / "_github_pull_request_journal.py", "PR_JOURNAL_ORIGIN")
+        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True).run(suite)
+    _remaining(deadline, 3300)
+    _require(result.wasSuccessful() and result.testsRun == 1 and not result.skipped, "PR_JOURNAL_TEST_RESULT")
+    observations.append({"id": PR_JOURNAL_CASE, "outcome": "ok"})
+    return {"executed": 1}
+
+
 def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list,
                      *, work_root: Path | None = None) -> dict:
     failures, callbacks, profile = [], [], None
@@ -1888,7 +1913,9 @@ def main(argv: list[str] | None = None) -> int:
         _require((args.check == "wheel-smoke") == (args.ruby is not None), "CHECK_RUBY_ARGUMENT")
         os.umask(0o077)
         os.chdir(work)
-        if args.check in {"python-full", "python-wheel"}:
+        if args.check == "python-pr-journal":
+            details = run_pr_journal_check(source, work, args.deadline, observations)
+        elif args.check in {"python-full", "python-wheel"}:
             details = run_python_tests(source, "full" if args.check == "python-full" else "wheel",
                                        args.deadline, observations, work_root=work)
         elif args.check == "wheel-smoke":
