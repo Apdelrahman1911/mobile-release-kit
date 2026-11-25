@@ -17,20 +17,15 @@ import time
 import zipfile
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
-SOURCE = "6bde41073ab878ab83f1e70ac46bfac7d0b7c185"
-TREE = "410f788d127278fa8041417c4dba039596714141"
-RELEASE = "macos26-arm64-desktop-16"
-ARTIFACT = 14903178669
-ARCHIVE = "abdce8855e548449b808a6b18ae6c655a2832ae9f8ce9196e76c6565229e9ed8"
+SOURCE = 'c7f5b2a2a6a41a3b930ff0d937198cd25abcb48d'
+TREE = '526b16a692a2df7a8ed29028d84c76f60050cb3e'
+RELEASE = 'macos26-arm64-desktop-17'
+INPUTS = {'prepared': {'id': 15000411994, 'run': 45556678054, 'sha256': '641a09f459718be942bcb738e81d3628ea2a1129b928508f41df20acad0e2915', 'bytes': 255989207}, 'carrier': {'id': 14999764984, 'run': 45567015627, 'sha256': '93711d38d03192c065ebd41b85a7d3298426632da610db060407df4d02809ac3', 'bytes': 7367}}
 TEAM = "7CGZ2343AA"
 IDENTITY = "5EFFA7D19BBE005B19C1617833CBE22186C2AF96"
 CERTIFICATE = "e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72"
 IDENTIFIER = "dev.mobile-release-kit.desktop.install-distribution"
-MEMBERS = {
-    "Install.pkg": "8f4dcf34a87c2d0966c51b2786b951eec1c22a17c516e30ba54ac664bc227dbe",
-    "producer.json": "6cbc9876124eea225e3295e0dd21bc63a5fbf0423a26a21567f3b7bc82f188ef",
-    "producer.sig": "36d661cf8010effd2d0a68279a6ff31d2b80372126145ae5f08dca96f21f337a",
-}
+MEMBERS = {'producer.json': '356944bff9877bffc7c4233d75e87924beb6396bb08c46fbd135dcce50559545', 'producer.sig': 'a47b315e4fb4982f88e8b2c3541f04f059af92f7ea4f0a762d66cdfd7ed79fad', 'Install.pkg': '605911e1c3e02f3b3c0c5008639f59e7035d3267ec33b31059685152029d3798'}
 IMAGE = "MobileReleaseKit-Install.dmg"
 SECRETS = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD",
            "MRK_MACOS_NOTARY_API_KEY_BASE64")
@@ -70,32 +65,56 @@ def accept_package(path):
     run("package staple", ["/usr/bin/xcrun", "stapler", "validate", str(path)])
 
 
-def prepare(root):
-    source = root / "release-asset.zip"
-    artifact = f"repos/{REPOSITORY}/actions/artifacts/{ARTIFACT}"
-    details = json.loads(run("artifact metadata", ["gh", "api", artifact]))
-    need(details["workflow_run"]["id"] == 45358905902 and not details["expired"]
-         and details["digest"] == "sha256:" + ARCHIVE and details["size_in_bytes"] == 260216887,
-         "unexpected input artifact")
+def original_archive(root, role):
+    expected = INPUTS[role]
+    source = root / (role + ".zip")
+    endpoint = f"repos/{REPOSITORY}/actions/artifacts/{expected['id']}"
+    details = json.loads(run("artifact metadata", ["gh", "api", endpoint]))
+    need(details["workflow_run"]["id"] == expected["run"]
+         and details["workflow_run"]["head_sha"] == SOURCE and not details["expired"]
+         and details["digest"] == "sha256:" + expected["sha256"]
+         and details["size_in_bytes"] == expected["bytes"], "unexpected input artifact")
     with source.open("xb") as stream:
-        run("artifact download", ["gh", "api", artifact + "/zip"], output=stream, timeout=540)
-    need(source.stat().st_size == details["size_in_bytes"] and digest(source) == ARCHIVE,
+        run("artifact download", ["gh", "api", endpoint + "/zip"], output=stream, timeout=540)
+    need(source.stat().st_size == expected["bytes"] and digest(source) == expected["sha256"],
          "input artifact bytes mismatch")
+    return source
+
+
+def original_member(archive, name, destination):
+    info = archive.getinfo(name)
+    need(0 < info.file_size < 200 * 1024**2
+         and not stat.S_ISLNK(info.external_attr >> 16), "input member metadata mismatch")
+    with archive.open(info) as original, destination.open("xb") as target:
+        shutil.copyfileobj(original, target, 1024 * 1024)
+    need(digest(destination) == MEMBERS[destination.name], "input member hash mismatch")
+
+
+def prepare(root):
     directory = root / "image-files"
     directory.mkdir()
-    with zipfile.ZipFile(source) as archive:
-        need(len(archive.namelist()) == 7 and len(set(archive.namelist())) == 7, "unexpected archive roster")
-        manifest = json.loads(archive.read("MANIFEST.json"))
-        need((manifest["sourceCommit"], manifest["sourceTree"], manifest["release"], manifest["target"])
-             == (SOURCE, TREE, RELEASE, "aarch64-apple-darwin"), "input source mismatch")
-        for name, expected in MEMBERS.items():
-            info = archive.getinfo(name)
-            need(0 < info.file_size < 200 * 1024**2 and not stat.S_ISLNK(info.external_attr >> 16)
-                 and manifest["sha256"][name] == expected, "input member metadata mismatch")
-            with archive.open(info) as original, (directory / name).open("xb") as target:
-                shutil.copyfileobj(original, target, 1024 * 1024)
-            need(digest(directory / name) == expected, "input member hash mismatch")
-    source.unlink()
+    for role in INPUTS:
+        source = original_archive(root, role)
+        with zipfile.ZipFile(source) as archive:
+            names = archive.namelist()
+            need(2 <= len(names) <= 32 and len(names) == len(set(names)), "unexpected archive roster")
+            if role == "prepared":
+                need(0 < archive.getinfo("PREPARED.json").file_size <= 16384, "prepared manifest size")
+                manifest = json.loads(archive.read("PREPARED.json"))
+                origin = manifest["origin"]
+                need((origin["source"], origin["tree"], str(origin["runId"]), manifest["release"], manifest["packageVersion"])
+                     == (SOURCE, TREE, str(INPUTS["prepared"]["run"]), RELEASE, "0.2.11"), "input source mismatch")
+                hashes = {row["name"]: row["sha256"] for row in manifest["members"]}
+                need(hashes["MobileReleaseKit.pkg"] == MEMBERS["Install.pkg"], "manifest member mismatch")
+                original_member(archive, "MobileReleaseKit.pkg", directory / "Install.pkg")
+            else:
+                for name in ("producer.json", "producer.sig"):
+                    original_member(archive, "producer-root/" + name, directory / name)
+        source.unlink()
+    producer = json.loads((directory / "producer.json").read_bytes())
+    current = producer["releaseSet"]["current"]
+    need((producer["target"], current["sourceCommit"], current["release"], current["packageVersion"], current["packageSha256"])
+         == ("aarch64-apple-darwin", SOURCE, RELEASE, "0.2.11", MEMBERS["Install.pkg"]), "producer source mismatch")
     accept_package(directory / "Install.pkg")
     run("hide producer sidecars", ["/usr/bin/chflags", "hidden", str(directory / "producer.json"),
                                     str(directory / "producer.sig")])
@@ -196,7 +215,7 @@ def validate_and_encrypt(root):
                                                     "-pkg", str(package), "-target", "/"], timeout=600)
         state = json.loads((app_root / "installation-v2.json").read_bytes())["current"]["release"]
         need((state["sourceCommit"], state["packageSha256"], state["packageVersion"], state["release"])
-             == (SOURCE, MEMBERS["Install.pkg"], "0.2.10", RELEASE), "installed identity mismatch")
+             == (SOURCE, MEMBERS["Install.pkg"], "0.2.11", RELEASE), "installed identity mismatch")
         run("installed bundle strict signature", ["/usr/bin/codesign", "--verify", "--deep", "--strict",
                                                   str(app_root / "Mobile Release Kit.app")])
         print("Verified quarantined Gatekeeper, mounted original bytes and fresh Installer", flush=True)
@@ -224,8 +243,8 @@ def validate_and_encrypt(root):
     envelope = out / (IMAGE + ".cms")
     run("encrypt private export", ["/usr/bin/openssl", "cms", "-encrypt", "-binary", "-aes256",
         "-outform", "DER", "-in", str(image), "-out", str(envelope), str(cert)], timeout=300)
-    receipt = {"version": "0.2.10", "release": RELEASE, "sourceCommit": SOURCE, "sourceTree": TREE,
-               "inputArtifact": ARTIFACT, "inputArtifactSha256": ARCHIVE, "members": MEMBERS,
+    receipt = {"version": "0.2.11", "release": RELEASE, "sourceCommit": SOURCE, "sourceTree": TREE,
+               "inputArtifacts": INPUTS, "members": MEMBERS,
                "image": IMAGE, "imageSha256": digest(image), "imageBytes": image.stat().st_size,
                "signedByTeam": TEAM, "signerLeafSha256": CERTIFICATE,
                "notary": json.loads((root / "submission.json").read_bytes()),
