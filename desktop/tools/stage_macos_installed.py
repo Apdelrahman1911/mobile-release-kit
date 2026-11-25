@@ -13,6 +13,7 @@ physical log; they never give those bytes installation/readback authority.
 from __future__ import annotations
 
 import argparse
+import ast
 from collections import namedtuple
 import contextlib
 import errno
@@ -1863,8 +1864,24 @@ def _git_observation_bootstraps(fetch_observation=False, push_observation=False,
       PUSH_OBSERVATION_BOOTSTRAPS if push_observation else set())
 
 
+def current_store_source_names(body):
+  """Read the literal Store input roster without executing captured source."""
+  try:
+    assignments = [node.value for node in ast.parse(body).body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "REQUIRED_TOOLING_FILES"
+                           for target in node.targets)]
+    need(len(assignments) == 1, "current-store-tooling-roster")
+    names = ast.literal_eval(assignments[0])
+  except (SyntaxError, ValueError, TypeError) as error:
+    raise Refused("current-store-tooling-roster") from error
+  need(type(names) is tuple and 0 < len(names) <= MAX_FILES
+       and all(safe_path(name) for name in names)
+       and len({name.lower() for name in names}) == len(names), "current-store-tooling-roster")
+  return names
+
+
 def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False,
-          git_observation=False, target=ARM_TARGET):
+          git_observation=False, target=ARM_TARGET, expected_source=None):
   """Capture DATA, including the committed CA's one explicit projection map."""
   need(type(history_provider) is bool, "current-history-provider-profile")
   need(type(store_runtime) is bool, "current-store-runtime-profile")
@@ -1890,12 +1907,9 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
     with parent(source / name) as (fd, leaf):
       body, info = read_at(fd, leaf, limit)
     captured[name] = (body, stat.S_IMODE(info.st_mode))
-  preparer = current_preparer(captured)
   if store_runtime:
-
-
-    names = preparer._store_tooling_names(core["tooling.py"][0])
-    for name in names:
+    need("tooling.py" in core, "current-store-tooling-roster")
+    for name in current_store_source_names(core["tooling.py"][0]):
       need(name not in captured, "current-store-source-collision")
       with parent(source / name) as (fd, leaf):
         body, info = read_at(fd, leaf, CURRENT_CORE_BYTES)
@@ -1903,6 +1917,10 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
   need(captured[CURRENT_CA_SOURCE][0], "current-ca-empty")
   rows = [{"path": name, "size": len(body), "sha256": digest(body)}
       for name, (body, _) in sorted(captured.items())]
+  source_digest = digest(canonical(rows))
+  if expected_source is not None:
+    need(source_digest == expected_source, "current-reviewed-source-mismatch")
+  preparer = current_preparer(captured)
   projection = {}
   for name, (body, _) in captured.items():
     if name != CURRENT_HELPER_SOURCE:
@@ -1916,7 +1934,7 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
       need(projected_name not in projection, "current-source-projection-collision")
       projection[projected_name] = (projected, 0o444)
   directories(projection)
-  return captured, projection, digest(canonical(rows))
+  return captured, projection, source_digest
 
 
 def current_directory_identity(info):
@@ -2011,7 +2029,7 @@ def current_preparer(captured):
     spec = importlib.util.spec_from_file_location("mrk_macos_current_runtime_preparer", path)
     need(spec is not None and spec.loader is not None, "current-helper-loader")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    exec(compile(expected, str(path), "exec", dont_inherit=True), module.__dict__)
   except (ImportError, AttributeError, SyntaxError) as error:
     raise Refused("current-helper-loader") from error
   need(read(path, 64 * 1024) == expected, "current-helper-changed")
@@ -2263,7 +2281,8 @@ def current_runtime_command(args):
     need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
   parents = current_paths(args)
   captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled,
-    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation, target=target)
+    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation, target=target,
+    expected_source=args.expected_source if final and not composing else None)
   if provider_enabled:
     need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
   if final and not composing:
@@ -2343,7 +2362,8 @@ def current_runtime_command(args):
                "qualification": "prepared-not-native-verified"}, "current-preparer-result")
       need(tree(source, current_root_mode=0o555) == projection
          and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation,
-                  push_observation=push_observation, git_observation=git_observation, target=target) == (captured, projection, source_digest),
+                  push_observation=push_observation, git_observation=git_observation, target=target,
+                  expected_source=source_digest) == (captured, projection, source_digest),
          "current-source-post-changed")
       if fresh_inputs is not None:
         need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
@@ -2602,10 +2622,10 @@ def cargo_records(messages):
   return records
 
 
-def cargo_profile(row, *, test, opt_level="3"):
+def cargo_profile(row, *, test, opt_level="3", debug=False):
   profile = row.get("profile")
   need(type(profile) is dict and profile.get("test") is test
-     and profile.get("debug_assertions") is test
+     and profile.get("debug_assertions") is (test or debug)
      and profile.get("opt_level") == ("0" if test else opt_level), "image-cargo-profile")
   need(type(row.get("fresh")) is bool, "image-cargo-fresh-field")
 
@@ -2616,7 +2636,7 @@ def cargo_features(row, expected):
      and sorted(features) == sorted(expected), "image-cargo-exact-features")
 
 
-def cargo_library(records, directory, package, name, features, *, package_version, test, opt_level="3"):
+def cargo_library(records, directory, package, name, features, *, package_version, test, opt_level="3", debug=False):
   selected = [row for row in records if row["target"].get("name") == name]
   need(len(selected) == 1, "image-cargo-one-library")
   row = selected[0]
@@ -2626,18 +2646,18 @@ def cargo_library(records, directory, package, name, features, *, package_versio
      and row["target"].get("src_path") == str(directory / "src/lib.rs")
      and row["target"].get("edition") == "2021"
      and "executable" in row and row["executable"] is None, "image-cargo-source-library")
-  cargo_profile(row, test=test, opt_level=opt_level)
+  cargo_profile(row, test=test, opt_level=opt_level, debug=debug)
   cargo_features(row, features)
 
 
-def cargo_catalogue_libraries(records, *, resident=False):
+def cargo_catalogue_libraries(records, *, resident=False, observer=False):
 
 
   for architecture in ("schema", "arm64", "x86_64"):
     cargo_library(records, DESKTOP / "catalogues" / ("macos-android-" + architecture),
            "mrk-android-catalogue-" + architecture, "mrk_android_catalogue_" + architecture,
            [], test=False, package_version="0.1.0",
-           opt_level="1" if resident and architecture == "schema" else "3")
+           opt_level="0" if observer else "1" if resident and architecture == "schema" else "3", debug=observer)
 
 
 def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM_TARGET, package_version):
@@ -2735,6 +2755,7 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
 
 
 
+  cargo_catalogue_libraries(records, observer=True)
   auxiliary = [item for item in records if item["target"].get("kind") == ["bin"]]
   need(len(auxiliary) <= 1, "observer-cargo-one-auxiliary-bin")
   for item in auxiliary:
@@ -2787,6 +2808,7 @@ def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TAR
   cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-installed-remover"], test=False, package_version=package_version)
   cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
          "mrk_macos_installed_native", ["default"], test=False, package_version="0.1.0")
+  cargo_catalogue_libraries(records)
   need(not any(item is not row and item["target"].get("kind") in
          (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "remover-cargo-no-mixed-role")
   macho(body, target=target)
@@ -5370,6 +5392,7 @@ def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, 
   cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", features, test=False, package_version=package_version)
   cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
          "mrk_macos_installed_native", ["default"], test=False, package_version="0.1.0")
+  cargo_catalogue_libraries(records)
   need(not any(item is not row and item["target"].get("kind") in
          (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "removal-fixture-no-mixed-graph")
   macho(body, target=target)

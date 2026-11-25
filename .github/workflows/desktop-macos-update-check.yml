@@ -1,82 +1,51 @@
-name: Desktop macOS in-place update check
+name: Desktop macOS deep packaging checks
 
-# Disposable hosted checks, each mode on its own fresh runner. update (#49):
-# install the previous signed package, seed per-user data, install the next
-# signed package over it with the standard Installer, verify the update and data
-# preservation, refuse the previous package as a downgrade, then launch the app.
-# fresh: install only the next package, launch it for the first time, reinstall
-# the same package (no-op) and reopen it. remove: install the next package,
-# seed per-user data, open the app, run the matching notarized Remove.pkg with
-# the standard Installer (confirming only the exact quit sheet), require the
-# app, launcher and process gone and the seeded data unchanged, then reinstall
-# and relaunch. Uses no signing credentials.
-# Path filters: push a follow-up commit after creating the branch (new-branch
-# diffs against main exceed the 300-file path-filter window).
 on:
   push:
-    branches:
-      - verify/desktop-macos-update-check
-    paths:
-      - .github/workflows/desktop-macos-update-check.yml
-      - desktop/macos-installed-inputs/update-check-selection.json
-      - desktop/tools/macos_update_check.py
+    branches: [verify/desktop-macos-deep-data]
 
 permissions:
   contents: read
-  actions: read
-
-concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
-  update-check:
-    name: update-check (${{ matrix.mode }})
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [update, fresh, remove, uninstaller]
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
+  packaging-data:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit'
     runs-on: macos-26
-    timeout-minutes: 45
-    env:
-      BASH_ENV: ''
-      ENV: ''
+    timeout-minutes: 12
     steps:
-      - name: Admit only a fresh hosted Apple Silicon macOS 26 runner
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
-          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
-          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
-
-      - name: Check out the exact source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Run the update check
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14.7'
+      - name: Test packaging and maintenance on a disposable host
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           umask 077
-          work="$(mktemp -d "$RUNNER_TEMP/mrk-update-check.XXXXXXXX")"
-          echo "MRK_UPDATE_WORK=$work" >> "$GITHUB_ENV"
-          /usr/bin/python3 -I -B desktop/tools/macos_update_check.py \
-            --selection desktop/macos-installed-inputs/update-check-selection.json --work "$work" \
-            --mode "${{ matrix.mode }}"
-
-      - name: Retain bounded update evidence
-        if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
+          [[ "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          evidence="$RUNNER_TEMP/deep-packaging"
+          mkdir "$evidence"
+          TMPDIR="$(mktemp -d "$RUNNER_TEMP/mrk-deep-data.XXXXXXXX")"
+          export TMPDIR
+          chgrp "$(id -gn)" "$TMPDIR"
+          export MRK_PART_TEST_ROOT="$TMPDIR"
+          touch "$TMPDIR/.volume-probe"
+          [[ -z "$(/usr/bin/xattr "$TMPDIR/.volume-probe")" ]]
+          git rev-parse HEAD "HEAD^{tree}" > "$evidence/source.txt"
+          sw_vers >> "$evidence/source.txt"
+          set +e
+          python3 -B -m unittest tests.desktop.test_macos_install_maintenance tests.desktop.test_macos_installed_staging tests.desktop.test_macos_desktop_update > "$evidence/tests.log" 2>&1
+          result=$?
+          set -e
+          sed -n '/^FAIL:/p; /^ERROR:/p; /^Ran /p; /^FAILED /p; /^OK/p' "$evidence/tests.log"
+          exit "$result"
+      - name: Retain exact disposable test output
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-update-check-${{ matrix.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.MRK_UPDATE_WORK }}/evidence
-          if-no-files-found: warn
-          retention-days: 30
+          name: deep-packaging-${{ github.sha }}
+          path: ${{ runner.temp }}/deep-packaging
+          retention-days: 14
+          if-no-files-found: error

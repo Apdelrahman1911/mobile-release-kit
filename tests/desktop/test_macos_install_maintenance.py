@@ -53,23 +53,23 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         # App shutdown is coordinated explicitly, never by Installer forcing it.
         self.assertIsNone(root.find("pkg-ref/must-close/app"))
 
-    def test_component_binding_remains_the_fixed_ordinary_fresh_only_package(self):
+    def test_component_binding_remains_the_fixed_ordinary_product(self):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
         refs = list(root.iter("pkg-ref"))
-        self.assertEqual(len(refs), 3)
+        self.assertEqual(len(refs), 2)
         self.assertTrue(all(node.get("id") == "dev.mobile-release-kit.desktop.installed" for node in refs))
         component = [node for node in refs if node.text and node.text.strip()]
         self.assertEqual(len(component), 1)
         self.assertEqual(component[0].text.strip(), "MobileReleaseKit.pkg")
         self.assertEqual(component[0].get("auth"), "root")
         plist = plistlib.loads((INPUTS / "Info.plist").read_bytes())
-        self.assertEqual(component[0].get("version"), plist["CFBundleVersion"])
         selected = json.loads((INPUTS / "build-release.json").read_bytes())
         self.assertEqual(set(selected), {"schemaVersion", "packageVersion", "release"})
         self.assertEqual(selected["schemaVersion"], 1)
         self.assertTrue(selected["release"].isascii())
         self.assertTrue(0 < len(selected["release"]) < 64)
-        self.assertEqual(component[0].get("version"), selected["packageVersion"])
+        self.assertEqual(component[0].get("version"), "__MRK_PACKAGE_VERSION__")
+        self.assertEqual(plist["CFBundleVersion"], selected["packageVersion"])
         tauri = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_bytes())
         self.assertEqual(tauri["version"], selected["packageVersion"])
         postinstall = (INPUTS / "postinstall").read_text()
@@ -89,12 +89,12 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('#[path = "macos_install_fixed_paths.rs"]', paths)
         self.assertNotRegex(paths, r'pub const (?:PACKAGE_VERSION|RELEASE):')
         build = (ROOT / "desktop/src-tauri/build.rs").read_text()
-        self.assertIn('fn main() {\n    macos_build_release_data();', build)
+        self.assertIn('macos_build_release_data(&target, &target_os);', build.split('fn main()', 1)[1])
         self.assertIn('include_bytes!("../macos-installed-inputs/build-release.json")', build)
         self.assertIn('env::var("CARGO_PKG_VERSION")', build)
         self.assertIn('include_bytes!("tauri.conf.json")', build)
-        self.assertEqual(build.count('fn macos_build_release_data()'), 1)
-        self.assertEqual(build.count('macos_build_release_data();'), 1)
+        self.assertEqual(build.count('fn macos_build_release_data('), 1)
+        self.assertEqual(build.count('macos_build_release_data(&target, &target_os);'), 1)
         library = (ROOT / "desktop/src-tauri/src/lib.rs").read_text()
         self.assertIn('pub mod macos_install_paths;', library)
         installer = (ROOT / "desktop/src-tauri/src/bin/macos_install.rs").read_text()
@@ -140,9 +140,10 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
         self.assertEqual(root.find("readme").attrib, {"file": "InstallerReadMe.html", "mime-type": "text/html"})
         text = (INPUTS / "InstallerReadMe.html").read_text()
-        for term in ["fresh installation", "exact same-package", "explicitly authorized predecessor", "Uninstall is unavailable", "engineering-v1", "credential vault", "Keychain",
-                     "signing originals", "provider registrations", "moved copies", "partial-installation evidence",
-                     "does not prove", "never run as root", "separately", "reviewed recovery route"]:
+        for term in ["Prepare app to quit", "Install.pkg", "hidden signature files", "fixed managed location",
+                     "Keep existing installation and recovery files, projects and saved credentials",
+                     "Do not delete managed folders or change their permissions", "same release's original Install disk image",
+                     "Show All Logs", "Review a log before sharing it", "not proof that installation or recovery finished"]:
             self.assertIn(term, text)
         self.assertNotRegex(text.lower(), r'<(?:script|form|button|iframe|img)\b|(?:href|src)\s*=|javascript:')
 
@@ -218,7 +219,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertLess(view.index('let state=self.lock()'), view.index('expected.is_some_and('))
         self.assertLess(view.index('expected.is_some_and('), view.index('Ok(PreparationStatus{'))
         self.assertIn('new_work_closed:state.maintenance.closed()', view)
-        public = document.split('impl DocumentBinding {\n    pub(crate) fn installation_preparation_status', 1)[1]
+        public = document.split('impl DocumentBinding {\n    pub(crate) fn installation_preparation_status', 1)[1].split('#[cfg(test)]', 1)[0]
         for authority in ['.release()', '.request_quit(', 'completion=', 'closed=false', 'Completion{']:
             self.assertNotIn(authority, public)
         self.assertIn('if completion.may_reopen()', document)
@@ -256,9 +257,9 @@ class MacMaintenancePreparationTests(unittest.TestCase):
     def test_private_writer_keeps_original_custody_and_does_not_activate_maintenance(self):
         """SOURCE boundary, not proof of Darwin lock, child or package finality."""
         source = (ROOT / 'desktop/src-tauri/src/bin/macos_install.rs').read_text()
-        marker = '    #[cfg(not(feature = "macos-installed-installer-fixture"))]\n    pub(super) fn run() -> i32 {'
+        marker = '    pub(super) fn run() -> i32 { worker::entry() }'
         private, ordinary = source.split('    mod worker {', 1)[1].split(marker, 1)
-        ordinary = ordinary.split('    // Exactly eight separately named cases', 1)[0]
+        ordinary = marker + ordinary.split('    // Exactly eight separately named cases', 1)[0]
         self.assertIn('worker::entry()', ordinary)
         self.assertNotIn('Install::new(', ordinary)
         self.assertNotIn('finish_transport(', ordinary)

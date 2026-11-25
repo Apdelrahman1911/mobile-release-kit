@@ -4504,6 +4504,7 @@ sys.exit(status)
                 if case == "no-growth": current = changed(after, 6, len(prefix))
                 if case == "excess-growth": current = changed(after, 6, len(prefix) + 1024 * 1024 + 1)
                 operation = object.__new__(module.Operation)
+                operation.setup_package = False
                 parent = {"synthetic": True, "fd": 90}
                 entry = {"parent_entry": parent, "parent": 90, "fd": 91, "name": "synthetic.pkg", "identity": before}
                 operation.final_package_output = entry
@@ -5089,8 +5090,11 @@ sys.exit(status)
                     value={name:getattr(info,name) for name in ("st_dev","st_ino","st_mode","st_nlink","st_uid","st_gid","st_size","st_mtime_ns","st_ctime_ns")}
                     value.update(st_uid=0,st_gid=0)
                     return SimpleNamespace(**value)
-                def under(fd):
-                    return Path(os.readlink('/proc/self/fd/'+str(fd))).is_relative_to(root)
+                stat_root = real_stat(root)
+                fixture_directories = {(info.st_dev, info.st_ino) for info in
+                    [stat_root, *(real_stat(p) for p in root.rglob('*') if p.is_dir())]}
+                def under(info):
+                    return (info.st_dev, info.st_ino) in fixture_directories
                 original_directory=operation.removal_open_directory
                 def opened_directory(parent,name,role,**kwargs):
                     if parent is not None:return original_directory(parent,name,role,**kwargs)
@@ -5100,10 +5104,10 @@ sys.exit(status)
                     entry["removal_facts"]=operation.removal_directory_facts(entry,protected=True)
                     return entry
                 def fst(fd):
-                    info=real_fstat(fd);return root_info(info) if under(fd) else info
+                    info=real_fstat(fd);return root_info(info) if under(info) else info
                 def st(path,*args,**kwargs):
                     info=real_stat(path,*args,**kwargs)
-                    local=kwargs.get("dir_fd") is not None and under(kwargs["dir_fd"])
+                    local=kwargs.get("dir_fd") is not None and under(real_fstat(kwargs["dir_fd"]))
                     local=local or isinstance(path,(str,Path)) and Path(path).is_absolute() and Path(path).is_relative_to(root)
                     return root_info(info) if local else info
                 def host():
@@ -5124,7 +5128,8 @@ sys.exit(status)
                         failures.append(traceback.format_exc())
                         raise
                 operation.verify_xcode_setup_package=traced_verify
-                before=len(os.listdir('/proc/self/fd'))
+                fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+                before = len(os.listdir(fd_directory))
                 with mock.patch.object(module.time,"monotonic_ns",side_effect=lambda:state.clock[0]), \
                      mock.patch.object(operation,"normal_mount_host",side_effect=host), \
                      mock.patch.object(operation,"setup_verification_consume_returned",side_effect=before_repeat), \
@@ -5146,7 +5151,7 @@ sys.exit(status)
                 self.assertFalse((state.work/"installer-log-selected.txt").exists())
                 self.assertTrue(operation.receipt["originalClosesKnown"])
                 self.assertEqual(operation.credential_calls,[])
-                self.assertEqual(len(os.listdir('/proc/self/fd')),before)
+                self.assertEqual(len(os.listdir(fd_directory)), before)
                 if fault in (None,"cursor-unavailable"):
                     self.assertEqual(first_nodes,[first_nodes[0]]*2)
                     self.assertFalse(operation.receipt["xcodeSetupVerification"]["desktopBookQualified"])
@@ -7943,7 +7948,8 @@ sys.exit(status)
     def test_resident_fetch_and_offline_compiler_keep_exact_graph_and_limits(self):
         module = ANDROID_HELPER
         for target in TOOL.MAC_TARGETS:
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary, \
+                 mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
                 checkout, work, environment, owner, observations = self.fixture(Path(temporary),
                     "nonzero", build_target=target)
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
@@ -14151,6 +14157,8 @@ class MacInstalledData(unittest.TestCase):
                            "--remover", "/inert/remover", "--expected-remover", "f" * 64,
                            "--remover-cargo-messages", "/inert/remover.jsonl",
                            "--remover-cargo-target-dir", "/inert/remover-target",
+                           "--installed-cli", "/inert/cli", "--expected-installed-cli", "0" * 64,
+                           "--installed-cli-cargo-messages", "/inert/cli.jsonl", "--installed-cli-cargo-target-dir", "/inert/cli-target",
                            "--android-support-signed-receipt", "/inert/support.json"])
             action.assert_called_once()
             args = action.call_args.args[0]
@@ -15950,14 +15958,15 @@ class MacInstalledData(unittest.TestCase):
         self.assertEqual(set(TOOL.NOTICES), {"21-LLVM-header-license.txt", "22-macOS-SDK-libffi-header-notices.txt"})
 
     def test_fixed_package_kind_rejects_wrong_identifier_payload_or_extra_hook(self):
+        version = TOOL.source_build_selection().package_version
         for fixture in (False, True):
             identifier = "dev.mobile-release-kit.desktop.installed" + ("-fixture" if fixture else "")
-            body = (f'<pkg-info identifier="{identifier}" version="0.1.2" install-location="/" auth="root">'
+            body = (f'<pkg-info identifier="{identifier}" version="{version}" install-location="/" auth="root">'
                     '<payload numberOfFiles="0"/><scripts><postinstall file="./postinstall"/></scripts></pkg-info>').encode()
             self.assertEqual(TOOL.package_info(body, fixture=fixture), identifier)
             with self.assertRaises(TOOL.Refused):
                 TOOL.package_info(body, fixture=not fixture)
-            for changed in (body.replace(b'version="0.1.2"', b'version="0.1.1"'),
+            for changed in (body.replace(f'version="{version}"'.encode(), b'version="0.0.1"'),
                             body.replace(identifier.encode(), b"arbitrary.package"), body.replace(b'numberOfFiles="0"', b'numberOfFiles="1"'),
                             body.replace(b'</scripts>', b'<preinstall file="other"/></scripts>')):
                 with self.assertRaises(TOOL.Refused):
@@ -15975,7 +15984,8 @@ class MacInstalledData(unittest.TestCase):
         for target in TOOL.MAC_TARGETS:
             prefix = "macos26-arm64-" if target == TOOL.ARM_TARGET else "macos26-x86_64-"
             selection = TOOL.BuildSelection(target, "2.3.4", prefix + "fixture-data-01")
-            for fixture in (False, True):
+            version = TOOL.source_build_selection().package_version
+        for fixture in (False, True):
                 body = package_data(fixture=fixture, selection=selection)[1]["PackageInfo"]
                 with self.subTest(target=target, fixture=fixture):
                     self.assertEqual(TOOL.package_info(body, fixture=fixture, selection=selection),
@@ -17326,7 +17336,12 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
     def test_source_pin_and_output_conflicts_fail_before_helper_or_writes(self):
-        with current_data_fixture() as fixture, mock.patch.object(TOOL, "current_preparer") as prepare:
+        with current_data_fixture() as fixture:
+            source_digest = TOOL.current_source()[2]
+            self.assert_current_source_rejections(fixture, source_digest)
+
+    def assert_current_source_rejections(self, fixture, source_digest):
+        with mock.patch.object(TOOL, "current_preparer") as prepare:
             args = self.args(fixture, "current-runtime", "stale")
             with mock.patch.object(TOOL, "CURRENT_PROTOCOL", "f" * 64):
                 with self.assertRaisesRegex(TOOL.Refused, "current-protocol-source"):
@@ -17337,7 +17352,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
                 TOOL.current_runtime_command(args)
             self.assertFalse(args.work.exists())
             self.assertFalse(args.output.exists())
-            args.expected_source = TOOL.current_source()[2]
+            args.expected_source = source_digest
             extra = fixture.checkout / "src/mobile_release/extra.py"
             extra.write_bytes(b"# extra current source must change S\n")
             with self.assertRaisesRegex(TOOL.Refused, "current-reviewed-source-mismatch"):
@@ -17687,7 +17702,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
                 result = preparer.prepare_current(source, runtime, target)
                 original.write_bytes(b"# changed after captured source\n")
                 return result
-            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=changed_source)):
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=changed_source, macos_trust_bundle=preparer.macos_trust_bundle)):
                 with self.assertRaisesRegex(TOOL.Refused, "current-source-post-changed"):
                     TOOL.current_runtime_command(args)
             self.assertFalse(args.output.exists())
@@ -17734,7 +17749,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
                            "--expected-entry", "a" * 64, "--expected-app-binary", "b" * 64, "--runtime", "/runtime",
                            "--expected-manifest", "d" * 64, "--expected-vault-helper", "f" * 64,
                            "--expected-remover", "8" * 64, "--expected-android-helper", "e" * 64, "--expected-resident-image", "9" * 64,
-                           "--output", "/input", *flags])
+                           "--expected-installed-cli", "0" * 64, "--output", "/input", *flags])
                 self.assertIs(inputs.call_args.args[0].current_runtime, current_profile)
                 self.assertEqual(inputs.call_args.args[0].expected_vault_helper, "f" * 64)
                 self.assertEqual(inputs.call_args.args[0].expected_remover, "8" * 64)
@@ -17748,7 +17763,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
                   mock.patch.object(TOOL, "runtime_tree", side_effect=RuntimeError("inert tree boundary")) as tree):
                 with self.assertRaisesRegex(RuntimeError, "inert tree boundary"):
                     TOOL.input_command(args)
-                tree.assert_called_once_with(args.runtime, args.expected_manifest, current=current_profile, target=TOOL.ARM_TARGET)
+                tree.assert_called_once_with(args.runtime, args.expected_manifest, current=current_profile, target=TOOL.ARM_TARGET, observation_role=True)
 
     def _assert_fresh_python_supplier_workflow(self, workflow, *, paired=False):
         admission = workflow_step(workflow, "Admit only this exact disposable-hosted source route")
@@ -18827,6 +18842,16 @@ def installed_cli_cargo_fixture(target=None, *, build_target="aarch64-apple-darw
     return target, binary, rows, entry_macho_fixture(target=build_target) + b"cli-signed-inert-DATA"
 
 
+def current_cargo_fixture(factory, *args, build_target=TOOL.ARM_TARGET):
+    target, binary, rows, body = factory(*args, build_target=build_target)
+    selected = TOOL.source_build_selection(build_target)
+    for row in rows:
+        package = row["package_id"].rsplit("#", 1)[-1].rsplit("@", 1)[0]
+        if package == "mobile-release-kit-desktop":
+            row["package_id"] = row["package_id"].rsplit("@", 1)[0] + "@" + selected.package_version
+    return target, binary, rows, body
+
+
 def cargo_lines(*items):
     return b"".join(TOOL.canonical(item) + b"\n" for item in items)
 
@@ -18908,7 +18933,7 @@ class MacAndroidSupportData(unittest.TestCase):
             first.update(size=len(archive_bytes), sha256=TOOL.digest(archive_bytes))
             fixture.values[fixture.bundletool_archive] = archive_bytes
             fixture.values[fixture.manifest_path] = TOOL.canonical(fixture.manifest)
-            target, binary, rows, body = normal_cargo_fixture()
+            target, binary, rows, body = current_cargo_fixture(normal_cargo_fixture)
             helper, facade = Path("/synthetic-mrk-support/helper"), Path("/synthetic-mrk-support/facade")
             resident = Path("/synthetic-mrk-support/resident.dylib")
             cargo = Path("/synthetic-mrk-support/desktop-image.jsonl")
@@ -18925,11 +18950,17 @@ class MacAndroidSupportData(unittest.TestCase):
                 entry_binary=Path("/synthetic-mrk-support/entry"), expected_entry=TOOL.digest(code),
                 output=Path("/synthetic-mrk-support/app"), bundletool_archive=fixture.bundletool_archive,
                 aapt2_archive=fixture.aapt2_archive, android_support_signed_receipt=fixture.android_support_signed_receipt)
-            remover_target, remover, remover_rows, remover_body = remover_cargo_fixture()
+            remover_target, remover, remover_rows, remover_body = current_cargo_fixture(remover_cargo_fixture)
             args.remover, args.expected_remover = remover, TOOL.digest(remover_body)
             args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/synthetic-mrk-support/remover.jsonl"), remover_target
             fixture.values[remover] = remover_body
             fixture.values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
+            cli_target, cli, cli_rows, cli_body = current_cargo_fixture(installed_cli_cargo_fixture)
+            args.installed_cli, args.expected_installed_cli = cli, TOOL.digest(cli_body)
+            args.installed_cli_cargo_messages = Path("/synthetic-mrk-support/cli.jsonl")
+            args.installed_cli_cargo_target_dir = cli_target
+            fixture.values[cli] = cli_body
+            fixture.values[args.installed_cli_cargo_messages] = cargo_lines(*cli_rows, {"reason": "build-finished", "success": True})
             original_read = TOOL.read
             with self.subTest(failure=failure), synthetic_android_support(fixture, app_seal={}), \
                     mock.patch.object(TOOL, "read", side_effect=lambda path, *limit: fixture.values[path] if path in fixture.values else original_read(path, *limit)), \
@@ -18945,6 +18976,8 @@ class MacAndroidSupportData(unittest.TestCase):
                 "--resident-image", "/resident.dylib", "--expected-resident-image", "d" * 64,
                 "--remover", "/inert/remover", "--expected-remover", "e" * 64,
                 "--remover-cargo-messages", "/inert/remover.jsonl", "--remover-cargo-target-dir", "/inert/remover-target",
+                "--installed-cli", "/inert/cli", "--expected-installed-cli", "0" * 64,
+                           "--installed-cli-cargo-messages", "/inert/cli.jsonl", "--installed-cli-cargo-target-dir", "/inert/cli-target",
                 "--output", "/out"])):
             for absent in ("--bundletool-archive", "--aapt2-archive", "--android-support-signed-receipt"):
                 flags = [value for flag, path in (("--bundletool-archive", "/bundletool"),
@@ -19129,7 +19162,7 @@ class MacNormalPreviewData(unittest.TestCase):
             with self.subTest(role=role, target=build_target), tempfile.TemporaryDirectory() as temporary:
                 work = Path(temporary).resolve(strict=True)
                 fixture = normal_cargo_fixture if role == "ordinary-image" else observer_cargo_fixture
-                target, artifact, rows, artifact_body = fixture(work / "cargo-target", build_target=build_target)
+                target, artifact, rows, artifact_body = current_cargo_fixture(fixture, work / "cargo-target", build_target=build_target)
                 artifact.parent.mkdir(parents=True, mode=0o700)
                 artifact.write_bytes(artifact_body)
                 facade = work / "desktop-facade-data" if role == "ordinary-image" else artifact
@@ -19146,12 +19179,12 @@ class MacNormalPreviewData(unittest.TestCase):
                 resident.write_bytes(resident_body); resident.chmod(0o555)
                 messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
                 cargo = work / "cargo.jsonl"; cargo.write_bytes(messages)
-                remover_target, remover, remover_rows, remover_body = remover_cargo_fixture(target, build_target=build_target)
+                remover_target, remover, remover_rows, remover_body = current_cargo_fixture(remover_cargo_fixture, target, build_target=build_target)
                 remover.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 remover.write_bytes(remover_body); remover.chmod(0o555)
                 remover_messages = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
                 remover_cargo = work / "remover-cargo.jsonl"; remover_cargo.write_bytes(remover_messages)
-                cli_target, cli, cli_rows, cli_body = installed_cli_cargo_fixture(work / "installed-cli-target", build_target=build_target)
+                cli_target, cli, cli_rows, cli_body = current_cargo_fixture(installed_cli_cargo_fixture, work / "installed-cli-target", build_target=build_target)
                 cli.parent.mkdir(parents=True, mode=0o700)
                 cli.write_bytes(cli_body); cli.chmod(0o555)
                 cli_cargo = work / "installed-cli-cargo.jsonl"
@@ -19193,11 +19226,11 @@ class MacNormalPreviewData(unittest.TestCase):
                 if role == "ordinary-image":
                     expected[TOOL.DESKTOP_IMAGE] = (artifact_body, 0o755)
                     self.assertEqual(result["desktopImageCargoArtifact"],
-                                     TOOL.image_cargo_artifact(messages, artifact, target, artifact_body, "desktop", target=build_target, package_version="0.1.2"))
+                                     TOOL.image_cargo_artifact(messages, artifact, target, artifact_body, "desktop", target=build_target, package_version=TOOL.source_build_selection(build_target).package_version))
                     self.assertNotIn("observerCargoArtifact", result)
                 else:
                     self.assertEqual(result["observerCargoArtifact"],
-                                     TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body, target=build_target, package_version="0.1.2"))
+                                     TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body, target=build_target, package_version=TOOL.source_build_selection(build_target).package_version))
                     self.assertNotIn("desktopImageCargoArtifact", result)
                 self.assertEqual(TOOL.tree(output), expected)
                 seal = {TOOL.GITHUB_SEAL: (helper_body, 0o555), TOOL.GITHUB_SEAL_NOTICE: (b"inert notice DATA", 0o644)}
@@ -19210,7 +19243,7 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertEqual(result["vaultHelperSha256"], TOOL.digest(helper_body))
                 self.assertEqual(result["removerSha256"], TOOL.digest(remover_body))
                 self.assertEqual(result["removerCargoArtifact"], TOOL.remover_cargo_artifact(
-                    remover_messages, remover, remover_target, remover_body, target=build_target, package_version="0.1.2"))
+                    remover_messages, remover, remover_target, remover_body, target=build_target, package_version=TOOL.source_build_selection(build_target).package_version))
                 missing = SimpleNamespace(**{key: value for key, value in vars(args).items() if key != "remover"})
                 missing.output = work / "missing-remover-app"
                 with synthetic_android_support(support, app_seal={}), self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"):
@@ -19286,10 +19319,10 @@ class MacNormalPreviewData(unittest.TestCase):
     def test_only_complete_normal_main_bin_receives_original_byte_binding(self):
         # Historical selector retained; ordinary authority is now the actual
         # cdylib, while appBinary remains its distinct fixed C facade.
-        target, binary, rows, image_body = normal_cargo_fixture()
+        target, binary, rows, image_body = current_cargo_fixture(normal_cargo_fixture)
         body, resident = entry_macho_fixture(), image_macho_fixture("resident")
         messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
-        result = TOOL.image_cargo_artifact(messages, binary, target, image_body, "desktop", package_version="0.1.2")
+        result = TOOL.image_cargo_artifact(messages, binary, target, image_body, "desktop", package_version=TOOL.source_build_selection().package_version)
         self.assertEqual(result["binarySha256"], TOOL.digest(image_body))
         self.assertEqual(result["cargoMessagesSha256"], TOOL.digest(messages))
         self.assertEqual((result["entrypoint"], result["targetKind"], result["imageRole"]), ("src/lib.rs", "cdylib", "desktop"))
@@ -19314,12 +19347,12 @@ class MacNormalPreviewData(unittest.TestCase):
             vault_helper=base / "helper", expected_vault_helper=TOOL.digest(body),
             android_helper=base / "resident-facade", expected_android_helper=TOOL.digest(body),
             resident_image=base / "resident-image", expected_resident_image=TOOL.digest(resident))
-        remover_target, remover, remover_rows, remover_body = remover_cargo_fixture()
+        remover_target, remover, remover_rows, remover_body = current_cargo_fixture(remover_cargo_fixture)
         args.remover, args.expected_remover = remover, TOOL.digest(remover_body)
         args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/inert/remover-cargo.jsonl"), remover_target
         values[remover] = remover_body
         values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
-        cli_target, cli, cli_rows, cli_body = installed_cli_cargo_fixture()
+        cli_target, cli, cli_rows, cli_body = current_cargo_fixture(installed_cli_cargo_fixture)
         args.installed_cli, args.expected_installed_cli = cli, TOOL.digest(cli_body)
         args.installed_cli_cargo_messages, args.installed_cli_cargo_target_dir = Path("/inert/cli-cargo.jsonl"), cli_target
         values[cli] = cli_body
@@ -19716,7 +19749,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     TOOL.image_macho(body, role)
 
     def test_changed_signed_helper_fails_before_any_app_write(self):
-        target, binary, rows, body = normal_cargo_fixture()
+        target, binary, rows, body = current_cargo_fixture(normal_cargo_fixture)
         args = SimpleNamespace(package_role="ordinary-image", binary=Path("/inert/facade"),
             expected_app_binary=TOOL.digest(entry_macho_fixture()),
             desktop_image=binary, expected_desktop_image=TOOL.digest(body),
@@ -19725,12 +19758,12 @@ class MacNormalPreviewData(unittest.TestCase):
             vault_helper=Path("/inert/helper"), expected_vault_helper="f" * 64, output=Path("/inert/output"))
         values = {args.binary: entry_macho_fixture(), binary: body, args.vault_helper: entry_macho_fixture(),
                   args.desktop_image_cargo_messages: cargo_lines(*rows, {"reason": "build-finished", "success": True})}
-        remover_target, remover, remover_rows, remover_body = remover_cargo_fixture()
+        remover_target, remover, remover_rows, remover_body = current_cargo_fixture(remover_cargo_fixture)
         args.remover, args.expected_remover = remover, TOOL.digest(remover_body)
         args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/inert/remover-cargo.jsonl"), remover_target
         values[remover] = remover_body
         values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
-        cli_target, cli, cli_rows, cli_body = installed_cli_cargo_fixture()
+        cli_target, cli, cli_rows, cli_body = current_cargo_fixture(installed_cli_cargo_fixture)
         args.installed_cli, args.expected_installed_cli = cli, TOOL.digest(cli_body)
         args.installed_cli_cargo_messages, args.installed_cli_cargo_target_dir = Path("/inert/cli-cargo.jsonl"), cli_target
         values[cli] = cli_body
@@ -20143,7 +20176,7 @@ class MacNormalPreviewData(unittest.TestCase):
         return binding
 
     def positive_update_export_fixture(self, target):
-        from test_macos_update_verification import manual_delivery_fixture
+        from tests.desktop.test_macos_update_verification import manual_delivery_fixture
         work, values, documents, inventory, selection = self.preview_fixture(target)
         documents["source-binding.json"] = self.actual_workflow_binding(target, installed=False, update=True)
         inputs = manual_delivery_fixture(target, producer=TOOL.decode(values[work / "producer-root/producer.json"]),
