@@ -2760,6 +2760,9 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["prepareQuitObserved"] = "MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release" in transcript
         observed = result["prepareQuitObserved"]
     elif recovery:
+        result["recoveryLaunchRefusal"] = re.findall(
+            r"(?m)^MRK_RELEASE_RECOVERY_LAUNCH_REFUSAL=reason=(deadline|clock|launch-work-closed|payload-identity|callback|owner|other|untyped);budget=(elapsed|under-five|available|unavailable)$",
+            transcript)
         result["recoveryFacts"] = re.findall(
             r"(?m)^MRK_RELEASE_RECOVERY_FACT=(before|refused|review);panel=(true|false);review=([0-3])$", transcript)
         result["recoveryMatches"] = re.findall(

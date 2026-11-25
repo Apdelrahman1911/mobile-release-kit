@@ -5756,6 +5756,24 @@ final class NormalAppUITests: XCTestCase {
                 _ = try waitElement(controls(renderer, [.button], label: label), in: renderer, enabled: true,
                                     timeout: 24, failures: Self.guidedWorkspaceFailures)
             } catch {
+                if projectRequireDiagnosticMethod == .guidedRecovery {
+                    let category: String
+                    if case Refusal.condition(let reason) = error {
+                        switch reason {
+                        case "original case or stage deadline elapsed": category = "deadline"
+                        case "case clock moved backwards or became unavailable", "case clock unavailable": category = "clock"
+                        case "ordinary launch work is closed": category = "launch-work-closed"
+                        case "original running reference is not the fixed payload": category = "payload-identity"
+                        case let value where value.contains("callback"): category = "callback"
+                        case let value where value.contains("owner"): category = "owner"
+                        default: category = "other"
+                        }
+                    } else { category = "untyped" }
+                    let remaining = (journeyDeadline ?? 0) - ProcessInfo.processInfo.systemUptime
+                    let budget = !remaining.isFinite ? "unavailable" : remaining <= 0 ? "elapsed"
+                                 : remaining < 5 ? "under-five" : "available"
+                    print("MRK_RELEASE_RECOVERY_LAUNCH_REFUSAL=reason=\(category);budget=\(budget)")
+                }
                 if projectRequireDiagnosticMethod == .guidedWorkspace && (try? remaining(1)) != nil {
                     let button = controls(renderer, [.button], label: label)
                     if button.count == 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=dashboard-button-absent") }
