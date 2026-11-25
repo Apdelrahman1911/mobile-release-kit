@@ -44,7 +44,7 @@ concurrency:
 jobs:
   prepare-install-image:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-update-check' && inputs.operation == 'prepare-install-image' && inputs.architecture == 'arm64' && inputs.transport_recipient != ''
-    name: Sign and privately return the fixed 0.2.11 install image
+    name: Sign and privately return the fixed 0.2.12 install image
     runs-on: macos-26
     environment: macos-developer-id
     timeout-minutes: 45
