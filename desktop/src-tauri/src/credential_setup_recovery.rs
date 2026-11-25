@@ -275,7 +275,7 @@ mod tests {
     fn project() -> ProjectBinding {
         ProjectBinding {
             project_id: "11".repeat(16),
-            canonical_root: "/synthetic/recovery".into(),
+            canonical_root: crate::test_absolute_path!("/synthetic/recovery").into(),
             device: 7,
             inode: 8,
         }
@@ -454,7 +454,7 @@ mod tests {
             .push(duplicate);
         assert!(Journal::decode(&serde_json::to_vec(&value).unwrap()).is_err());
         let mut moved = project.clone();
-        moved.canonical_root = "/synthetic/moved".into();
+        moved.canonical_root = crate::test_absolute_path!("/synthetic/moved").into();
         assert!(journal.preference(&moved, Role::AndroidUpload).is_err());
         let historical = journal.cancelled_generations.as_ref().unwrap()[0].clone();
         journal
@@ -544,7 +544,7 @@ mod tests {
             .unwrap();
         let mut other = project.clone();
         other.project_id = "cc".repeat(16);
-        other.canonical_root = "/synthetic/other".into();
+        other.canonical_root = crate::test_absolute_path!("/synthetic/other").into();
         other.inode = 88;
         journal
             .assigned(

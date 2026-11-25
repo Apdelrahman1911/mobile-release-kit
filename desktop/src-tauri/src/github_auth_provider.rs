@@ -722,8 +722,8 @@ mod tests {
     #[test]
     fn environment_excludes_ambient_token_precedence_and_routing() {
         let environment = NativeEnvironment {
-            home: "/synthetic/home".into(),
-            config: "/synthetic/gh".into(),
+            home: crate::test_absolute_path!("/synthetic/home").into(),
+            config: crate::test_absolute_path!("/synthetic/gh").into(),
             session_bus: None,
             runtime_directory: None,
         }

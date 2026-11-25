@@ -279,6 +279,7 @@ fn local_key_modes_keep_old_grammar_and_consent_closed_and_future_modes_unavaila
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn key_events_require_same_context_sequence_and_cannot_enter_old_modes() {
     let b = key_binding(Mode::KeyPrepare);
@@ -310,6 +311,7 @@ fn key_events_require_same_context_sequence_and_cannot_enter_old_modes() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn output_metadata_is_not_saved_key_or_csr_authority_and_missing_output_refuses() {
     let b = key_binding(Mode::KeyPrepare);
@@ -347,6 +349,7 @@ fn output_metadata_is_not_saved_key_or_csr_authority_and_missing_output_refuses(
     // The last positive is decoder DATA only: no private body/ACK/native joins exist.
 }
 
+#[cfg(unix)]
 #[test]
 fn no_generation_receipt_must_match_original_command_count_and_not_follow_output() {
     let b = key_binding(Mode::KeyPrepare);

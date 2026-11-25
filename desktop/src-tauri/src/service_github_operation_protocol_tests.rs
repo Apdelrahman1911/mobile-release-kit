@@ -13,7 +13,7 @@ fn review(kind:Kind)->p::Review {
     else if kind==Kind::RepositoryCreate {p::Review::RepositoryCreate(p::PreparedReference{session_id:"github-session-1".into(),expected_revision:4,consent_id:"b".repeat(32),prepared_sha256:"a".repeat(64)})}
     else{serde_json::from_value(v).unwrap()}
 }
-fn scope(doc:&Arc<()>,kind:Kind)->Arc<r::NativeScope>{let at=Instant::now();r::NativeScope::new(id(1),"project-1".into(),"/never-opened-operation-book".into(),1,2,3,review(kind),Arc::new(()),
+fn scope(doc:&Arc<()>,kind:Kind)->Arc<r::NativeScope>{let at=Instant::now();r::NativeScope::new(id(1),"project-1".into(),crate::test_absolute_path!("/never-opened-operation-book").into(),1,2,3,review(kind),Arc::new(()),
     at+Duration::from_secs(60),Arc::new(crate::service_version_reserve_requests::ReadPermission::new(at+Duration::from_secs(80))),Arc::downgrade(doc),tokio::sync::watch::channel(1).0)}
 fn entry(doc:&Arc<()>,kind:Kind)->(r::Inbox,r::Claim,Arc<r::Entry>){let book=r::Inbox::new(id(2));book.allow(scope(doc,kind),id(3)).unwrap();book.submit(p::Submit{origin:p::Query{project_id:id(1),service_instance:id(2),request_id:id(4)},grant_id:id(3)}).unwrap();let c=book.claim().unwrap().unwrap();let e=c.entry().clone();(book,c,e)}
 fn arm(e:&r::Entry,go:bool)->String{let op=format!("{}1",e.scope().review.kind().prefix());e.entering().unwrap();e.arm(&op).unwrap();if go{e.go(&op).unwrap();}op}

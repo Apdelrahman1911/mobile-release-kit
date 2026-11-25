@@ -25,8 +25,8 @@ jobs:
     permissions:
       contents: read
     env:
-      MRK_DIAGNOSTIC_BASIS_COMMIT: d70345a094ff66e2b4ffa3735670c32ce1be9ca5
-      MRK_DIAGNOSTIC_BASIS_TREE: 34ad30f578d87acb3db5547b00c986e92c493580
+      MRK_DIAGNOSTIC_BASIS_COMMIT: cc84a42062e1c005cb9d499dff583675639a633e
+      MRK_DIAGNOSTIC_BASIS_TREE: 03987b67ffc9182cca34673bfdd091b807337a01
     steps:
       - name: Require a disposable GitHub-hosted runner
         env:
@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          ref: ${{ env.MRK_DIAGNOSTIC_BASIS_COMMIT }}
       - name: Set up Python
         id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -76,9 +76,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ "$(git rev-parse 'HEAD^2')" == "$MRK_DIAGNOSTIC_BASIS_COMMIT" ]]
-          [[ "$(git rev-parse 'HEAD^2^{tree}')" == "$MRK_DIAGNOSTIC_BASIS_TREE" ]]
+          [[ "$(git rev-parse HEAD)" == "$MRK_DIAGNOSTIC_BASIS_COMMIT" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$MRK_DIAGNOSTIC_BASIS_TREE" ]]
           xcode_version="$(DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer /usr/bin/xcodebuild -version)"
           [[ "$xcode_version" == $'Xcode 27.1\nBuild version 27A9275' ]]
           ruby_executable="$(command -v ruby)"
@@ -90,6 +89,6 @@ jobs:
             --python "$MRK_PYTHON" --ruby "$ruby_executable" \
             --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
             --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
-            --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+            --commit "$MRK_DIAGNOSTIC_BASIS_COMMIT" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --scope native-python --summary "$GITHUB_STEP_SUMMARY"

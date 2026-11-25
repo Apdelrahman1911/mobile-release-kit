@@ -79,7 +79,7 @@ fn state(at: Instant) -> ConnectionState {
 }
 fn root() -> RegisteredRoot {
     RegisteredRoot {
-        path: "/never-opened-activity-scope".into(),
+        path: crate::test_absolute_path!("/never-opened-activity-scope").into(),
         identity: crate::asset_source::ProjectIdentity::Posix(
             crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
         ),

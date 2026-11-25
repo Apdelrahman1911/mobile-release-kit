@@ -268,7 +268,7 @@ mod tests {
         let scope = Arc::new(agent::NativeScope {
             project_id: id('c'),
             runtime_id: "project-1".into(),
-            root: std::path::PathBuf::from("/unopened-preflight-project"),
+            root: std::path::PathBuf::from(crate::test_absolute_path!("/unopened-preflight-project")),
             device: 1,
             inode: 2,
             registration: 1,

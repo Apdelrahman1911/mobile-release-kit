@@ -1154,7 +1154,7 @@ def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
         "MOBILE_RELEASE_TEST_PYTHON": str(paths.source_python),
     }
     if platform == "macos":
-        env["DEVELOPER_DIR"] = "/Applications/Xcode_27.1.app/Contents/Developer"
+        env["DEVELOPER_DIR"] = "/Applications/Xcode_26.3.app/Contents/Developer"
     if paths.java_home is not None:
         env["JAVA_HOME"] = str(paths.java_home)
     return tuple(sorted(env.items()))
@@ -1863,9 +1863,9 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("NATIVE_PYTHON_INVENTORY")
         details.update(tests=len(expected), completed=list(observed))
     elif step.parser == "xcode":
-        if stdout.strip().splitlines() != ["Xcode 27.1", "Build version 27A9275"]:
+        if stdout.strip().splitlines() != ["Xcode 26.3", "Build version 17C529"]:
             raise VerificationError("XCODE_VERSION")
-        details["version"] = "Xcode27.1/27A9275"
+        details["version"] = "Xcode26.3/17C529"
     elif step.parser == "check":
         lines = [line[len("MRK_CHECK_RESULT="):] for line in stdout.splitlines() if line.startswith("MRK_CHECK_RESULT=")]
         limit = (512 if step.id == "python-full" else 256) * 1024
@@ -2010,17 +2010,16 @@ def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
             outcome = outcomes.get(token) if closed else None
         if identifier is not None:
             observed = {"id": identifier}
-            # Optional ordinary-native stopwatch data belongs only to this
-            # complete header's immediately preceding physical line. Never
-            # carry it across body text or a truncated window. It describes a
-            # reported callback, not entry, completion, finality or a deadline.
-            if closed and index:
+            # Optional timing is scoped to this header's immediately preceding
+            # line. The Linux runner can time an exact standard start header
+            # before its outcome arrives. No timing is a completion receipt.
+            if index:
                 preceding = lines[index - 1]
                 if preceding.endswith(b"\r"):
                     preceding = preceding[:-1]
-                prefix = b"MRK_NATIVE_ELAPSED_MS="
-                if preceding.startswith(prefix):
-                    scalar = preceding[len(prefix):]
+                prefix, separator, scalar = preceding.partition(b"=")
+                if separator and (closed and prefix == b"MRK_NATIVE_ELAPSED_MS"
+                                  or prefix == b"MRK_PYTHON_ELAPSED_MS"):
                     if re.fullmatch(rb"(?:0|[1-9][0-9]{0,6})", scalar):
                         elapsed = int(scalar)
                         if elapsed <= 3_600_000:
@@ -4059,7 +4058,7 @@ def retain_native_header(paths: Paths, session, checks, platform: str, state: Na
     # GCC's assembler/linker must never search mutable work, venv or Bundler
     # directories. No CPATH/GCC_EXEC_PREFIX/COMPILER_PATH or arbitrary -B/-I.
     env = {"PATH": "/usr/bin:/bin"} if platform == "linux" else {
-        "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
+        "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
     }
     version_argv = (compiler, "--version") if platform == "linux" else (compiler, "--no-default-config", "--version")
     version = original_native_capture(session, version_argv, paths, rows, "compiler-version",

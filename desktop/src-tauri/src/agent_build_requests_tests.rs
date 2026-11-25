@@ -17,7 +17,7 @@ impl Fixture {
             point: crate::agent_local_checks::SavedPoint {
                 project_id: id(2),
                 runtime_id: "project-1".into(),
-                root: "/inert/never-opened".into(),
+                root: crate::test_absolute_path!("/inert/never-opened").into(),
                 device: 1,
                 inode: 2,
                 revision: 5,
@@ -398,7 +398,8 @@ fn typed_row_public_and_ancillary_bounds_keep_all32_and_four_nonipc_reports() {
 fn all32_mixed_rows_retain_acknowledged_reports_and_one_absorbing_failed_claim() {
     let mut f = Fixture::new();
     f.point.runtime_id = "r".repeat(64);
-    f.point.root = format!("/{}", "r".repeat(ROOT_HEAP_BYTES - 1)).into();
+    let root = crate::test_absolute_path!("/");
+    f.point.root = format!("{root}{}", "r".repeat(ROOT_HEAP_BYTES - root.len())).into();
     for n in 0..LIMIT {
         let family = if n % 2 == 0 { Family::AndroidInspect } else { Family::IosArchive };
         // Different maximal scope allocations exercise the closed32-row

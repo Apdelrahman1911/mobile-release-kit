@@ -389,7 +389,7 @@ fn format_record_limit() -> usize { crate::vault_format::DESCRIPTOR_COUNT }
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn project() -> ProjectBinding { ProjectBinding { project_id: "11".repeat(16), canonical_root: "/synthetic/project".into(), device: 7, inode: 8 } }
+    fn project() -> ProjectBinding { ProjectBinding { project_id: "11".repeat(16), canonical_root: crate::test_absolute_path!("/synthetic/project").into(), device: 7, inode: 8 } }
     fn key() -> KeyReference { KeyReference { vault_id: "22".repeat(16), generation_id: "33".repeat(16), record_id: "44".repeat(16), revision_id: "55".repeat(16), revision_counter: 1 } }
     fn saved() -> SavedAssignment { SavedAssignment { reference: key(), identity_sha256: "66".repeat(32), certificate_sha256: Some("77".repeat(32)), operation_id: "88".repeat(16) } }
     fn intent() -> GenerationIntent { GenerationIntent { operation_id: saved().operation_id, vault_id: key().vault_id, generation_id: key().generation_id,
@@ -457,8 +457,8 @@ mod tests {
         journal.reserve(1, &project, Role::AndroidUpload, intent(), &observed).unwrap();
         for change in 0..4 {
             let mut changed = project.clone();
-            match change { 0 => changed.inode += 1, 1 => changed.canonical_root = "/synthetic/moved".into(),
-                2 => changed.project_id = "aa".repeat(16), _ => { changed.project_id = "aa".repeat(16); changed.canonical_root = "/synthetic/moved".into(); } }
+            match change { 0 => changed.inode += 1, 1 => changed.canonical_root = crate::test_absolute_path!("/synthetic/moved").into(),
+                2 => changed.project_id = "aa".repeat(16), _ => { changed.project_id = "aa".repeat(16); changed.canonical_root = crate::test_absolute_path!("/synthetic/moved").into(); } }
             assert!(matches!(journal.preference(&changed, Role::AndroidUpload), Err(Error::Conflict)));
         }
     }

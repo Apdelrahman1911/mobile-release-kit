@@ -303,6 +303,7 @@ fn observed_metadata_is_scoped_and_does_not_turn_seed_id_into_team_proof() {
     assert!(!Observed::deserialize(absent).unwrap().valid(&binding));
 }
 
+#[cfg(unix)]
 #[test]
 fn pending_reconstructs_service_intent_and_exact_python_hashes_without_receipt() {
     let binding = binding(Mode::Register);

@@ -502,7 +502,7 @@ mod tests {
         let scope = Arc::new(agent::NativeScope {
             project_id: id('c'),
             runtime_id: input.project_id.clone(),
-            root: "/inert/never-opened".into(),
+            root: crate::test_absolute_path!("/inert/never-opened").into(),
             device: 1,
             inode: 2,
             registration: 1,

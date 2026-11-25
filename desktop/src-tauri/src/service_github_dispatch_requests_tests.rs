@@ -13,7 +13,7 @@ fn scope(doc:&Arc<()>,kind:p::Kind)->Arc<NativeScope> {
             consent_id:"a".repeat(32),prepared_sha256:"b".repeat(64)}).unwrap(),
     };
     let at=Instant::now();
-    NativeScope::new(id(1),"project-1".into(),"/never-opened-dispatch-entry".into(),1,2,3,review,Arc::new(()),
+    NativeScope::new(id(1),"project-1".into(),crate::test_absolute_path!("/never-opened-dispatch-entry").into(),1,2,3,review,Arc::new(()),
         at+Duration::from_secs(100),Arc::new(crate::service_version_reserve_requests::ReadPermission::new(at+Duration::from_secs(110))),
         Arc::downgrade(doc),tokio::sync::watch::channel(1).0)
 }

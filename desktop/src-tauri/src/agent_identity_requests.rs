@@ -785,7 +785,7 @@ mod tests {
         NativeScope {
             project_id: id(2),
             runtime_id: "project-1".into(),
-            root: "/inert/identity-fixture".into(),
+            root: crate::test_absolute_path!("/inert/identity-fixture").into(),
             device: 7,
             inode: 8,
             registration: 9,
@@ -797,7 +797,7 @@ mod tests {
         SavedPoint {
             project_id: id(2),
             runtime_id: "project-1".into(),
-            root: "/inert/identity-fixture".into(),
+            root: crate::test_absolute_path!("/inert/identity-fixture").into(),
             device: 7,
             inode: 8,
             revision: 3,

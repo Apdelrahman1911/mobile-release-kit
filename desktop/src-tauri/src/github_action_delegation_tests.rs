@@ -11,7 +11,7 @@ fn scope(doc: &Arc<()>, data: p::Review, identity: Arc<()>) -> Arc<r::NativeScop
     r::NativeScope::new(
         id('1'),
         "project-1".into(),
-        "/never-opened-github-delegation".into(),
+        crate::test_absolute_path!("/never-opened-github-delegation").into(),
         1,
         2,
         3,
@@ -49,7 +49,7 @@ fn input() -> p::Submit {
 #[test]
 fn streamed_review_binds_private_input_and_actual_original_edit_stamp() {
     let owner = EditOwner::new(RuntimeConfig::packaged(PathBuf::from(
-        "/never-opened-github-review-test",
+        crate::test_absolute_path!("/never-opened-github-review-test"),
     )));
     let doc = Arc::new(());
     owner.bind_saved_registration(
@@ -58,7 +58,7 @@ fn streamed_review_binds_private_input_and_actual_original_edit_stamp() {
     );
     owner.initial_document("main").unwrap();
     let foreign = EditOwner::new(RuntimeConfig::packaged(PathBuf::from(
-        "/never-opened-other-github-review-test",
+        crate::test_absolute_path!("/never-opened-other-github-review-test"),
     )));
     foreign.bind_saved_registration(
         &doc,

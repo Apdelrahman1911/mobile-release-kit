@@ -30,7 +30,7 @@ fn scope(doc: &Arc<()>, now: Instant, selected: p::Review) -> Arc<req::NativeSco
         runtime_id: "p1".into(),
         review_id: id('4'),
         review: selected,
-        root: "/inert-never-opened-tool-inspect".into(),
+        root: crate::test_absolute_path!("/inert-never-opened-tool-inspect").into(),
         device: 1,
         inode: 2,
         observation_revision: 1,

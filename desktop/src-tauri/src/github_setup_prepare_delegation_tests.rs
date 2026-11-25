@@ -33,7 +33,7 @@ fn entry(at: Instant) -> (Arc<()>, request::Inbox, request::Claim, Arc<request::
     let scope = request::NativeScope::new(
         id(1),
         "project-1".into(),
-        "/never-opened-ordinary-setup".into(),
+        crate::test_absolute_path!("/never-opened-ordinary-setup").into(),
         1,
         2,
         3,
@@ -310,7 +310,7 @@ fn ordinary_prepare_producer_needs_native_caller_and_history_before_a_separate_p
     let fresh = request::NativeScope::new(
         id(1),
         "project-1".into(),
-        "/never-opened-publish".into(),
+        crate::test_absolute_path!("/never-opened-publish").into(),
         1,
         2,
         3,

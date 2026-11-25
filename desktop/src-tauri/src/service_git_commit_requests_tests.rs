@@ -9,7 +9,7 @@ fn scope(doc: &Arc<()>, family: Family) -> Arc<NativeScope> {
     Arc::new(NativeScope {
         project_id: id('a'),
         runtime_id: "project-1".into(),
-        root: "/inert/git-commit".into(),
+        root: crate::test_absolute_path!("/inert/git-commit").into(),
         device: 1,
         inode: 2,
         registration: 1,

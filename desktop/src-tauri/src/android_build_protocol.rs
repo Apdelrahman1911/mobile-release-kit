@@ -430,7 +430,8 @@ impl MacToolchainSelection {
             && sha(&self.record_sha256) && sha(&self.inventory_sha256) && sha(&self.os_provider_sha256)
     }
     pub(crate) fn root_data(&self) -> std::path::PathBuf {
-        Path::new(MAC_TOOLCHAIN_PREFIX).join(self.owner_uid.to_string()).join(&self.instance)
+        // This field is a POSIX path in the macOS wire protocol on every host.
+        format!("{MAC_TOOLCHAIN_PREFIX}/{}/{}", self.owner_uid, self.instance).into()
     }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

@@ -95,6 +95,7 @@ pub(in crate::apple_provisioning_journal) fn certificate_armed(
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn actual_python_key_review_and_certificate_plan_vectors_match_without_private_bodies() {
     let key = intent();
@@ -281,6 +282,7 @@ fn certificate_sparse_receipt_and_sent_unknown_cannot_be_rewritten_or_rearmed() 
     no_send.record.cancel_requested = true;
     assert!(no_send.follows(&unknown, &intent).is_err());
 }
+#[cfg(unix)]
 #[test]
 fn restored_key_reference_requires_a_new_explicit_plan_not_old_attempt_adoption() {
     let old = certificate();

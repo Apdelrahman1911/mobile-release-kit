@@ -1775,6 +1775,14 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertIsNone(observation(timing + b"9" + header(first) + b"\n")["last_observed_start"])
         self.assertIsNone(observation(marker + b"test_foreign (unit.foreign.Private.test_foreign)\n")
                           ["last_observed_start"])
+        linux_timing = b"MRK_PYTHON_ELAPSED_MS="
+        value = observation(linux_timing + b"110\n" + header(first) + b" ... ok\n"
+                            + linux_timing + b"120\n" + header(second) + b" ... ")
+        self.assertEqual(value["last_observed_start"], {"id": second, "elapsed_ms": 120})
+        self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": "ok", "elapsed_ms": 110})
+        value = observation(linux_timing + b"120\n" + private + b"\n" + header(second) + b" ... ")
+        self.assertEqual(value["last_observed_start"], {"id": second})
+        self.assertIsNone(value["last_observed_outcome"])
         headline = header(first) + b"\n"
         value = observation(marker + headline + b"x\n" * 2047)
         self.assertTrue(value["lines_truncated"])

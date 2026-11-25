@@ -51,7 +51,7 @@ fn scope(f: &Fixture, kind: flow::Kind) -> Arc<queue::Scope> {
         "p1".into(),
         id('4'),
         selected(kind),
-        "/inert/never-opened".into(),
+        crate::test_absolute_path!("/inert/never-opened").into(),
         1,
         2,
         1,

@@ -2216,13 +2216,19 @@ mod tests {
     #[test]
     fn physical_selection_is_only_bounded_path_data_not_execution_authority() {
         assert!(physical_selection_bounded(std::path::Path::new(
-            "/fixture/installed/gh"
+            crate::test_absolute_path!("/fixture/installed/gh")
         )));
-        for path in ["gh", "/fixture/not-gh", "/fixture/gh\0", ""] {
+        for path in [
+            "gh",
+            crate::test_absolute_path!("/fixture/not-gh"),
+            crate::test_absolute_path!("/fixture/gh\0"),
+            "",
+        ] {
             assert!(!physical_selection_bounded(std::path::Path::new(path)));
         }
         assert!(!physical_selection_bounded(std::path::Path::new(&format!(
-            "/{}/gh",
+            "{}{}/gh",
+            crate::test_absolute_path!("/"),
             "a".repeat(4096)
         ))));
     }

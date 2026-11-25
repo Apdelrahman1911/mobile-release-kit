@@ -692,7 +692,7 @@ mod tests {
             saved: SavedPoint {
                 project_id: id(1),
                 runtime_id: "p1".into(),
-                root: "/inert/never-opened-history-preparation".into(),
+                root: crate::test_absolute_path!("/inert/never-opened-history-preparation").into(),
                 device: 1,
                 inode: 2,
                 revision: 0,
