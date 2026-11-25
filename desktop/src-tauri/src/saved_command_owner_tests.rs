@@ -1311,9 +1311,11 @@ fn artifact_original_closure_distinguishes_unentered_from_claimed_and_unreturned
     assert!(!artifact_installed_closure_ready(&r,&owner,false,false));
     assert!(!artifact_installed_closure_ready(&r,&owner,true,true));
     drop(r);
-    let book=Resources::default();let startup=Startup::default();
-    assert!(!offline_consumers_returned(&book,&startup,true));
-    let mut book=book;book.artifact_selected=true;
+    let mut book = Resources::default();
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    assert!(!offline_consumers_returned(&book, &Startup::default(), true));
+    book.artifact_selected = true;
     assert!(!artifact_installed_final(&book));
     assert!(!owner.startup.lock().unwrap().attempted);
     assert!(!owner.resource_unknown.load(Ordering::SeqCst));

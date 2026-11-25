@@ -491,7 +491,7 @@ jobs:
             rustup run 1.98.1 cargo check --locked --no-default-features \
               --features macos-installed-remover --bin mrk-macos-remove
           fi
-          # Named launcher/path/recovery DATA tests and one original-reader
+          # Named launcher/path/recovery and journal DATA tests and one original-reader
           # test on exclusive user-owned temporary files. No Installer main,
           # root destination, signing or remover execution.
           tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality
@@ -504,8 +504,9 @@ jobs:
             tests+=(installer::applications::tests::
                     installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped
                     installer::maintenance::restore_recovery::
-                    installer::tests::collected_inventory_uses_original_reader_with_exact_bound_and_post)
-            expected_tests=17
+                    installer::maintenance::output_projection_tests::
+                    installer::tests::collected_inventory_roles_use_original_reader_with_exact_bound_and_post)
+            expected_tests=25
           fi
           if [[ "$INSTALLER_CHECKS" == installer-frames ]]; then
             tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)
@@ -521,8 +522,9 @@ jobs:
             rustup run 1.98.1 cargo test --locked --no-default-features --lib -- \
               macos_install_transaction::tests::restore_ \
               macos_install_transaction::tests::retained_storage_and_original_budget_arithmetic_refuse_before_effects \
+              macos_fresh_recovery::output_enrollment_tests:: \
               --test-threads=1 | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
-            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
           fi
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''

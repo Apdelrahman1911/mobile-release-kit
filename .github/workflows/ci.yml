@@ -25,8 +25,8 @@ jobs:
     permissions:
       contents: read
     env:
-      MRK_DIAGNOSTIC_BASIS_COMMIT: bfdf963e5baf8d7a5eff4f79dadda2b7489f316a
-      MRK_DIAGNOSTIC_BASIS_TREE: 1eac1ff8ddcd046310277351519ad738a8747cb0
+      MRK_DIAGNOSTIC_BASIS_COMMIT: d70345a094ff66e2b4ffa3735670c32ce1be9ca5
+      MRK_DIAGNOSTIC_BASIS_TREE: 34ad30f578d87acb3db5547b00c986e92c493580
     steps:
       - name: Require a disposable GitHub-hosted runner
         env:

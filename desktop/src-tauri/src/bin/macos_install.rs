@@ -13766,7 +13766,10 @@ mod installer {
                     std::mem::size_of::<RemovalArchiveReference>(),table.rows.capacity(),owned,
                     REMOVAL_ARCHIVE_TABLE,std::mem::size_of::<fresh_conservation::ConservationSpanData>());
             }
-            fn corpus()->serde_json::Value{serde_json::from_str(include_str!(env!("MRK_OUTPUT_DATA_CORPUS"))).unwrap()}
+            fn corpus()->serde_json::Value{
+                serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                    "/../../.github/fixtures/macos-output-data/corpus.json"))).unwrap()
+            }
             fn identity(v:&serde_json::Value)->Identity{Identity{
                 dev:v["dev"].as_i64().unwrap(),ino:v["ino"].as_u64().unwrap(),mode:v["mode"].as_u64().unwrap() as u32,
                 uid:v["uid"].as_u64().unwrap() as u32,gid:v["gid"].as_u64().unwrap() as u32,links:v["links"].as_u64().unwrap(),
@@ -13812,7 +13815,8 @@ mod installer {
             }
             #[test]
             fn full_public_inventory_control_storage_quote(){
-                let raw=include_bytes!(env!("MRK_OUTPUT_DATA_INVENTORY"));
+                let raw=include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+                    "/../../.github/fixtures/macos-output-data/inventory.json"));
                 assert_eq!(format!("{:x}",Sha256::digest(raw)),"beb7a406091cef70e0e7799450bab1cd90a969436d7c1ae231b3c49b133a350a");
                 let document:serde_json::Value=serde_json::from_slice(raw).unwrap();
                 let inventory=Inventory::parse_for_release(raw,document["runtimeManifestSha256"].as_str().unwrap(),document["release"].as_str().unwrap()).unwrap();
@@ -25377,6 +25381,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 }
             }
         }
+        #[cfg(feature = "macos-installed-phase-audit-tests")]
         #[test]
         fn fresh_memory_full_journal_namespace_and_retained_launcher_share_the_strict_pool() {
             use super::*;
@@ -25424,6 +25429,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             assert!(maintenance::fresh_conservation::namespace_memory_quote_data(installation_record::CONTROL_LIMIT as u64-reserve+1).is_err());
             assert!(maintenance::fresh_conservation::namespace_memory_quote_data(u64::MAX).is_err());
         }
+        #[cfg(feature = "macos-installed-phase-audit-tests")]
         #[test]
         fn recovery_memory_phase_profile_uses_exact_admitted_inventory() {
             use super::*;

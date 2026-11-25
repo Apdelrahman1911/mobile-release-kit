@@ -26,6 +26,9 @@ GIT = Path("/Library/Developer/CommandLineTools/usr/bin/git" if sys.platform == 
 
 class OwnedReadTests(unittest.TestCase):
     def setUp(self):
+        # Stock checkout must create 0644/0755 files in these private repos.
+        previous_umask = os.umask(0o022)
+        self.addCleanup(os.umask, previous_umask)
         self.unknown = False
         self.calls = 0
         self.end = time.monotonic() + 120

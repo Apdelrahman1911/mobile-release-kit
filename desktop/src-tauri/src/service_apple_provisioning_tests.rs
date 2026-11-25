@@ -456,6 +456,7 @@ fn apple_cli_exact_modes_and_status_payloads_remain_small_and_closed() {
     assert!(p::ROW_BACKING >= 3 * 8192);
     assert_eq!(p::DOCUMENT_BACKING, 32 * p::ROW_BACKING + 128 * 1024);
     assert_eq!(p::IPC_WORKER_BACKING, 3 * p::STATUS_LIMIT + p::RAW_LIMIT);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert_eq!(crate::installed_cli_ipc::CLIENTS, 8);
 }
 #[test]
