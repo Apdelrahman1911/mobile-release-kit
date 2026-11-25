@@ -1,4 +1,4 @@
-name: Disposable macOS native issuer diagnostic
+name: Disposable macOS native source and wheel comparison
 
 on:
   workflow_dispatch:
@@ -11,37 +11,82 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONSAFEPATH: '1'
+
 jobs:
-  synthetic-issuer-comparison:
+  native-profiles-comparison:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-system' &&
       inputs.verification_target == 'macos'
-    timeout-minutes: 8
     runs-on: xcode-27
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      MRK_DIAGNOSTIC_COMMIT: e1232bdeef9b5a515ab3a8b7f33f55e7577ff72e
+      MRK_DIAGNOSTIC_TREE: 4f5f85af06fd150a1b1a414ddb35677918e1ee40
     steps:
-      - name: Admit a disposable Apple Silicon runner
+      - name: Require a disposable GitHub-hosted runner
         env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: bash
         run: |
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
           [[ "$(sw_vers -productVersion)" == 27.* ]]
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+          ref: ${{ env.MRK_DIAGNOSTIC_COMMIT }}
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Compare original synthetic issuer behavior with live Apple trust-service events
+      - name: Set up the fixed Python 3.12 compatibility runtime
+        id: python312
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up the fixed Python 3.13 compatibility runtime
+        id: python313
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up the fixed Python 3.14 compatibility runtime
+        id: python314
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Set up pinned Ruby without project installation
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler: none
+          bundler-cache: false
+      - name: Require isolated macOS source and installed-wheel verification
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
+        shell: bash
         run: |
           set -euo pipefail
-          python -I -B .github/scripts/aia-comparison.py | tee "$RUNNER_TEMP/aia-comparison.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: ${{ !cancelled() }}
-        with:
-          name: synthetic-macos-issuer-xcode27
-          path: ${{ runner.temp }}/aia-comparison.json
-          if-no-files-found: error
-          retention-days: 14
+          [[ "$(git rev-parse HEAD)" == "$MRK_DIAGNOSTIC_COMMIT" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$MRK_DIAGNOSTIC_TREE" ]]
+          ruby_executable="$(command -v ruby)"
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
+          sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
+            "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
+            --platform macos --source "$GITHUB_WORKSPACE" \
+            --python "$MRK_PYTHON" --ruby "$ruby_executable" \
+            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
+            --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
+            --commit "$MRK_DIAGNOSTIC_COMMIT" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
+            --scope native-python --summary "$GITHUB_STEP_SUMMARY"
