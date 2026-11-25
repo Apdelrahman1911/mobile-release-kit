@@ -7,6 +7,7 @@ from pathlib import Path
 import plistlib
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -47,13 +48,15 @@ def digest(path):
     return value.hexdigest()
 
 
-def run(label, args, *, timeout=120, output=None, cwd=None, combined=False):
+def run(label, args, *, timeout=120, output=None, cwd=None, combined=False, public_failure=False):
     try:
         result = subprocess.run(args, stdout=output if output is not None else subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=timeout, cwd=cwd)
     except subprocess.TimeoutExpired:
         raise RuntimeError(label + " timed out") from None
-    need(result.returncode == 0, f"{label} failed ({result.returncode})")
+    if result.returncode != 0:
+        detail = (result.stderr or b"").decode(errors="replace")[-500:] if public_failure else ""
+        raise RuntimeError(f"{label} failed ({result.returncode}) {detail}")
     return (result.stdout or b"") + (result.stderr if combined else b"")
 
 
@@ -109,7 +112,10 @@ def sign(root, p12, password, p8):
         secret = secrets.token_hex(32)
         cert_file = private / "application.p12"
         cert_file.write_bytes(base64.b64decode(p12, validate=True))
-        search_list = run("read keychain search list", ["/usr/bin/security", "list-keychains", "-d", "user"])
+        base = ["/usr/bin/security", "list-keychains", "-d", "user"]
+        search_list = run("read keychain search list", base)
+        default = ["/usr/bin/security", "default-keychain", "-d", "user"]
+        original_default = run("read default keychain", default)
         run("create ephemeral keychain", ["/usr/bin/security", "create-keychain", "-p", secret, keychain])
         try:
             run("limit the ephemeral unlock interval", ["/usr/bin/security", "set-keychain-settings",
@@ -124,12 +130,18 @@ def sign(root, p12, password, p8):
                                                          "codesigning", keychain])
             need(len(re.findall(rb"(?m)^\s*\d+\) " + IDENTITY.encode() + rb' "Developer ID Application:', identities)) == 1,
                  "pinned Developer ID identity unavailable")
-            run("sign outer image", ["/usr/bin/codesign", "--sign", IDENTITY, "--keychain", keychain,
-                                     "--timestamp", "--identifier", IDENTIFIER, str(image)])
+            run("select only the ephemeral keychain", [*base, "-s", keychain])
+            image.chmod(0o600)
+            run("sign outer image", ["/usr/bin/codesign", "--sign", IDENTITY,
+                                     "--timestamp", "--identifier", IDENTIFIER, str(image)], public_failure=True)
         finally:
-            run("retire ephemeral keychain", ["/usr/bin/security", "delete-keychain", keychain])
-        need(run("verify original keychain search list", ["/usr/bin/security", "list-keychains", "-d", "user"])
-             == search_list, "ephemeral keychain search cleanup mismatch")
+            try:
+                run("restore original keychain search list", [*base, "-s", *shlex.split(search_list.decode())])
+            finally:
+                run("retire ephemeral keychain", ["/usr/bin/security", "delete-keychain", keychain])
+        need(run("verify original keychain search list", base) == search_list
+             and run("verify original default keychain", default) == original_default,
+             "ephemeral keychain search cleanup mismatch")
         profile = json.loads(Path("desktop/packaging/macos-notary-service.json").read_bytes())
         need(profile["mode"] == "app-store-connect-team-key" and profile["teamId"] == TEAM
              and re.fullmatch(r"[A-Z0-9]{10}", profile["keyId"])
