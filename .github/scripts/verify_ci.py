@@ -1155,7 +1155,7 @@ def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
         "MOBILE_RELEASE_TEST_PYTHON": str(paths.source_python),
     }
     if platform == "macos":
-        env["DEVELOPER_DIR"] = "/Applications/Xcode_26.3.app/Contents/Developer"
+        env["DEVELOPER_DIR"] = "/Applications/Xcode_27.1.app/Contents/Developer"
     if paths.java_home is not None:
         env["JAVA_HOME"] = str(paths.java_home)
     return tuple(sorted(env.items()))
@@ -1865,9 +1865,9 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("NATIVE_PYTHON_INVENTORY")
         details.update(tests=len(expected), completed=list(observed))
     elif step.parser == "xcode":
-        if stdout.strip().splitlines() != ["Xcode 26.3", "Build version 17C529"]:
+        if stdout.strip().splitlines() != ["Xcode 27.1", "Build version 27A9275"]:
             raise VerificationError("XCODE_VERSION")
-        details["version"] = "Xcode26.3/17C529"
+        details["version"] = "Xcode27.1/27A9275"
     elif step.parser == "check":
         lines = [line[len("MRK_CHECK_RESULT="):] for line in stdout.splitlines() if line.startswith("MRK_CHECK_RESULT=")]
         limit = (512 if step.id == "python-full" else 256) * 1024
@@ -4064,7 +4064,7 @@ def retain_native_header(paths: Paths, session, checks, platform: str, state: Na
     # GCC's assembler/linker must never search mutable work, venv or Bundler
     # directories. No CPATH/GCC_EXEC_PREFIX/COMPILER_PATH or arbitrary -B/-I.
     env = {"PATH": "/usr/bin:/bin"} if platform == "linux" else {
-        "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+        "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
     }
     version_argv = (compiler, "--version") if platform == "linux" else (compiler, "--no-default-config", "--version")
     version = original_native_capture(session, version_argv, paths, rows, "compiler-version",
