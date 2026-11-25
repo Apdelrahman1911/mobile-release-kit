@@ -16,7 +16,7 @@ import test_macos_store_staging as store_staging
 
 
 @contextlib.contextmanager
-def fixture(*, target=TOOL.ARM_TARGET):
+def fixture(*, target=TOOL.ARM_TARGET, command_bytecode=False):
     assert os.geteuid() != 0, "Run filesystem cases as a nonroot test user"
     source = Path(__file__).resolve().parents[2]
     helper = (source / TOOL.CURRENT_HELPER_SOURCE).read_bytes()
@@ -46,6 +46,9 @@ def fixture(*, target=TOOL.ARM_TARGET):
                             "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py",
                             "apple_provisioning_bootstrap.py"}
         inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | store_bootstraps})
+        if command_bytecode:
+            for name in TOOL.CURRENT_COMMAND_BYTECODE_FILES:
+                inputs.setdefault("src/" + name, b"# inert command source, never executed\n")
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +71,10 @@ def fixture(*, target=TOOL.ARM_TARGET):
             path.chmod(mode)
         supplier = {"python/bin/python3": (b"INERT PYTHON, NEVER EXECUTED\n", 0o555),
                     "python/licenses/notice.txt": (b"inert supplier notice\n", 0o444)}
+        if command_bytecode:
+            stdlib = Path(os.__file__).parent
+            supplier.update({TOOL.CURRENT_STDLIB_ROOT + name: ((stdlib / name).read_bytes(), 0o444)
+                             for name in TOOL.CURRENT_COMMAND_STDLIB_BYTECODE_FILES})
         python_root = root / "python-input"
         python_root.mkdir()
         receipt = root / "supplier.json"

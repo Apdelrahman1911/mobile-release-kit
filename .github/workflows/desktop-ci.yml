@@ -43,6 +43,15 @@ jobs:
         env:
           PYTHONPATH: src:tests:tests/desktop
         run: |
-          python -B -m unittest -v test_macos_store_composition test_macos_store_consumer test_macos_store_paths \
+          python -B -m unittest -v test_macos_store_paths \
             test_runtime_preparation.RuntimePreparationTests.test_macos_trust_projection_removes_only_the_reviewed_roots \
             test_runtime_preparation.RuntimePreparationTests.test_macos_store_ruby_pin_preserves_the_locked_gems
+      - name: Set up the pinned macOS DATA compiler
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Test signed Store composition with the production bytecode compiler
+        working-directory: .
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: python -B -m unittest -v test_macos_store_composition test_macos_store_consumer
