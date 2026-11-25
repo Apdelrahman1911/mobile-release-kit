@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 
 
 TARGET = "aarch64-apple-darwin"
@@ -173,8 +174,95 @@ def verify_frozen(media, source, tree, build_run, carrier_run):
     names = image_names(value["version"])
     need({path.name for path in media.iterdir()} == {*names, MANIFEST, CHECKSUMS}, "release-asset-roster")
     need(value["images"] == {name: record(media / name) for name in names}, "release-image-digests")
-    need((media / CHECKSUMS).read_bytes() == checksum_bytes(media, (*names, MANIFEST)), "release-checksums")
+    expected = checksum_bytes(media, (*names, MANIFEST))
+    need(record(media / CHECKSUMS, DESCRIPTOR_LIMIT)["sha256"] == hashlib.sha256(expected).hexdigest(), "release-checksums")
+    need(set(value["packages"]) == {"Install.pkg", "Remove.pkg"}, "release-package-roster")
+    for package in value["packages"].values():
+        need(set(package) == {"bytes", "sha256", "descriptorSha256", "signatureSha256",
+                              "developerIdApplicationLeafSha256"}
+             and type(package["bytes"]) is int and 0 < package["bytes"] <= IMAGE_LIMIT
+             and all(re.fullmatch(r"[0-9a-f]{64}", digest) for key, digest in package.items() if key != "bytes"),
+             "release-package-record")
     return value
+
+
+def release_selection(value):
+    """Select the qualified predecessor and actual same-source Actions outputs."""
+    repository = "Apdelrahman1911/mobile-release-kit"
+    source, tree = value["sourceCommit"], value["sourceTree"]
+    workflow = ".github/workflows/desktop-macos-installed.yml"
+
+    def api(path):
+        return json.loads(run("gh", "api", f"repos/{repository}/{path}", timeout=45))
+
+    def artifact(run_id, attempt, name):
+        original = api(f"actions/runs/{run_id}/attempts/{attempt}")
+        need(original["id"] == int(run_id) and original["run_attempt"] == int(attempt)
+             and original["head_sha"] == source and original["head_commit"]["tree_id"] == tree
+             and original["head_branch"] == "main" and original["event"] == "workflow_dispatch"
+             and original["path"] == workflow and original["repository"]["full_name"] == repository,
+             "release-selection-run")
+        page = api(f"actions/runs/{run_id}/artifacts?per_page=100")
+        need(len(page["artifacts"]) == page["total_count"] <= 100, "release-selection-page")
+        matches = [item for item in page["artifacts"] if item["name"] == name and item["expired"] is False]
+        need(len(matches) == 1 and matches[0]["workflow_run"]["head_sha"] == source
+             and matches[0]["workflow_run"]["id"] == int(run_id), "release-selection-artifact")
+        return str(matches[0]["id"])
+
+    build, attempt = value["buildRun"], value["buildAttempt"]
+    carrier, carrier_attempt = value["carrierRun"], value["carrierAttempt"]
+    prepared = artifact(build, attempt, f"mobile-release-kit-macos26-{TARGET}-prepared-{source}-{build}-{attempt}")
+    transport = artifact(carrier, carrier_attempt, f"candidate-local-carrier-{source}-{attempt}-{source}-{carrier}-{carrier_attempt}")
+    remove = artifact(carrier, carrier_attempt, f"candidate-local-remove-{source}-{source}-{carrier}-{carrier_attempt}")
+    remove_name = image_names(value["version"])[1]
+    return dict(schemaVersion=1,
+        next=dict(runId=build, artifactId=prepared, carrierArtifactId=transport,
+                  packageSha256=value["packages"]["Install.pkg"]["sha256"],
+                  packageVersion=value["version"], release=value["release"]),
+        removal=dict(runId=carrier, artifactId=remove, imageSha256=value["images"][remove_name]["sha256"]),
+        previous=dict(runId="45599087818", artifactId="15020241911", carrierArtifactId="15021626521",
+                      packageSha256="0b0b77dc8168194622d230af72e75d112458ff3831130fb069d4a06d0a2cbab2",
+                      packageVersion="0.2.12", release="macos26-arm64-desktop-18"),
+        previousRemoval=dict(runId="45612131054", artifactId="15021938507",
+                             imageSha256="c04b2eb96e431f44ced32bfdc276b6b813d1155b45928ebcc7f1bc9c2ddaae6e"))
+
+
+def preflight():
+    inputs = Path("desktop/macos-installed-inputs")
+    build = json_data(inputs / "build-release.json")
+    version = build["packageVersion"]
+    image_names(version)
+    versions = [json_data(Path(path))["version"] for path in (
+        "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json")]
+    versions.append(tomllib.loads(Path("desktop/src-tauri/Cargo.toml").read_text())["package"]["version"])
+    for plist in (inputs / "Info.plist", inputs / "EntryInfo.plist",
+                  Path("desktop/native/macos-applications-launcher/Info.plist")):
+        values = plistlib.loads(plist.read_bytes())
+        versions.extend(values[key] for key in ("CFBundleVersion", "CFBundleShortVersionString"))
+        need(values["LSMinimumSystemVersion"] == "26.0", "release-preflight-minimum-os")
+    need(all(item == version for item in versions), "release-preflight-version-projection")
+    notices = json_data(inputs / "notices/third-party-inputs.json", 1024 * 1024)
+    for path, digest in notices["lockfiles"].items():
+        need(record(Path(path), 4 * 1024 * 1024)["sha256"] == digest, "release-preflight-notice-lockfile")
+    for certificate in (CERT, Path("desktop/packaging/macos-installer-certificates/leaf.der")):
+        run("/usr/bin/openssl", "x509", "-inform", "DER", "-in", str(certificate), "-noout", "-checkend", "86400")
+
+    tools = json_data(inputs / "github-tool-signing.json")["tools"]
+    python = json_data(inputs / "python-signed-runtime-binding.json")["targets"][TARGET]
+    store = json_data(inputs / "store-signed-retained-transport.json")["targets"][TARGET]["transport"]
+    support = Path(".github/actions/macos-retained-android-support/action.yml").read_text()
+    supplier = Path(".github/workflows/desktop-macos-update-parts.yml").read_text()
+    support_id, = re.findall(r"artifact-ids: '([1-9][0-9]+)'", support)
+    supplier_id = re.search(r"supplier_artifact: '([1-9][0-9]+)'", supplier)[1]
+    artifacts = [tools[key][TARGET]["signed"]["artifactId"] for key in ("history-provider", "github-seal")]
+    artifacts.extend((python["signingArtifactId"], store["artifactId"], support_id, supplier_id,
+                      "15020241911", "15021626521", "15021938507"))
+    for artifact in artifacts:
+        need(re.fullmatch(r"[1-9][0-9]{0,19}", artifact), "release-preflight-artifact-input")
+        value = json.loads(run("gh", "api", "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/" + artifact))
+        need(value["id"] == int(artifact) and value["expired"] is False
+             and re.fullmatch(r"sha256:[0-9a-f]{64}", value["digest"]), "release-preflight-artifact")
+        print(f"Available immutable input {artifact} through {value['expires_at']}")
 
 
 def freeze(work, media):
@@ -219,6 +307,7 @@ def freeze(work, media):
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("preflight")
     make = commands.add_parser("freeze")
     make.add_argument("work", type=Path)
     make.add_argument("media", type=Path)
@@ -228,11 +317,17 @@ def main():
     verify.add_argument("--tree", required=True)
     verify.add_argument("--build-run", required=True)
     verify.add_argument("--carrier-run", required=True)
+    verify.add_argument("--selection", type=Path)
     args = parser.parse_args()
-    if args.command == "freeze":
+    if args.command == "preflight":
+        preflight()
+    elif args.command == "freeze":
         freeze(args.work, args.media)
     else:
-        verify_frozen(args.media, args.source, args.tree, args.build_run, args.carrier_run)
+        value = verify_frozen(args.media, args.source, args.tree, args.build_run, args.carrier_run)
+        if args.selection is not None:
+            with args.selection.open("xb") as stream:
+                stream.write(dump(release_selection(value)))
 
 
 if __name__ == "__main__":

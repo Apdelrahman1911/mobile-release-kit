@@ -267,7 +267,15 @@ LINUX_MACOS_SKIPS = frozenset({
 })
 TOOLING_FILES = (
     "Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb",
-    "fastlane/apple_store.rb", "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb",
+    "fastlane/apple_store.rb", "fastlane/apple_provisioning.rb",
+    "fastlane/apple_provisioning_bundle_registration.rb", "fastlane/apple_provisioning_bundle_read.rb",
+    "fastlane/apple_provisioning_profile_read.rb", "fastlane/apple_provisioning_p12.rb",
+    "fastlane/apple_provisioning_p12_assemble.rb", "fastlane/apple_provisioning_signing.rb",
+    "fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
+    "fastlane/apple_distribution_certificate_policy.rb", "fastlane/apple_distribution_certificate_prepare.rb",
+    "fastlane/apple_distribution_certificate_verify.rb", "fastlane/apple_provisioning_certificate_issuance.rb",
+    "fastlane/apple_store_versions.rb", "fastlane/android_store_versions.rb", "fastlane/play_edit_recovery.rb",
+    "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb",
     "fastlane/apple_create_retry.rb", "fastlane/ios_upload_validation.rb",
     "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
     "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
@@ -1501,7 +1509,9 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
     tooling, _ = _tree(tooling_root, deadline=deadline)
     _require(package == expected_package and directories == PACKAGE_DIRECTORIES
              and set(tooling) == set(TOOLING_FILES)
-             and set(REQUIRED_TOOLING_FILES) == set(TOOLING_FILES)
+             # The installed bundle must also carry the hosted Play recovery
+             # helper. External tooling may omit it until that route is used.
+             and set(REQUIRED_TOOLING_FILES) | {"fastlane/play_edit_recovery.rb"} == set(TOOLING_FILES)
              and all(tooling[name] == _read_regular(source_root / name, deadline=deadline) for name in TOOLING_FILES),
              "WHEEL_INSTALLED_RESOURCE_BYTES")
     distribution = importlib.metadata.distribution("mobile-release-kit")

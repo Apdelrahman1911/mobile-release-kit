@@ -309,8 +309,12 @@ class CandidateConsumerTests(unittest.TestCase):
         self.assertTrue(line.startswith(prefix) and line.endswith(suffix))
         routing = json.loads(line[len(prefix):-len(suffix)])
         self.assertEqual(routing, {target: row['source'] for target, row in removal.items()})
-        self.assertEqual(json.loads((ROOT / 'desktop/macos-installed-inputs/update-predecessors.json').read_bytes()),
-                         {'schemaVersion': 1, 'mode': 'unconfigured'})
+        update = json.loads((ROOT / 'desktop/macos-installed-inputs/update-predecessors.json').read_bytes())
+        self.assertEqual((update['schemaVersion'], update['mode'], set(update['targets'])),
+                         (1, 'configured', {'aarch64-apple-darwin'}))
+        selected_update = update['targets']['aarch64-apple-darwin']
+        self.assertEqual(selected_update['source'], selected_update['release']['sourceCommit'])
+        self.assertEqual(selected_update['package']['sha256'], selected_update['release']['packageSha256'])
         for purpose in C.PURPOSES:
             selected = C.REMOVAL_SELECTION_PATH if purpose == 'acquire-removal' else C.SELECTION_PATH
             for target in old:
@@ -789,6 +793,7 @@ class CandidateConsumerTests(unittest.TestCase):
             fresh_directory=mock.Mock(side_effect=AssertionError('input published before guard')),
             clock=SimpleNamespace(finality=False))
         owner.purpose = 'acquire'
+        owner._CandidateResume__retained_observer = False
         owner.prepare_readback = mock.Mock(side_effect=lambda result, inventory: C.CandidateResume.prepare_readback(owner, result, inventory))
         with ExitStack() as patches:
             patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
@@ -1042,7 +1047,8 @@ class CandidateConsumerTests(unittest.TestCase):
         try:
             donor = R.load_module('_mrk_p0_originals', ROOT / 'desktop/tools/macos_e2_native_fixture.py',
                 (ROOT / 'desktop/tools/macos_e2_native_fixture.py').read_bytes())
-            with tempfile.TemporaryDirectory() as name, mock.patch.object(C, 'HELPER_ROOT', ROOT):
+            with tempfile.TemporaryDirectory(prefix='mrk-system-tool-fixture-', dir=ROOT) as name, \
+                    mock.patch.object(C, 'HELPER_ROOT', ROOT):
                 path = Path(name) / 'tool'; path.write_bytes(b'inert tool data'); path.chmod(0o600)
                 originals = []
                 for missing in (False, True):
@@ -1333,6 +1339,8 @@ class PredecessorInstallTests(unittest.TestCase):
             owner.stager, owner.signing_identity = stage, row['signingIdentity']
             owner.point = mock.Mock(); owner.admit_resources = mock.Mock(); owner._resource_inputs = (0,0)
             owner.allocation_budget = mock.Mock()
+            if not predecessor:
+                owner.clock = SimpleNamespace(finality=False)
             mounted, entries = object(), {}
             def acquired(book, operation, path, *args, **kwargs):
                 self.assertIs(book, mounted)

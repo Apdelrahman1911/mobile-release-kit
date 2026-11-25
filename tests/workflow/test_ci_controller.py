@@ -88,8 +88,8 @@ def minitest_fixture(identifiers):
 _RUBY_PARTITION_FIXTURES = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
     ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
-    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
-    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
+    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 35, 26, 300, "IosUploadValidationTest"),
+    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 37, 28, 300, "AndroidUploadValidationTest"),
 )
 
 
@@ -1294,10 +1294,10 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
                           controller.SOURCE_MAX_TOTAL_BYTES), (4128, 32 * 1024**2, 160 * 1024**2))
         self.assertEqual(controller.read_regular.__kwdefaults__["maximum"], 8 * 1024**2)
         self.assertEqual(controller.DISK_RESERVE, 4 * 1024**3 + 512 * 1024**2)
-        empty_leaves = {str(i): {"bytes": 0} for i in range(2048)}
+        empty_leaves = {str(i): {"bytes": 0} for i in range(4128)}
         self.assertEqual(controller.source_inventory_bytes(empty_leaves), 0)
-        full = {str(i): {"bytes": 32 * 1024**2} for i in range(4)}
-        self.assertEqual(controller.source_inventory_bytes(full), 128 * 1024**2)
+        full = {str(i): {"bytes": 32 * 1024**2} for i in range(5)}
+        self.assertEqual(controller.source_inventory_bytes(full), 160 * 1024**2)
         invalid = [(None, "INVENTORY"), ({}, "INVENTORY"),
             (dict(empty_leaves, extra={"bytes": 0}), "INVENTORY"),
             (dict(full, extra={"bytes": 1}), "TOTAL")]
@@ -1359,7 +1359,7 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
                         controller.snapshot_source(checkout, overflow, commit, deadline=2.0)
                 self.assertEqual([path.name for path in overflow.iterdir()], ["0"])
                 # Count is rejected before source reads, reservation or destination allocation.
-                rows = b"".join(f"100644 blob {blob}\t{i}\0".encode() for i in range(2049))
+                rows = b"".join(f"100644 blob {blob}\t{i}\0".encode() for i in range(4129))
                 too_many = root / "too-many"
                 calls = reserve.call_count
                 with patch.object(controller, "read_regular", side_effect=AssertionError("must refuse before reading")):
@@ -2147,8 +2147,8 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-apple_production": ("test_apple_production.rb", {"AppleProductionTest", "AppleCreateRetryContractTest"}, 47),
             "ruby-apple_production_lane": ("test_apple_production_lane.rb", {"AppleProductionLaneTest"}, 2),
             "ruby-apple_asset_upload": ("test_apple_asset_upload.rb", {"AppleAssetUploadTest"}, 8),
-            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", {"IosUploadValidationTest"}, 32),
-            "ruby-android_upload_validation": ("test_android_upload_validation.rb", {"AndroidUploadValidationTest"}, 32),
+            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", {"IosUploadValidationTest"}, 35),
+            "ruby-android_upload_validation": ("test_android_upload_validation.rb", {"AndroidUploadValidationTest"}, 37),
             "ruby-workflow-yaml": ("test_workflow_yaml.rb", {"WorkflowYamlStructureTest"}, 1),
             "ruby-packaged-capture-source": ("test_installed_ruby_capture.rb", {"PackagedRubyCaptureTest"}, 6),
             "ruby-packaged-capture-wheel": ("test_installed_ruby_capture.rb",

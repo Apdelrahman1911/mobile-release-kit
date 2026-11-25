@@ -16,6 +16,9 @@ final class NormalAppUITests: XCTestCase {
     private enum RequireCheck: String { case condition, singleton, actionable }
     private enum ProjectRequireMethod: String {
         case pathFields = "testSyntheticProjectPathFields"
+        case guidedWorkspace = "testCurrentGuidedWorkspaceAndCli"
+        case prepareToQuit = "testCurrentPrepareToQuit"
+        case guidedRecovery = "testCurrentSavedVersionRecovery"
         case androidSourceSelection = "testSyntheticProjectAndroidSourceSelection"
         case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
         case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
@@ -25,6 +28,10 @@ final class NormalAppUITests: XCTestCase {
         case savedOfflineChecks = "testSyntheticProjectSavedOfflineChecks"
         case emptyBuildInputInspection = "testSyntheticProjectEmptyBuildInputInspection"
         case androidCandidateInputs = "testSyntheticProjectAndroidCandidateInputs"
+
+        var diagnosesLaunch: Bool {
+            self == .pathFields || self == .guidedWorkspace || self == .prepareToQuit || self == .guidedRecovery
+        }
     }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
@@ -96,13 +103,14 @@ final class NormalAppUITests: XCTestCase {
             case artifactValue, quitCancel, postCancel, quitConfirm, termination, terminal
         }
         private let engineeringDiagnostic: Bool
+        private let projectDiagnostic: Bool
         private var engineeringPhase: EngineeringPhase = .admission
         func recordEngineeringPhase(_ phase: EngineeringPhase) {
             // Last ENTERED fixed step only; never completion or a new observation.
             if engineeringDiagnostic && firstFailure == nil { engineeringPhase = phase }
         }
         init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
-             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false) throws {
+             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false, projectDiagnostic: Bool = false) throws {
             let now = ProcessInfo.processInfo.systemUptime
             guard now.isFinite, now >= 0, [androidPositive, iosUnsigned, iosRecovery].filter({ $0 }).count <= 1,
                   (iosRecovery ? seconds == 525 : ((androidPositive || iosUnsigned) ? seconds == 900 : (seconds == 60 || seconds == 300))),
@@ -112,12 +120,16 @@ final class NormalAppUITests: XCTestCase {
             last = now
             deadline = now + seconds
             self.engineeringDiagnostic = engineeringDiagnostic
+            self.projectDiagnostic = projectDiagnostic
         }
         func fail(_ reason: String, line: UInt = #line) -> Refusal {
             if firstFailure == nil {
                 firstFailure = reason
                 if engineeringDiagnostic && line >= 1 && line <= 65535 {
                     print("MRK_MACOS_ENGINEERING_FIRST_FAILURE=v1;line=\(line);phase=\(engineeringPhase.rawValue)")
+                }
+                if projectDiagnostic && line >= 1 && line <= 65535 {
+                    print("MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=\(line)")
                 }
             }
             return .condition(firstFailure!)
@@ -597,9 +609,21 @@ final class NormalAppUITests: XCTestCase {
                     && !removalQuitObserved && removalChannel == nil,
                     "removal harness channel is exclusive to its fixed case")
         let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,
-                                  iosRecovery: iosRecovery, engineeringDiagnostic: engineeringDiagnostic)
+                                  iosRecovery: iosRecovery, engineeringDiagnostic: engineeringDiagnostic,
+                                  projectDiagnostic: projectRequireDiagnosticMethod?.diagnosesLaunch == true)
         caseClock = clock
         journeyDeadline = clock.deadline
+    }
+
+    private enum ProjectLaunchStage: String {
+        case account, identity, proxies, gateOpen = "gate-open", gateFree = "gate-free",
+             request, gateHeld = "gate-held", owner, window, renderer, dashboard
+    }
+
+    @MainActor private func projectLaunchStage(_ stage: ProjectLaunchStage) {
+        if projectRequireDiagnosticMethod?.diagnosesLaunch == true {
+            print("MRK_NORMAL_PROJECT_LAUNCH_STAGE=\(stage.rawValue)")
+        }
     }
 
     @MainActor private func launchOrdinaryApplication() throws -> XCUIApplication {
@@ -608,18 +632,24 @@ final class NormalAppUITests: XCTestCase {
         try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved && !removalQuitObserved
                     && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,
                     "a new ordinary launch requires empty active custody and no engineering profile")
+        projectLaunchStage(.proxies)
         let outer = XCUIApplication(url: OrdinaryLaunch.outerURL)
         let monitor = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         try require(outer.state == .notRunning && monitor.state == .notRunning,
                     "occupied outer or payload must not be launched, adopted or terminated")
         let gate = GateObservation()
         entryGateObservation = gate
+        projectLaunchStage(.gateOpen)
         try gate.openOnce()
+        projectLaunchStage(.gateFree)
         try gate.probe(busy: false)
         let owner = OrdinaryLaunch(clock: clock)
         originalLaunch = owner // Custody before the one fallible request.
+        projectLaunchStage(.request)
         try owner.requestAndAwait()
+        projectLaunchStage(.gateHeld)
         try gate.probe(busy: true)
+        projectLaunchStage(.owner)
         try owner.healthy()
         // This URL proxy is monitoring/UI only, NOT a public original-PID attach.
         // Never launch, activate, open or terminate it.
@@ -1349,10 +1379,12 @@ final class NormalAppUITests: XCTestCase {
         }
         switch profile {
         case .currentCandidateOrdinary:
-            try require(applicationSource != harnessSource && applicationSource != String(repeating: "0", count: 40)
+            let sameFrozenSource = context["MRK_NORMAL_UI_SAME_FROZEN_SOURCE"] == "true"
+            try require((sameFrozenSource ? applicationSource == harnessSource : applicationSource != harnessSource)
+                        && applicationSource != String(repeating: "0", count: 40)
                         && harnessSource != String(repeating: "0", count: 40)
                         && context["MRK_NORMAL_UI_CURRENT_ORDINARY"] == "current-candidate-ordinary-only-v1",
-                        "current ordinary requires distinct candidate and harness sources")
+                        "current ordinary candidate and harness source relationship differs")
         case .currentCandidateIOSPending:
             try require(Self.iosPendingConsumerContext(context), "iOS pending consumer profile required")
         case .currentCandidateAndroid:
@@ -5073,13 +5105,17 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func stage(_ name: String, _ body: () throws -> Void) throws {
         journeyStage = name
         _ = try remaining(300)
-        print("MRK_NORMAL_PROJECT_STAGE=\(name);result=started")
+        func report(_ result: String, suffix: String = "") {
+            let epochMillis = Int64(Date().timeIntervalSince1970 * 1000)
+            print("MRK_NORMAL_PROJECT_STAGE=\(name);result=\(result);epochMillis=\(epochMillis)\(suffix)")
+        }
+        report("started")
         do { try body() }
         catch {
-            print("MRK_NORMAL_PROJECT_STAGE=\(name);result=failed;laterStages=not-run")
+            report("failed", suffix: ";laterStages=not-run")
             throw error
         }
-        print("MRK_NORMAL_PROJECT_STAGE=\(name);result=passed")
+        report("passed")
     }
     @MainActor private func named(_ root: XCUIElement, _ label: String) -> XCUIElementQuery {
         root.descendants(matching: .any).matching(identifier: label)
@@ -5426,9 +5462,31 @@ final class NormalAppUITests: XCTestCase {
         try reveal(ready, in: renderer, line: line); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
-    @MainActor private func nativeSheet(_ window: XCUIElement, title: String,
+    @MainActor private func waitForGuidedProjectPicker(_ window: XCUIElement) throws -> XCUIElement {
+        guard let clock = caseClock, let journeyDeadline else {
+            throw Refusal.condition("original project picker deadline missing")
+        }
+        let end = min(try clock.end(within: 5), journeyDeadline)
+        let title = "Choose a mobile project folder"
+        // XCTest's predicate waiter can report timeout even when the original
+        // window has one matching sheet. Observe that sheet directly and
+        // check the same deadline again after the original AX calls return.
+        while true {
+            try checkOriginalOwners()
+            _ = try clock.remaining(1, before: end)
+            if window.sheets.count == 1 {
+                let sheet = window.sheets.element(boundBy: 0)
+                let matches = sheet.exists && (sheet.label == title || sheet.staticTexts.matching(identifier: title).count == 1)
+                _ = try clock.remaining(1, before: end)
+                if matches { return sheet }
+            }
+            try clock.progress(until: end)
+        }
+    }
+    @MainActor private func nativeSheet(_ window: XCUIElement, title: String, timeout: TimeInterval = 5,
+                                        failures: [String] = [],
                                         line: UInt = #line) throws -> XCUIElement {
-        let sheet = try waitElement(window.sheets, in: window, line: line)
+        let sheet = try waitElement(window.sheets, in: window, timeout: timeout, failures: failures, line: line)
         if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {
             diagnostic(sheet)
             if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
@@ -5651,8 +5709,10 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func admittedJourneyApplication(profile: SourceProfile = .sameBuild) throws -> (URL, HostedAccount) {
+        projectLaunchStage(.account)
         let account = try admitHostedAccount(profile)
 
+        projectLaunchStage(.identity)
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop.entry"
@@ -5664,14 +5724,17 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func launchForJourney(profile: SourceProfile = .sameBuild,
+                                             guided: Bool = false,
                                              diagnosticOrdinal: UInt8? = nil) throws -> (XCUIApplication, XCUIElement, XCUIElement) {
         _ = try admittedJourneyApplication(profile: profile) // Defaults remain exact same-build.
         let app = try launchOrdinaryApplication()
+        projectLaunchStage(.window)
         try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
         // Shared journey bounded renderer readiness; ambiguity remains terminal.
+        projectLaunchStage(.renderer)
         let rendererQuery = window.webViews
         let rendererCount = rendererQuery.count
         if rendererCount != 1 {
@@ -5687,7 +5750,42 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End shared journey bounded renderer readiness.
-        try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
+        projectLaunchStage(.dashboard)
+        if guided {
+            try require(profile == .currentCandidateOrdinary, "guided observation requires the current signed candidate")
+            let label = projectRequireDiagnosticMethod == .prepareToQuit ? "Build tools" : "Choose project folder"
+            do {
+                _ = try waitElement(controls(renderer, [.button], label: label), in: renderer, enabled: true,
+                                    timeout: 24, failures: Self.guidedWorkspaceFailures)
+            } catch {
+                if projectRequireDiagnosticMethod == .guidedRecovery {
+                    let category: String
+                    if case Refusal.condition(let reason) = error {
+                        switch reason {
+                        case "original case or stage deadline elapsed": category = "deadline"
+                        case "case clock moved backwards or became unavailable", "case clock unavailable": category = "clock"
+                        case "ordinary launch work is closed": category = "launch-work-closed"
+                        case "original running reference is not the fixed payload": category = "payload-identity"
+                        case let value where value.contains("callback"): category = "callback"
+                        case let value where value.contains("owner"): category = "owner"
+                        default: category = "other"
+                        }
+                    } else { category = "untyped" }
+                    let remaining = (journeyDeadline ?? 0) - ProcessInfo.processInfo.systemUptime
+                    let budget = !remaining.isFinite ? "unavailable" : remaining <= 0 ? "elapsed"
+                                 : remaining < 5 ? "under-five" : "available"
+                    print("MRK_RELEASE_RECOVERY_LAUNCH_REFUSAL=reason=\(category);budget=\(budget)")
+                }
+                if projectRequireDiagnosticMethod == .guidedWorkspace && (try? remaining(1)) != nil {
+                    let button = controls(renderer, [.button], label: label)
+                    if button.count == 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=dashboard-button-absent") }
+                    else { print("MRK_RELEASE_CLI_ACCESS_STATE=dashboard-button-present") }
+                }
+                throw error
+            }
+        } else {
+            try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
+        }
         return (app, window, renderer)
     }
 
@@ -6299,6 +6397,316 @@ final class NormalAppUITests: XCTestCase {
         // Source selection is not supplier inspection, protected copy, or an Android build.
         try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
+    private static let guidedWorkspaceFailures = ["Maximum update depth", "Minified React error", "Something went wrong"]
+
+    @MainActor private func checkInstalledCliStatus(_ expected: Int32?) throws {
+        guard let clock = caseClock else { throw Refusal.condition("CLI observation requires the original case clock") }
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("mrk-status-" + UUID().uuidString)
+        try require(FileManager.default.createFile(atPath: outputURL.path, contents: nil,
+                                                   attributes: [.posixPermissions: 0o600]), "CLI output file unavailable")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let output = try FileHandle(forUpdating: outputURL)
+        defer { try? output.close() }
+        let child = Process()
+        child.executableURL = OrdinaryLaunch.outerURL.appendingPathComponent("Contents/MacOS/mrk")
+        child.arguments = ["status", "--json"]
+        child.standardOutput = output
+        child.standardError = output
+        let end: TimeInterval
+        if expected == nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard let journeyDeadline, clock.observationAllowed(now, before: journeyDeadline) else { return }
+            end = min(journeyDeadline, now + 8)
+        } else {
+            end = try clock.end(within: 30)
+        }
+        try child.run()
+        defer { if child.isRunning { child.terminate() } }
+        while child.isRunning { try clock.progress(until: end, cleanup: expected == nil) }
+        _ = try clock.remaining(1, before: end, cleanup: expected == nil)
+        try output.seek(toOffset: 0)
+        let body = try output.read(upToCount: 16385) ?? Data()
+        try require(!body.isEmpty && body.count <= 16384, "original CLI status output bounds exceeded")
+        let payload = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        let exit = child.terminationReason == .exit ? child.terminationStatus : -1
+        guard let expected else {
+            print("MRK_RELEASE_CLI_POST_REFUSAL_STATUS=exit=\(exit);json=\(payload != nil ? 1 : 0)")
+            return
+        }
+        print("MRK_RELEASE_CLI_STATUS=expected=\(expected);exit=\(exit)")
+        try require(exit == expected && payload != nil, "original installed CLI status differed")
+        if expected == 0 {
+            try require(payload?["error"] == nil, "original installed CLI granted response contained an error")
+        } else if expected == 3 {
+            try require(String(decoding: body, as: UTF8.self).contains("CLI / AI access"), "installed CLI guidance is missing")
+        } else {
+            try require(payload?["error"] as? String == "access_denied", "the running service did not return its explicit revoked denial")
+        }
+    }
+
+    @MainActor private func recordCliAccessObservation(_ renderer: XCUIElement) {
+        try? checkInstalledCliStatus(nil)
+        for (kind, label) in [
+            ("off", "Off at last check"), ("granted", "1 project was allowed at last check"), ("checking", "Checking access…"),
+            ("allowing", "Allowing the selected project…"), ("revoking", "Turning off access…"), ("unknown", "Access is not confirmed"),
+            ("retired", "Finishing an earlier access request…"), ("unchecked", "Access not checked"),
+            ("needs-check", "Access needs another check"),
+        ] {
+            guard let caseClock, let journeyDeadline,
+                  caseClock.observationAllowed(ProcessInfo.processInfo.systemUptime, before: journeyDeadline) else { break }
+            let observation = renderer.staticTexts.matching(NSPredicate(format: "label == %@ OR title == %@ OR value == %@",
+                                                                          label, label, label))
+            if observation.count != 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)") }
+        }
+    }
+
+    @MainActor func testCurrentGuidedWorkspaceAndCli() throws {
+        projectRequireDiagnosticMethod = .guidedWorkspace
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult"), guided: true) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("guided launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("fixture") { try fixture.prepare(.projectEdits) }
+        try stage("cli-denied") { try checkInstalledCliStatus(3) }
+        try stage("project-open") {
+            try press(renderer, "Choose project folder", renderer: renderer, failures: Self.guidedWorkspaceFailures, timeout: 24)
+            let picker = try waitForGuidedProjectPicker(window)
+            try goToFolder(picker, path: fixture.projectPath)
+            try nativeOpen(picker)
+            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: fixture.projectPath), in: renderer,
+                                timeout: 24, failures: Self.guidedWorkspaceFailures)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+            print("MRK_RELEASE_WORKSPACE=selected-saved-identity-files-unchanged")
+        }
+        try stage("cli-allow") {
+            try press(renderer, "Open all project settings", renderer: renderer, failures: Self.guidedWorkspaceFailures)
+            try expand(renderer, prefix: "Advanced · CLI / AI access", renderer: renderer)
+            try press(renderer, "Check access", renderer: renderer)
+            try press(renderer, "Allow selected project for 1 hour", renderer: renderer)
+            do {
+                // Check is disabled while the one original grant is pending.
+                // Observe its returned permission before requesting readback.
+                let granted = renderer.staticTexts.matching(identifier: "1 project was allowed at last check")
+                _ = try waitElement(granted, in: renderer, timeout: 24, failures: ["Access is not confirmed"])
+                try press(renderer, "Check access", renderer: renderer)
+                try checkInstalledCliStatus(0)
+                _ = try waitElement(granted, in: renderer, failures: ["Access is not confirmed"])
+            } catch {
+                recordCliAccessObservation(renderer)
+                throw error
+            }
+        }
+        try stage("cli-revoke") {
+            try press(renderer, "Turn off access", renderer: renderer)
+            print("MRK_RELEASE_CLI_REVOKE_CUT=click-returned")
+            do {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "Off at last check"), in: renderer)
+            } catch {
+                recordCliAccessObservation(renderer)
+                throw error
+            }
+            print("MRK_RELEASE_CLI_REVOKE_CUT=off-visible")
+            // The ordinary service is still running, so its revoked handshake
+            // returns access_denied (4). The unopened service returned 3.
+            try checkInstalledCliStatus(4)
+            try fixture.assertUnchanged()
+            print("MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked")
+        }
+        try stage("normal-quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "the original Quit button is not actionable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try acceptFinalScenario()
+        }
+    }
+
+    @MainActor func testCurrentPrepareToQuit() throws {
+        projectRequireDiagnosticMethod = .prepareToQuit
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult"), guided: true) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("maintenance launch returned no original") }
+        try stage("maintenance-ready") {
+            try press(renderer, "Build tools", renderer: renderer)
+            try expand(renderer, prefix: "About this installation", renderer: renderer)
+            try press(renderer, "Refresh preparation status", renderer: renderer, timeout: 24)
+            let consent = "I want to stop the installed Android helper and prepare this application to quit."
+            let check = try waitElement(controls(renderer, [.checkBox], label: consent), in: renderer,
+                                        enabled: true, timeout: 24)
+            try reveal(check, in: renderer)
+            try require((check.value as? String) == "0" || (check.value as? NSNumber)?.intValue == 0,
+                        "maintenance consent did not start unchecked")
+            check.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)).click()
+            let checked = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@ OR value == %@",
+                                                      "1", NSNumber(value: 1)), object: check)
+            try require(XCTWaiter.wait(for: [checked], timeout: try remaining(5)) == .completed,
+                        "maintenance consent checkbox did not become checked")
+            try require(window.sheets.count == 0, "a sheet was present before preparation")
+            try press(renderer, "Prepare and quit", renderer: renderer)
+        }
+        try stage("maintenance-confirmation") {
+            // Observe only the sheet emitted by the maintenance operation.
+            let nativeRefusal = "The original native helper operation was refused or failed. Retain its result and refresh status; do not bypass it by changing installed files."
+            let unknownCleanup = "The original cleanup is unconfirmed. Keep the app open and retain evidence. New preparation, automatic helper registration and file removal are not authorized."
+            let failures = ["Preparation not confirmed", nativeRefusal, unknownCleanup]
+            let sheet: XCUIElement
+            do {
+                sheet = try nativeSheet(window, title: "Quit and discard unsaved drafts?", timeout: 180, failures: failures)
+            } catch {
+                let observations = [("rejected-request", "Preparation not confirmed"), ("refused", "refused"),
+                    ("unknown", "unknown"), ("prepared", "Preparation settled · exit unconfirmed"),
+                    ("started", "Waiting for the original native helper operation and its cleanup. Changing screens does not cancel it or start another request."),
+                    ("native-refused", nativeRefusal), ("cleanup-unknown", unknownCleanup),
+                    ("deadline", "The original operation reached its fixed deadline. A later reply cannot turn this into successful preparation.")]
+                for (key, title) in observations where renderer.staticTexts.matching(NSPredicate(format:
+                    "identifier == %@ OR label == %@ OR title == %@ OR value == %@", title, title, title, title)).count == 1 {
+                    print("MRK_RELEASE_PREPARE_STATUS=\(key)")
+                }
+                let admissions = [
+                    ("native-unavailable", "Preparation requires the normal installed app"),
+                    ("busy", "Finish or cancel the existing operation or quit question"),
+                    ("unknown-cleanup", "An original operation has unconfirmed cleanup"),
+                    ("closing", "The original app window is closing or unavailable"),
+                    ("confirmation-invalid", "Preparation needs the explicit confirmation shown here"),
+                    ("reply-unconfirmed", "The preparation reply could not be confirmed")
+                ]
+                for (reason, prefix) in admissions {
+                    let matches = renderer.staticTexts.matching(NSPredicate(format:
+                        "label BEGINSWITH %@ OR title BEGINSWITH %@ OR value BEGINSWITH %@", prefix, prefix, prefix))
+                    if matches.count == 1 { print("MRK_RELEASE_PREPARE_ADMISSION=\(reason)") }
+                }
+                throw error
+            }
+            try require(sheet.buttons.count == 2 && sheet.buttons.matching(identifier: "Cancel").count == 1,
+                        "maintenance produced an unexpected sheet")
+            try click(sheet.buttons.matching(identifier: "Quit"), "the maintenance Quit button is not actionable")
+            try completeNormalQuit(app)
+            try acceptFinalScenario()
+            print("MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release")
+        }
+    }
+
+    @MainActor func testCurrentSavedVersionRecovery() throws {
+        projectRequireDiagnosticMethod = .guidedRecovery
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        guard let project = ProcessInfo.processInfo.environment["MRK_RELEASE_RECOVERY_PROJECT"],
+              project.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_]{6,24}/project$"#,
+                            options: .regularExpression) != nil else {
+            throw Refusal.condition("no admitted disposable recovery project")
+        }
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult"), guided: true) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("recovery launch returned no original") }
+        try stage("project-open") {
+            try press(renderer, "Choose project folder", renderer: renderer, failures: Self.guidedWorkspaceFailures, timeout: 24)
+            let picker = try waitForGuidedProjectPicker(window)
+            try goToFolder(picker, path: project)
+            try nativeOpen(picker)
+            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
+                                timeout: 24, failures: Self.guidedWorkspaceFailures + ["Project read details"])
+        }
+        try stage("recover-replacement") {
+            try press(renderer, "Review version & build number", renderer: renderer)
+            @MainActor func recordRecovery(_ stage: String) {
+                let panel = named(renderer, "Saved-version recovery inspection").firstMatch
+                let action = renderer.buttons.matching(identifier: "Review recovery confirmation…")
+                let inspect = renderer.buttons.matching(identifier: "Inspect recovery").firstMatch
+                let close = renderer.buttons.matching(identifier: "Close inspection, keep drafts").firstMatch
+                let checks: [(String, String)] = [
+                    ("waiting-native", "Wait for the original native status"),
+                    ("ownership-unverified", "Original native ownership or cleanup is unverified"),
+                    ("selection-pending", "Select a registered project and finish"),
+                    ("service-unavailable", "The native saved-version recovery route"),
+                    ("service-required", "Recovery inspection requires the qualified native saved-version service"),
+                    ("other-journal", "Configuration recovery is required"),
+                    ("other-operation", "Close the original edit/recovery review"),
+                    ("attempt-retained", "Recovery project:"),
+                    ("inspection-pending", "Waiting for the original inspection"),
+                    ("phase-opening", "Original phase: opening"),
+                    ("phase-preparing", "Original phase: preparing"),
+                    ("phase-reviewing", "Original phase: reviewing"),
+                    ("phase-final", "Original phase: final"),
+                    ("phase-unknown", "Original phase: unknown"),
+                    ("recoverable", "The original journal and current dependencies identify exactly this action"),
+                    ("no-journal", "No selected-domain journal was found"),
+                    ("conflict", "Conflict category:"),
+                    ("invalidated", "Project, navigation or service context changed"),
+                    ("terminal-refusal", "No successful recovery is confirmed"),
+                ]
+                print("MRK_RELEASE_RECOVERY_FACT=\(stage);panel=\(panel.exists);review=\(min(action.count, 3))")
+                print("MRK_RELEASE_RECOVERY_CONTROL=\(stage);inspect=\(inspect.exists && inspect.isEnabled);close=\(close.exists)")
+                guard stage == "refused" else { return }
+                for (kind, marker) in checks {
+                    // The accessibility label is a string. Some static text
+                    // elements expose non-string values to XCTest predicates.
+                    let matches = renderer.staticTexts.matching(NSPredicate(
+                        format: "label CONTAINS %@", marker)).count
+                    if matches > 0 { print("MRK_RELEASE_RECOVERY_MATCH=\(stage);state=\(kind)") }
+                }
+            }
+            recordRecovery("before")
+            let panel = try waitElement(named(renderer, "Saved-version recovery inspection"), in: renderer)
+            let inspect = try waitElement(panel.buttons.matching(identifier: "Inspect recovery"), in: panel,
+                                          enabled: true, timeout: 24)
+            try reveal(inspect, in: renderer)
+            // Put the control well inside the renderer, clear of the application header
+            // and viewport edges where a coordinate can hit a covering element.
+            for _ in 0..<5 {
+                let viewport = renderer.frame
+                if inspect.frame.midY >= viewport.minY + 130 && inspect.frame.midY <= viewport.maxY - 80 { break }
+                _ = try remaining(3)
+                renderer.scroll(byDeltaX: 0, deltaY: inspect.frame.midY < viewport.midY ? 200 : -200)
+            }
+            try require(inspect.isHittable && inspect.isEnabled, "original recovery control is not actionable")
+            inspect.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            do {
+                _ = try waitElement(panel.buttons.matching(identifier: "Review recovery confirmation…"), in: panel,
+                                    enabled: true, timeout: 48)
+            } catch {
+                recordRecovery("refused")
+                throw error
+            }
+            recordRecovery("review")
+            try inventory(renderer, caption: "Inspected journal files — not your current draft", paths: ["public/version.properties"])
+            try press(renderer, "Review recovery confirmation…", renderer: renderer, timeout: 48)
+            let dialog = try waitElement(controls(renderer, [.dialog, .group], label: "Roll back the interrupted save?"), in: renderer)
+            let apply = try unique(dialog.buttons.matching(identifier: "Confirm recovery action"), "recovery Apply is ambiguous")
+            try require(!apply.isEnabled, "recovery Apply began enabled without consent")
+            let consent = "I reviewed the action, exact file effects, both byte/digest/mode summaries and private cleanup scope."
+            let checkbox = try waitElement(controls(dialog, [.checkBox], label: consent), in: dialog, enabled: true)
+            try reveal(checkbox, in: renderer)
+            checkbox.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)).click()
+            try require(!apply.isEnabled, "recovery typed confirmation was not required")
+            try replace(field(dialog, "Type RECOVER to confirm this one original plan"), with: "RECOVER", renderer: renderer)
+            try press(dialog, "Confirm recovery action", renderer: renderer)
+            try waitGone(dialog)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery action completed; current draft kept."),
+                                in: renderer, timeout: 48)
+        }
+        try stage("normal-quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "the original Quit button is not actionable")
+            try completeNormalQuit(app)
+            try acceptFinalScenario()
+        }
+        print("MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit")
     }
 
     @MainActor func testSyntheticProjectPathFields() throws {

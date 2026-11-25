@@ -724,7 +724,7 @@ RUBY_NATIVE_CAPTURE_SHARED_SECONDS = 10
 RUBY_PARTITION_CONTRACTS = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
     ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
-    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
+    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 35, 26, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 37, 28, 300, "AndroidUploadValidationTest"),
 )
 PARTITIONED_RUBY_GATES = tuple(row[0] for row in RUBY_PARTITION_CONTRACTS)

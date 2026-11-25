@@ -1,0 +1,40 @@
+name: Verify and attest frozen macOS release media
+description: Bind the exact frozen Apple Silicon assets to their protected main build
+inputs:
+  producer-run:
+    required: true
+    description: Original signed build run
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      with:
+        name: macos-release-frozen-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/frozen-release
+    - name: Match the exact source, runs, media and checksum roster
+      shell: bash
+      env:
+        PRODUCER_RUN: ${{ inputs.producer-run }}
+      run: |
+        set -euo pipefail
+        [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+        python3 -I -B desktop/tools/macos_release_media.py verify "$RUNNER_TEMP/frozen-release" \
+          --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
+          --build-run "$PRODUCER_RUN" --carrier-run "$GITHUB_RUN_ID"
+    - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: |
+          ${{ runner.temp }}/frozen-release/*.dmg
+          ${{ runner.temp }}/frozen-release/RELEASE-MANIFEST.json
+          ${{ runner.temp }}/frozen-release/SHA256SUMS
+    - name: Verify each retained asset against its GitHub build attestation
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        for asset in "$RUNNER_TEMP"/frozen-release/*; do
+          gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" --deny-self-hosted-runners \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
+        done

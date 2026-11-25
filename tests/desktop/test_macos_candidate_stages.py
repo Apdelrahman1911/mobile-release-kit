@@ -1195,12 +1195,18 @@ class CandidateWorkflowTests(unittest.TestCase):
                 'github.event.head_commit.message': message,
                 'github.event_name': event,
                 'github.ref': 'refs/heads/' + ref,
+                'github.ref_protected': ref == 'main',
+                'github.sha': 'a' * 40,
+                'github.repository': 'Apdelrahman1911/mobile-release-kit',
                 'inputs.operation': operation,
+                'inputs.expected_sha': 'a' * 40,
+                'inputs.target': 'aarch64-apple-darwin',
                 'needs.candidate-tool26-final-package.result': tool,
                 'needs.candidate-git27-final-package.result': git,
             }
             expression = expression.removeprefix('${{').removesuffix('}}').strip()
-            for key, value in values.items():
+            for key in sorted(values, key=len, reverse=True):
+                value = values[key]
                 expression = expression.replace(key, repr(value))
             expression = expression.replace('!cancelled()', repr(not cancelled))
             expression = expression.replace('!contains(', 'not contains(')
@@ -1266,7 +1272,7 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertEqual(len(literals),4)
         ordinary,carrier,singles,initial=map(json.loads,literals)
         self.assertEqual(ordinary,[dict(target='aarch64-apple-darwin',group='local-carrier',native_scope='disabled',
-            runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
+            runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=100)])
         self.assertEqual(carrier,[dict(target='aarch64-apple-darwin',group='local-carrier',native_scope='tool-setup',
             runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
         self.assertEqual(set(singles),{'git-local','git-branch','git-fetch','git-push','git-create','git-upstream',
@@ -1425,6 +1431,12 @@ class CandidateWorkflowTests(unittest.TestCase):
                     self.assertEqual(step['if'], "steps.remove_image.outcome == 'success'")
                     self.assertEqual(step['with']['if-no-files-found'], 'error')
                     self.assertEqual(step['with']['overwrite'], False)
+                elif step['name'] == 'Retain the verified release media for attestation':
+                    self.assertEqual(paths, ['${{ steps.work.outputs.root }}/frozen-release'])
+                    self.assertIn("github.ref == 'refs/heads/main'", step['if'])
+                    self.assertIn("steps.finalize_image.outcome == 'success'", step['if'])
+                    self.assertEqual(step['with']['if-no-files-found'], 'error')
+                    self.assertFalse(step['with']['overwrite'])
                 else:
                     self.assertEqual(step['name'],'Retain only authenticated files for the owner local installation')
                     self.assertEqual(len(paths),6)

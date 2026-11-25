@@ -1198,13 +1198,14 @@ class SetupInstallerDiagnosticTests(unittest.TestCase):
                         credential_known=lambda: True, credential_failed=False, credential_active=None,
                         removal_final_active=lambda: False, android_support=None, store_signing=None,
                         app_absence=None, update=None, removal=False, setup_package=False, setup_verify=True,
-                        prepared_staging=False,
+                        prepared_staging=False, candidate_removal_context=None,
                         removal_recorded_role=lambda r:r, setup_verification_post=lambda:None,
                         setup_verification_absent=lambda:None, errors=[], stager_io_pending=None,
                         calls=[dict(role=r, entered=True, returned=True, capturesSettled=True, returncode=0)
                                for r in HELPER.XCODE_SETUP_VERIFY_ROLES[:index]],
                         owner=SimpleNamespace(run_owned=owned), work=Path("/inert-unopened-work"),
                         checkout=Path("/inert-unopened-checkout"), publish=publish)
+                    op.candidate_removal_quote = HELPER.Operation.candidate_removal_quote.__get__(op)
                     def guarded(name, actual_parser):
                         def invoke(out, err):
                             self.assertEqual((out, err), (stdout, stderr))

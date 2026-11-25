@@ -28,6 +28,10 @@ on:
         description: Exact reviewed SHA for the ARM64 compile or protected-main release
         type: string
         required: false
+      preflight_run:
+        description: Successful exact main-release-preflight run required before signing
+        type: string
+        required: false
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -3642,31 +3646,10 @@ jobs:
         github.ref_protected && inputs.expected_sha == github.sha &&
         inputs.target == 'aarch64-apple-darwin' &&
         (inputs.operation == 'main-release-preflight' || inputs.operation == 'main-release-build')))
-    runs-on: macos-26
-    timeout-minutes: 8
-    steps:
-      - name: "Check out exact reviewed source without retained credentials"
-        timeout-minutes: 3
-        uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-        env:
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: core.autocrlf
-          GIT_CONFIG_VALUE_0: "false"
-        with:
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: "Select DATA stager Python, not the packaged interpreter"
-        timeout-minutes: 3
-        id: python
-        uses: "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
-        with:
-          python-version: "3.14.7"
-      - name: "Check closed part provenance, retry, archive and signing diagnostics"
-        env:
-          MRK_PART_TEST_ROOT: "${{ runner.temp }}"
-        shell: bash
-        run: |
-          "${{ steps.python.outputs.python-path }}" -B -m unittest tests.desktop.test_macos_candidate_parts tests.desktop.test_macos_candidate_part_transport tests.desktop.test_macos_candidate_parts_workflow tests.desktop.test_macos_desktop_update tests.desktop.test_macos_candidate_stages tests.desktop.test_macos_optional_arrays tests.desktop.test_runtime_preparation.MacCoreBytecodeDataTests
+    uses: ./.github/workflows/desktop-macos-candidate-preflight.yml
+    with:
+      operation: ${{ inputs.operation || 'candidate-push' }}
+      preflight_run: ${{ inputs.preflight_run || 'none' }}
   desktop-local-carrier:
     name: Desktop local preparation
     if: >-
@@ -3698,35 +3681,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: ./.github/actions/macos-main-release-attestation
         with:
-          name: macos-release-frozen-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/frozen-release
-      - name: Match the exact source, runs, media and checksum roster
-        env:
-          PRODUCER_RUN: ${{ inputs.prepared_run }}
-        run: |
-          set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          python3 -I -B desktop/tools/macos_release_media.py verify "$RUNNER_TEMP/frozen-release" \
-            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
-            --build-run "$PRODUCER_RUN" --carrier-run "$GITHUB_RUN_ID"
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            ${{ runner.temp }}/frozen-release/*.dmg
-            ${{ runner.temp }}/frozen-release/RELEASE-MANIFEST.json
-            ${{ runner.temp }}/frozen-release/SHA256SUMS
-      - name: Verify each retained asset against its GitHub build attestation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for asset in "$RUNNER_TEMP"/frozen-release/*; do
-            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
-              --source-digest "$GITHUB_SHA" --deny-self-hosted-runners \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
-          done
+          producer-run: ${{ inputs.prepared_run }}
 
   candidate-desktop-update:
     name: Desktop update

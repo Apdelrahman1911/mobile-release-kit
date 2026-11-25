@@ -1,78 +1,83 @@
-# Install, update and remove Mobile Release Kit on macOS (0.2.0)
+# Mobile Release Kit 0.2.13 for Apple Silicon
 
-This is the current guide for the ordinary Apple Silicon package. It supersedes
-the `0.1.1` / `desktop-01` wording kept for history in `macos-installed.md` and
-`macos-maintenance-data.md`.
+This candidate targets Apple Silicon Macs running macOS 26.0 or later.
+Intel Macs, macOS 25 and earlier, Windows, and Linux are outside this release's
+qualification. Issues [#19] and [#20] track broader platform scope.
 
-| Item | Value |
+| Item | Expected value |
 | --- | --- |
-| Package version / release | `0.2.0` / `macos26-arm64-desktop-06` (target `aarch64-apple-darwin`) |
-| Minimum macOS | 26.0 |
-| Package identifier | `dev.mobile-release-kit.desktop.installed` |
-| App | `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app` (bundle `dev.mobile-release-kit.desktop`) |
-| Applications launcher | `/Applications/Mobile Release Kit.app` (convenience copy only) |
-| Accepted predecessors | `0.1.2 / desktop-02` (`bf9d397b`) and `0.1.4 / desktop-04` (`ac506bb3`, package SHA-256 `ed44a41a…4f15`) |
+| Version and installed release identity | 0.2.13 and macos26-arm64-desktop-19 |
+| Architecture | aarch64-apple-darwin |
+| Candidate source | Exact protected main commit in RELEASE-MANIFEST.json |
+| Proposed tag | desktop-v0.2.13 |
+| Package identifier | dev.mobile-release-kit.desktop.installed |
+| Open from Applications | /Applications/Mobile Release Kit.app |
 
-Intel (`x86_64`) has no enrolled predecessor and no verified package yet.
+## Install or upgrade
 
-## What the standard Installer does with `Install.pkg`
+Mount **MobileReleaseKit-0.2.13-macos-arm64-Install.dmg** and open
+**Install.pkg** inside the image. Leave the producer files next to the
+package. Approve the operation in macOS Installer, then open Mobile Release Kit
+from Applications. Build tools shows the bundled runtime after initialization.
 
-Open `Install.pkg` from the read-only carrier with its `producer.json` and
-`producer.sig` beside it. macOS Installer asks for administrator approval. The
-package authenticates the detached producer signature and then selects one
-route from the installed state:
+To upgrade from the enrolled signed 0.2.12, save your work and quit the app
+before following the same steps. Setup authenticates the current app, package
+and installation record before switching versions. It preserves projects,
+drafts, settings and credentials. Earlier enrolled builds have an exact
+entry in the predecessor table bound to their source, signed inventory,
+policy and package digests. Downgrades and unrecognized installation records
+are refused before replacement.
 
-- **Fresh install** when neither the app nor the release exists.
-- **Same-package no-op** when exactly this package is already installed and the
-  app is present. No payload is rewritten.
-- **Missing-app restore** when exactly this package is recorded but the app is
-  absent. Only the app is restored from the package; the runtime is kept.
-- **Update** when an accepted predecessor (table above) is installed with its
-  app present. The new runtime and record are published, the app is switched,
-  and the previous generation is retained. A downgrade or an unlisted tuple is
-  refused without changes.
+Running the identical installer with an intact app leaves the installation
+in place. The matching package can restore a missing app when the protected
+record admits recovery.
 
-Your projects, project releases, saved settings under
-`~/Library/Application Support/dev.mobile-release-kit.desktop`, vault contents
-and Keychain items are not part of the payload and are never removed or
-rewritten by install, update or removal.
+## Prepare and Quit, removal and reinstall
 
-## OS-managed metadata on an existing installation
+Save your work and choose **Prepare and Quit** from the app's menu before
+maintenance if the Android helper is running. Complete the native macOS
+prompt if it appears. If the app reports a refusal, keep the exact error.
 
-macOS 27 can attach its own `com.apple.provenance` tag to an installed file
-after an App Management-mediated write. Neither root nor the owner can remove
-it. The maintenance audit therefore admits, on regular files of an **already
-recorded** generation only, either no extended attributes or exactly that one
-tag in its 11-byte version-1 form. The tag is read, never removed or copied,
-and the file's bytes must still match the recorded inventory hash. Any other
-attribute is still refused. Every incoming, newly created or launcher object
-must have no extended attributes. The authenticated bundle roots keep their
-existing `com.apple.macl` snapshot rule.
+Mount **MobileReleaseKit-0.2.13-macos-arm64-Remove.dmg** and open
+**Uninstall Mobile Release Kit**. Choose **Uninstall App (Keep My Data)**,
+then **Continue** and follow the macOS Installer prompts. If the app is open,
+review its removal confirmation. Wait for the uninstaller to confirm that
+removal finished and data was kept. Reinstall from the matching Install DMG.
 
-## Remove
+Keep My Data preserves project folders, settings, drafts, history and saved
+credentials. The remover checks the current installation and any retained
+rollback generation in scope. **Delete All Data** requires extra confirmation
+and proof that app removal completed. It deletes supported app-owned data
+and leaves project folders and unrelated files outside deletion scope. See
+[macOS removal guidance](macos-removal.md) for cancellation and recovery.
 
-Use the matching `Remove.pkg` from the separate removal image (see
-`macos-removal.md`). With the app present it runs the live removal; with the app
-absent it resumes an interrupted removal that the protected record shows was
-admitted earlier. User data stays.
+Use the matching signed media after an interruption. If a retry is refused,
+retain the original files, recovery records and logs. Changing permissions
+or manually moving bundles can invalidate the recovery record.
 
-## Known stops (refused safely, no data loss)
+## Verify downloaded media
 
-These cases end in a refusal, not damage. Keep the result files and report them.
+Download both DMGs, RELEASE-MANIFEST.json and SHA256SUMS from the
+same release. In that directory run `shasum -a 256 -c SHA256SUMS`.
+Compare the manifest's source commit and tree with the tag. Verify each
+download with GitHub CLI, substituting the full main commit for SOURCE_COMMIT.
 
-1. **Removal after an interrupted-restore retry.** If a missing-app restore was
-   interrupted and then completed by a retry, the record links a
-   `restoreRecovery`. Live removal refuses that link (current or archived), and
-   the resume route needs an absent app and an earlier removal admission. The
-   app keeps working; removal for this history is not yet qualified.
-2. **Maintenance after a recovered failed update.** If an update fails before
-   its state is published and the worker's bounded inverse restores the old app,
-   the state records `InverseRecorded`. The old app works, but ordinary
-   maintenance (update, no-op, removal) requires `MutationRecorded` and stops.
-   Treat this as a recovered failed update, not a successful one.
-3. **Interrupted-removal resume over a provenance-tagged file.** The live update
-   and removal walks admit the OS provenance tag as described above. The separate
-   archive census of an interrupted removal still requires zero attributes.
+```sh
+for asset in MobileReleaseKit-0.2.13-macos-arm64-Install.dmg \
+             MobileReleaseKit-0.2.13-macos-arm64-Remove.dmg \
+             RELEASE-MANIFEST.json SHA256SUMS; do
+  gh attestation verify "$asset" \
+    --repo Apdelrahman1911/mobile-release-kit \
+    --source-ref refs/heads/main --source-digest SOURCE_COMMIT \
+    --deny-self-hosted-runners \
+    --signer-workflow Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml || exit 1
+done
+```
 
-Do not delete protected directories, change permissions or strip metadata to get
-past a refusal.
+Each DMG contains a separately signed and stapled Installer package. The
+manifest lists both package digests and signed producer descriptors. GitHub's
+source archive at the tag identifies the source. The DMGs and frozen manifest
+identify the installable product.
+
+[#19]: https://github.com/Apdelrahman1911/mobile-release-kit/issues/19
+[#20]: https://github.com/Apdelrahman1911/mobile-release-kit/issues/20

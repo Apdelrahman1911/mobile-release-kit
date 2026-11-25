@@ -33,7 +33,10 @@ def fixture(*, target=TOOL.ARM_TARGET):
                   TOOL.CURRENT_CA_SOURCE: b"synthetic CA, not usable TLS material\n",
                   TOOL.CURRENT_HELPER_SOURCE: helper,
                   "desktop/macos-installed-inputs/build-release-intel.json": intel_release, **tooling}
-        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py"}})
+        store_bootstraps = {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py",
+                            "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py",
+                            "apple_provisioning_bootstrap.py"}
+        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | store_bootstraps})
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)

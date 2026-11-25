@@ -71,7 +71,7 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("mode: [update, fresh, remove, uninstaller]", workflow)
         self.assertIn('--mode "${{ matrix.mode }}"', workflow)
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
-        self.assertIn('choices=("update", "fresh", "remove", "uninstaller")', source)
+        self.assertIn('choices=("update", "fresh", "remove", "uninstaller",', source)
         # The installed-only uninstaller mode never runs or claims a live removal.
         installed = source.split("def uninstaller_installed_check(", 1)[1].split("\ndef ", 1)[0]
         self.assertNotIn("live_remove(", installed)
@@ -90,7 +90,7 @@ class LaunchSmokeSourceTests(unittest.TestCase):
                  '"removal-left-app-objects"')]
         self.assertEqual(order, sorted(order))
         source = text.split("def remove_check(", 1)[1].split("\ndef ", 1)[0]
-        order = [source.index(marker) for marker in ('live_remove(mount, work, evidence, steps, "remove")',
+        order = [source.index(marker) for marker in ('live_remove(mount, work, evidence, steps, "remove",',
                  '"user-data-changed-by-removal"', 'install("reinstall"',
                  '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"', "uninstaller_check(", '"detach"')]
         self.assertEqual(order, sorted(order))
@@ -108,7 +108,9 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         # The confirmed path first runs every installed-app path, then removes.
         self.assertLess(confirmed.index("uninstaller_while_installed("),
                         confirmed.index('live_remove(mount, work, evidence, steps, "remove-again")'))
-        check = installed + confirmed
+        deletion = source.split("def confirmed_data_deletion(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("confirmed_data_deletion(", confirmed)
+        check = installed + confirmed + deletion
         order = [check.index(marker) for marker in ('"uninstall-cancel-delete"', '"uninstall-cancel-keep"',
                  '"uninstall-installer-quit"', "p.returncode == 65", 'live_remove(mount, work, evidence, steps, "remove-again")',
                  '"user-data-changed-by-second-removal"', '"uninstall-delete"', '"delete-all-data-left-app-data"',

@@ -210,7 +210,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ruby_executable="$(command -v ruby)"
+          ruby_executable="$(/bin/bash .github/scripts/stage_ci_linux_ruby.sh)"
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
           [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
@@ -436,7 +436,10 @@ jobs:
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
           [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           case "$MRK_OS" in
-            ubuntu-24.04) platform=linux ;;
+            ubuntu-24.04)
+              platform=linux
+              ruby_executable="$(/bin/bash .github/scripts/stage_ci_linux_ruby.sh)"
+              ;;
             macos-26) platform=macos ;;
             *) exit 1 ;;
           esac
@@ -538,7 +541,10 @@ jobs:
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
           [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           case "$MRK_OS" in
-            ubuntu-24.04) platform=linux ;;
+            ubuntu-24.04)
+              platform=linux
+              ruby_executable="$(/bin/bash .github/scripts/stage_ci_linux_ruby.sh)"
+              ;;
             macos-26) platform=macos ;;
             *) exit 1 ;;
           esac
