@@ -4552,6 +4552,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         for row in details["partitions"]:
             active = row
             partition = row["partition"]
+            if partition not in {"poison-command-preguard-127", "poison-command-guarded-import"}:
+                continue
             healthy = partition == "healthy"
             details["stage"] = partition
             check_clock(cutoff)
@@ -4606,6 +4608,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 raise VerificationError("PYTHON_CAPTURE_RESULT")
             row.update(status="PASS", tests=len(observed), completed=list(observed))
             completed.extend(observed)
+        details["stage"] = "focused-observations-only"
+        raise VerificationError("FOCUSED_DIAGNOSTIC_NOT_A_GATE_RECEIPT")
         details["stage"] = "union"
         check_clock(cutoff)
         if (tuple(sorted(completed + list(delegated))) != inventories["all"]
