@@ -133,6 +133,7 @@ mod installer {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Role { Reader, PayloadWriter, LauncherWriter, MetadataWriter, ReceiptWriter, GateWriter, GateParticipant, ReservationWriter, ReservationParticipant, FreshEnrollmentWriter }
     #[derive(Clone, Copy, PartialEq, Eq)]
+    #[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
     struct Identity { dev: i64, ino: u64, mode: u32, uid: u32, gid: u32, links: u64, size: i64,
         mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64 }
     impl Identity {
@@ -2898,6 +2899,10 @@ mod installer {
             pub(super) fn digest(&self)->&[u8;32] { &self.digest }
             pub(super) fn shape_tag_data(&self)->u8 { match self.shape {
                 RemovalArchiveShape::WritingPrefix=>1,RemovalArchiveShape::SealedBody=>2 } }
+            fn matches_recorded(&self,live:&Self,volume:ArchiveVolume)->bool {
+                volume.matches(self.identity,live.identity) && self.flags==live.flags
+                    && self.len==live.len && self.digest==live.digest && self.shape==live.shape
+            }
         }
         const REHOME_RETRY_LIMIT:usize=transaction::INVOCATION_LIMIT;
         const REHOME_RETRY_NAME:&str="fresh-retry-";
@@ -3606,9 +3611,26 @@ mod installer {
             pub(super) fn files(&self)->&[Option<RemovalArchiveFileReference>;6] {&self.files}
             pub(super) fn app_data(&self)->Option<(Identity,u32)> {self.app}
             pub(super) fn rehome_data(&self)->Option<&RehomeReferenceData> {self.rehome.as_ref()}
-            pub(super) fn matches_current_data(&self,row:&RemovalArchiveReference)->bool {
-                self.name==row.name && self.identity==row.identity && self.flags==row.flags && self.files==row.files
-                    && self.app==row.app && self.rehome==row.rehome && row.pending_rehome.is_none()
+            fn matches_originals(&self,row:&RemovalArchiveReference,volume:ArchiveVolume)->bool {
+                self.name==row.name && volume.matches(self.identity,row.identity) && self.flags==row.flags
+                    && self.files.iter().zip(&row.files).all(|(old,live)| match (old,live) {
+                        (None,None)=>true,
+                        (Some(old),Some(live))=>old.matches_recorded(live,volume),
+                        _=>false,
+                    })
+                    && match (self.app,row.app) {
+                        (None,None)=>true,
+                        (Some((old,flags)),Some((live,actual_flags)))=>flags==actual_flags && volume.matches(old,live),
+                        _=>false,
+                    }
+            }
+            pub(super) fn matches_current_data(&self,row:&RemovalArchiveReference,volume:ArchiveVolume)->bool {
+                self.matches_originals(row,volume) && row.pending_rehome.is_none()
+                    && match (&self.rehome,&row.rehome) {
+                        (None,None)=>true,
+                        (Some(old),Some(live))=>old.matches_recorded(live,volume),
+                        _=>false,
+                    }
             }
         }
         struct RemovalSemanticSpans {
@@ -4597,13 +4619,14 @@ mod installer {
             book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?.install(table)
         }
         pub(super) fn complete_removal_pending_census(book:&mut Install,mut pending:RemovalPendingArchiveCensus,
-            read:&worker::RemovalConservationRead<'_>,baseline:&RemovalGenesisData)->Result<RemovalArchiveCensus> {
+            read:&worker::RemovalConservationRead<'_>,baseline:&RemovalGenesisData,snapshot:usize)->Result<RemovalArchiveCensus> {
             read.post_source(book)?;check(pending.table.root==read.root_original(),"removal-conservation-root")?;
+            let volume=removal_snapshot_recorded_volume(book,pending.table.root,snapshot,baseline)?;
             for prior in baseline.prior_archives_data() {
                 let row=pending.table.rows.iter().find(|row|row.name()==prior.name()).ok_or("removal-conservation-prior-missing")?;
-                check(row.identity==prior.identity && row.flags==prior.flags && row.files==prior.files && row.app==prior.app,
-                    "removal-conservation-prior-changed")?;
-                check(match (&prior.rehome,row.pending_rehome) {(None,None)=>true,(Some(child),Some(actual))=>child.root_data()==actual,
+                check(prior.matches_originals(row,volume),"removal-conservation-prior-changed")?;
+                check(match (&prior.rehome,row.pending_rehome) {(None,None)=>true,
+                    (Some(child),Some((live,flags)))=>child.flags==flags && volume.matches(child.root,live),
                     _=>false},"removal-conservation-prior-child")?;
             }
             // Unknown optional children cannot become complete because their
@@ -4616,7 +4639,7 @@ mod installer {
             read_rehome_children(book,&mut pending.table,Some(&input),&mut source)?;
             for prior in baseline.prior_archives_data() {
                 let row=pending.table.rows.iter().find(|row|row.name()==prior.name()).ok_or("removal-conservation-prior-missing")?;
-                check(prior.matches_current_data(row),"removal-conservation-prior-changed")?;
+                check(prior.matches_current_data(row,volume),"removal-conservation-prior-changed")?;
             }
             pending.table.invocation_union()?;read.post_source(book)?;book.clock()?;Ok(pending.table)
         }
@@ -5206,6 +5229,16 @@ mod installer {
                 Self::wire_data(root,flags,prefix,plan.moves.len(),directories,files,bytes,digest)?.with_restores_data(restores)?.with_conservation_data(row)
             }
             pub(super) fn matches_data(&self,other:&Self)->bool {self==other}
+            fn matches_recorded(&self,live:&Self,volume:ArchiveVolume)->bool {
+                volume.matches(self.root,live.root) && self.flags==live.flags && self.prefix==live.prefix
+                    && self.total==live.total && self.counts_data()==live.counts_data() && self.digest==live.digest
+                    && self.restores==live.restores && self.conservation==live.conservation
+                    && self.retries.len()==live.retries.len()
+                    && self.retries.iter().zip(&live.retries).all(|(old,current)|
+                        volume.matches(old.root_data(),current.root_data())
+                            && *old==RehomeRetryReferenceData{reference:PartialFreshRetryReferenceData{
+                                root:old.root_data(),..current.reference},..*current})
+            }
             // Old skeleton completion is deliberately separate from completion
             // of preserved retries; the early partial-root reader needs both
             // states, whereas final strong-clean requires the latter as well.
@@ -5408,8 +5441,7 @@ mod installer {
             ->Result<RehomeParsedPlan<'a>> {
             let selected=ReleaseSetData::parse_for_target_data(genesis.selected_bytes_data(),genesis.header.target)
                 .map_err(|_|"rehome-plan-selection")?;
-            let raw=rehome_span_bytes_data(genesis,transaction::STATE_NAME,transaction::STATE_LIMIT,&mut read)?;
-            let state=StateData::parse_data(&raw,&selected).map_err(|_|"rehome-plan-state")?;drop(raw);
+            let state=rehome_snapshot_state(genesis,&selected,&mut read)?;
             let mut plan=RehomeMoveSetData::begin_genesis(genesis,&selected,&state)?;
             check(state.evidence_data().count()<transaction::INVOCATION_LIMIT,"rehome-plan-history-count")?;
             let name=data(transaction::intent_name_data(state.invocation_data()))?;
@@ -5484,6 +5516,14 @@ mod installer {
             }
             let plan=plan.finish_genesis()?;Ok(RehomeParsedPlan {selected,state,plan})
         }
+        fn rehome_snapshot_state<F:FnMut(u64,&mut [u8])->Result<usize>>(genesis:&RemovalGenesisData,selected:&ReleaseSetData,
+            read:&mut F)->Result<StateData> {
+            let raw=rehome_span_bytes_data(genesis,transaction::STATE_NAME,transaction::STATE_LIMIT,read)?;
+            let state=StateData::parse_data(&raw,selected).map_err(|_|"rehome-plan-state")?;
+            check(state.mutation_recorded_data() && state.current_data().release_data()==selected.current_data()
+                && state.digest_data()==genesis.header.values[3],"rehome-data-genesis")?;
+            Ok(state)
+        }
         fn rehome_plan_work(book:&Install,genesis:&RemovalGenesisData,plan_bytes:usize,physical:usize)->Result<()> {
             check(plan_bytes<=REHOME_WORK && physical<=REHOME_WORK,"rehome-audit-memory")?;
             let extra=REMOVAL_ARCHIVE_PARSER.checked_add(genesis.owned_bytes_data()?)
@@ -5494,7 +5534,7 @@ mod installer {
             genesis.controls_data().iter().try_fold(0u64,|end,span|span.offset_data().checked_add(span.len_data())
                 .map(|next|end.max(next)).ok_or("rehome-plan-extent"))
         }
-        fn rehome_genesis_original(book:&Install,snapshot:usize,genesis:&RemovalGenesisData)->Result<(Identity,u32)> {
+        fn rehome_genesis_stat(book:&Install,snapshot:usize,genesis:&RemovalGenesisData)->Result<(Identity,u32)> {
             let original=book.originals.get(snapshot).ok_or("rehome-plan-snapshot-original")?;
             let archive=original.parent.ok_or("rehome-plan-snapshot-location")?;
             let directory=book.originals.get(archive).ok_or("rehome-plan-snapshot-location")?;
@@ -5505,6 +5545,10 @@ mod installer {
             let value=removal_archive_stat(book,snapshot,false,0o444)?;
             check(value.0.dev==parent.0.dev && value.0.size>0 && value.0.size as u64==rehome_genesis_extent_data(genesis)?
                 && value.0.size as u64<=REMOVAL_SNAPSHOT_LIMIT,"rehome-plan-snapshot-bound")?;
+            Ok(value)
+        }
+        fn rehome_genesis_original(book:&Install,snapshot:usize,genesis:&RemovalGenesisData)->Result<(Identity,u32)> {
+            let value=rehome_genesis_stat(book,snapshot,genesis)?;
             let digest=removal_archive_raw_hash(value.0.size as u64,|at,out|removal_archive_read_at(book,snapshot,at,out))?;
             check(digest==*genesis.whole_sha256_data() && removal_archive_stat(book,snapshot,false,0o444)?==value,
                 "rehome-plan-snapshot-post")?;Ok(value)
@@ -5512,7 +5556,61 @@ mod installer {
         // Scoped held-original witness, never part of serialized/DATA plan.
         // Only the two original wrappers below construct it; all native Restore
         // stage reads receive this explicit reference and are fenced by POST.
-        pub(super) struct SnapshotRead<'a> {snapshot:usize,genesis:&'a RemovalGenesisData,identity:(Identity,u32)}
+        // Snapshot-v2 stores the mount number in its identities. Keep that
+        // representation for legacy digests and project only an observation
+        // from the same authenticated APFS volume into the recorded epoch.
+        #[derive(Clone, Copy)]
+        pub(super) struct ArchiveVolume {
+            recorded: i64,
+            observed: i64,
+        }
+        impl ArchiveVolume {
+            fn new(recorded:i64,observed:i64,
+                historical:Option<mobile_release_desktop::macos_persistent_identity::VolumeUuid>,
+                live:Option<mobile_release_desktop::macos_persistent_identity::VolumeUuid>)->Result<Self> {
+                check(recorded>0 && observed>0 && match historical {
+                    Some(uuid)=>live==Some(uuid),
+                    None=>recorded==observed,
+                },"removal-history-volume")?;
+                Ok(Self{recorded,observed})
+            }
+            fn recorded_identity(self,id:Identity)->Result<Identity> {
+                check(id.dev==self.observed,"removal-history-observed-device")?;
+                Ok(Identity{dev:self.recorded,..id})
+            }
+            fn matches(self,recorded:Identity,observed:Identity)->bool {
+                self.recorded_identity(observed).is_ok_and(|identity|recorded==identity)
+            }
+        }
+        pub(super) fn removal_snapshot_volume(book:&Install,root:usize,snapshot:usize,
+            genesis:&RemovalGenesisData,state:&StateData)->Result<ArchiveVolume> {
+            let recorded=genesis.directories_data().iter().find(|row|row.path_data().is_empty())
+                .ok_or("removal-history-root")?;
+            let old=recorded.identity_data();
+            let live=book.recorded_directory(root)?;
+            check(book.gate.parent==Some(root) && book.identity(snapshot)?.dev==live.device
+                && (old.ino,old.mode,old.uid,old.gid,recorded.flags_data())
+                    ==(live.inode,live.mode,live.uid,live.gid,live.flags),
+                "removal-history-root")?;
+            let expected=state.current_data().release_directory_data().volume_uuid;
+            ArchiveVolume::new(old.dev,live.device,expected,live.volume_uuid)
+        }
+        pub(super) fn removal_snapshot_recorded_volume(book:&Install,root:usize,snapshot:usize,
+            genesis:&RemovalGenesisData)->Result<ArchiveVolume> {
+            // The pending and lineage readers have already bound the whole
+            // snapshot digest to this original. Recheck the name and stat,
+            // and read and hash only the required state span here.
+            let before=rehome_genesis_stat(book,snapshot,genesis)?;
+            removal_archive_memory(book,REMOVAL_ARCHIVE_PARSER)?;
+            let selected=ReleaseSetData::parse_for_target_data(genesis.selected_bytes_data(),genesis.header.target)
+                .map_err(|_|"rehome-plan-selection")?;
+            let state=rehome_snapshot_state(genesis,&selected,&mut |at,bytes|removal_archive_read_at(book,snapshot,at,bytes))?;
+            let volume=removal_snapshot_volume(book,root,snapshot,genesis,&state)?;
+            check(rehome_genesis_stat(book,snapshot,genesis)?==before,"rehome-plan-snapshot-post")?;
+            Ok(volume)
+        }
+        pub(super) struct SnapshotRead<'a> {snapshot:usize,genesis:&'a RemovalGenesisData,
+            identity:(Identity,u32),volume:ArchiveVolume}
         impl SnapshotRead<'_> {
             fn post(&self,book:&Install)->Result<()> {
                 check(rehome_genesis_original(book,self.snapshot,self.genesis)?==self.identity,"restore-transport-snapshot-original")
@@ -5535,7 +5633,9 @@ mod installer {
             let parsed=restore_recovery::snapshot_plan_work(book,genesis,|book|
                 read_rehome_plan(genesis,|at,out|removal_archive_read_at(book,snapshot,at,out)))?;
             rehome_plan_work(book,genesis,parsed.plan.owned_bytes_data()?,REHOME_WORK)?;
-            let snapshot_read=SnapshotRead{snapshot,genesis,identity:before};
+            let root=book.gate.parent.ok_or("removal-history-root")?;
+            let volume=removal_snapshot_volume(book,root,snapshot,genesis,&parsed.state)?;
+            let snapshot_read=SnapshotRead{snapshot,genesis,identity:before,volume};
             let result=call(book,&parsed.selected,&parsed.state,&parsed.plan,holder,&snapshot_read);
             // The actual native holder is sampled before any further original
             // POST. Preserve an earlier callback error; never retry its close.
@@ -5555,7 +5655,9 @@ mod installer {
             // The reader's immutable Book borrow has ended before this mutable
             // callback. Native/signature/R/M/current namespace remain caller
             // responsibilities; this callback/plan is not an admission token.
-            let snapshot_read=SnapshotRead{snapshot,genesis,identity:before};
+            let root=book.gate.parent.ok_or("removal-history-root")?;
+            let volume=removal_snapshot_volume(book,root,snapshot,genesis,&parsed.state)?;
+            let snapshot_read=SnapshotRead{snapshot,genesis,identity:before,volume};
             let result=call(book,&parsed.selected,&parsed.state,&parsed.plan,&snapshot_read);
             let post=rehome_genesis_original(book,snapshot,genesis).and_then(|after|
                 check(after==before,"rehome-plan-snapshot-post"));
@@ -5645,13 +5747,13 @@ mod installer {
             digest.update(id.links.to_be_bytes());
             for value in [id.size,id.mtime,id.mtime_ns,id.ctime,id.ctime_ns] {digest.update(value.to_be_bytes());}
         }
-        struct RehomeAuditFold {digest:Sha256,directories:usize,files:usize,bytes:u64}
+        struct RehomeAuditFold {digest:Sha256,directories:usize,files:usize,bytes:u64,volume:ArchiveVolume}
         impl RehomeAuditFold {
-            fn new(side:RehomeAuditSideData,total:usize)->Result<Self> {
+            fn new(side:RehomeAuditSideData,total:usize,volume:ArchiveVolume)->Result<Self> {
                 check((1..=REHOME_TOP_LIMIT).contains(&total),"rehome-audit-range")?;
                 let (start,end)=side.range(total)?;let mut digest=Sha256::new();digest.update(b"MRK-MACOS-REHOME-CENSUS-v1\0");
                 digest.update([side.tag()]);for n in [start,end,total] {digest.update((n as u16).to_be_bytes());}
-                Ok(Self{digest,directories:0,files:0,bytes:0})
+                Ok(Self{digest,directories:0,files:0,bytes:0,volume})
             }
             fn label(&mut self,path:&str)->Result<()> {
                 check(path.len()<=1024,"rehome-audit-source-path")?;self.digest.update((path.len() as u16).to_be_bytes());
@@ -5660,6 +5762,7 @@ mod installer {
             fn directory(&mut self,path:&str,id:Identity,flags:u32,rows:&[(String,u64)])->Result<()> {
                 check(self.directories<SNAPSHOT_DIRECTORIES && rows.len()<=350
                     && rows.windows(2).all(|r|r[0].0<r[1].0),"rehome-audit-directory-count")?;
+                let id=self.volume.recorded_identity(id)?;
                 self.digest.update([1]);self.label(path)?;rehome_hash_identity(&mut self.digest,id,flags);
                 self.digest.update((rows.len() as u16).to_be_bytes());
                 for (name,ino) in rows {check(name.len()<=255 && *ino!=0,"rehome-audit-roster")?;
@@ -5669,6 +5772,7 @@ mod installer {
             fn file(&mut self,path:&str,id:Identity,flags:u32,digest:[u8;32])->Result<()> {
                 check(self.files<SNAPSHOT_CONTROLS-4 && (id.size>0||id.size==0
                     && (noop_recovery::snapshot_prefix_shape(path,id,flags,0)||restore_recovery::snapshot_prefix_shape(path,id,flags,0))),"rehome-audit-file-count")?;
+                let id=self.volume.recorded_identity(id)?;
                 self.digest.update([2]);self.label(path)?;rehome_hash_identity(&mut self.digest,id,flags);
                 self.digest.update((id.size as u64).to_be_bytes());self.digest.update(digest);
                 self.files+=1;self.bytes=removal_archive_storage_sum_data(self.bytes,id.size as u64)?;Ok(())
@@ -5678,6 +5782,7 @@ mod installer {
                 // New typed leaf in the same census. The fixed descriptor
                 // commits every descendant; no app payload is a control span.
                 let mut encoded=SnapshotBytes::new(512)?;descriptor.encode(&mut encoded)?;
+                let id=self.volume.recorded_identity(id)?;
                 self.digest.update([3]);self.label(path)?;rehome_hash_identity(&mut self.digest,id,0);
                 self.digest.update((encoded.0.len() as u16).to_be_bytes());self.digest.update(&encoded.0);
                 self.directories+=1;Ok(())
@@ -5685,6 +5790,7 @@ mod installer {
             fn conservation(&mut self,id:Identity,row:&fresh_conservation::ConservationSpanData)->Result<()> {
                 check(self.directories<SNAPSHOT_DIRECTORIES,"fresh-transport-fold")?;
                 let mut encoded=SnapshotBytes::new(8192)?;row.encode(&mut encoded)?;
+                let id=self.volume.recorded_identity(id)?;
                 self.digest.update([4]);self.label(fresh_conservation::ROOT_NAME)?;rehome_hash_identity(&mut self.digest,id,0);
                 self.digest.update((encoded.0.len() as u16).to_be_bytes());self.digest.update(&encoded.0);self.directories+=1;Ok(())
             }
@@ -5699,12 +5805,13 @@ mod installer {
             plan.genesis.directories_data().iter().find(|row|row.path_data()==path).ok_or("rehome-audit-directory-source")
         }
         fn rehome_open_directory(book:&mut Install,parent:usize,name:&str,path:&str,inode:u64,
-            mode:u32,plan:&RehomeMoveSetData<'_>)->Result<(usize,(Identity,u32))> {
+            mode:u32,plan:&RehomeMoveSetData<'_>,volume:ArchiveVolume)->Result<(usize,(Identity,u32))> {
             check(component(name) && name.len()<=255,"rehome-audit-source-name")?;
             let old=rehome_directory_span(plan,path)?;
             let index=book.open(Some(parent),name,true)?;let current=removal_archive_stat(book,index,true,mode)?;
             check(current.0.ino==inode && current.0.dev==book.identity(parent)?.dev
-                && rehome_directory_correspondence_data(old.identity_data(),old.flags_data(),current.0,current.1,mode),
+                && rehome_directory_correspondence_data(old.identity_data(),old.flags_data(),
+                    volume.recorded_identity(current.0)?,current.1,mode),
                 "rehome-audit-directory-source")?;Ok((index,current))
         }
         fn rehome_audit_file(book:&mut Install,parent:usize,name:&str,path:&str,inode:u64,
@@ -5718,7 +5825,7 @@ mod installer {
                     && (before.0.size>0||matches!(span.kind_data(),5|6)&&before.0.size==0)
                     && before.0.size as u64==span.len_data(),"rehome-audit-file-source")?;
                 let digest=removal_archive_raw_hash(span.len_data(),|at,out|removal_archive_read_at(book,index,at,out))?;
-                check(rehome_file_correspondence_data(span,before.0,before.1,&digest)
+                check(rehome_file_correspondence_data(span,fold.volume.recorded_identity(before.0)?,before.1,&digest)
                     && removal_archive_stat(book,index,false,mode)?==before,"rehome-audit-file-post")?;
                 fold.file(path,before.0,before.1,digest)
             })
@@ -5748,7 +5855,7 @@ mod installer {
                 return fold.restore_stage(&spec.name,actual,descriptor);
             }
             removal_archive_scope(book,|book| {
-                let (directory,before)=rehome_open_directory(book,root,&spec.name,&spec.name,inode,spec.kind.mode()&0o7777,plan)?;
+                let (directory,before)=rehome_open_directory(book,root,&spec.name,&spec.name,inode,spec.kind.mode()&0o7777,plan,fold.volume)?;
                 let kind=match spec.kind {RehomeKindData::Versions=>RemovalRosterKind::Versions,
                     RehomeKindData::InstallPhases=>RemovalRosterKind::InstallPhases,
                     RehomeKindData::FreshInstallPhases=>RemovalRosterKind::FreshInstallPhases,
@@ -5762,7 +5869,7 @@ mod installer {
                         removal_archive_scope(book,|book| {
                             let path=rehome_path_data(&[&spec.name,&release.name])?;
                             let inode=removal_archive_inode(&children,&release.name).ok_or("rehome-audit-release-missing")?;
-                            let (directory,release_before)=rehome_open_directory(book,directory,&release.name,&path,inode,0o755,plan)?;
+                            let (directory,release_before)=rehome_open_directory(book,directory,&release.name,&path,inode,0o755,plan,fold.volume)?;
                             rehome_roster_work_data(retained,RemovalRosterKind::Release)?;
                             let leaves=removal_fixed_roster(book,directory,RemovalRosterKind::Release)?;
                             check(rehome_exact_names_data(&leaves,[installation_record::INVENTORY_NAME,installation_record::RECORD_NAME].into_iter()),
@@ -6017,8 +6124,8 @@ mod installer {
                 let root=book.open(parent,&name,true)?;let mode=if archived{0o700}else{0o755};
                 let before=removal_archive_stat(book,root,true,mode)?;check(before==expected,"rehome-audit-root-original")?;
                 let old_root=rehome_directory_span(plan,"")?;
-                check(before.0.dev==old_root.identity_data().dev,"rehome-audit-root-device")?;
-                if !archived {check(rehome_directory_correspondence_data(old_root.identity_data(),old_root.flags_data(),before.0,before.1,0o755),
+                let projected=snapshot_read.volume.recorded_identity(before.0)?;
+                if !archived {check(rehome_directory_correspondence_data(old_root.identity_data(),old_root.flags_data(),projected,before.1,0o755),
                     "rehome-audit-current-root")?;}
                 let kind=if archived {if context.is_some(){RemovalRosterKind::RehomeWithRetries}else{RemovalRosterKind::Rehome}}
                     else{RemovalRosterKind::InstalledRoot};
@@ -6037,7 +6144,7 @@ mod installer {
                 reserve_removal_original_storage(book,bound)?;
                 let mut restore_used=0usize;
                 let root_work=rehome_roster_bytes_data(&roster,roster.capacity())?;
-                let mut fold=RehomeAuditFold::new(side,plan.moves.len())?;
+                let mut fold=RehomeAuditFold::new(side,plan.moves.len(),snapshot_read.volume)?;
                 fold.directory("",before.0,before.1,&roster)?;
                 for (offset,spec) in plan.moves[first..end].iter().enumerate() {
                     let index=first+offset;
@@ -6095,7 +6202,7 @@ mod installer {
             with_rehome_plan(book,snapshot,genesis,|book,_,_,plan,read| {
                 let quote=capture.restore_originals_data()?;
                 let start=rehome_originals_before(book,quote)?;
-                let mut fold=RehomeAuditFold::new(RehomeAuditSideData::CurrentSuffix(0),plan.moves.len())?;
+                let mut fold=RehomeAuditFold::new(RehomeAuditSideData::CurrentSuffix(0),plan.moves.len(),read.volume)?;
                 for descriptor in genesis.restore_stages_data() {
                     let actual=restore_recovery::audit_transport_stage(book,capture.root,descriptor,read)?;
                     fold.restore_stage(&descriptor.name(),actual,descriptor)?;
@@ -8719,14 +8826,22 @@ mod installer {
 
         #[cfg(test)]
         fn rehome_audit_test_fold(plan:&RehomeMoveSetData<'_>,side:RehomeAuditSideData)->RehomeAuditData {
+            let root=rehome_directory_span(plan,"").unwrap().identity_data();
+            let volume=ArchiveVolume::new(root.dev,root.dev,None,None).unwrap();
+            rehome_audit_test_fold_in_volume(plan,side,volume)
+        }
+        #[cfg(test)]
+        fn rehome_audit_test_fold_in_volume(plan:&RehomeMoveSetData<'_>,side:RehomeAuditSideData,volume:ArchiveVolume)
+            ->RehomeAuditData {
             let (start,end)=side.range(plan.moves.len()).unwrap();
-            let mut root=plan.genesis.directories_data().iter().find(|row|row.path_data().is_empty()).unwrap().identity_data();
+            let live=|id:Identity|Identity{dev:volume.observed,..id};
+            let mut root=live(rehome_directory_span(plan,"").unwrap().identity_data());
             if side.archived(){root.mode=0o040700;root.ino=999;}
             let mut roster=plan.moves[start..end].iter().map(|spec|{
                 let ino=if spec.kind==RehomeKindData::Metadata {plan.span(&spec.name).unwrap().identity_data().ino}
                     else {rehome_directory_span(plan,&spec.name).unwrap().identity_data().ino};(spec.name.clone(),ino)
             }).collect::<Vec<_>>();roster.sort_unstable_by(|a,b|a.0.cmp(&b.0));
-            let mut fold=RehomeAuditFold::new(side,plan.moves.len()).unwrap();fold.directory("",root,0,&roster).unwrap();
+            let mut fold=RehomeAuditFold::new(side,plan.moves.len(),volume).unwrap();fold.directory("",root,0,&roster).unwrap();
             for spec in &plan.moves[start..end] {
                 if spec.kind!=RehomeKindData::Metadata {
                     let before=rehome_directory_span(plan,&spec.name).unwrap();
@@ -8735,18 +8850,18 @@ mod installer {
                     }).collect::<Vec<_>>()}else{spec.kind.phases().iter().map(|leaf|{
                         let path=format!("{}/{leaf}",spec.name);((*leaf).to_owned(),plan.span(&path).unwrap().identity_data().ino)
                     }).collect::<Vec<_>>()};children.sort_unstable_by(|a,b|a.0.cmp(&b.0));
-                    fold.directory(&spec.name,before.identity_data(),before.flags_data(),&children).unwrap();
+                    fold.directory(&spec.name,live(before.identity_data()),before.flags_data(),&children).unwrap();
                     if spec.kind==RehomeKindData::Versions {for release in &plan.releases {
                         let path=format!("versions/{}",release.name);let before=rehome_directory_span(plan,&path).unwrap();
                         let mut leaves=[installation_record::INVENTORY_NAME,installation_record::RECORD_NAME].into_iter().map(|leaf|
                             (leaf.to_owned(),plan.span(&format!("{path}/{leaf}")).unwrap().identity_data().ino)).collect::<Vec<_>>();
-                        leaves.sort_unstable_by(|a,b|a.0.cmp(&b.0));fold.directory(&path,before.identity_data(),before.flags_data(),&leaves).unwrap();
+                        leaves.sort_unstable_by(|a,b|a.0.cmp(&b.0));fold.directory(&path,live(before.identity_data()),before.flags_data(),&leaves).unwrap();
                     }}
                 }
                 for row in plan.genesis.controls_data().iter().filter(|row|row.kind_data()==0
                     && row.path_data().split('/').next()==Some(spec.name.as_str())) {
                     assert!(rehome_file_correspondence_data(row,row.identity_data(),row.flags_data(),row.digest_data()));
-                    fold.file(row.path_data(),row.identity_data(),row.flags_data(),*row.digest_data()).unwrap();
+                    fold.file(row.path_data(),live(row.identity_data()),row.flags_data(),*row.digest_data()).unwrap();
                 }
             }
             fold.finish(plan,side,root,0).unwrap()
@@ -8844,10 +8959,41 @@ mod installer {
             let mut same=removal_archive_test_row(3);same.files=std::array::from_fn(|slot|Some(
                 removal_history_test_file(same.identity,slot,b"{}",0o100444)));
             same.rehome=Some(rehome_audit_test_fold(&plan,A::ArchivedPrefix(total)).into_reference_data(&plan).unwrap());
-            assert!(prior.matches_current_data(&same));same.files[1].as_mut().unwrap().digest[0]^=1;
-            assert!(!prior.matches_current_data(&same));same.files[1].as_mut().unwrap().digest[0]^=1;
-            same.rehome.as_mut().unwrap().digest[0]^=1;assert!(!prior.matches_current_data(&same));
-            same.rehome.as_mut().unwrap().digest[0]^=1;same.pending_rehome=Some((same.identity,0));assert!(!prior.matches_current_data(&same));
+            let volume=ArchiveVolume::new(same.identity.dev,same.identity.dev,None,None).unwrap();
+            assert!(prior.matches_current_data(&same,volume));same.files[1].as_mut().unwrap().digest[0]^=1;
+            assert!(!prior.matches_current_data(&same,volume));same.files[1].as_mut().unwrap().digest[0]^=1;
+            same.rehome.as_mut().unwrap().digest[0]^=1;assert!(!prior.matches_current_data(&same,volume));
+            same.rehome.as_mut().unwrap().digest[0]^=1;
+            let uuid=mobile_release_desktop::macos_persistent_identity::VolumeUuid::from_bytes_data([7;16]).unwrap();
+            let foreign=mobile_release_desktop::macos_persistent_identity::VolumeUuid::from_bytes_data([8;16]).unwrap();
+            let observed=old.dev+1;
+            assert!(ArchiveVolume::new(old.dev,observed,None,Some(uuid)).is_err());
+            assert!(ArchiveVolume::new(old.dev,observed,Some(uuid),None).is_err());
+            for device in [old.dev,observed] {
+                assert!(ArchiveVolume::new(old.dev,device,Some(uuid),Some(foreign)).is_err());
+            }
+            let remount=ArchiveVolume::new(old.dev,observed,Some(uuid),Some(uuid)).unwrap();
+            let record_remount=|id:Identity|Identity{dev:observed,..id};
+            same.identity=record_remount(same.identity);
+            for file in same.files.iter_mut().flatten() {file.identity=record_remount(file.identity);}
+            let after=rehome_audit_test_fold_in_volume(&plan,A::ArchivedPrefix(total),remount).into_reference_data(&plan).unwrap();
+            assert_eq!(after.digest_data(),prior.rehome_data().unwrap().digest_data());
+            assert_eq!(after.root_data().0.dev,observed);
+            same.rehome=Some(after);
+            assert!(prior.matches_current_data(&same,remount));
+            let unchanged=same.files[0].as_ref().unwrap().identity;
+            for changed in [Identity{dev:observed+1,..unchanged},Identity{ino:unchanged.ino+1,..unchanged},
+                Identity{uid:1,..unchanged},Identity{mtime:unchanged.mtime+1,..unchanged},
+                Identity{size:unchanged.size+1,..unchanged},Identity{links:2,..unchanged}] {
+                same.files[0].as_mut().unwrap().identity=changed;
+                assert!(!prior.matches_current_data(&same,remount));
+            }
+            same.files[0].as_mut().unwrap().identity=unchanged;
+            same.files[0].as_mut().unwrap().digest[0]^=1;assert!(!prior.matches_current_data(&same,remount));
+            same.files[0].as_mut().unwrap().digest[0]^=1;
+            same.rehome.as_mut().unwrap().digest[0]^=1;assert!(!prior.matches_current_data(&same,remount));
+            same.rehome.as_mut().unwrap().digest[0]^=1;
+            same.pending_rehome=Some((same.identity,0));assert!(!prior.matches_current_data(&same,remount));
             let mut chain=removal_history_test_chain(2);
             let first=(0..chain.rows.len()).find(|i|chain.rows[*i].attempt.as_ref().unwrap().previous.is_none()).unwrap();
             chain.rows[first].pending_rehome=Some((Identity{ino:999,..chain.rows[first].identity},0));
@@ -8859,6 +9005,66 @@ mod installer {
             assert!(RehomeMoveSetData::from_genesis_data(&bad,&selected,&state,&[&intent]).is_err());
             let (mut bad,selected,state,intent)=rehome_test_fixture();bad.spans.directories[1].path="foreign".into();
             assert!(RehomeMoveSetData::from_genesis_data(&bad,&selected,&state,&[&intent]).is_err());
+        }
+
+        #[cfg(test)]
+        #[test]
+        #[ignore = "requires two disposable APFS volumes and a remount"]
+        fn rehome_apfs_remount_lab() {
+            use mobile_release_desktop::macos_persistent_identity::{observe_volume, VolumeUuid};
+            use std::{env, fs::File, io::Read, path::PathBuf};
+
+            let path = |name| PathBuf::from(env::var_os(name).expect("lab path"));
+            let sample = || {
+                let dir = File::open(path("MRK_REHOME_LAB_ROOT")).unwrap();
+                let mut file = File::open(path("MRK_REHOME_LAB_ROOT").join("archive-record")).unwrap();
+                let root = Identity::of(&stat::fstat(&dir).unwrap());
+                let volume = observe_volume(dir.as_fd()).unwrap();
+                assert_eq!(volume, observe_volume(file.as_fd()).unwrap());
+                let before = stat::fstat(&file).unwrap();
+                let identity = Identity::of(&before);
+                let mut bytes = Vec::new();
+                (&mut file).take(1024).read_to_end(&mut bytes).unwrap();
+                assert!(bytes.len()<1024 && identity.size==bytes.len() as i64);
+                assert!(identity==Identity::of(&stat::fstat(&file).unwrap()));
+                let hash: [u8; 32] = Sha256::digest(&bytes).into();
+                (volume, root, identity, before.st_flags, hash)
+            };
+            let evidence = path("MRK_REHOME_LAB_EVIDENCE");
+            let current = sample();
+            let phase = env::var("MRK_REHOME_LAB_PHASE").unwrap();
+            if phase=="record" {
+                serde_json::to_writer(File::create_new(evidence).unwrap(),&current).unwrap();
+                return;
+            }
+            let historical: (VolumeUuid, Identity, Identity, u32, [u8; 32]) =
+                serde_json::from_reader(File::open(&evidence).unwrap()).unwrap();
+            let (uuid, recorded_root, recorded_file, flags, digest) = historical;
+            let (live_uuid, live_root, live_file, live_flags, live_digest) = current;
+            let bind = |device| ArchiveVolume::new(recorded_root.dev,device,Some(uuid),Some(live_uuid));
+            if phase=="foreign" {
+                assert!(bind(live_root.dev).is_err() && bind(recorded_root.dev).is_err());
+                return;
+            }
+            let volume = bind(live_root.dev).unwrap();
+            assert_ne!(recorded_root.dev,live_root.dev);
+            assert!(volume.matches(recorded_root,live_root));
+            let reference = |identity:Identity,flags,digest| RemovalArchiveFileReference {
+                identity,flags,digest,len:identity.size as u64,shape:RemovalArchiveShape::SealedBody,
+            };
+            let before = reference(recorded_file,flags,digest);
+            let live = reference(live_file,live_flags,live_digest);
+            if phase=="modified" {
+                assert_eq!(recorded_file.ino,live_file.ino);
+                assert_ne!(digest,live_digest);
+                assert!(!before.matches_recorded(&live,volume));
+                return;
+            }
+            assert!(before.matches_recorded(&live,volume));
+            assert!(!before.matches_recorded(&reference(Identity{ino:live_file.ino+1,..live_file},live_flags,live_digest),volume));
+            assert!(!before.matches_recorded(&reference(live_file,live_flags,Sha256::digest(b"substituted").into()),volume));
+            assert_eq!(phase,"verify");
+            println!("APFS volume {uuid:?}, device {} -> {}, archive inode {}",recorded_root.dev,live_root.dev,live_file.ino);
         }
 
         #[cfg(test)]
@@ -11469,7 +11675,7 @@ mod installer {
             check(removal_effective_control_bytes(book)?==effective,"removal-resume-original-storage-memory")?;Ok(expected)
         }
         fn removal_resume_retain_controls(book:&mut Install,source:worker::RemovalResumeRead<'_>,
-            plan:&mut RemovalRemainingPlan,versions:usize,history:&mut History)->Result<RemovalResumeControls> {
+            plan:&mut RemovalRemainingPlan,versions:usize,history:&mut History,volume:ArchiveVolume)->Result<RemovalResumeControls> {
             let root=source.root_original();let generation=history.current.state.current_data();
             let binding=generation.release_data().binding_data();
             check(generation.retained_invocation_data().is_none() && component(binding.release)
@@ -11517,13 +11723,13 @@ mod installer {
             let (record_original,record)=metadata_original(book,release,installation_record::RECORD_NAME,record_len)?;
             check(inventory.len()==inventory_len && record.len()==record_len
                 && inventory.capacity()<=inventory_len.max(8)*2 && record.capacity()<=record_len.max(8)*2
-                && book.identity(inventory_original)?==inventory_span.identity_data()
-                && book.identity(record_original)?==record_span.identity_data()
+                && volume.matches(inventory_span.identity_data(),book.identity(inventory_original)?)
+                && volume.matches(record_span.identity_data(),book.identity(record_original)?)
                 && inventory_span.flags_data()==0 && record_span.flags_data()==0
                 && <[u8;32]>::from(Sha256::digest(&inventory))==*inventory_span.digest_data()
                 && <[u8;32]>::from(Sha256::digest(&record))==*record_span.digest_data(),"removal-resume-current-changed")?;
             let state_span=source.genesis_control_data(book,transaction::STATE_NAME)?;
-            check(book.identity(history.state_original)?==state_span.identity_data() && state_span.flags_data()==0
+            check(volume.matches(state_span.identity_data(),book.identity(history.state_original)?) && state_span.flags_data()==0
                 && history.state_bytes.len() as u64==state_span.len_data()
                 && <[u8;32]>::from(Sha256::digest(&history.state_bytes))==*state_span.digest_data(),"removal-resume-current-state-changed")?;
             check(book.originals.len().checked_sub(start)==Some(3) && book.originals.len()<=end
@@ -11640,7 +11846,7 @@ mod installer {
                 Ok((end,storage))
             }
         }
-        fn removal_resume_compare_capture(book:&Install,source:worker::RemovalResumeRead<'_>)->Result<()> {
+        fn removal_resume_compare_capture(book:&Install,source:worker::RemovalResumeRead<'_>,volume:ArchiveVolume)->Result<()> {
             let capture=book.removal_snapshot_capture.as_ref().ok_or("removal-resume-capture-missing")?;
             check(!capture.failed && !capture.complete && capture.root==source.root_original(),"removal-resume-capture-state")?;
             let expected=source.genesis_data(book)?;
@@ -11649,7 +11855,8 @@ mod installer {
             check(capture.controls.len()==wanted,"removal-resume-control-census")?;
             for actual in &capture.controls {
                 let old=source.genesis_control_data(book,&actual.path)?;
-                check(actual.kind==old.kind_data() && matches!(actual.kind,0|5|6) && actual.identity==old.identity_data() && actual.flags==old.flags_data()
+                check(actual.kind==old.kind_data() && matches!(actual.kind,0|5|6)
+                    && volume.matches(old.identity_data(),actual.identity) && actual.flags==old.flags_data()
                     && actual.size==old.len_data() && actual.digest==*old.digest_data(),"removal-resume-control-changed")?;
             }
             for (kind,n,raw) in [(3,book.registration.participant,paths::REGISTRATION_GATE_BYTES),
@@ -11658,7 +11865,7 @@ mod installer {
                 let path=&book.originals[n].name;
                 let mut old=expected.controls_data().iter().filter(|span|span.kind_data()==kind && span.path_data()==path.as_str());
                 let span=old.next().ok_or("removal-resume-gate-span")?;
-                check(old.next().is_none() && span.identity_data()==book.identity(n)? && span.flags_data()==0
+                check(old.next().is_none() && volume.matches(span.identity_data(),book.identity(n)?) && span.flags_data()==0
                     && span.len_data()==raw.len() as u64 && *span.digest_data()==<[u8;32]>::from(Sha256::digest(raw)),
                     "removal-resume-gate-changed")?;held_bytes(book,n,raw)?;
             }capture.memory(0)?;Ok(())
@@ -11688,6 +11895,8 @@ mod installer {
                 .ok_or("removal-resume-recovery-quote")?;
             let genesis=source.genesis_data(book)?.binding_data()?;
             check(<[u8;32]>::from(Sha256::digest(&history.state_bytes))==genesis.digests_data()[3],"removal-resume-current-state-changed")?;
+            let volume=removal_snapshot_volume(book,root,source.genesis_original(book)?,
+                source.genesis_data(book)?,&history.current.state)?;
             let forecast=if let Some(prior)=prior {
                 check(prior.forecast.restore==restore_quote
                     && prior.forecast.restore_transport==source.genesis_data(book)?.restore_transport_data()
@@ -11746,15 +11955,15 @@ mod installer {
             for row in census.rows(){check(full.insert(row.name().to_owned()),"removal-resume-root-collision")?;}
             exact_roster(book,root,&full)?;
             restore.post(book,root,&history,selected)?;
-            removal_resume_compare_capture(book,source)?;
+            removal_resume_compare_capture(book,source,volume)?;
             check(plan.expected_files==forecast.files && plan.expected_directories==forecast.directories,"removal-resume-forecast-changed")?;
             let storage=payload.checked_add(evidence).and_then(|n|n.checked_add(source.history_storage_data().ok()?))
                 .and_then(|n|n.checked_add((paths::MAINTENANCE_GATE_BYTES.len()+paths::REGISTRATION_GATE_BYTES.len()) as u64))
                 .filter(|n|*n<=transaction::MAINTENANCE_STORAGE_LIMIT).ok_or("removal-resume-storage")?;
             held_bytes(book,history.state_original,&history.state_bytes)?;
             let controls=if prior.is_some(){
-                let controls=removal_resume_retain_controls(book,source,&mut plan,versions,&mut history)?;
-                removal_resume_compare_capture(book,source)?;Some(controls)
+                let controls=removal_resume_retain_controls(book,source,&mut plan,versions,&mut history,volume)?;
+                removal_resume_compare_capture(book,source,volume)?;Some(controls)
             }else{book.forward_close(history.state_original,"removal-resume-state-close")?;None};
             drop(history);drop(census);drop(recovery);drop(restore);
             let mut capture=book.removal_snapshot_capture.take().ok_or("removal-resume-capture-missing")?;
@@ -18870,7 +19079,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let pending=self.originals.pending_genesis.take().ok_or("removal-resume-genesis")?;
                 let RemovalPendingGenesis{parts,table}=pending;
                 let read=RemovalConservationRead{origin:RemovalConservationOrigin::Pending{source:self,parts:&parts}};
-                let census=maintenance::complete_removal_pending_census(book,table,&read,&parts.data)?;
+                let census=maintenance::complete_removal_pending_census(book,table,&read,&parts.data,parts.snapshot)?;
                 parts.post(book,RemovalGenesisRows::Complete(&census))?;
                 self.originals.genesis=Some(parts.into_complete(census));
                 self.originals.genesis.as_ref().ok_or("removal-resume-genesis")?.content_post(book)?;
@@ -18978,7 +19187,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.current_selection(book)?;
                 let RemovalPendingGenesis{parts,table}=self.pending_genesis.take().ok_or("removal-observer-genesis")?;
                 let read=RemovalConservationRead{origin:RemovalConservationOrigin::ObserverPending{source:self,parts:&parts}};
-                let census=maintenance::complete_removal_pending_census(book,table,&read,&parts.data)?;
+                let census=maintenance::complete_removal_pending_census(book,table,&read,&parts.data,parts.snapshot)?;
                 parts.post(book,RemovalGenesisRows::Complete(&census))?;
                 self.genesis=Some(parts.into_complete(census));
                 self.genesis.as_ref().ok_or("removal-observer-genesis")?.content_post(book)?;
@@ -19521,12 +19730,15 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     |at,buf|removal_resume_read_at(book,snapshot,at,buf))?;
                 check(genesis.whole_sha256_data()==file.digest() && genesis.binding_data()?==*row.attempt_data()
                     .ok_or("reinstall-genesis-record")?.binding_data(),"reinstall-genesis-binding")?;
-                for prior in genesis.prior_archives_data() {
-                    let current=census.rows().iter().position(|actual|actual.name()==prior.name())
-                        .ok_or("reinstall-lineage-missing")?;
-                    check(prior.matches_current_data(&census.rows()[current]),"reinstall-lineage-changed")?;
-                    if let Some(previous)=census.genesis_index_data(current) {
-                        check(previous!=index,"reinstall-lineage-self")?;edges[index][previous]=true;
+                if !genesis.prior_archives_data().is_empty() {
+                    let volume=maintenance::removal_snapshot_recorded_volume(book,root,snapshot,&genesis)?;
+                    for prior in genesis.prior_archives_data() {
+                        let current=census.rows().iter().position(|actual|actual.name()==prior.name())
+                            .ok_or("reinstall-lineage-missing")?;
+                        check(prior.matches_current_data(&census.rows()[current],volume),"reinstall-lineage-changed")?;
+                        if let Some(previous)=census.genesis_index_data(current) {
+                            check(previous!=index,"reinstall-lineage-self")?;edges[index][previous]=true;
+                        }
                     }
                 }
                 drop(genesis);book.check_name(snapshot,true)?;book.check_name(archive,true)?;
