@@ -288,7 +288,9 @@ jobs:
     name: ${{ inputs.component == 'installer-compile' && 'Compile and link Installer without signing or execution' || inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-removal-fixtures' && 'Check removal fixture roles' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
     if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-compile' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-removal-fixtures' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    # On a cold Intel runner, both role checks and the installer contracts took
+    # 18 minutes before Cargo could compile the separate recovery test target.
+    timeout-minutes: ${{ matrix.arch == 'x86_64' && 35 || 20 }}
     strategy:
       fail-fast: false
       max-parallel: 2
