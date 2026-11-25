@@ -52,6 +52,8 @@ _ANCESTOR_READ_BYTES = b"MRK_SYNTHETIC_ANCESTOR_READ\n"
 _HOME_SOCKET_BYTES = b"MRK_SYNTHETIC_HOME_SOCKET\n"
 _CENSUS_PASSES = 8
 _CENSUS_PAUSE = 0.01
+# Fixed wall budget for the full source suite in verify_ci.py.
+_PYTHON_FULL_SECONDS = 2100
 _PYTHON_FULL_FSIZE = (1 << 32) + MiB
 _PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * MiB), *((name, 16 * MiB) for name in (
     "home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")))
@@ -4666,7 +4668,7 @@ class Session:
         if type(profile) is not str or profile not in {"ordinary", "python-full", "native-control", *_NATIVE_PROFILES}:
             raise SessionError("unknown fixed command profile")
         if profile == "python-full" and (self.platform != "linux" or not self.admitted or self._admitting
-                or not latch or cancel_after is not None or cwd != self.work or seconds != 900
+                or not latch or cancel_after is not None or cwd != self.work or seconds != _PYTHON_FULL_SECONDS
                 or cpu_seconds != 300 or output_limit != 8 * MiB
                 or argv != _python_full_command(self.root, self.deadline)):
             raise SessionError("fixed Python profile invocation differs from its one admitted gate")

@@ -473,6 +473,12 @@ renewed grace period. Original-handle cleanup still runs; uncertain finality
 cannot pass. These verification scheduling allocations do not change product
 deadlines or native-control permissions and do not predict a passing duration.
 
+The Linux full Python source gate has a 2100-second wall-clock allocation for
+the full discovered inventory and its isolated fault cases. The installed-wheel
+gate uses 900 seconds. Preparation, every original capture, finality and union
+reconciliation share one cutoff clamped to the same 3300-second job deadline.
+Each isolated fault case retains its 900-second relative maximum.
+
 The ordinary per-file logical-size limit is512MiB. Only the exact Linux
 `python-full` invocation uses `(1 << 32) + 1MiB`, preserving the genuine sparse
 ZIP64 regression rather than splitting, skipping or mocking it. This fixed
