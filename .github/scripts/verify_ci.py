@@ -1094,7 +1094,8 @@ def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]
         raise VerificationError("UNSUPPORTED_VERIFICATION_SCOPE")
     if platform == "linux":
         return (*_BEFORE_TESTS, "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
-                "python-full", *(row[0] for row in RUBY_SUITES), "ruby-packaged-capture-source", STORE_NATIVE_GATES[0],
+                "python-pr-journal", "python-full", *(row[0] for row in RUBY_SUITES),
+                "ruby-packaged-capture-source", STORE_NATIVE_GATES[0],
                 "fastfile", "actionlint", "jdk-signers", *_WHEEL, "native-process-abi-wheel",
                 *COMPATIBILITY_WHEEL_GATES, "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel",
                 STORE_NATIVE_GATES[1], "python-wheel", "source-integrity")
@@ -1154,7 +1155,7 @@ def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
         "MOBILE_RELEASE_TEST_PYTHON": str(paths.source_python),
     }
     if platform == "macos":
-        env["DEVELOPER_DIR"] = "/Applications/Xcode_26.3.app/Contents/Developer"
+        env["DEVELOPER_DIR"] = "/Applications/Xcode_27.1.app/Contents/Developer"
     if paths.java_home is not None:
         env["JAVA_HOME"] = str(paths.java_home)
     return tuple(sorted(env.items()))
@@ -1231,6 +1232,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platf
             "--find-links", paths.inputs / "python", "--no-deps", "--editable", paths.work / "source-build"), seconds=900)
     command("source-pip-check", python(paths.source_python, "-m", "pip", "check"))
     command("bundle-check", (*paths.bundle, "check"))
+    check("python-pr-journal", paths.source_python, seconds=90)
     check("python-full", paths.source_python, seconds=900)
     native = paths.source / "tests/workflow/run_native_profile_checks.py"
     command("native-tools", ("/usr/bin/xcodebuild", "-version"), parser="xcode")
@@ -1863,9 +1865,9 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("NATIVE_PYTHON_INVENTORY")
         details.update(tests=len(expected), completed=list(observed))
     elif step.parser == "xcode":
-        if stdout.strip().splitlines() != ["Xcode 26.3", "Build version 17C529"]:
+        if stdout.strip().splitlines() != ["Xcode 27.1", "Build version 27A9275"]:
             raise VerificationError("XCODE_VERSION")
-        details["version"] = "Xcode26.3/17C529"
+        details["version"] = "Xcode27.1/27A9275"
     elif step.parser == "check":
         lines = [line[len("MRK_CHECK_RESULT="):] for line in stdout.splitlines() if line.startswith("MRK_CHECK_RESULT=")]
         limit = (512 if step.id == "python-full" else 256) * 1024
@@ -1878,7 +1880,11 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("CHECK_SUMMARY_REJECTED")
         # The source-anchored entrypoint checks actual methods/outcomes; parent
         # independently verifies expected complete identities after real finality.
-        if step.id in ("python-full", "python-wheel"):
+        if step.id == "python-pr-journal":
+            if (platform != "linux" or summary["tests"] != [{"id": checks.PR_JOURNAL_CASE, "outcome": "ok"}]
+                    or summary["details"] != {"executed": 1} or type(summary["details"].get("executed")) is not int):
+                raise VerificationError("PR_JOURNAL_COMPLETION")
+        elif step.id in ("python-full", "python-wheel"):
             selection = "full" if step.id == "python-full" else "wheel"
             expected = (_python_expected if _python_expected is not None else
                         checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline))
@@ -4058,7 +4064,7 @@ def retain_native_header(paths: Paths, session, checks, platform: str, state: Na
     # GCC's assembler/linker must never search mutable work, venv or Bundler
     # directories. No CPATH/GCC_EXEC_PREFIX/COMPILER_PATH or arbitrary -B/-I.
     env = {"PATH": "/usr/bin:/bin"} if platform == "linux" else {
-        "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+        "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
     }
     version_argv = (compiler, "--version") if platform == "linux" else (compiler, "--no-default-config", "--version")
     version = original_native_capture(session, version_argv, paths, rows, "compiler-version",

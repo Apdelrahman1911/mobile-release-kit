@@ -1,7 +1,7 @@
 """Actual PR core/journal and private dialogue with inert HTTP, never a provider.
 
-One bounded disk case uses only the supplied nonroot private TMPDIR; it preserves
-failed fixtures. Other cases use the existing journal's inert byte-map storage.
+The CI controller runs the bounded disk case separately with its private TMPDIR.
+Discovered cases use the journal's inert byte-map storage and transport fixtures.
 """
 import copy
 import hashlib
@@ -240,9 +240,8 @@ class PullRequestModeTests(unittest.TestCase):
         with self.assertRaises(ValueError): wire.parse_go(duplicate + b"\n", initial)
         self.assertNotIn(draft().title.encode(), raw); self.assertNotIn(b"not-a-live-token", wire.ready_frame(initial))
 
-    def test_actual_exclusive_journal_cold_reopen_preserves_ready_bytes_and_cross_mode_fence(self):
-        if os.geteuid() == 0:
-            self.skipTest("Physical journal requires the reviewed nonroot private-TMPDIR recipe")
+    def verify_actual_exclusive_journal_cold_reopen_preserves_ready_bytes_and_cross_mode_fence(self):
+        self.assertNotEqual(os.geteuid(), 0)
         tmp = os.environ.get("TMPDIR")
         self.assertTrue(tmp and Path(tmp).is_absolute())
         info = os.stat(tmp, follow_symlinks=False)

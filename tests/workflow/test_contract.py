@@ -259,6 +259,7 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(dict(python.env)["FASTLANE_SKIP_UPDATE_CHECK"], "true")
         ruby = {Path(step.argv[len(paths.bundle) + 2]).name for step in catalog if step.id.startswith("ruby-")}
         self.assertEqual(ruby, {
+            "test_metadata_image_catalog.rb", "test_local_store_intent.rb", "test_local_store_execution_runtime.rb",
             "test_fastlane_support.rb", "test_play_store.rb", "test_play_lanes.rb", "test_apple_store.rb",
             "test_apple_lanes.rb", "test_apple_production.rb", "test_apple_production_lane.rb",
             "test_apple_asset_upload.rb", "test_ios_upload_validation.rb", "test_android_upload_validation.rb",
@@ -296,6 +297,14 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(checks.TOOLING_SHA, "1" * 40)
         self.assertEqual(set(checks.TOOLING_FILES), {
             "Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/apple_store.rb",
+            "fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_registration.rb",
+            "fastlane/apple_provisioning_bundle_read.rb", "fastlane/apple_provisioning_profile_read.rb",
+            "fastlane/apple_provisioning_p12.rb", "fastlane/apple_provisioning_p12_assemble.rb",
+            "fastlane/apple_provisioning_signing.rb", "fastlane/apple_provisioning_certificate_issuance.rb",
+            "fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
+            "fastlane/apple_distribution_certificate_policy.rb", "fastlane/apple_distribution_certificate_prepare.rb",
+            "fastlane/apple_distribution_certificate_verify.rb", "fastlane/apple_store_versions.rb",
+            "fastlane/android_store_versions.rb", "fastlane/play_edit_recovery.rb",
             "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb",
             "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
             "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",

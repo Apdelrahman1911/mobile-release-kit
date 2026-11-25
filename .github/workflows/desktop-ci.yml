@@ -49,7 +49,8 @@ jobs:
   frontend:
     name: Fast desktop checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The complete suite can approach 10 minutes before Actions post-job cleanup.
+    timeout-minutes: 15
     outputs:
       artifact-id: ${{ steps.frontend.outputs.artifact-id }}
       native: ${{ steps.changed.outputs.native }}
@@ -94,6 +95,11 @@ jobs:
             test_offline_preflight test_project_recovery test_macos_workflow_admission \
             test_local_release_intent test_local_store_intent test_local_ios_store_data test_local_ios_prepared_intent_data test_local_store_receipt test_local_release_source test_local_release_candidate \
             test_local_candidate_composition test_local_candidate_create test_local_ios_candidate test_local_ios_candidate_protocol test_local_ios_candidate_facts test_local_output_freshness test_local_release_metadata test_local_release_journal test_local_store_stages
+      - name: Test Store workflow and macOS packaging contracts
+        working-directory: .
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
           # Own process for the finite private-input/stdio failure fixtures;
           # explicit module names avoid the historical native/package suite.
           python -B -m unittest \
