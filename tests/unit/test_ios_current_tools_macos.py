@@ -22,9 +22,13 @@ from .helpers import ios_config, write_project
 from .evidence_helpers import build_lifecycle
 from .ios_entitlement_helpers import NativeProfileSeam, modernize_ipa_fixture, CERTIFICATE, profile
 
+FD_DIRECTORY = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+
 class CurrentIPAToolsTests(unittest.TestCase):
     def fixture(self, stack, *, deep=False):
-        root=Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='mrk-ipa-current-')))
+        temp_parent = Path(tempfile.gettempdir()).resolve(strict=True)
+        root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='mrk-ipa-current-', dir=temp_parent)))
+        stack.enter_context(patch.dict(os.environ, {'TMPDIR': str(temp_parent)}))
         tools=root/'system';tools.mkdir()
         for name in subject.NAMES:
             p=tools/name;p.write_bytes(b'inert role '+name.encode());p.chmod(0o555)
@@ -44,7 +48,10 @@ class CurrentIPAToolsTests(unittest.TestCase):
         request=dict(schemaVersion=1,signingTools={name:identity((tools/name).stat()) for name in subject.NAMES},
                      runDeadlineNs=str(now+200*10**9),hardDeadlineNs=str(now+205*10**9))
         project=root/'project'
-        if deep: project=project/'work'/'apps'/'original'/'selected'/'release-project'
+        if deep:
+            # Leave room for the original-file ancestry under the hosted scratch
+            # prefix and its separately quoted macOS /tmp alias.
+            project = project / 'work' / 'apps' / 'selected' / 'release-project'
         project.mkdir(parents=True)
         config=load_config(write_project(project,ios_config(),platform='ios'))
         build_lifecycle(config,platform='ios')
@@ -63,7 +70,7 @@ class CurrentIPAToolsTests(unittest.TestCase):
     def capture(self, native, records):
         def call(argv,**kwargs):
             evidence=kwargs['_evidence'];owner=evidence._current_ios
-            records.append((owner,evidence,tuple(argv),len(os.listdir('/proc/self/fd'))))
+            records.append((owner,evidence,tuple(argv),len(os.listdir(FD_DIRECTORY))))
             self.assertEqual(kwargs['output_limit'],8*1024**2)
             self.assertFalse(any(k.startswith('MOBILE_RELEASE') for k in kwargs['environ']))
             evidence._attempt(owner.guard,timeout=kwargs['timeout'],ordinary=True)
@@ -87,7 +94,7 @@ class CurrentIPAToolsTests(unittest.TestCase):
             stack.enter_context(native.profile_authentication())
             stack.enter_context(patch.object(subject,'run_owned',self.capture(native,records)))
             stack.enter_context(patch.object(gate,'ipa_signing_evidence',side_effect=AssertionError('no second extraction/profile')))
-            before=len(os.listdir('/proc/self/fd'))
+            before=len(os.listdir(FD_DIRECTORY))
             result=gate.validate_current_local_upload(**args)
             self.assertEqual(result['operationIntentSha256'],args['intent_sha256'])
             self.assertEqual(result['ipaSha256'],sha256_file(args['ipa_path']))
@@ -97,7 +104,7 @@ class CurrentIPAToolsTests(unittest.TestCase):
             self.assertTrue(all(s.close_state=='CLOSED' for s in owner.tools.values()))
             self.assertFalse(owner.snapshot.temporary.exists())
             self.assertLess(max(r[3] for r in records),256)
-            self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+            self.assertEqual(before,len(os.listdir(FD_DIRECTORY)))
 
     def test_foreign_ci_intent_and_signer_mismatch_cannot_return_eligibility(self):
         with ExitStack() as stack:
@@ -120,9 +127,9 @@ class CurrentIPAToolsTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):subject.request_data(json.dumps(bad))
             bad=json.loads(json.dumps(request));bad['signingTools']['security']['inode']='1'
             args['tools_request']=json.dumps(bad)
-            before=len(os.listdir('/proc/self/fd'))
+            before=len(os.listdir(FD_DIRECTORY))
             with self.assertRaises(ValidationError):gate.validate_current_local_upload(**args)
-            self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+            self.assertEqual(before,len(os.listdir(FD_DIRECTORY)))
             args['tools_request']=json.dumps(request);native=NativeProfileSeam();records=[];capture=self.capture(native,records)
             def change(argv,**kwargs):
                 result=capture(argv,**kwargs);(tools/'security').chmod(0o755);(tools/'security').write_bytes(b'changed original');return result
@@ -170,9 +177,9 @@ class CurrentIPAToolsTests(unittest.TestCase):
             stack.enter_context(native.profile_authentication())
             stack.enter_context(patch.object(native,'authenticate_cms',side_effect=ValidationError('inert CMS rejection')))
             stack.enter_context(patch.object(subject,'run_owned',self.capture(native,records)))
-            before=len(os.listdir('/proc/self/fd'))
+            before=len(os.listdir(FD_DIRECTORY))
             with self.assertRaises(ValidationError):gate.validate_current_local_upload(**args)
-            self.assertFalse(records);self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+            self.assertFalse(records);self.assertEqual(before,len(os.listdir(FD_DIRECTORY)))
 
     def test_unknown_consuming_tool_close_is_not_retried(self):
         with ExitStack() as stack:
@@ -187,12 +194,12 @@ class CurrentIPAToolsTests(unittest.TestCase):
                     os_close(number)
                 with patch.object(os,'close',lost): return actual_close(owner)
             stack.enter_context(patch.object(subject.CurrentIPATools,'close',close))
-            before=len(os.listdir('/proc/self/fd'))
+            before=len(os.listdir(FD_DIRECTORY))
             with self.assertRaises(ProcessError):gate.validate_current_local_upload(**args)
             self.assertEqual(1,len(attempts));owner=records[0][0]
             self.assertFalse(owner.closed);self.assertEqual('UNKNOWN',owner.tools['security'].close_state)
             self.assertTrue(all(s.close_state=='CLOSED' for n,s in owner.tools.items() if n!='security'))
-            self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+            self.assertEqual(before,len(os.listdir(FD_DIRECTORY)))
 
     def test_zip_preallocation_and_expiry_refuse_before_native_or_zipinfo(self):
         import zipfile
