@@ -1213,10 +1213,11 @@ impl Book {
         Ok(parent)
     }
     fn read(&self, index: usize, size: u64, collect: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<(String, Vec<u8>)> {
+        use sha2_11::Digest as _;
         if size > 512 * 1024 * 1024 || (collect && size > crate::macos_install_record::MANIFEST_LIMIT as u64) { return Err(AdmissionFailure::Bounds); }
         let fd = self.fd(index)?; native::no_xattrs(fd.as_fd()).map_err(native_error)?;
         if self.records[index].identity.is_none_or(|id| id.size < 0 || id.size as u64 != size) { return Err(AdmissionFailure::Inventory); }
-        let mut hash = Sha256::new(); let mut bytes = Vec::new(); let mut count = 0u64; let mut block = [0u8; 65536];
+        let mut hash = sha2_11::Sha256::new(); let mut bytes = Vec::new(); let mut count = 0u64; let mut block = [0u8; 65536];
         loop {
             self.point(end, stop)?;
             let n = unistd::read(fd, &mut block).map_err(native_error)?;

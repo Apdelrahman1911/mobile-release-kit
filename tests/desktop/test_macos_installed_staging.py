@@ -3421,7 +3421,7 @@ sys.exit(status)
         self.assertEqual(len(predicates), 1)
         for target, correlation, accepted in [(target, "f" * 32, True) for target in TOOL.MAC_TARGETS] + [
             ("other", "f" * 32, False), (TOOL.INTEL_TARGET, "bad", False), (TOOL.ARM_TARGET, "F" * 32, False)]:
-            result = subprocess.run(["/usr/bin/bash", "-c", predicates[0]], check=False,
+            result = subprocess.run(["/bin/bash", "-c", predicates[0]], check=False,
                 env={"MRK_MACOS_TARGET": target, "MRK_MACOS_REMOVAL_CORRELATION": correlation},
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
             self.assertEqual(result.returncode == 0, accepted)
@@ -3883,7 +3883,7 @@ sys.exit(status)
         payload = body if role == "ordinary-image" else body + b"inert observer DATA"
         inputs = checkout / "desktop/macos-installed-inputs"
         files = {TOOL.ENTRY_BINARY: (entry, 0o755), TOOL.APP_BINARY: (payload, 0o755),
-            TOOL.VAULT_HELPER: (body, 0o555), TOOL.REMOVER: (body, 0o555),
+            TOOL.INSTALLED_CLI: (body, 0o555), TOOL.VAULT_HELPER: (body, 0o555), TOOL.REMOVER: (body, 0o555),
             TOOL.ANDROID_HELPER: (body, 0o555), TOOL.RESIDENT_IMAGE: (resident, 0o555),
             TOOL.ANDROID_SERVICE_PLIST: ((inputs / (module.IDENTIFIER + ".plist")).read_bytes(), 0o644),
             "Contents/Info.plist": ((inputs / "EntryInfo.plist").read_bytes(), 0o644),
@@ -3936,6 +3936,7 @@ sys.exit(status)
             "MRK_MACOS_PACKAGE_ROLE": role, module.NOTARY_KEY_VARIABLE: module.base64.b64encode(key).decode("ascii"),
             "MRK_MACOS_SIGNED_ENTRY_SHA256": TOOL.digest(entry), "MRK_MACOS_SIGNED_PAYLOAD_SHA256": TOOL.digest(payload),
             "MRK_MACOS_VAULT_HELPER_SHA256": TOOL.digest(body), "MRK_MACOS_REMOVER_SHA256": TOOL.digest(body),
+            "MRK_MACOS_INSTALLED_CLI_SHA256": TOOL.digest(body),
             "MRK_MACOS_ANDROID_HELPER_SHA256": TOOL.digest(body),
             "MRK_MACOS_RESIDENT_IMAGE_SHA256": TOOL.digest(resident), "MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256": TOOL.digest(desktop)}
         if launcher:
@@ -4587,6 +4588,8 @@ sys.exit(status)
                 operation.entries = []; operation.entry_registry = {}; operation.errors = []
                 operation.app_absence = operation.update = None
                 operation.setup_package = operation.setup_verify = False
+                operation.prepared_binding = operation.candidate_removal_context = None
+                operation.prepared_staging = False
                 operation.stager = TOOL; operation.notary_clock = lambda **kwargs: None
                 parent = operation.register(os.open(path, module.READ_FLAGS | os.O_DIRECTORY), "parent", "directory")
                 parent["identity"] = module.directory_identity(os.fstat(parent["fd"]))
@@ -5106,14 +5109,12 @@ sys.exit(status)
                     else:
                         path = Path(os.readlink("/proc/self/fd/" + str(fd)))
                     return path.is_relative_to(root)
-                original_directory=operation.removal_open_directory
-                def opened_directory(parent,name,role,**kwargs):
-                    if parent is not None:return original_directory(parent,name,role,**kwargs)
-                    entry=operation.register(real_open(root,module.READ_FLAGS|os.O_DIRECTORY),role,"removal-directory",None,str(root))
-                    entry["parent_entry"]=None
-                    entry["removal_policy"]=(True,False,False)
-                    entry["removal_facts"]=operation.removal_directory_facts(entry,protected=True)
-                    return entry
+                def opened(path, flags, *args, **kwargs):
+                    return real_open(root if path == "/" else path, flags, *args, **kwargs)
+                def lst(path, *args, **kwargs):
+                    if path == "/":
+                        return root_info(real_lstat(root, *args, **kwargs))
+                    return real_lstat(path, *args, **kwargs)
                 def fst(fd):
                     info=real_fstat(fd);return root_info(info) if under(fd) else info
                 def st(path,*args,**kwargs):
@@ -5144,7 +5145,8 @@ sys.exit(status)
                 with mock.patch.object(module.time,"monotonic_ns",side_effect=lambda:state.clock[0]), \
                      mock.patch.object(operation,"normal_mount_host",side_effect=host), \
                      mock.patch.object(operation,"setup_verification_consume_returned",side_effect=before_repeat), \
-                     mock.patch.object(operation,"removal_open_directory",side_effect=opened_directory),mock.patch.object(module.os,"fstat",side_effect=fst), \
+                     mock.patch.object(module.os,"open",side_effect=opened),mock.patch.object(module.os,"lstat",side_effect=lst), \
+                     mock.patch.object(module.os,"fstat",side_effect=fst), \
                      mock.patch.object(module.os,"stat",side_effect=st):
                     if fault in (None,"cursor-unavailable"):
                         try: operation.execute()
@@ -12694,7 +12696,7 @@ class MacInstalledData(unittest.TestCase):
             root = Path(tmp)
             args, original, final, source, maker = self.xcode_setup_package_fixture(root, TOOL.ARM_TARGET)
             component = TOOL.XCODE_SETUP_COMPONENT
-            distribution = (Path(__file__).absolute().parents[1] / "fixtures/macos-xcode-product-distribution.xml").read_bytes()
+            distribution = self.xcode_native_distribution(TOOL.source_build_selection(args.target).package_version)
             product = {"Distribution": distribution, "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
                        **{component+"/"+name: body for name, body in final.items()}}
             for flat in (False, True):
@@ -12711,18 +12713,23 @@ class MacInstalledData(unittest.TestCase):
                 args.package.write_bytes(maker(changed, product=True))
                 with self.assertRaises(TOOL.Refused): TOOL.audit_xcode_setup_product_command(args)
 
-    def test_xcode_product_native_bundle_annotation_is_source_bound(self):
-        # Actual unsigned productbuild output on macOS26 ARM and Intel,
-        # run39067503871/1. Synthetic carrier, no signed/installed claim.
+    def xcode_native_distribution(self, version):
+        # Actual unsigned productbuild structure from run 39067503871/1.
+        # Project only the version attributes injected by PackageKit.
         captured = (Path(__file__).absolute().parents[1] / "fixtures/macos-xcode-product-distribution.xml").read_bytes()
+        self.assertEqual(captured.count(b'="0.1.2"'), 2)
+        return captured.replace(b'="0.1.2"', b'="' + version.encode("ascii") + b'"')
+
+    def test_xcode_product_native_bundle_annotation_is_source_bound(self):
         for target in TOOL.MAC_TARGETS:
             selection = TOOL.source_build_selection(target)
             expected = TOOL.xcode_setup_sources(selection)["Distribution.xml"]
+            captured = self.xcode_native_distribution(selection.package_version)
             TOOL.install_product_distribution(captured, expected, xcode_setup=True)
-        # Version is checked against the expected definition, not a constant
-        # and not the untrusted package's own reference/annotation pair.
-        TOOL.install_product_distribution(captured.replace(b'0.1.2', b'1.2.3'),
-            expected.replace(b'0.1.2', b'1.2.3'), xcode_setup=True)
+        # Verify against an independently selected version with unchanged shape.
+        alternate = TOOL.BuildSelection(target, "1.2.3", selection.release)
+        TOOL.install_product_distribution(self.xcode_native_distribution("1.2.3"),
+            TOOL.xcode_setup_sources(alternate)["Distribution.xml"], xcode_setup=True)
         for mutation in ("id", "path", "version", "extra-attribute", "extra-bundle", "nested",
                          "text", "tail", "wrapper-attribute", "reference-attribute", "reference-text",
                          "not-final", "paired-version", "active-action"):
@@ -13106,6 +13113,7 @@ class MacInstalledData(unittest.TestCase):
                 values = files if changed is None else changed
                 archive = odc(".", stat.S_IFDIR | 0o755, uid=uid, gid=gid)
                 archive += odc("./input", stat.S_IFDIR | 0o555, uid=uid, gid=gid)
+                archive += odc("./input/runtime", stat.S_IFDIR | 0o555, uid=uid, gid=gid)
                 for name, (body, mode) in sorted(values.items()):
                     archive += odc("./" + name, stat.S_IFREG | mode, body, uid=uid, gid=gid)
                 return {"PackageInfo": info, "Scripts": archive + odc("TRAILER!!!", 0)}
@@ -13119,7 +13127,7 @@ class MacInstalledData(unittest.TestCase):
                   mock.patch.object(TOOL, "read_at", return_value=(original, SimpleNamespace(st_uid=501, st_gid=20))),
                   mock.patch.object(TOOL, "read", return_value=final) as read):
                 compact = TOOL.app_absence_original_command(args)
-                self.assertEqual(set(compact["rows"]), set(files) | {"input"})
+                self.assertEqual(set(compact["rows"]), set(files) | {"input", "input/runtime"})
                 self.assertEqual(compact["rows"]["input/data"], {"size": 4, "sha256": TOOL.digest(b"DATA"), "mode": 0o444})
                 self.assertEqual([key for key, value in compact.items() if isinstance(value, bytes)], ["packageInfo"])
                 value = TOOL.app_absence_final_command(args, compact)
@@ -13815,7 +13823,7 @@ class MacInstalledData(unittest.TestCase):
                 raise AssertionError("string subclass must not be inspected")
             def __hash__(self):
                 raise AssertionError("string subclass must not be hashed")
-        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 200)
+        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 201)
         self.assertTrue(all(re.fullmatch(r"[a-z0-9-]{1,49}", x) for x in TOOL.CARRIER_REFUSAL_REASONS))
         cli = ["preview", "--installed-passive-carrier", "--work", "/inert/work",
                "--expected-source", "a" * 40, "--output", "/inert/carrier"]
@@ -14301,7 +14309,8 @@ class MacInstalledData(unittest.TestCase):
                     with TOOL.maintenance_directory(fd, name, mode) as (held, identity):
                         self.assertEqual(held, model.leaf)
                         self.assertEqual(identity, {"device": model.objects[held].st_dev, "inode": held,
-                            "mode": stat.S_IFDIR | mode, "uid": 0, "gid": 0, "flags": 0})
+                            "mode": stat.S_IFDIR | mode, "uid": 0, "gid": 0, "flags": 0,
+                            "volumeUuid": "1" * 32})
                 model.attributes.assert_called_once_with(model.leaf)
                 self.assertEqual(model.closed, list(reversed(model.opened)))
                 model.api.chmod.assert_not_called()
@@ -15959,7 +15968,8 @@ class MacInstalledData(unittest.TestCase):
         context = {"pending": None}
         for phase, count in (("finalize-package", 64), ("prepare-removal-observers", 158)):
             guarded = SimpleNamespace(phase=phase, credential_active=context, credential_known=lambda: True,
-                                      credential_calls=[None] * count)
+                                      credential_calls=[None] * count, candidate_removal_context=None)
+            guarded.candidate_removal_quote = ANDROID_HELPER.Operation.candidate_removal_quote.__get__(guarded)
             with self.assertRaisesRegex(ANDROID_HELPER.Refused, "credential-fixed-original"):
                 ANDROID_HELPER.Operation.credential_call(guarded, context, expected_roles[0], ())
 
@@ -16435,8 +16445,7 @@ class MacInstallationMetadataData(unittest.TestCase):
     def test_optional_android_service_is_exact_nonexecutable_plist_and_bound_helper_pair(self):
         helper, resident = entry_macho_fixture(), image_macho_fixture("resident")
         expected, expected_image = TOOL.digest(helper), TOOL.digest(resident)
-        plist = TOOL.plistlib.dumps({"Label": TOOL.ANDROID_SERVICE_LABEL, "BundleProgram": TOOL.ANDROID_HELPER_BUNDLE_PROGRAM,
-                                    "MachServices": {TOOL.ANDROID_SERVICE_LABEL: True}})
+        plist = TOOL.android_service_plist()
         helper_path, image_path = Path("/inert/android-helper"), Path("/inert/resident-image")
         args = SimpleNamespace(android_helper=helper_path, expected_android_helper=expected,
                                resident_image=image_path, expected_resident_image=expected_image)
@@ -16764,7 +16773,7 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(selected["release"], TOOL.RELEASE)
         self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
-        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-16")
+        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-17")
         # Current verification generation, not a predecessor or release approval.
         def source_data(relative, limit):
             path = source / relative
@@ -16777,17 +16786,17 @@ class MacInstallationMetadataData(unittest.TestCase):
         cargo = tomllib.loads(source_data("desktop/src-tauri/Cargo.toml", 16384).decode("utf-8"))
         tauri = json.loads(source_data("desktop/src-tauri/tauri.conf.json", 4096))
         self.assertEqual((cargo["package"]["name"], cargo["package"]["version"], tauri["version"]),
-                         ("mobile-release-kit-desktop", "0.2.10", "0.2.10"))
-        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-16"),
-                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-16")):
+                         ("mobile-release-kit-desktop", "0.2.11", "0.2.11"))
+        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-17"),
+                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-17")):
             row = TOOL.build_release_data(source_data("desktop/macos-installed-inputs/" + name, 4096), target=target)
-            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.10", "release": release})
+            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.11", "release": release})
         for relative in ("desktop/src-tauri/Cargo.lock", "desktop/helpers/macos-android-register/Cargo.lock",
                          "desktop/helpers/macos-desktop-image/Cargo.lock"):
             locked = tomllib.loads(source_data(relative, 256 * 1024).decode("utf-8"))
             roots = [row for row in locked["package"] if row["name"] == "mobile-release-kit-desktop"]
             self.assertEqual(len(roots), 1)
-            self.assertEqual(roots[0]["version"], "0.2.10")
+            self.assertEqual(roots[0]["version"], "0.2.11")
             self.assertNotIn("source", roots[0])
             self.assertNotIn("checksum", roots[0])
         # This is bounded SOURCE metadata comparison, not native xattr/input
@@ -17318,7 +17327,8 @@ class MacCurrentRuntimeData(unittest.TestCase):
             def incomplete(source, runtime, target):
                 (runtime / "partial-data").write_bytes(b"retained")
                 raise ValueError("injected preparation failure")
-            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=incomplete)):
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(
+                    prepare_current=incomplete, macos_trust_bundle=preparer.macos_trust_bundle)):
                 with self.assertRaises(ValueError):
                     TOOL.current_runtime_command(args)
             self.assertEqual((args.work / "runtime/partial-data").read_bytes(), b"retained")
@@ -17330,7 +17340,8 @@ class MacCurrentRuntimeData(unittest.TestCase):
                 result = preparer.prepare_current(source, runtime, target)
                 (source / "desktop").chmod(0o700)
                 return result
-            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=writable_projection)):
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(
+                    prepare_current=writable_projection, macos_trust_bundle=preparer.macos_trust_bundle)):
                 with self.assertRaisesRegex(TOOL.Refused, "current-directory-mode-owner"):
                     TOOL.current_runtime_command(args)
             self.assertFalse(args.output.exists())
@@ -18825,7 +18836,8 @@ class MacNormalPreviewData(unittest.TestCase):
 
         # One paired ordinary Intel flow proves every nested validator and the
         # inventory writer use the caller target, not the ARM module defaults.
-        intel_target, intel_release = "x86_64-apple-darwin", "macos26-x86_64-synthetic-01"
+        intel_target = TOOL.INTEL_TARGET
+        intel_release = TOOL.source_build_selection(intel_target).release
         intel_body = entry_macho_fixture(target=intel_target)
         intel_entry = intel_body + b"outer-entry-DATA"
         intel_desktop = image_macho_fixture(target=intel_target)
@@ -18838,8 +18850,6 @@ class MacNormalPreviewData(unittest.TestCase):
             expected_installed_cli=TOOL.digest(intel_body),
             expected_entry=TOOL.digest(intel_entry), expected_app_binary=TOOL.digest(intel_body), expected_vault_helper=TOOL.digest(intel_body),
             expected_android_helper=TOOL.digest(intel_body), expected_remover=TOOL.digest(intel_body), expected_desktop_image=TOOL.digest(intel_desktop), expected_resident_image=TOOL.digest(intel_resident)))
-        source[TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json"] = TOOL.canonical({
-            "schemaVersion": 1, "packageVersion": "0.1.2", "release": intel_release})
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime) as runtime_reader,
               mock.patch.object(TOOL, "tree", return_value=intel_app) as signed_tree,
               synthetic_android_support(support, app_seal={}),

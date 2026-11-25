@@ -203,8 +203,14 @@ impl DocumentBinding {
     pub(crate) fn start_macos_maintenance(&self,confirmation:&str)
         ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
         let mut stage="profile";
-        self.start_macos_maintenance_staged(confirmation,&mut stage).inspect_err(|_|{
+        self.start_macos_maintenance_staged(confirmation,&mut stage).map_err(|error|{
             macos_removal::removal_trace(format_args!("app prepare-admission=refused stage={stage}"));
+            // Only this pre-release boundary proves the request never entered
+            // the original worker. A lost reply or late refusal still retains
+            // the ordinary unknown-outcome protections in the renderer.
+            if stage == "saved-admission" && error.code == "macos_maintenance_unavailable" {
+                BridgeError::new("macos_maintenance_not_admitted", "The original preparation did not start.")
+            } else { error }
         })
     }
 

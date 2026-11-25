@@ -98,7 +98,9 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertEqual(build.count('fn macos_build_release_data('), 1)
         self.assertEqual(build.count('macos_build_release_data(&target, &target_os);'), 1)
         library = (ROOT / "desktop/src-tauri/src/lib.rs").read_text()
-        self.assertIn('pub mod macos_install_paths;', library)
+        self.assertIn('include!("lib_platform_data.rs");', library)
+        platform_data = (ROOT / "desktop/src-tauri/src/lib_platform_data.rs").read_text()
+        self.assertIn('pub mod macos_install_paths;', platform_data)
         installer = (ROOT / "desktop/src-tauri/src/bin/macos_install.rs").read_text()
         self.assertIn('macos_install_paths as paths', installer)
         for target in ('installed_shell_observation.rs', 'session_gtk_qualification.rs'):
@@ -127,7 +129,8 @@ class MacMaintenancePreparationTests(unittest.TestCase):
             self.assertEqual(manifest["dependencies"]["mobile-release-kit-desktop"]["features"], [feature])
             self.assertIn(library + ".dylib", stable)
         package = (ROOT / "desktop/tools/macos_android_helper_package.py").read_text()
-        self.assertIn('self.release_entry = self.source_original("desktop/macos-installed-inputs/build-release.json"', package)
+        self.assertIn('self.release_entry = self.source_original(self.release_input, "source-image-release", self.stager.BUILD_RELEASE_LIMIT)', package)
+        self.assertIn('self.stager.build_release_data(body, target=self.target)', package)
         self.assertIn('self.read(self.release_entry) == release_body', package)
         self.assertIn('MRK_MACOS_INSTALL_SOURCE_COMMIT=environment["GITHUB_SHA"], MRK_IMAGE_RELEASE_ID=release', package)
         self.assertIn('source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]', package)
@@ -291,12 +294,13 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertNotIn('Install::new(', completed)
         self.assertLess(completed.index('parent.run_completed('), completed.index('parent.record_maintenance_export('))
         self.assertLess(completed.index('parent.record_maintenance_export('), completed.index('parent.settle_parent_originals()'))
-        self.assertEqual(source.count('fn install_prepared('), 1)
+        self.assertEqual(source.count('fn stage_payload('), 1)
         self.assertEqual(source.count('self.copy_tree("app", prepared.input, stage,'), 1)
         self.assertEqual(source.count('self.copy_tree("runtime", prepared.input, stage,'), 1)
-        self.assertIn('self.install_prepared(prepared, &invocation)', source)
-        self.assertIn('book.install_prepared(prepared,&args[3])', private)
-        for guard in ['const TOTAL: u64 = 120 * SECOND', 'const SETTLEMENT: u64 = 10 * SECOND',
+        self.assertEqual(source.count('book.stage_payload(&observed.prepared,invocation,admission)'), 1)
+        self.assertIn('PreparedWorker::Maintenance(observed) => maintenance::execute(', private)
+        self.assertIn('PreparedWorker::ArchivedMaintenance(observed)=>maintenance::execute(', private)
+        for guard in ['const TOTAL: u64 = compiled_total_data(', 'const SETTLEMENT: u64 = 10 * SECOND',
                       'ClockId::CLOCK_MONOTONIC', 'start.checked_add(TOTAL) == Some(end)',
                       'now < self.last.get()', 'end.checked_sub(TOTAL)',
                       'self.book.shared_deadline().and_then(Deadline::check_work)',
@@ -310,10 +314,12 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('Stdio::from(duplicate)', private)
         self.assertIn('OFlag::O_ACCMODE == OFlag::O_RDONLY', private)
         self.assertIn('pread(fd,&mut bytes[used..],used as i64)', private)
-        self.assertEqual(private.count('.spawn()'), 1)
+        self.assertEqual(private.count('.spawn()'), 2)
         self.assertIn('self.child.as_mut().map(Child::try_wait)', private)
         self.assertIn('self.child.as_mut().map(Child::kill)', private)
         admission = private.split('fn admit_and_go(', 1)[1].split('fn collect(', 1)[0]
+        self.assertEqual(admission.count('.spawn()'), 1)
+        self.assertIn('ok_or("removal-fixture-command")?.spawn()', private)
         self.assertLess(admission.index('self.book.gate.exclusive_acquired'), admission.index('.spawn()'))
         self.assertLess(admission.index('let output_owned = self.book.control_original'),
                         admission.index('input_owned?; output_owned?;'))
@@ -322,7 +328,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         dispatch = private.split('fn dispatch_private(', 1)[1].split('#[cfg(test)]', 1)[0]
         self.assertLess(dispatch.index('Deadline::inherit(end)'), dispatch.index('read_frame(stdin.as_fd()'))
         self.assertLess(dispatch.index('command_eof(stdin.as_fd()'), dispatch.index('book.worker_go_eof = true'))
-        self.assertLess(dispatch.index('book.worker_go_eof = true'), dispatch.index('book.install_prepared'))
+        self.assertLess(dispatch.index('book.worker_go_eof = true'), dispatch.index('maintenance::execute('))
         for held in ['parentCommandEndpoint', 'parentResultEndpoint', 'writerCommandEndpoint', 'writerResultEndpoint',
                      'worker-pipe-post', 'worker-source-binding', 'worker-gate-binding']:
             self.assertIn(held, private)
@@ -339,7 +345,6 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         # owner. Ordinary entry now uses that owner, but source checks cannot
         # attest Context forwarding, signing, native calls or outer finality.
         actions = source.split('    mod maintenance {', 1)[1].split('    // B2 is deliberately private', 1)[0]
-        self.assertEqual(source.count('fn stage_payload('), 1)
         self.assertEqual(source.count('fn record_file('), 1)
         self.assertIn('ActionData::SamePackageNoop', actions)
         self.assertIn('ActionData::RestoreFixedApp', actions)
@@ -356,14 +361,17 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('fn run_maintenance(', private)
         self.assertIn('self.run_selected(source,Some((selected,request_id)))', private)
         # A request ID is correlation only. The original same-clock parent
-        # reserves one fixed EXCL output before intent/GO and never reuses the
-        # old per-release export owner or attests its own future return.
-        self.assertLess(admission.index('RequestExport::reserve'), admission.index('observed.create_intent'))
-        self.assertLess(admission.index('observed.create_intent'), admission.index('.spawn()'))
+        # Fresh must persist its birth and intent before publishing the
+        # request slot. Existing installations reserve before their intent.
+        request_setup = private.split('fn create_intent_and_reserve_request(', 1)[1].split('fn spawn_admitted_writer', 1)[0]
+        self.assertLess(request_setup.index('observed.create_intent'), request_setup.index('RequestExport::reserve'))
+        self.assertLess(request_setup.index('RequestExport::reserve'), request_setup.index('if !fresh'))
+        self.assertLess(request_setup.index('if !fresh'), request_setup.index('.create_intent', request_setup.index('if !fresh')))
+        self.assertLess(admission.index('self.create_intent_and_reserve_request('), admission.index('self.spawn_admitted_writer('))
         self.assertIn('request.empty_original(&self.book)?', admission)
         export = private.split('struct RequestExport {', 1)[1].split('struct Parent {', 1)[0]
         for original in ['transaction::export_name_data(request_id)',
-                         'book.create_file(support,&name,Role::ReceiptWriter)',
+                         'book.create_public_receipt_file(support,&name)',
                          'self.empty_original(book)?', 'self.attempted = true',
                          'book.record_reserved_file(self.writer,&bytes.0)',
                          'book.persist(self.support,false)', 'book.forward_close(reader,']:

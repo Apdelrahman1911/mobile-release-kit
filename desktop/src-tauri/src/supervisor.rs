@@ -3456,6 +3456,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
                     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
+                        #[cfg(feature = "desktop-shell")]
+                        if matches!(_method, Method::Capabilities) {
+                            crate::shell::diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-inspection-enter\n");
+                        }
                         let armed = originals.arm_acl_once(endpoint, &inspection_stop);
                         inspection_owner.observe_native_failure(originals.first_failure());
                         armed.map_err(|_| BridgeError::unavailable("The original Mac ACL inspection could not be armed."))?;
@@ -3749,6 +3753,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             return DriverEnd::RetainedUnknown;
         }
     };
+    #[cfg(all(target_os = "macos", feature = "desktop-shell"))]
+    if matches!(profile, Profile::Passive(Method::Capabilities)) {
+        crate::shell::diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-inspection-joined\n");
+    }
     if owner.failed() || Instant::now() >= owner.endpoint() {
         owner.fail(BridgeError::timeout());
         return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
@@ -3989,6 +3997,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
     };
     resources.child = child;
+    #[cfg(all(target_os = "macos", feature = "desktop-shell"))]
+    if matches!(profile, Profile::Passive(Method::Capabilities)) {
+        crate::shell::diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-child-acquired\n");
+    }
     #[cfg(all(test, feature = "development-runtime"))]
     { lock(&owner.observation).spawned = true; }
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
