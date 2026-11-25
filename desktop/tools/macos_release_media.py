@@ -200,7 +200,8 @@ def release_selection(value):
         need(original["id"] == int(run_id) and original["run_attempt"] == int(attempt)
              and original["head_sha"] == source and original["head_commit"]["tree_id"] == tree
              and original["head_branch"] == "main" and original["event"] == "workflow_dispatch"
-             and original["path"] == workflow and original["repository"]["full_name"] == repository,
+             and original["path"] == workflow and original["repository"]["full_name"] == repository
+             and original["status"] == "completed" and original["conclusion"] == "success",
              "release-selection-run")
         page = api(f"actions/runs/{run_id}/artifacts?per_page=100")
         need(len(page["artifacts"]) == page["total_count"] <= 100, "release-selection-page")

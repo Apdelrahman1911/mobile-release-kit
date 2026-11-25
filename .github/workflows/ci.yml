@@ -138,7 +138,7 @@ jobs:
               "$MRK_TEST_RUBY" -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
               grep -Eq "^60 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
               "$MRK_TEST_RUBY" -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
-              grep -Eq "^18 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
+              grep -Eq "^21 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
             '
       - name: Remove only this job's disposable dependencies and cache
         if: always() && steps.work.outputs.root != ''
@@ -210,10 +210,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ruby_executable="$(/bin/bash .github/scripts/stage_ci_linux_ruby.sh)"
+          ruby_executable="$(command -v ruby)"
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
           [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
+            /bin/bash .github/scripts/stage_ci_linux_ruby.sh \
             "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
             --platform linux --source "$GITHUB_WORKSPACE" \
             --python "$MRK_PYTHON" --ruby "$ruby_executable" \
@@ -436,10 +437,7 @@ jobs:
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
           [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           case "$MRK_OS" in
-            ubuntu-24.04)
-              platform=linux
-              ruby_executable="$(/bin/bash .github/scripts/stage_ci_linux_ruby.sh)"
-              ;;
+            ubuntu-24.04) platform=linux ;;
             macos-26) platform=macos ;;
             *) exit 1 ;;
           esac
@@ -455,6 +453,7 @@ jobs:
             --job "$GITHUB_JOB" --shard "$MRK_SHARD")
           if [[ "$platform" == linux ]]; then
             verifier_args+=(--java-home "$JAVA_HOME_21_X64")
+            verifier_args=(/bin/bash .github/scripts/stage_ci_linux_ruby.sh "${verifier_args[@]}")
           fi
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 "${verifier_args[@]}"
       - name: Preserve only the successful compact pair proof
@@ -541,10 +540,7 @@ jobs:
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
           [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           case "$MRK_OS" in
-            ubuntu-24.04)
-              platform=linux
-              ruby_executable="$(/bin/bash .github/scripts/stage_ci_linux_ruby.sh)"
-              ;;
+            ubuntu-24.04) platform=linux ;;
             macos-26) platform=macos ;;
             *) exit 1 ;;
           esac
@@ -560,6 +556,7 @@ jobs:
             --job "$GITHUB_JOB")
           if [[ "$platform" == linux ]]; then
             verifier_args+=(--java-home "$JAVA_HOME_21_X64")
+            verifier_args=(/bin/bash .github/scripts/stage_ci_linux_ruby.sh "${verifier_args[@]}")
           fi
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 "${verifier_args[@]}"
   # Only full verification may publish the protected test status. A manual

@@ -2131,9 +2131,9 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-support": ("test_fastlane_support.rb", {"FastlaneReleaseSupportTest"}, 12),
             "ruby-metadata-image-catalog": ("test_metadata_image_catalog.rb", {"MetadataImageCatalogTest"}, 1),
             "ruby-store_document": ("test_store_document.rb", {"StoreDocumentPublicationTest"}, 13),
-            "ruby-store_lane_lifetime": ("test_store_lane_lifetime.rb", {"StoreLaneLifetimeTest"}, 19),
+            "ruby-store_lane_lifetime": ("test_store_lane_lifetime.rb", {"StoreLaneLifetimeTest"}, 21),
             "ruby-store_lane_nested_validation": ("test_store_lane_nested_validation.rb", {"StoreLaneNestedValidationTest"}, 13),
-            "ruby-store_lane_resources": ("test_store_lane_resources.rb", {"StoreLaneResourcesTest"}, 9),
+            "ruby-store_lane_resources": ("test_store_lane_resources.rb", {"StoreLaneResourcesTest"}, 13),
             "ruby-store_lane_runtime": ("test_store_lane_runtime.rb", {"StoreLaneRuntimeTest"}, 12),
             "ruby-native-spawn": ("test_native_process_spawn.rb", {"NativeProcessSpawnTests"}, 52),
             "ruby-native-owner": ("test_native_upload_process.rb",
@@ -2141,14 +2141,17 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 22),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", {"NativeSignalObservationTest"}, 1),
             "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 44),
-            "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 50),
+            "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 60),
             "ruby-apple_store": ("test_apple_store.rb", {"AppleOperationTransportTest", "AppleStoreContractTest"}, 7),
-            "ruby-apple_lanes": ("test_apple_lanes.rb", {"AppleReleaseLanesTest"}, 29),
-            "ruby-apple_production": ("test_apple_production.rb", {"AppleProductionTest", "AppleCreateRetryContractTest"}, 47),
+            "ruby-apple_lanes": ("test_apple_lanes.rb", {"AppleReleaseLanesTest"}, 40),
+            "ruby-apple_production": ("test_apple_production.rb", {"AppleProductionTest", "AppleCreateRetryContractTest"}, 49),
             "ruby-apple_production_lane": ("test_apple_production_lane.rb", {"AppleProductionLaneTest"}, 2),
             "ruby-apple_asset_upload": ("test_apple_asset_upload.rb", {"AppleAssetUploadTest"}, 8),
-            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", {"IosUploadValidationTest"}, 35),
-            "ruby-android_upload_validation": ("test_android_upload_validation.rb", {"AndroidUploadValidationTest"}, 37),
+            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", {"IosUploadValidationTest", "IosUploadOriginTest"}, 35),
+            "ruby-android_upload_validation": ("test_android_upload_validation.rb", {"AndroidUploadValidationTest", "AndroidLocalUploadInputTest", "AndroidUploadOriginTest"}, 37),
+            "ruby-local-store-intent": ("test_local_store_intent.rb", {"LocalStoreIntentContractTest"}, 14),
+            "ruby-local-store-execution-runtime": ("test_local_store_execution_runtime.rb",
+                                                    {"LocalStoreExecutionRuntimeTest"}, 21),
             "ruby-workflow-yaml": ("test_workflow_yaml.rb", {"WorkflowYamlStructureTest"}, 1),
             "ruby-packaged-capture-source": ("test_installed_ruby_capture.rb", {"PackagedRubyCaptureTest"}, 6),
             "ruby-packaged-capture-wheel": ("test_installed_ruby_capture.rb",
@@ -2630,6 +2633,20 @@ class CICoordinatorResultTests(unittest.TestCase):
 
 
 class SigningMatrixControllerTests(unittest.TestCase):
+    def test_admits_the_current_source_diagnostic_roster_and_refuses_overflow(self):
+        import time
+        controller = controller_module()
+        contract = controller._module(ROOT / "tests/workflow", "local_signing_matrix_contract")
+        deadline = time.monotonic() + 15.0
+        package = contract.package_manifest(ROOT / "src/mobile_release", deadline=deadline)
+        definitions = contract.definitions_manifest(ROOT, deadline=deadline)
+        files = tuple(sorted({name for name in definitions if name.endswith(".py")}
+                             | {"src/mobile_release/" + name for name in package if name.endswith(".py")}))
+        scope = controller.SigningMatrixDiagnostic("source", "macos-26", 0, ("1" * 64,), (), files, ())
+        self.assertTrue(controller._signing_matrix_diagnostic_scope(scope))
+        oversized = tuple(f"tests/inert_{index}.py" for index in range(1025))
+        self.assertFalse(controller._signing_matrix_diagnostic_scope(dataclasses.replace(scope, files=oversized)))
+
     """Original-capture doubles and tiny private DATA; no Session or native tool."""
 
     def rig(self):

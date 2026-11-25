@@ -16,6 +16,9 @@ APP = Path("/Applications/Mobile Release Kit.app")
 PRODUCT = Path("/Library/Application Support/MobileReleaseKit")
 CLI = PRODUCT / "Mobile Release Kit.app/Contents/MacOS/mrk"
 FIXTURE = Path("tests/fixtures/macos_android_journey")
+VERSION_FILE = Path("public/version.properties")
+CONFIG_FILE = Path("release/mobile-release.json")
+PAYLOAD_PATTERN = r"[/]MobileReleaseKitPayload\.app/Contents/MacOS/mobile-release-kit-desktop( |$)"
 PAGES = (
     "Overview", "Build & release", "Store listing", "Signing & accounts",
     "Project settings", "Build tools", "GitHub", "Build files", "Recover work", "Automation",
@@ -111,10 +114,15 @@ class UI:
         need(found["matched"] == 1, f"ambiguous-element-{name}")
         return found["snapshot_id"], found["nodes"][0]
 
-    def click(self, name, *, category=None):
-        snapshot, node = self.node(name, category=category)
+    def click(self, name, *, category=None, contains=False):
+        snapshot, node = self.node(name, category=category, contains=contains)
         need(node.get("enabled"), f"disabled-element-{name}")
         self.command("element.click", snapshot_id=snapshot, id=node["id"])
+
+    def edit(self, name, text):
+        self.click(name, category="textfield", contains=True)
+        self.keys("command", "a")
+        self.command("text.insert", text=text)
 
     def keys(self, *keys):
         self.command("keyboard.press", keys=keys)
@@ -134,11 +142,11 @@ class UI:
 
     def pick(self, project, *, first=False):
         self.click("Choose project folder" if first else "Open another project folder", category="button")
+        self.node("Choose a mobile project folder", contains=True)
         self.keys("command", "shift", "g")
         self.command("text.insert", text=str(project))
         self.keys("return")
-        time.sleep(1)
-        self.keys("return")
+        self.click("Open", category="button")
 
     def record_session(self, name, exercise):
         self.command("recording.start", duration_seconds=25)
@@ -179,7 +187,8 @@ def observe(work, action, media):
     connection, client = open_session(work, action)
     ui = UI(client, evidence)
     project = work / "MRK Verification Android"
-    original = {name: file_hash(project / name) for name in ("release/mobile-release.json", "public/version.properties")}
+    original = {path.relative_to(project): file_hash(path) for path in project.rglob("*")
+                if path.is_file() and ".git" not in path.relative_to(project).parts}
 
     def save():
         tmp = evidence / "RESULT.next"
@@ -217,7 +226,7 @@ def observe(work, action, media):
     def select_project():
         ui.page("Overview")
         ui.pick(project, first=True)
-        ui.page("Build & release")
+        ui.click("Edit version & build number")
         ui.click("Open saved version editor", category="button")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
         need(all(file_hash(project / name) == digest for name, digest in original.items()), "project-originals")
@@ -234,6 +243,39 @@ def observe(work, action, media):
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
 
+    def versions():
+        ui.page("Overview")
+        ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
+        ui.edit("Marketing version", "1.0.1")
+        ui.edit("Build number", "2")
+        ui.click("Validate and review values", category="button")
+        ui.node("Edit only the two selected value spans", category="heading", contains=True)
+        ui.click("Save version values…", category="button")
+        ui.node("Save the new version?", category="heading", contains=True)
+        ui.click("Keep reviewing", category="button")
+        need(file_hash(project / VERSION_FILE) == original[VERSION_FILE], "cancelled-save-modified-version")
+        ui.click("Save version values…", category="button")
+        ui.click("I reviewed the change.", category="checkbox")
+        ui.click("Save version values", category="button")
+        ui.node("Submitted version values saved", category="statictext", contains=True)
+        expected = b"VERSION_NAME=1.0.1\nBUILD_NUMBER=2\n"
+        need((project / VERSION_FILE).read_bytes() == expected, "exact-saved-version")
+        need(all(file_hash(project / name) == digest for name, digest in original.items() if name != VERSION_FILE),
+             "save-touched-another-input")
+        ui.keys("command", "q")
+        ui.node("Quit and discard unsaved drafts?", category="statictext", contains=True)
+        ui.click("Quit", category="button")
+        until(lambda: call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False).returncode == 1,
+              18, "original-payload-did-not-quit")
+        call("/usr/bin/open", "-a", str(APP))
+        ui.page("Overview")
+        ui.pick(project, first=True)
+        ui.click("Edit version & build number")
+        ui.click("Open saved version editor", category="button")
+        ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
+        need((project / VERSION_FILE).read_bytes() == expected
+             and file_hash(project / CONFIG_FILE) == original[CONFIG_FILE], "reopened-saved-values")
+
     try:
         if scenario("cold-runtime-and-cli-denial", lambda: ui.record_session("cold-runtime", startup)):
             selected = scenario("project-picker-and-saved-config", select_project)
@@ -242,10 +284,13 @@ def observe(work, action, media):
                 scenario(label, lambda page=page: ui.page(page))
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
+                scenario("version-cancel-save-quit-reopen", versions)
             else:
                 scenarios["cli-grant-and-revoke"] = dict(status="Blocked", reason="Fixture project selection failed")
+                scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
         else:
-            for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation"):
+            for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
+                         "version-cancel-save-quit-reopen"):
                 scenarios[name] = dict(status="Blocked", reason="Original UI session or initialization did not pass")
     finally:
         save()

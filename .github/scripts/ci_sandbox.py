@@ -3185,7 +3185,9 @@ class Session:
         if path in state["files"] and state["files"][path] != record:
             raise SessionError("native authority immutable file binding changed")
         state["files"][path] = record
-        if len(state["files"]) > 1024 or sum(row["identity"][6] for row in state["files"].values()) > 128 * MiB:
+        # The subject receives two separately bounded immutable trees. The
+        # current package and test trees contain 1,059 files together.
+        if len(state["files"]) > 1152 or sum(row["identity"][6] for row in state["files"].values()) > 128 * MiB:
             raise SessionError("native authority immutable input inventory exceeds fixed bounds")
         return raw
 

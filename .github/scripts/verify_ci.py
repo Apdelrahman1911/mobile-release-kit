@@ -2206,7 +2206,7 @@ def _signing_matrix_diagnostic_scope(scope) -> bool:
             and type(scope.regression_ids) is tuple
             and all(type(value) is str and value in scope.identifiers for value in scope.regression_ids)
             and len(set(scope.regression_ids)) == len(scope.regression_ids)
-            and type(scope.files) is tuple and len(scope.files) <= 512
+            and type(scope.files) is tuple and len(scope.files) <= 1024
             and all(type(value) is str and len(value) <= 256 and re.fullmatch(
                 r"(?:tests|\.github/scripts|src/mobile_release)/(?:[A-Za-z_][A-Za-z0-9_-]*/)*[A-Za-z_][A-Za-z0-9_-]*\.py",
                 value) for value in scope.files)
@@ -6055,6 +6055,13 @@ def finalize_report(report: dict, session, *, summary: Path | None, runner_temp:
         if summary is None or runner_temp is None:
             raise VerificationError("NO_SAFE_SUMMARY_DESTINATION")
         publish_summary(summary, report, runner_temp=runner_temp, deadline=deadline)
+        # Keep the original failure available in log tails after large inventories.
+        first_failure = next((row for row in report["rows"] if row["status"] == "FAIL"), None)
+        if first_failure is not None:
+            details = first_failure.get("details", {})
+            diagnostic = {"gate": first_failure["id"], "error": first_failure.get("error"),
+                          "stage": details.get("stage"), "failure": details.get("failure")}
+            print("MRK_CI_GATE_FAILURE=" + json.dumps(diagnostic, sort_keys=True, ensure_ascii=True), flush=True)
     except BaseException as exc:
         fail(exc)
         print("MRK_CI_PUBLICATION_FAILED=" + json.dumps(error_details(exc), sort_keys=True), flush=True)
