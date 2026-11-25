@@ -1,0 +1,2708 @@
+diff --git a/desktop/src-tauri/src/apple_provisioning_certificate_protocol.rs b/desktop/src-tauri/src/apple_provisioning_certificate_protocol.rs
+--- a/desktop/src-tauri/src/apple_provisioning_certificate_protocol.rs
++++ b/desktop/src-tauri/src/apple_provisioning_certificate_protocol.rs
+@@ -92,13 +92,16 @@
+     }
+     pub(super) fn valid(&self, context: &Context, scope: &ScopeData) -> bool {
+         let Ok(target) = self.target(&scope.target) else { return false; };
+-        if !context.mode.certificate() || self.source_key.validate().is_err() || self.source_p8.validate().is_err()
++        if !(context.mode.certificate() || context.mode.p12()) || self.source_key.validate().is_err() || self.source_p8.validate().is_err()
+             || context.key_record_id.as_deref() != Some(&self.source_key.record_id)
+             || context.key_record_revision != Some(self.source_key.revision_counter)
+             || self.source_p8.record_id != context.record_id || self.source_p8.revision_counter != context.record_revision
+             || self.source_key.vault_id != self.source_p8.vault_id || self.source_key.generation_id != self.source_p8.generation_id
+             || self.source_key.record_id == self.source_p8.record_id || target.team_id != target.app_id_prefix {
+             return false;
++        }
++        if context.mode.p12() {
++            return self.key_preparation.is_none() && self.review.is_none() && self.prior.is_none();
+         }
+         if let Some(key) = &self.key_preparation {
+             if !key.reference.valid() || key.source_key != self.source_key || key.account_ref != scope.provisioning.account_ref
+@@ -254,7 +257,7 @@
+ impl CertificateDecoder {
+     pub(super) fn event(&mut self, binding: &RequestBinding, sequence: u32, kind: &str, value: Value)
+         -> Result<CertificateEvent, BridgeError> {
+-        need(binding.context.mode.certificate() && sequence > 0 && sequence <= CERTIFICATE_EVENTS)?;
++        need((binding.context.mode.certificate() || binding.context.mode.p12() && matches!(kind,"certificate-key"|"certificate-identities"|"certificate-policy")) && sequence > 0 && sequence <= binding.context.mode.events())?;
+         let scope = binding.scope.certificate.as_ref().ok_or_else(invalid)?;
+         let digest = certificate_phase_sha256(&value).map_err(|_| invalid())?;
+         match kind {
+@@ -399,8 +402,12 @@
+ 
+ pub(crate) fn certificate_reply(binding: &RequestBinding, sequence: u32, kind: &str, payload: Value)
+     -> Result<(Vec<u8>, String), BridgeError> {
+-    need(binding.context.mode.certificate() && (1..=CERTIFICATE_EVENTS).contains(&sequence)
+-        && matches!(kind, "certificate-key" | "certificate-identities" | "certificate-policy" | "certificate-pending" | "certificate-attempt"))?;
++    let mode = binding.context.mode;
++    need(mode.certificate() && (1..=CERTIFICATE_EVENTS).contains(&sequence)
++        && matches!(kind, "certificate-key" | "certificate-identities" | "certificate-policy" | "certificate-pending" | "certificate-attempt")
++        || mode.p12() && matches!((kind, sequence),
++            ("certificate-key", 1) | ("certificate-identities", 2) | ("certificate-policy", 3))
++        || mode == Mode::P12Save && matches!((kind, sequence), ("p12-pending", 4) | ("p12-output", 5)))?;
+     let value = json!({"protocol":PROTOCOL,"operationId":binding.operation,"ownerGeneration":binding.generation,
+         "nonce":binding.nonce,"requestSha256":binding.sha256,"kind":format!("{kind}-ack"),"step":sequence,"payload":payload});
+     let digest = certificate_phase_sha256(&value).map_err(|_| invalid())?;
+diff --git a/desktop/src-tauri/src/apple_provisioning_certificate_recovery_selection.rs b/desktop/src-tauri/src/apple_provisioning_certificate_recovery_selection.rs
+--- a/desktop/src-tauri/src/apple_provisioning_certificate_recovery_selection.rs
++++ b/desktop/src-tauri/src/apple_provisioning_certificate_recovery_selection.rs
+@@ -113,7 +113,7 @@
+ 
+     fn account(scope:&ScopeData)->AccountSnapshot {
+         AccountSnapshot { revision:crate::application_state_store::Revision(7),account:scope.provisioning.account_ref.clone(),
+-            rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![] }
++            rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![],p12_rows:vec![] }
+     }
+     #[test]
+     fn certificate_history_is_redacted_current_fullref_data_and_preserves_pending() {
+diff --git a/desktop/src-tauri/src/apple_provisioning_journal.rs b/desktop/src-tauri/src/apple_provisioning_journal.rs
+--- a/desktop/src-tauri/src/apple_provisioning_journal.rs
++++ b/desktop/src-tauri/src/apple_provisioning_journal.rs
+@@ -40,6 +40,10 @@
+ #[path = "apple_provisioning_key_journal.rs"]
+ mod key;
+ pub(crate) use key::{KeyOriginalReservation, KeyJournalAck, CertificateOriginalReservation, CertificateJournalAck};
++pub(crate) use data::p12::*;
++#[path="apple_provisioning_p12_journal.rs"]
++mod p12;
++pub(crate) use p12::{P12OriginalReservation,P12JournalAck};
+ type Result<T> = std::result::Result<T, StateError>;
+ 
+ fn unknown() -> StateError {
+@@ -63,6 +67,8 @@
+     key_rows: Option<Vec<KeyPrepareRow>>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     certificate_rows: Option<Vec<CertificateIssuanceRow>>,
++    #[serde(default,skip_serializing_if="Option::is_none")]
++    p12_rows: Option<Vec<P12SaveRow>>,
+ }
+ impl State {
+     fn empty() -> Self {
+@@ -73,30 +79,35 @@
+             profile_rows: None,
+             key_rows: None,
+             certificate_rows: None,
++            p12_rows: None,
+         }
+     }
+     fn row_count(&self) -> usize {
+         self.rows.len().saturating_add(self.profile_rows.as_ref().map_or(0,Vec::len))
+             .saturating_add(self.key_rows.as_ref().map_or(0,Vec::len))
+             .saturating_add(self.certificate_rows.as_ref().map_or(0,Vec::len))
++            .saturating_add(self.p12_rows.as_ref().map_or(0,Vec::len))
+     }
+     fn contains_operation(&self, operation: &str) -> bool {
+         self.rows.iter().any(|row| row.intent.context.operation_id == operation)
+             || self.profile_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
+             || self.key_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
+             || self.certificate_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
++            || self.p12_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
+     }
+     fn unresolved(&self, account: &AccountRef) -> bool {
+         self.rows.iter().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+             || self.profile_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+             || self.key_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+             || self.certificate_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
++            || self.p12_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+     }
+     fn validate(&self) -> Result<()> {
+         need(self.row_count() <= ROWS && match self.schema_version {
+-            1 => self.protocol == PROTOCOL && self.profile_rows.is_none() && self.key_rows.is_none() && self.certificate_rows.is_none(),
+-            2 => self.protocol == PROFILE_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_none() && self.certificate_rows.is_none(),
+-            3 => self.protocol == KEY_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_some() && self.certificate_rows.is_some(),
++            1 => self.protocol == PROTOCOL && self.profile_rows.is_none() && self.key_rows.is_none() && self.certificate_rows.is_none() && self.p12_rows.is_none(),
++            2 => self.protocol == PROFILE_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_none() && self.certificate_rows.is_none() && self.p12_rows.is_none(),
++            3 => self.protocol == KEY_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_some() && self.certificate_rows.is_some() && self.p12_rows.is_none(),
++            4 => self.protocol == P12_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_some() && self.certificate_rows.is_some() && self.p12_rows.is_some(),
+             _ => false,
+         })?;
+         let mut operations = BTreeSet::new();
+@@ -123,6 +134,11 @@
+             need(operations.insert(row.intent.provenance.operation_id.as_str()))?;
+             if row.unresolved() { need(pending_accounts.insert(&row.intent.context.account_ref))?; }
+         }
++        for row in self.p12_rows.iter().flatten() {
++            row.validate()?; need(operations.insert(row.intent.provenance.operation_id.as_str()))?;
++            if row.unresolved() { need(pending_accounts.insert(&row.intent.context.account_ref))?; }
++        }
++        need(self.p12_rows.as_ref().is_none_or(|rows| rows.windows(2).all(|pair| State::p12_key(&pair[0]) < State::p12_key(&pair[1]))))?;
+         need(self.key_rows.as_ref().is_none_or(|rows| rows.windows(2)
+             .all(|pair| key_key(&pair[0]) < key_key(&pair[1]))))?;
+         need(self.certificate_rows.as_ref().is_none_or(|rows| rows.windows(2)
+@@ -207,6 +223,7 @@
+     pub(crate) profile_rows: Vec<ProfileSetupRow>,
+     pub(crate) key_rows: Vec<KeyPrepareRow>,
+     pub(crate) certificate_rows: Vec<CertificateIssuanceRow>,
++    pub(crate) p12_rows: Vec<P12SaveRow>,
+ }
+ 
+ pub(crate) struct AppleProvisioningJournal {
+@@ -217,6 +234,7 @@
+     profile_original: Option<Arc<ProfileOriginalReservation>>,
+     key_original: Option<Arc<KeyOriginalReservation>>,
+     certificate_original: Option<Arc<CertificateOriginalReservation>>,
++    p12_original: Option<Arc<P12OriginalReservation>>,
+     #[cfg(test)]
+     lose_next_ack: bool,
+ }
+@@ -233,6 +251,7 @@
+             profile_original: None,
+             key_original: None,
+             certificate_original: None,
++            p12_original: None,
+             #[cfg(test)]
+             lose_next_ack: false,
+         }
+@@ -254,7 +273,7 @@
+     }
+ 
+     fn reservation_taken(&self) -> bool {
+-        self.original.is_some() || self.profile_original.is_some() || self.key_original.is_some() || self.certificate_original.is_some()
++        self.original.is_some() || self.profile_original.is_some() || self.key_original.is_some() || self.certificate_original.is_some() || self.p12_original.is_some()
+     }
+ 
+     fn healthy(&self) -> Result<()> {
+@@ -349,6 +368,7 @@
+             account: account.clone(),
+             key_rows: state.key_rows.into_iter().flatten()
+                 .filter(|row| &row.intent.context.account_ref == account).collect(),
++            p12_rows: state.p12_rows.into_iter().flatten().filter(|row| &row.intent.context.account_ref==account).collect(),
+             certificate_rows: state.certificate_rows.into_iter().flatten()
+                 .filter(|row| &row.intent.context.account_ref == account).collect(),
+             profile_rows: state.profile_rows.into_iter().flatten()
+diff --git a/desktop/src-tauri/src/apple_provisioning_journal_data.rs b/desktop/src-tauri/src/apple_provisioning_journal_data.rs
+--- a/desktop/src-tauri/src/apple_provisioning_journal_data.rs
++++ b/desktop/src-tauri/src/apple_provisioning_journal_data.rs
+@@ -677,3 +677,6 @@
+ #[cfg(test)]
+ #[path = "apple_provisioning_journal_data_tests.rs"]
+ pub(super) mod tests;
++
++#[path="apple_provisioning_p12_journal_data.rs"]
++pub(super) mod p12;
+diff --git a/desktop/src-tauri/src/apple_provisioning_journal_tests.rs b/desktop/src-tauri/src/apple_provisioning_journal_tests.rs
+--- a/desktop/src-tauri/src/apple_provisioning_journal_tests.rs
++++ b/desktop/src-tauri/src/apple_provisioning_journal_tests.rs
+@@ -276,7 +276,7 @@
+     let before = reopened.read(Namespace::AppleProvisioning).unwrap();
+     let found = later.inspect_account(&value.context.account_ref).unwrap();
+     let mut current = crate::apple_provisioning_protocol::ScopeData {
+-        signing: None, key: None, certificate: None,
++        signing: None, key: None, certificate: None, p12: None,
+         provisioning: value.context.clone(), provenance: value.provenance.clone(),
+         target: value.target.clone(), reviewed_at: None,
+     };
+diff --git a/desktop/src-tauri/src/apple_provisioning_protocol.rs b/desktop/src-tauri/src/apple_provisioning_protocol.rs
+--- a/desktop/src-tauri/src/apple_provisioning_protocol.rs
++++ b/desktop/src-tauri/src/apple_provisioning_protocol.rs
+@@ -61,6 +61,11 @@
+     CertificateIdentityInput, CertificatePolicyInput, CertificateObserved, CertificateEvent, CertificateResult,
+     certificate_reply, certificate_journal_ack, CERTIFICATE_EVENTS, CERTIFICATE_IDENTITY_LIMIT,
+     CERTIFICATE_IDENTITIES_LIMIT, CERTIFICATE_JSON_LIMIT, CERTIFICATE_BATCH_DER};
++
++#[path = "apple_provisioning_p12_protocol.rs"]
++mod p12;
++pub(crate) use p12::{P12Choice,P12ReviewData,P12HistoryHint,P12ScopeData,P12Decision,P12Reason,
++    P12Observed,P12ReuseComparison,P12Result,P12Event,p12_journal_ack,p12_custody_ack,P12_EVENTS,P12_COMMANDS};
+ 
+ pub(crate) const PROTOCOL: &str = "mrk-apple-bundle-provisioning/1";
+ pub(crate) const EVENT: &str = "apple-bundle-provisioning-state-changed";
+@@ -200,20 +205,24 @@
+     CertificateCreate,
+     #[serde(rename = "certificate-reconcile")]
+     CertificateReconcile,
++    #[serde(rename="p12-review")] P12Review,
++    #[serde(rename="p12-reuse")] P12Reuse,
++    #[serde(rename="p12-save")] P12Save,
+ }
+ impl Mode {
+     pub(crate) fn key(self) -> bool {
+-        matches!(self, Self::KeyReview | Self::KeyPrepare | Self::KeyRecover | Self::CertificateReview | Self::CertificateCreate | Self::CertificateReconcile)
++        matches!(self, Self::KeyReview | Self::KeyPrepare | Self::KeyRecover | Self::CertificateReview | Self::CertificateCreate | Self::CertificateReconcile | Self::P12Review | Self::P12Reuse | Self::P12Save)
+     }
+     pub(crate) fn certificate(self) -> bool { matches!(self, Self::CertificateReview | Self::CertificateCreate | Self::CertificateReconcile) }
++    pub(crate) fn p12(self)->bool { matches!(self,Self::P12Review|Self::P12Reuse|Self::P12Save) }
+     pub(crate) fn local_key(self) -> bool { matches!(self, Self::KeyReview | Self::KeyPrepare) }
+     pub(crate) fn profile(self) -> bool {
+         matches!(self, Self::ProfileReview | Self::ProfileReuse | Self::ProfileCreate | Self::ProfileReconcile)
+     }
+     pub(crate) fn profile_save(self) -> bool { matches!(self, Self::ProfileReuse | Self::ProfileCreate) }
+-    pub(crate) fn events(self) -> u32 { if self.certificate() { CERTIFICATE_EVENTS } else if self.key() { KEY_EVENTS } else if self.profile() { PROFILE_EVENTS } else { MAX_EVENTS } }
+-    pub(crate) fn frame_limit(self) -> usize { if self.certificate() { CERTIFICATE_IDENTITY_LIMIT } else if self.key() { EVENT_LIMIT } else if self.profile() { PROFILE_IDENTITY_LIMIT } else { FRAME_LIMIT } }
+-    pub(crate) fn response_limit(self) -> usize { if self.certificate() { CERTIFICATE_JSON_LIMIT } else if self.key() { KEY_JSON_LIMIT } else if self.profile() { PROFILE_JSON_LIMIT } else { RESPONSE_LIMIT } }
++    pub(crate) fn events(self) -> u32 { if self.p12() { P12_EVENTS } else if self.certificate() { CERTIFICATE_EVENTS } else if self.key() { KEY_EVENTS } else if self.profile() { PROFILE_EVENTS } else { MAX_EVENTS } }
++    pub(crate) fn frame_limit(self) -> usize { if self.certificate() || self.p12() { CERTIFICATE_IDENTITY_LIMIT } else if self.key() { EVENT_LIMIT } else if self.profile() { PROFILE_IDENTITY_LIMIT } else { FRAME_LIMIT } }
++    pub(crate) fn response_limit(self) -> usize { if self.certificate() || self.p12() { CERTIFICATE_JSON_LIMIT } else if self.key() { KEY_JSON_LIMIT } else if self.profile() { PROFILE_JSON_LIMIT } else { RESPONSE_LIMIT } }
+     pub(crate) fn consent(self) -> &'static str {
+         match self {
+             Self::Review => "local-ios-bundle-review-v1",
+@@ -229,10 +238,13 @@
+             Self::CertificateReview => "local-ios-certificate-review-v1",
+             Self::CertificateCreate => "local-ios-certificate-create-v1",
+             Self::CertificateReconcile => "local-ios-certificate-reconcile-v1",
++            Self::P12Review => "local-ios-p12-review-v1",
++            Self::P12Reuse => "local-ios-p12-reuse-v1",
++            Self::P12Save => "local-ios-p12-save-v1",
+         }
+     }
+     pub(crate) fn commands(self) -> u32 {
+-        if self.certificate() {
++        if self.p12() { P12_COMMANDS } else if self.certificate() {
+             if self == Self::CertificateCreate { 21 } else { 14 }
+         } else if self == Self::KeyReview {
+             12
+@@ -311,18 +323,24 @@
+             && (1..u32::MAX).contains(&self.record_revision)
+             && display_name(&self.display_name)
+             && self.new_application == (self.mode == Mode::Register)
+-            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview | Mode::CertificateReview) {
++            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview | Mode::CertificateReview | Mode::P12Review) {
+                 self.reference.is_none()
+             } else {
+                 self.reference.as_ref().is_some_and(Reference::valid)
+             })
+-            && (if self.mode.certificate() {
++            && (if self.mode.certificate() || self.mode.p12() {
+                 self.key_record_id.as_ref().is_some_and(|value| token(value))
+                     && self.key_record_revision.is_some_and(|value| (1..u32::MAX).contains(&value))
+             } else { self.key_record_id.is_none() && self.key_record_revision.is_none() })
+             && if self.mode.profile() {
+                 self.p12_record_id.as_ref().is_some_and(|value| token(value))
+                     && self.p12_record_revision.is_some_and(|value| (1..u32::MAX).contains(&value))
++            } else if self.mode.p12() {
++                match (&self.p12_record_id,self.p12_record_revision) {
++                    (Some(id),Some(rev)) => self.mode!=Mode::P12Save && token(id) && (1..u32::MAX).contains(&rev),
++                    (None,None) => self.mode!=Mode::P12Reuse,
++                    _=>false,
++                }
+             } else { self.p12_record_id.is_none() && self.p12_record_revision.is_none() }
+     }
+     pub(crate) fn accepts_target(&self, target: &BundleTarget) -> bool {
+@@ -378,9 +396,10 @@
+             "newApplication",
+             "displayName",
+         ];
+-    if profile { names.extend(["p12RecordId", "p12RecordRevision"]); }
++    let p12=value.get("mode").and_then(Value::as_str).is_some_and(|mode|matches!(mode,"p12-review"|"p12-reuse"|"p12-save"));
++    if profile || p12 { names.extend(["p12RecordId", "p12RecordRevision"]); }
+     if value.get("mode").and_then(Value::as_str).is_some_and(|mode|
+-        matches!(mode, "certificate-review" | "certificate-create" | "certificate-reconcile")) {
++        matches!(mode, "certificate-review" | "certificate-create" | "certificate-reconcile")) || p12 {
+         names.extend(["keyRecordId", "keyRecordRevision"]);
+     }
+     need(keys(value, &names))?;
+@@ -404,7 +423,7 @@
+             && token(&input.owner_generation)
+             && [Mode::Review, Mode::Register, Mode::Reconcile, Mode::ProfileReview,
+                 Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile, Mode::KeyReview, Mode::KeyPrepare,
+-                Mode::CertificateReview, Mode::CertificateCreate, Mode::CertificateReconcile]
++                Mode::CertificateReview, Mode::CertificateCreate, Mode::CertificateReconcile, Mode::P12Review, Mode::P12Reuse, Mode::P12Save]
+                 .iter()
+                 .any(|mode| input.consent_version == mode.consent()),
+     )?;
+@@ -430,6 +449,7 @@
+     pub(crate) signing: Option<ProfileScopeData>,
+     pub(crate) key: Option<KeyScopeData>,
+     pub(crate) certificate: Option<CertificateScopeData>,
++    pub(crate) p12: Option<P12ScopeData>,
+ }
+ impl ScopeData {
+     fn matches(
+@@ -470,7 +490,12 @@
+             && n.project_binding.device == n.registered_root.device
+             && n.project_binding.inode == n.registered_root.inode
+             && context.accepts_target(t)
+-            && if context.mode.certificate() {
++            && if context.mode.p12() {
++                self.signing.is_none() && self.key.is_none()
++                    && self.certificate.as_ref().is_some_and(|scope| scope.valid(context,self))
++                    && self.p12.as_ref().is_some_and(|scope| scope.valid(context,self))
++            } else if self.p12.is_some() { false
++            } else if context.mode.certificate() {
+                 self.signing.is_none() && self.key.is_none() && self.certificate.as_ref().is_some_and(|scope| scope.valid(context, self))
+             } else if self.certificate.is_some() { false
+             } else if context.mode.key() {
+@@ -539,10 +564,10 @@
+             && credential_config == &context.saved_config
+             && scope.matches(context, operation, generation, root)
+             && account.account == scope.provisioning.account_ref
+-            && account.rows.len().saturating_add(account.profile_rows.len()).saturating_add(account.key_rows.len()).saturating_add(account.certificate_rows.len()) <= ROWS
++            && account.rows.len().saturating_add(account.profile_rows.len()).saturating_add(account.key_rows.len()).saturating_add(account.certificate_rows.len()).saturating_add(account.p12_rows.len()) <= ROWS
+             // Reserve, up to two attempt writes, then final native CAS. Do not
+             // arm a provider write if this fixed whole path can overflow.
+-            && account.revision.0 <= u64::MAX - if context.mode.profile_save() || context.mode == Mode::KeyPrepare { 7 } else { 4 }
++            && account.revision.0 <= u64::MAX - if context.mode.profile_save() || matches!(context.mode, Mode::KeyPrepare | Mode::P12Save) { 7 } else { 4 }
+             && work_end_ns > 0
+             && work_end_ns < hard_end_ns
+             && hard_end_ns - work_end_ns <= 10_000_000_000,
+@@ -559,6 +584,8 @@
+     need(account.key_rows.iter().all(|row| row.intent.context.account_ref == account.account
+         && seen.insert(row.intent.context.operation_id.as_str())))?;
+     need(account.certificate_rows.iter().all(|row| row.intent.context.account_ref == account.account
++        && seen.insert(row.intent.context.operation_id.as_str())))?;
++    need(account.p12_rows.iter().all(|row| row.intent.context.account_ref == account.account
+         && seen.insert(row.intent.context.operation_id.as_str())))?;
+     if context.mode == Mode::Reconcile {
+         let reference = context.reference.as_ref().ok_or_else(invalid)?;
+@@ -594,6 +621,11 @@
+         "action":"create_certificate","status":if row.unresolved(){"unknown"}else{"succeeded"},
+         "nativeSettlement":row.native_settlement,
+     })));
++    pending.extend(account.p12_rows.iter().map(|row| json!({
++        "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
++        "action":"p12_setup","status":if row.unresolved(){"unknown"}else{"succeeded"},
++        "nativeSettlement":row.native_settlement,
++    })));
+     let identity = root
+         .identity
+         .posix()
+@@ -605,11 +637,19 @@
+             "clock":{"workEndNs":work_end_ns.to_string(),"hardEndNs":hard_end_ns.to_string()},"nonce":nonce,
+             "provisioning":scope.provisioning,"target":scope.target,"reviewedAt":scope.reviewed_at,
+             "journalRevision":account.revision.0,"pending":pending,"prior":prior}});
++    if context.mode.p12() {
++        let data=value["context"].as_object_mut().ok_or_else(invalid)?;
++        data.insert("p12RecordId".into(),json!(context.p12_record_id));
++        data.insert("p12RecordRevision".into(),json!(context.p12_record_revision));
++    }
+     if context.mode.profile() {
+         value["native"].as_object_mut().ok_or_else(invalid)?
+             .insert("signing".into(), serde_json::to_value(&scope.signing).map_err(|_| invalid())?);
+     }
+-    if context.mode.certificate() {
++    if context.mode.p12() {
++        value["native"].as_object_mut().ok_or_else(invalid)?.insert("p12".into(),serde_json::to_value(&scope.p12).map_err(|_| invalid())?);
++    }
++    if context.mode.certificate() || context.mode.p12() {
+         value["native"].as_object_mut().ok_or_else(invalid)?
+             .insert("certificate".into(), serde_json::to_value(&scope.certificate).map_err(|_| invalid())?);
+     } else if context.mode.key() {
+@@ -698,7 +738,7 @@
+                 Mode::Reconcile => self.decision == Decision::ComparisonOnly,
+                 Mode::Register | Mode::ProfileReview | Mode::ProfileReuse | Mode::ProfileCreate | Mode::ProfileReconcile
+                 | Mode::KeyReview | Mode::KeyPrepare | Mode::KeyRecover | Mode::CertificateReview
+-                | Mode::CertificateCreate | Mode::CertificateReconcile => false,
++                | Mode::CertificateCreate | Mode::CertificateReconcile | Mode::P12Review | Mode::P12Reuse | Mode::P12Save => false,
+             }
+     }
+ }
+@@ -721,6 +761,7 @@
+     Profile(ProfileEvent),
+     Key(KeyEvent),
+     Certificate(CertificateEvent),
++    P12(P12Event),
+     Observed(Observed),
+     Pending {
+         intent: BundleRegistrationIntent,
+@@ -911,11 +952,12 @@
+ }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum ResultData { Bundle(BundleResultData), Profile(ProfileResult), Key(KeyResult), Certificate(CertificateResult) }
++pub(crate) enum ResultData { Bundle(BundleResultData), Profile(ProfileResult), Key(KeyResult), Certificate(CertificateResult), P12(P12Result) }
+ impl ResultData {
+     pub(crate) fn bundle(&self) -> Option<&BundleResultData> { match self { Self::Bundle(value) => Some(value), _ => None } }
+     pub(crate) fn key(&self) -> Option<&KeyResult> { match self { Self::Key(value) => Some(value), _ => None } }
+     pub(crate) fn certificate(&self) -> Option<&CertificateResult> { match self { Self::Certificate(value) => Some(value), _ => None } }
++    pub(crate) fn p12(&self)->Option<&P12Result> { match self { Self::P12(value)=>Some(value),_=>None } }
+     pub(crate) fn profile(&self) -> Option<&ProfileResult> { match self { Self::Profile(value) => Some(value), _ => None } }
+ }
+ 
+@@ -948,7 +990,7 @@
+             && !self.fatal
+             && self.contained
+             && self.command_dispatched.is_some()
+-            && self.profile_calls <= u32::from(mode.profile())
++            && self.profile_calls <= u32::from(mode.profile() || mode.p12())
+             && self.input_closed
+             && self.handlers_restored
+             && self.invocation_closed
+@@ -979,13 +1021,14 @@
+         profile: &profile::ProfileDecoder,
+         key: &key::KeyDecoder,
+         certificate: &certificate::CertificateDecoder,
++        p12: &p12::P12Decoder,
+     ) -> bool {
+         let life = &self.lifetime;
+         if self.schema_version != 1
+             || self.context != binding.context
+             || !self.context.valid()
+             || life.commands > self.context.mode.commands()
+-            || life.profile_calls > u32::from(self.context.mode.profile())
++            || life.profile_calls > u32::from(self.context.mode.profile() || self.context.mode.p12())
+             || !key.lifetime_matches(life)
+         {
+             return false;
+@@ -1002,6 +1045,7 @@
+                     ResultData::Bundle(result) => !self.context.mode.profile() && !self.context.mode.key() && result.valid(binding, last_update),
+                     ResultData::Profile(result) => self.context.mode.profile() && profile.valid_terminal(result, binding),
+                     ResultData::Key(result) => self.context.mode.local_key() && key.valid_terminal(result, binding),
++                    ResultData::P12(result) => self.context.mode.p12() && p12.valid_terminal(result,binding),
+                     ResultData::Certificate(result) => self.context.mode.certificate() && certificate.valid_terminal(result, binding),
+                 });
+         }
+@@ -1061,6 +1105,7 @@
+     profile: profile::ProfileDecoder,
+     key: key::KeyDecoder,
+     certificate: certificate::CertificateDecoder,
++    p12: p12::P12Decoder,
+ }
+ impl Decoder {
+     pub(crate) fn new(binding: Arc<RequestBinding>) -> Self {
+@@ -1076,6 +1121,7 @@
+             profile: profile::ProfileDecoder::default(),
+             key: key::KeyDecoder::default(),
+             certificate: certificate::CertificateDecoder::default(),
++            p12: p12::P12Decoder::default(),
+         }
+     }
+     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
+@@ -1119,7 +1165,7 @@
+             "terminal" => {
+                 need(self.next > 0 && self.next <= binding.context.mode.events() + 1)?;
+                 let terminal = Terminal::deserialize(envelope.payload).map_err(|_| invalid())?;
+-                need(terminal.valid(binding, self.last_update.as_ref(), self.observed, &self.profile, &self.key, &self.certificate))?;
++                need(terminal.valid(binding, self.last_update.as_ref(), self.observed, &self.profile, &self.key, &self.certificate, &self.p12))?;
+                 self.terminal = true;
+                 Frame::Terminal(terminal)
+             }
+@@ -1207,9 +1253,14 @@
+                 })
+             }
+             kind @ ("certificate-key" | "certificate-identities" | "certificate-policy" | "certificate-observed" | "certificate-pending" | "certificate-attempt") => {
+-                need(binding.context.mode.certificate() && (kind == "certificate-identities" || bytes.len() <= EVENT_LIMIT))?;
++                need((binding.context.mode.certificate() || binding.context.mode.p12() && matches!(kind,"certificate-key"|"certificate-identities"|"certificate-policy"))
++                    && (kind == "certificate-identities" || bytes.len() <= EVENT_LIMIT))?;
+                 Frame::Event(EventDataFrame { sequence: self.next, data: EventData::Certificate(
+                     self.certificate.event(binding, self.next, kind, envelope.payload)?) })
++            },
++            kind @ ("p12-observed"|"p12-pending"|"p12-output") => {
++                need(binding.context.mode.p12() && bytes.len()<=EVENT_LIMIT)?;
++                Frame::Event(EventDataFrame { sequence:self.next, data:EventData::P12(self.p12.event(binding,self.next,kind,envelope.payload)?) })
+             },
+             kind @ ("key-observed" | "key-pending" | "key-output" | "key-not-generated") => {
+                 need(binding.context.mode.local_key() && bytes.len() <= EVENT_LIMIT)?;
+@@ -1281,6 +1332,8 @@
+     pub(crate) saved_profile: Option<crate::credential_setup::KeyReference>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub(crate) saved_key: Option<crate::credential_setup::KeyReference>,
++    #[serde(skip_serializing_if="Option::is_none")]
++    pub(crate) saved_p12: Option<crate::credential_setup::KeyReference>,
+ }
+ #[derive(Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+diff --git a/desktop/src-tauri/src/apple_provisioning_protocol_tests.rs b/desktop/src-tauri/src/apple_provisioning_protocol_tests.rs
+--- a/desktop/src-tauri/src/apple_provisioning_protocol_tests.rs
++++ b/desktop/src-tauri/src/apple_provisioning_protocol_tests.rs
+@@ -6,6 +6,56 @@
+     application_service::ProjectBinding,
+     application_state_store::Revision,
+ };
++
++#[test]
++fn p12_prepare_requires_explicit_selection_and_never_borrows_issuer_ack_modes() {
++    for mode in [Mode::P12Review, Mode::P12Reuse, Mode::P12Save] {
++        let mut value = prepare_value(Mode::Review);
++        value["mode"] = json!(mode);
++        value["keyRecordId"] = json!("b".repeat(32));
++        value["keyRecordRevision"] = json!(1);
++        value["p12RecordId"] = Value::Null;
++        value["p12RecordRevision"] = Value::Null;
++        if mode != Mode::P12Review {
++            value["reference"] = json!({"operationId":"8".repeat(32),"ownerGeneration":"9".repeat(32)});
++        }
++        if mode == Mode::P12Reuse {
++            value["p12RecordId"] = json!("a".repeat(32));
++            value["p12RecordRevision"] = json!(2);
++        }
++        let prepared = prepare(&value).unwrap();
++        assert!(prepared.context.mode == mode && mode.commands() == 15);
++        let mut missing = value.clone();
++        missing.as_object_mut().unwrap().remove("p12RecordId");
++        assert!(prepare(&missing).is_err());
++        let mut mismatched = value.clone();
++        mismatched["p12RecordRevision"] = if mode == Mode::P12Reuse { Value::Null } else { json!(1) };
++        assert!(prepare(&mismatched).is_err());
++        let mut wrong = value.clone();
++        wrong["mode"] = json!(Mode::CertificateReview);
++        assert!(prepare(&wrong).is_err());
++        if mode == Mode::P12Save {
++            wrong = value.clone();
++            wrong["p12RecordId"] = json!("a".repeat(32));
++            wrong["p12RecordRevision"] = json!(2);
++            assert!(prepare(&wrong).is_err());
++        }
++        let mut original = binding(Mode::Review);
++        Arc::get_mut(&mut original).unwrap().context = prepared.context;
++        for (kind, step) in [("certificate-key", 1), ("certificate-identities", 2), ("certificate-policy", 3)] {
++            let (bytes, _) = certificate_reply(&original, step, kind, json!({})).unwrap();
++            let parsed: Value = serde_json::from_slice(&bytes).unwrap();
++            assert_eq!(parsed["kind"], json!(format!("{kind}-ack")));
++            assert!(certificate_reply(&original, step + 1, kind, json!({})).is_err());
++        }
++        for (kind, step) in [("p12-pending", 4), ("p12-output", 5)] {
++            assert_eq!(certificate_reply(&original, step, kind, json!({})).is_ok(), mode == Mode::P12Save);
++        }
++        for kind in ["certificate-pending", "certificate-attempt", "key-pending", "profile-pending"] {
++            assert!(certificate_reply(&original, 4, kind, json!({})).is_err());
++        }
++    }
++}
+ 
+ fn prepare_value(mode: Mode) -> Value {
+     json!({"projectId":"project-1","draftRevision":1,"baselineGeneration":1,
+@@ -57,7 +107,7 @@
+         generation: "5".repeat(32),
+         context,
+         scope: ScopeData {
+-            signing: None, key: None, certificate: None,
++            signing: None, key: None, certificate: None, p12: None,
+             provisioning,
+             provenance,
+             target: BundleTarget {
+diff --git a/desktop/src-tauri/src/apple_provisioning_recovery_selection.rs b/desktop/src-tauri/src/apple_provisioning_recovery_selection.rs
+--- a/desktop/src-tauri/src/apple_provisioning_recovery_selection.rs
++++ b/desktop/src-tauri/src/apple_provisioning_recovery_selection.rs
+@@ -159,7 +159,7 @@
+                 "status":"unknown","reason":"provider_outcome_unknown","possibleSend":true,"responseResourceId":null,
+                 "responseResourceSha256":null,"observedResourceId":null,"cancelRequested":false}}})).unwrap();
+         let mut scope = ScopeData {
+-            signing: None, key: None, certificate: None,
++            signing: None, key: None, certificate: None, p12: None,
+             provisioning: intent.context.clone(),
+             provenance,
+             target: intent.target,
+@@ -173,7 +173,7 @@
+                 revision: Revision(7),
+                 account,
+                 rows: vec![row],
+-                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![],
++                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![], p12_rows: vec![],
+             },
+             scope,
+         )
+@@ -208,7 +208,7 @@
+         let (account, scope) = sample();
+         for field in 0..14 {
+             let mut changed = ScopeData {
+-            signing: None, key: None, certificate: None,
++            signing: None, key: None, certificate: None, p12: None,
+                 provisioning: scope.provisioning.clone(),
+                 provenance: scope.provenance.clone(),
+                 target: scope.target.clone(),
+diff --git a/desktop/src-tauri/src/asset_commands.rs b/desktop/src-tauri/src/asset_commands.rs
+--- a/desktop/src-tauri/src/asset_commands.rs
++++ b/desktop/src-tauri/src/asset_commands.rs
+@@ -17,6 +17,12 @@
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+ #[path = "credential_apple_distribution_key_fields.rs"]
+ mod apple_distribution_key_fields;
++#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++#[path = "credential_apple_p12_fields.rs"]
++mod apple_p12_fields;
++#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++pub(crate) use apple_p12_fields::{AppleP12Password, output_metadata as apple_p12_output_metadata,
++    P12_BYTES as APPLE_P12_BYTES, PRIVATE_FRAME_BYTES as APPLE_P12_PRIVATE_FRAME_BYTES};
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+ pub(crate) use apple_distribution_key_fields::{AppleDistributionKeyFields, AppleDistributionKeyMetadata,
+     PRIVATE_FRAME_LIMIT as APPLE_KEY_PRIVATE_FRAME_LIMIT, CONSTRUCTION_BYTES as APPLE_KEY_CONSTRUCTION_BYTES,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -100,7 +100,7 @@
+ #[path = "asset_session_keyring_macos.rs"]
+ mod keyring_macos;
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+-pub(crate) use vault::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleKeyInventoryPoint, AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
++pub(crate) use vault::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleKeyInventoryPoint, AppleP12Destination, AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
+ 
+ // A borrowed original session record is not a serialized credential or a new
+ // credential owner. Only this document module can construct the signed loan.
+@@ -129,7 +129,7 @@
+ pub(crate) use tool_acquisition::ToolAcquisitionDocumentInput;
+ #[path = "asset_session_store_material.rs"]
+ mod store_material;
+-pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
++pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, P12Material, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
+ #[path = "asset_session_github_secret.rs"]
+ mod github_secret;
+ pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+@@ -303,7 +303,7 @@
+ #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "kebab-case")]
+ enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+-    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup, PrepareAppleDistributionKey, UseAppleDistributionKey }
++    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup, PrepareAppleDistributionKey, UseAppleDistributionKey, AssembleAppleP12 }
+ impl Operation {
+     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
+     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
+@@ -1906,6 +1906,10 @@
+                     self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                 }
+             }
++            if let Some(destination)=value.p12_destination() {
++                let inventory=destination.inventory();
++                if !self.secret_loans.insert(inventory)? { self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?; }
++            }
+             if let Some(context) = value.context() { self.context(context)?; }
+             if let Some(key) = value.key() { self.vault_key(key)?; }
+             if let Some(store) = value.store() { self.vault_store(store)?; }
+@@ -2076,6 +2080,7 @@
+             self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.vault_loan(sources.loan())?;
+             if let Some(payload)=sources.certificate_payload() { self.payload(&payload)?; }
++            if let Some(selected)=sources.selected_p12() { self.apple_profile_source(&selected)?; }
+             if let Some(inventory)=sources.inventory() {
+                 if self.secret_loans.insert(inventory)? { self.add(inventory.own_retained_bytes().ok_or(Problem::Capacity)?)?; }
+                 self.context(inventory.context())?; self.vault_key(inventory.key())?; self.vault_store(inventory.store())?;
+@@ -5204,6 +5209,8 @@
+ fn key_preservation_child(_owner: &Arc<OriginalWork>, _job: &ChildJob) -> bool {
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+     if let ChildJob::Vault(vault::Child::SaveAppleDistributionKey(request)) = _job { return request.admitted(_owner); }
++    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++    if let ChildJob::Vault(vault::Child::SaveAppleP12(request)) = _job { return request.admitted(_owner); }
+     false
+ }
+ fn cleanup_child(_job: &ChildJob) -> bool {
+@@ -5217,11 +5224,13 @@
+ }
+ fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++    if let ChildJob::Vault(vault::Child::CheckAppleP12Sources(sources,point)) = _job { return vault::key_sources::p12::child_admitted(_owner,sources,*point); }
++    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+     if let ChildJob::Vault(vault::Child::CheckAppleCertificateSources(sources, point)) = _job {
+         return vault::key_sources::certificate::child_admitted(_owner, sources, *point);
+     }
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+-    if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_))) = _job {
++    if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_) | vault::Child::SaveAppleP12(_))) = _job {
+         return vault::distribution_key::child_admitted(_owner, job);
+     }
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+diff --git a/desktop/src-tauri/src/asset_session_apple_key.rs b/desktop/src-tauri/src/asset_session_apple_key.rs
+--- a/desktop/src-tauri/src/asset_session_apple_key.rs
++++ b/desktop/src-tauri/src/asset_session_apple_key.rs
+@@ -12,6 +12,9 @@
+     key_sources::{self, AppleKeySources},
+ };
+ 
++#[path = "asset_session_apple_p12.rs"]
++pub(in crate::asset_session) mod p12;
++
+ pub(super) struct Work {
+     parent: Weak<AppleKeySession>,
+     sources: Mutex<Option<Arc<AppleKeySources>>>,
+@@ -19,13 +22,15 @@
+     installed: AtomicBool,
+     no_dispatch: AtomicBool,
+     save_received: AtomicBool,
++    p12: Option<p12::P12Work>,
+ }
+ pub(super) struct Request {
+     parent: Arc<AppleKeySession>,
+     sources: Arc<AppleKeySources>,
+-    receive: oneshot::Receiver<Option<AppleKeySavePermit>>,
++    receive: oneshot::Receiver<Option<crate::saved_command_owner::AppleKeySaveCommand>>,
+     prepare: bool,
+     certificate: bool,
++    p12: bool,
+ }
+ impl Work {
+     fn parent(&self) -> Option<Arc<AppleKeySession>> {
+@@ -62,6 +67,7 @@
+         self.apple_key.get()?.parent()
+     }
+     pub(crate) fn apple_key_source_checked(&self, parent: &AppleKeySession) -> bool {
++        if parent.p12_mode().is_some() { return p12::source_checked(self,parent); }
+         self.apple_key.get().is_some_and(|work| work.same_parent(parent) && work.sources().is_ok_and(|sources|
+             sources.owner().is_some_and(|owner| std::ptr::eq(owner.as_ref(), self) &&
+                 if sources.selected_certificate_key().is_some() {
+@@ -115,7 +121,7 @@
+         && owner.installation.is_none()
+ }
+ pub(super) fn current_slot(slot: &Slot, sources: &Arc<AppleKeySources>) -> bool {
+-    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
++    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
+         && slot.target.is_none()
+         && slot.reason == Reason::None
+         && slot.cleanup_end.is_none()
+@@ -138,9 +144,10 @@
+         .is_some_and(|work| !work.no_more_work(owner))
+ }
+ pub(super) fn source_release_ready(slot: &Slot) -> bool {
+-    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
++    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
+         && slot.owner.apple_key.get().is_some_and(|work| {
+             work.destination.get().is_none()
++                && work.p12.as_ref().is_none_or(|p12| !p12.has_destination())
+                 && !work.save_received.load(Ordering::SeqCst)
+                 && work.no_more_work(&slot.owner)
+                 && known_controls(&slot.owner, true)
+@@ -149,7 +156,7 @@
+ pub(super) fn cleanup_staged_allowed(slot: &Slot, retained: bool) -> bool {
+     slot.staged.is_none()
+         || retained
+-            && matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
++            && matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
+             && matches!(
+                 slot.staged.as_ref(),
+                 Some(Staged::Refused(_)) | Some(Staged::Committed { bind: None })
+@@ -172,6 +179,7 @@
+     let Ok(mut sources) = work.sources.try_lock() else {
+         return false;
+     };
++    if !sources.as_ref().is_none_or(|source| source.retire_p12_private()) { return false; }
+     sources.take();
+     true
+ }
+@@ -198,7 +206,7 @@
+         input: &Arc<AppleProvisioningDocumentInput>,
+         parent: &Arc<AppleKeySession>,
+     ) -> Result<oneshot::Sender<()>, BridgeError> {
+-        if !(input.context().mode.local_key() || input.context().mode.certificate()) {
++        if !(input.context().mode.local_key() || input.context().mode.certificate() || input.context().mode.p12()) {
+             return Err(crate::apple_provisioning_protocol::invalid());
+         }
+         let sources = input
+@@ -228,6 +236,7 @@
+                 installed: AtomicBool::new(false),
+                 no_dispatch: AtomicBool::new(false),
+                 save_received: AtomicBool::new(false),
++                p12: input.context().mode.p12().then(p12::P12Work::new),
+             })
+             .map_err(|_| BridgeError::cleanup_unknown())?;
+         if let Err(reason) = key_sources::attach(state, &owner, &sources) {
+@@ -236,15 +245,16 @@
+             return Err(key_error(reason));
+         }
+         let prepare = input.context().mode == crate::apple_provisioning_protocol::Mode::KeyPrepare;
+-        let certificate = input.context().mode.certificate();
++        let p12=input.context().mode.p12();
++        let certificate = input.context().mode.certificate() || p12;
+         let mut slot = Slot::new(
+             owner.clone(),
+-            if certificate { Operation::UseAppleDistributionKey } else { Operation::PrepareAppleDistributionKey },
++            if input.context().mode == crate::apple_provisioning_protocol::Mode::P12Save { Operation::AssembleAppleP12 } else if certificate { Operation::UseAppleDistributionKey } else { Operation::PrepareAppleDistributionKey },
+             Some(sources.native().clone()),
+             None,
+             None,
+         );
+-        slot.kind = prepare.then_some(Kind::AppleDistributionKey);
++        slot.kind = if input.context().mode==crate::apple_provisioning_protocol::Mode::P12Save {Some(Kind::AppleP12)} else {prepare.then_some(Kind::AppleDistributionKey)};
+         let start = match self.install(
+             state,
+             slot,
+@@ -252,7 +262,7 @@
+                 parent: parent.clone(),
+                 sources: sources.clone(),
+                 receive,
+-                prepare, certificate,
++                prepare, certificate, p12,
+             }),
+         ) {
+             Ok(start) => start,
+@@ -309,7 +319,7 @@
+ pub(super) async fn run(
+     document: &DocumentBinding,
+     owner: &Arc<OriginalWork>,
+-    request: Request,
++    mut request: Request,
+ ) -> Staged {
+     if owner.interrupted() {
+         owner.apple_key_no_dispatch();
+@@ -334,6 +344,9 @@
+             .clock()
+             .observe_failure_at(reason, Instant::now());
+         return Staged::Refused(reason);
++    }
++    if request.p12 {
++        if let Err(reason)=p12::initial(document,owner,&request).await { return refused(&request.parent,reason); }
+     }
+     if request.prepare {
+         let Some(inventory)=request.sources.inventory() else { return refused(&request.parent,Reason::CleanupUnknown); };
+@@ -379,7 +392,6 @@
+     if request.parent.source_check_returned(owner).is_err() {
+         return refused(&request.parent, Reason::ContextStale);
+     }
+-    let mut receive = request.receive;
+     let permit = loop {
+         let notified = owner.wake.notified();
+         let now = Instant::now();
+@@ -423,7 +435,7 @@
+             return refused(&request.parent, Reason::Deadline);
+         }
+         tokio::select! { biased;
+-            returned = &mut receive => match returned {
++            returned = &mut request.receive => match returned {
+                 Ok(permit) => break permit,
+                 Err(_) => return refused(&request.parent, Reason::CleanupUnknown),
+             },
+@@ -434,9 +446,11 @@
+     let Some(permit) = permit else {
+         return Staged::Committed { bind: None };
+     };
+-    if !request.prepare {
+-        return refused(&request.parent, Reason::CleanupUnknown);
+-    }
++    let permit = match permit {
++        crate::saved_command_owner::AppleKeySaveCommand::P12(permit) => return p12::save(document,owner,&request,permit).await,
++        crate::saved_command_owner::AppleKeySaveCommand::Key(permit) if request.prepare && !request.p12=>permit,
++        _=>return refused(&request.parent,Reason::CleanupUnknown),
++    };
+     let Some(work) = owner.apple_key.get() else {
+         return refused(&request.parent, Reason::CleanupUnknown);
+     };
+@@ -496,11 +510,11 @@
+         let notify = owner.wake.notified();
+         document.reconcile();
+         if known_controls(owner, true) {
+-            let saved = work
++            let saved = if work.p12.is_some() { p12::published(owner) } else { work
+                 .destination
+                 .get()
+                 .and_then(Weak::upgrade)
+-                .and_then(|destination| destination.published_reference_data(owner));
++                .and_then(|destination| destination.published_reference_data(owner)) };
+             // Full readback alone is insufficient: the original coordinator
+             // must have published this exact NEW row under its same guard.
+             if work.save_received.load(Ordering::SeqCst) && saved.is_none() {
+diff --git a/desktop/src-tauri/src/asset_session_apple_key_input.rs b/desktop/src-tauri/src/asset_session_apple_key_input.rs
+--- a/desktop/src-tauri/src/asset_session_apple_key_input.rs
++++ b/desktop/src-tauri/src/asset_session_apple_key_input.rs
+@@ -13,7 +13,7 @@
+         &self,
+         original: &Arc<OriginalWork>,
+     ) -> Result<(), BridgeError> {
+-        if !(self.context.mode.local_key() || self.context.mode.certificate()) || self.key_sources().is_none() {
++        if !(self.context.mode.local_key() || self.context.mode.certificate() || self.context.mode.p12()) || self.key_sources().is_none() {
+             return Err(wire::invalid());
+         }
+         let mut held = self
+@@ -121,7 +121,7 @@
+         &self,
+         review: Option<wire::CertificateReviewData>,
+     ) -> Result<wire::CertificateScopeData, BridgeError> {
+-        if !self.context.mode.certificate() { return Err(wire::invalid()); }
++        if !(self.context.mode.certificate() || self.context.mode.p12()) || self.context.mode.p12() && review.is_some() { return Err(wire::invalid()); }
+         let sources = self.key_sources().ok_or_else(wire::invalid)?;
+         let original = sources.owner().ok_or_else(wire::invalid)?;
+         if !sources.certificate_checked(&original, vault::key_sources::certificate::CheckPoint::Initial) {
+diff --git a/desktop/src-tauri/src/asset_session_apple_key_material.rs b/desktop/src-tauri/src/asset_session_apple_key_material.rs
+--- a/desktop/src-tauri/src/asset_session_apple_key_material.rs
++++ b/desktop/src-tauri/src/asset_session_apple_key_material.rs
+@@ -4,6 +4,8 @@
+ use super::*;
+ use crate::apple_provisioning_protocol as provisioning;
+ use vault::key_sources::AppleKeySources;
++#[path="asset_session_apple_p12_material.rs"]
++pub(super) mod p12;
+ 
+ pub(super) fn borrow(
+     document: &DocumentBinding,
+@@ -12,7 +14,7 @@
+     registration: u32,
+     root: &asset_source::RegisteredRoot,
+ ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+-    if !(context.mode.local_key() || context.mode.certificate()) || !context.valid() {
++    if !(context.mode.local_key() || context.mode.certificate() || context.mode.p12()) || !context.valid() {
+         return Err(refused());
+     }
+     let native = state
+@@ -39,10 +41,14 @@
+     let payload = github_secret::assigned(state, &key, Kind::AscP8, &native)
+         .ok_or_else(refused)?
+         .clone();
+-    let selected_key = if context.mode.certificate() { Some(RecordKey {
++    let selected_key = if context.mode.certificate() || context.mode.p12() { Some(RecordKey {
+         id: Token(context.key_record_id.clone().ok_or_else(refused)?), revision: context.key_record_revision.ok_or_else(refused)?,
+     }) } else { None };
+-    let sources = AppleKeySources::capture(document, state, &native, &key, &payload, selected_key.as_ref())
++    let selected_p12=match (&context.p12_record_id,context.p12_record_revision) {
++        (Some(id),Some(revision)) if context.mode.p12()=>Some(RecordKey {id:Token(id.clone()),revision}),
++        (None,None)=>None,_=>return Err(refused()),
++    };
++    let sources = AppleKeySources::capture(document, state, &native, &key, &payload, selected_key.as_ref(), context.mode.p12(), selected_p12.as_ref())
+         .map_err(|_| refused())?;
+     let result = Arc::new(SelectedStoreMaterial {
+         native,
+@@ -60,7 +66,7 @@
+     {
+         return Err(refused());
+     }
+-    if context.mode.certificate() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
++    if context.mode.certificate() || context.mode.p12() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
+     Ok(result)
+ }
+ 
+@@ -116,7 +122,7 @@
+         let Some(document) = self.prepare_document.as_ref().and_then(Weak::upgrade) else {
+             return false;
+         };
+-        (context.mode.local_key() || context.mode.certificate())
++        (context.mode.local_key() || context.mode.certificate() || context.mode.p12())
+             && self.provisioning_matches(context, registration, root)
+             && self.profile_sources.is_none()
+             && self.supplemental.iter().all(Option::is_none)
+diff --git a/desktop/src-tauri/src/asset_session_apple_provisioning.rs b/desktop/src-tauri/src/asset_session_apple_provisioning.rs
+--- a/desktop/src-tauri/src/asset_session_apple_provisioning.rs
++++ b/desktop/src-tauri/src/asset_session_apple_provisioning.rs
+@@ -3,6 +3,8 @@
+ //! starts the state service, grants CLI access or constructs a replacement
+ //! account/credential/registration capability.
+ use super::*;
++#[path="asset_session_apple_p12_input.rs"]
++mod p12_input;
+ use crate::{
+     apple_provisioning_journal::{
+         AccountRef, BundleTarget, NativeProvenance, ProvisioningContext, RegisteredRootData,
+@@ -104,6 +106,8 @@
+             && self.context.display_name == other.context.display_name
+             && self.context.key_record_id == other.context.key_record_id
+             && self.context.key_record_revision == other.context.key_record_revision
++            && self.context.p12_record_id == other.context.p12_record_id
++            && self.context.p12_record_revision == other.context.p12_record_revision
+     }
+     fn project(&self, document: &Arc<Inner>) -> Result<NativeProject, BridgeError> {
+         let (device, inode) = self
+@@ -273,7 +277,7 @@
+             target: self.target.clone(),
+             reviewed_at,
+             signing: None,
+-            key: None, certificate: None,
++            key: None, certificate: None,p12:None,
+         })
+     }
+     fn own_backing_bytes(&self) -> Option<usize> {
+diff --git a/desktop/src-tauri/src/asset_session_apple_provisioning_material.rs b/desktop/src-tauri/src/asset_session_apple_provisioning_material.rs
+--- a/desktop/src-tauri/src/asset_session_apple_provisioning_material.rs
++++ b/desktop/src-tauri/src/asset_session_apple_provisioning_material.rs
+@@ -132,7 +132,7 @@
+             && self.key.revision == context.record_revision
+             && self.native.execution_mode == commands::ExecutionMode::Local
+             && self.native.platform == Platform::Ios
+-            && if context.mode.local_key() || context.mode.certificate() { self.native.purpose == Purpose::Provisioning
++            && if context.mode.local_key() || context.mode.certificate() || context.mode.p12() { self.native.purpose == Purpose::Provisioning
+                 && self.native.stage == Stage::Candidate && self.key_sources.is_some() && self.profile_sources.is_none()
+             } else if context.mode.profile() { self.key_sources.is_none() && self.native.purpose == Purpose::Provisioning
+                 && self.native.stage == Stage::Candidate && self.profile_sources.is_some()
+@@ -225,7 +225,7 @@
+         {
+             return Err(refused());
+         }
+-        if context.mode.local_key() || context.mode.certificate() { return super::apple_key::borrow(self, state, context, registration, root); }
++        if context.mode.local_key() || context.mode.certificate() || context.mode.p12() { return super::apple_key::borrow(self, state, context, registration, root); }
+         if context.mode.profile() {
+             return super::apple_profile::borrow(self, state, context, registration, root);
+         }
+@@ -272,7 +272,7 @@
+         {
+             return Err(refused());
+         }
+-        if context.mode.certificate() { apple_parts(&material.payload).ok_or_else(refused)?; } else { material.parts()?; }
++        if context.mode.certificate() || context.mode.p12() { apple_parts(&material.payload).ok_or_else(refused)?; } else { material.parts()?; }
+         Ok(())
+     }
+ }
+diff --git a/desktop/src-tauri/src/asset_session_store_material.rs b/desktop/src-tauri/src/asset_session_store_material.rs
+--- a/desktop/src-tauri/src/asset_session_store_material.rs
++++ b/desktop/src-tauri/src/asset_session_store_material.rs
+@@ -18,6 +18,7 @@
+ pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
+ pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";
+ 
++pub(crate) use apple_key::p12::P12Material;
+ pub(crate) struct SelectedStoreMaterial {
+     native: Arc<NativeContext>, key: RecordKey, payload: Arc<Payload>,
+     command: Option<StoreCommand>, prepare_document:Option<std::sync::Weak<Inner>>,
+@@ -67,6 +68,7 @@
+     // Payload/Fields originals are counted separately, never copied here.
+     pub(super) fn supplemental_frame_bytes(&self)->usize {
+         if self.paired_context().is_some() { return paired_material::FRAME_BYTES; }
++        if self.p12_material() { return std::mem::size_of::<P12Material<'_>>()+2*8*std::mem::size_of::<(&str,&[u8])>()+1024+8*std::mem::size_of::<(&str,usize)>(); }
+         if self.certificate_material() { return std::mem::size_of::<apple_key::CertificateMaterial<'_>>()+2*6*std::mem::size_of::<(&str,&[u8])>()+1024+6*std::mem::size_of::<(&str,usize)>(); }
+         if self.profile_sources.is_some() { return 2*5*std::mem::size_of::<(&str,&[u8])>()+1024+5*std::mem::size_of::<(&str,usize)>(); }
+         if self.apple_material()&&self.command.as_ref().and_then(StoreCommand::assignments).is_some(){
+@@ -120,7 +122,7 @@
+         if self.profile_sources.is_some() { return self.profile_parts(); }
+         // Certificate private fields require the fixed writer-local borrow;
+         // a retained review/source must not own another loaded payload Arc.
+-        if self.certificate_material() { return Err(refused()); }
++        if self.certificate_material() || self.p12_material() { return Err(refused()); }
+         if self.command.is_none() { return Err(refused()); }
+         let assignments=self.command.as_ref().and_then(StoreCommand::assignments);
+         let count=if self.apple_material(){if let Some(a)=assignments{if a.review_demo.is_some(){11}else{9}}else{3}}else{1};
+diff --git a/desktop/src-tauri/src/asset_session_vault.rs b/desktop/src-tauri/src/asset_session_vault.rs
+--- a/desktop/src-tauri/src/asset_session_vault.rs
++++ b/desktop/src-tauri/src/asset_session_vault.rs
+@@ -5,7 +5,7 @@
+ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store};
+ #[path = "credential_apple_distribution_key_native.rs"]
+ pub(super) mod distribution_key;
+-pub(crate) use distribution_key::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, InventoryPoint as AppleKeyInventoryPoint};
++pub(crate) use distribution_key::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleP12Destination, InventoryPoint as AppleKeyInventoryPoint};
+ #[path = "credential_apple_provisioning_native.rs"]
+ mod provisioning_native;
+ pub(crate) use provisioning_native::{AppleP12Loan, AppleProfileDestination};
+@@ -101,6 +101,9 @@
+     fn current_for_apple_profile(&self, state: &DocumentState, session: &Session, owner: &Arc<OriginalWork>) -> bool {
+         self.current_original(state, session) && apple_profile::owns_current_source(state, session, owner, self)
+     }
++    fn current_for_apple_p12(&self,state:&DocumentState,session:&Session,owner:&Arc<OriginalWork>)->bool {
++        self.current_original(state,session) && distribution_key::p12::owns_current_source(state,session,owner,self)
++    }
+     fn current_original(&self, state: &DocumentState, session: &Session) -> bool {
+         !state.session && !state.stopping && !state.unknown && !state.exhausted && !state.lock_pending
+             && !state.retiring && !state.quit_pending && state.lifetime.original_bound()
+@@ -204,6 +207,7 @@
+ }
+ impl Work {
+     pub(super) fn attach_apple_distribution_key(&mut self, destination: Arc<AppleDistributionKeyDestination>) -> Result<(),Reason> { self.apple_distribution_key.attach_destination(destination) }
++    pub(super) fn attach_apple_p12_destination(&mut self,value:Arc<AppleP12Destination>)->Result<(),Reason> { self.apple_distribution_key.attach_p12(value) }
+     pub(super) fn attach_apple_distribution_key_loan(&mut self, loan: Arc<AppleDistributionKeyLoan>) -> Result<(),Reason> { self.apple_distribution_key.attach_loan(loan) }
+     pub(super) fn apple_distribution_key_retained_bytes(&self) -> Option<usize> { self.apple_distribution_key.retained_bytes() }
+     pub(super) fn attach_apple_profile(&mut self, destination: Arc<AppleProfileDestination>) -> Result<(),Reason> { self.apple_profile.attach(destination) }
+@@ -348,6 +352,9 @@
+ /// The caller temporarily removed its slot; compare that exact original rather
+ /// than trying to recover authority through a status projection/current number.
+ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slot: &mut Slot, staged: Staged) {
++    if slot.operation==Operation::AssembleAppleP12 {
++        distribution_key::p12::p12_store::publish(state,slot,staged); return;
++    }
+     if slot.operation == Operation::PrepareAppleDistributionKey {
+         // Fixed returned-key preservation; ordinary mutations below retain
+         // their original unconditional STOP/publication refusal.
+@@ -795,7 +802,7 @@
+         && work.key.is_none() && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
+ }
+ pub(super) fn preserve_operation(slot: &Slot) -> bool {
+-    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
++    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
+ }
+ pub(super) fn controls_released(owner: &OriginalWork) -> bool {
+     owner.control_resources_settled() && owner.retired.load(Ordering::SeqCst)
+@@ -941,12 +948,14 @@
+     CheckAppleDistributionKeyInventory(Arc<AppleDistributionKeyInventory>, AppleKeyInventoryPoint),
+     LoadAppleDistributionKey(distribution_key::LoadRequest),
+     SaveAppleDistributionKey(distribution_key::key_store::SaveRequest),
++    SaveAppleP12(distribution_key::p12::p12_store::SaveRequest),
+     CheckAppleProfile(Arc<profile_sources::AppleProfileSources>, profile_sources::CheckPoint),
+     CheckAppleCertificateSources(Arc<key_sources::AppleKeySources>, key_sources::certificate::CheckPoint),
++    CheckAppleP12Sources(Arc<key_sources::AppleKeySources>,key_sources::p12::CheckPoint),
+     Release,
+ }
+ impl Child {
+-    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_) | Self::SaveAppleProfile(_) | Self::LoadAppleDistributionKey(_) | Self::SaveAppleDistributionKey(_)) }
++    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_) | Self::SaveAppleProfile(_) | Self::LoadAppleDistributionKey(_) | Self::SaveAppleDistributionKey(_) | Self::SaveAppleP12(_)) }
+     pub(super) fn cleanup(&self) -> bool { matches!(self, Self::Release) }
+ }
+ pub(super) enum ChildResult {
+@@ -1153,8 +1162,10 @@
+         Child::CheckAppleDistributionKeyInventory(inventory, point) => distribution_key::execute_inventory(owner, &mut book, &inventory, point),
+         Child::LoadAppleDistributionKey(request) => distribution_key::execute_load(owner, &mut book, request),
+         Child::SaveAppleDistributionKey(request) => distribution_key::key_store::execute(owner, &mut book, request),
++        Child::SaveAppleP12(request)=>distribution_key::p12::p12_store::execute(owner,&mut book,request),
+         Child::CheckAppleProfile(sources, point) => profile_sources::execute(owner, &mut book, &sources, point),
+         Child::CheckAppleCertificateSources(sources, point) => key_sources::certificate::execute(owner, &mut book, &sources, point),
++        Child::CheckAppleP12Sources(sources,point)=>key_sources::p12::execute(owner,&mut book,&sources,point),
+         Child::Release => {
+             let settled = book.release(&mut || cleanup_expired(owner));
+             let mut work = owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?;
+@@ -1238,7 +1249,7 @@
+         let upload_key_recovery = upload_key_recovery && matches!(operation, Operation::GenerateUploadKey | Operation::RecoverUploadKey);
+         let apple_profile_recovery = apple_profile_recovery && operation == Operation::AppleProfileSetup;
+         let apple_key_recovery = apple_key_retained && !preserve_key && !key_cleanup_known
+-            && matches!(operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey);
++            && matches!(operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12);
+         if backup_recovery || upload_key_recovery || apple_profile_recovery || apple_key_recovery {
+             // Unknown pair effects are not StoreBook mutation outcomes and do
+             // not overwrite the first failure. They still prevent a misleading
+@@ -1247,7 +1258,7 @@
+         }
+         if let Some(vault) = &mut state.vault {
+             vault.reason = reason;
+-            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey) && !preserve_key { vault.state = State::Interrupted; vault.read_only = true; }
++            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::AssembleAppleP12) && !preserve_key { vault.state = State::Interrupted; vault.read_only = true; }
+             if reason == Reason::CleanupUnknown || backup_recovery || upload_key_recovery || apple_profile_recovery || apple_key_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
+         }
+         invalidate_all(&mut state); document.bump(&mut state);
+diff --git a/desktop/src-tauri/src/credential_apple_certificate_source.rs b/desktop/src-tauri/src/credential_apple_certificate_source.rs
+--- a/desktop/src-tauri/src/credential_apple_certificate_source.rs
++++ b/desktop/src-tauri/src/credential_apple_certificate_source.rs
+@@ -58,6 +58,7 @@
+         let reference = self.certificate.as_ref()?.reference;
+         Some(KeyReference::native(reference.identity, reference.record, reference.revision))
+     }
++    pub(in crate::asset_session) fn certificate_read_witness(&self) -> Option<&store::ReadWitness> { Some(&self.certificate.as_ref()?.reference.original) }
+     pub(in crate::asset_session) fn certificate_loan(&self) -> Option<Arc<AppleDistributionKeyLoan>> {
+         self.certificate.as_ref()?.loan.get()?.upgrade()
+     }
+@@ -68,8 +69,10 @@
+         let certificate = self.certificate.as_ref().ok_or(Reason::SourceRefused)?;
+         if !self.same_owner(owner) || !self.current(document, state) || certificate.loan.get().is_some() { return Err(Reason::SourceChanged); }
+         let expected = self.selected_certificate_key().ok_or(Reason::SourceRefused)?;
+-        let loan = AppleDistributionKeyLoan::reserve(document, state, owner, &expected,
+-            ProjectRoster { generation: self.roster.generation, roots: self.roster.roots.clone() })?;
++        let roster=ProjectRoster { generation:self.roster.generation, roots:self.roster.roots.clone() };
++        let loan=if owner.apple_key_parent().is_some_and(|parent|parent.p12_mode()==Some(crate::apple_provisioning_protocol::Mode::P12Save)) {
++            AppleDistributionKeyLoan::reserve_p12(document,state,owner,&expected,roster)?
++        } else { AppleDistributionKeyLoan::reserve(document,state,owner,&expected,roster)? };
+         // reserve is zero-IO. The existing Work retains the exact original
+         // BEFORE weak publication, parent attachment, or the first Load.
+         owner.vault.try_lock().map_err(|_| Reason::CleanupUnknown)?.attach_apple_distribution_key_loan(loan.clone())?;
+diff --git a/desktop/src-tauri/src/credential_apple_distribution_key_native.rs b/desktop/src-tauri/src/credential_apple_distribution_key_native.rs
+--- a/desktop/src-tauri/src/credential_apple_distribution_key_native.rs
++++ b/desktop/src-tauri/src/credential_apple_distribution_key_native.rs
+@@ -14,17 +14,22 @@
+ #[path = "credential_apple_distribution_key_store.rs"]
+ pub(in crate::asset_session) mod key_store;
+ pub(crate) use key_store::AppleDistributionKeyDestination;
++#[path="credential_apple_p12_native.rs"]
++pub(in crate::asset_session) mod p12;
++pub(crate) use p12::AppleP12Destination;
+ 
+ #[derive(Clone, Copy, PartialEq, Eq)]
+ enum Purpose {
+     Prepare,
+     Use,
++    P12,
+ }
+ impl Purpose {
+     fn operation(self) -> Operation {
+         match self {
+             Self::Prepare => Operation::PrepareAppleDistributionKey,
+             Self::Use => Operation::UseAppleDistributionKey,
++            Self::P12 => Operation::AssembleAppleP12,
+         }
+     }
+ }
+@@ -162,7 +167,7 @@
+             && !session.revoked
+             && !session.read_only
+             && (session.state == State::Unlocked
+-                || mutating && self.purpose == Purpose::Prepare && session.state == State::Mutating)
++                || mutating && matches!(self.purpose,Purpose::Prepare|Purpose::P12) && session.state == State::Mutating)
+             && session.identity == Some(self.key.identity())
+             && Arc::ptr_eq(&session.store, &self.store)
+             && session
+@@ -810,7 +815,7 @@
+         state: &DocumentState,
+         owner: &Arc<OriginalWork>,
+     ) -> bool {
+-        self.original.current(document, state, owner, false)
++        self.original.current(document, state, owner, self.original.purpose==Purpose::P12)
+             && state.vault.as_ref().is_some_and(|session| {
+                 session.rows.iter().any(|row| {
+                     !row.mutation_pending
+@@ -1049,6 +1054,7 @@
+         Child::CheckAppleDistributionKeyInventory(inventory, _) => &inventory.original,
+         Child::LoadAppleDistributionKey(request) => &request.loan.original,
+         Child::SaveAppleDistributionKey(request) => request.original(),
++        Child::SaveAppleP12(request)=>request.original(),
+         _ => return false,
+     };
+     let Some(held_owner) = original
+@@ -1102,6 +1108,7 @@
+                     p.phase == LoadPhase::Reserved && p.first.is_none() && p.payload.is_none()
+                 })
+         }
++        Child::SaveAppleP12(request)=> !owner.interrupted() && work.first.is_none() && request.admitted(&held_owner),
+         Child::SaveAppleDistributionKey(request) => {
+             work.first
+                 .is_none_or(|(reason, _)| preservation_reason(reason))
+@@ -1123,7 +1130,7 @@
+     let Some(loan) = work.apple_distribution_key.loan() else {
+         return false;
+     };
+-    slot.operation == Operation::UseAppleDistributionKey
++    matches!(slot.operation,Operation::UseAppleDistributionKey|Operation::AssembleAppleP12)
+         && generation == loan.original.roster.generation
+         && loan
+             .original
+@@ -1257,6 +1264,7 @@
+ enum Holding {
+     Prepare(Arc<AppleDistributionKeyDestination>),
+     Use(Arc<AppleDistributionKeyLoan>),
++    P12(Arc<AppleP12Destination>),
+ }
+ #[derive(Default)]
+ pub(in crate::asset_session) struct Work {
+@@ -1283,17 +1291,23 @@
+         self.inner = Some(Holding::Use(value));
+         Ok(())
+     }
++    pub(in crate::asset_session) fn attach_p12(&mut self,value:Arc<AppleP12Destination>)->Result<(),Reason> {
++        if !self.loan().is_some_and(|loan|value.same_source(loan)) || !matches!(self.inner,Some(Holding::Use(_))) { return Err(Reason::SourceChanged); }
++        self.inner=Some(Holding::P12(value)); Ok(())
++    }
++    pub(in crate::asset_session) fn p12_destination(&self)->Option<&Arc<AppleP12Destination>> { match self.inner.as_ref()? {Holding::P12(value)=>Some(value),_=>None} }
+     pub(in crate::asset_session) fn destination(
+         &self,
+     ) -> Option<&Arc<AppleDistributionKeyDestination>> {
+         match self.inner.as_ref()? {
+             Holding::Prepare(value) => Some(value),
+-            Holding::Use(_) => None,
++            Holding::Use(_) | Holding::P12(_) => None,
+         }
+     }
+     pub(in crate::asset_session) fn loan(&self) -> Option<&Arc<AppleDistributionKeyLoan>> {
+         match self.inner.as_ref()? {
+             Holding::Use(value) => Some(value),
++            Holding::P12(value)=>Some(&value.loan),
+             Holding::Prepare(_) => None,
+         }
+     }
+@@ -1301,6 +1315,7 @@
+         match self.inner.as_ref()? {
+             Holding::Prepare(value) => Some(&value.original),
+             Holding::Use(value) => Some(&value.original),
++            Holding::P12(value)=>Some(&value.loan.original),
+         }
+     }
+     pub(in crate::asset_session) fn empty(&self) -> bool {
+@@ -1314,6 +1329,7 @@
+             None => Some(0),
+             Some(Holding::Prepare(value)) => value.retained_bytes(),
+             Some(Holding::Use(value)) => value.own_retained_bytes(),
++            Some(Holding::P12(value))=>value.own_retained_bytes(),
+         }
+     }
+     fn parent_ready(&self, owner: &Arc<OriginalWork>) -> bool {
+@@ -1321,6 +1337,7 @@
+             None => true,
+             Some(Holding::Prepare(value)) => value.parent_retirement_ready(owner),
+             Some(Holding::Use(value)) => value.parent_retirement_ready(owner),
++            Some(Holding::P12(value))=>value.parent_retirement_ready(owner),
+         }
+     }
+     fn allows_unstarted_child(&self) -> bool {
+@@ -1355,6 +1372,7 @@
+         let disposed = match self.inner.as_ref() {
+             Some(Holding::Prepare(value)) => value.dispose_private(&owner),
+             Some(Holding::Use(value)) => value.dispose_private(&owner),
++            Some(Holding::P12(value))=>value.dispose_private(&owner),
+             None => true,
+         };
+         if !disposed {
+@@ -1463,6 +1481,7 @@
+         Ok(work) => match &work.apple_distribution_key.inner {
+             Some(Holding::Prepare(value)) => Holding::Prepare(value.clone()),
+             Some(Holding::Use(value)) => Holding::Use(value.clone()),
++            Some(Holding::P12(value))=>Holding::P12(value.clone()),
+             None => return false,
+         },
+         Err(_) => return false,
+@@ -1470,22 +1489,24 @@
+     let original = match &held {
+         Holding::Prepare(value) => &value.original,
+         Holding::Use(value) => &value.original,
++        Holding::P12(value)=>&value.loan.original,
+     };
+     let unstarted = match &held {
+         Holding::Prepare(value) => value.allows_unstarted_child(),
+-        Holding::Use(_) => false,
++        Holding::Use(_) | Holding::P12(_) => false,
+     };
+     original_cleanup_joins(owner, original, unstarted)
+         && match held {
+             Holding::Prepare(value) => value.parent_retirement_ready(owner),
+             Holding::Use(value) => value.parent_retirement_ready(owner),
++            Holding::P12(value)=>value.parent_retirement_ready(owner),
+         }
+ }
+ 
+ pub(in crate::asset_session) fn retirement_deferred(slot: &Slot) -> bool {
+     if !matches!(
+         slot.operation,
+-        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey
++        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12
+     ) {
+         return false;
+     }
+@@ -1539,7 +1560,7 @@
+ ) -> bool {
+     if !matches!(
+         slot.operation,
+-        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey
++        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12
+     ) || slot.target.is_some()
+     {
+         return false;
+@@ -1599,7 +1620,7 @@
+     retained_ready
+         && matches!(
+             slot.operation,
+-            Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey
++            Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12
+         )
+         && match slot.staged.as_ref() {
+             Some(super::super::Staged::Refused(_))
+diff --git a/desktop/src-tauri/src/credential_apple_key_source.rs b/desktop/src-tauri/src/credential_apple_key_source.rs
+--- a/desktop/src-tauri/src/credential_apple_key_source.rs
++++ b/desktop/src-tauri/src/credential_apple_key_source.rs
+@@ -8,6 +8,8 @@
+ 
+ #[path = "credential_apple_certificate_source.rs"]
+ pub(in crate::asset_session) mod certificate;
++#[path = "credential_apple_p12_source.rs"]
++pub(in crate::asset_session) mod p12;
+ 
+ pub(crate) struct AppleKeySources {
+     p8: BoundLoan,
+@@ -15,6 +17,7 @@
+     owner: OnceLock<Weak<OriginalWork>>,
+     inventory: OnceLock<Arc<AppleDistributionKeyInventory>>,
+     certificate: Option<certificate::CertificateSource>,
++    p12: Option<p12::P12Source>,
+ }
+ impl AppleKeySources {
+     pub(in crate::asset_session) fn capture(
+@@ -24,6 +27,7 @@
+         key: &RecordKey,
+         payload: &Arc<Payload>,
+         selected_key: Option<&RecordKey>,
++        p12_mode: bool, selected_p12: Option<&RecordKey>,
+     ) -> Result<Arc<Self>, Reason> {
+         if !document.native_qualified()
+             || !document.persistence_qualified()
+@@ -58,6 +62,19 @@
+         {
+             return Err(Reason::ContextStale);
+         }
++        let p12 = if p12_mode {
++            let key=selected_key.ok_or(Reason::SourceRefused)?;
++            let mut rows=session.rows.iter().filter(|row| row.reference(loan.reference.identity).matches(key));
++            let keyref=rows.next().ok_or(Reason::SourceChanged)?.reference(loan.reference.identity);
++            if rows.next().is_some() { return Err(Reason::SourceChanged); }
++            let selected=selected_p12.map(|expected| {
++                let mut rows=session.rows.iter().filter(|row| row.reference(loan.reference.identity).matches(expected));
++                let first=rows.next().ok_or(Reason::SourceChanged)?.reference(loan.reference.identity);
++                if rows.next().is_some(){return Err(Reason::SourceChanged);}
++                Ok(KeyReference::native(first.identity,first.record,first.revision))
++            }).transpose()?;
++            Some(p12::P12Source::capture(document,state,loan,&KeyReference::native(keyref.identity,keyref.record,keyref.revision),selected.as_ref())?)
++        } else { if selected_p12.is_some(){return Err(Reason::SourceRefused);} None };
+         let certificate = selected_key.map(|key| certificate::CertificateSource::capture(state, key, loan)).transpose()?;
+         Ok(Arc::new(Self {
+             p8: BoundLoan {
+@@ -70,7 +87,7 @@
+             roster,
+             owner: OnceLock::new(),
+             inventory: OnceLock::new(),
+-            certificate,
++            certificate, p12,
+         }))
+     }
+     pub(in crate::asset_session) fn native(&self) -> &Arc<NativeContext> {
+@@ -104,6 +121,7 @@
+             && left.revision == right.revision
+             && left.original == right.original
+             && match (&self.certificate, &other.certificate) { (None,None)=>true,(Some(a),Some(b))=>a.same(b),_=>false }
++            && match (&self.p12,&other.p12) { (None,None)=>true,(Some(a),Some(b))=>a.same(b),_=>false }
+             && self.roster.generation == other.roster.generation
+             && self.roster.roots == other.roster.roots
+     }
+@@ -115,8 +133,9 @@
+         state
+             .vault
+             .as_ref()
+-            .is_some_and(|session| self.p8.current(state, session))
++            .is_some_and(|session| self.p8.current(state, session) || self.owner().is_some_and(|owner| self.p8.current_for_apple_p12(state,session,&owner)))
+             && self.certificate.as_ref().is_none_or(|source| source.current(self, document, state))
++            && self.p12.as_ref().is_none_or(|p12| p12.current(document,state))
+             && document.inner.bridge.registry_generation() == self.roster.generation
+             && document
+                 .context_matches(state, &self.p8.context)
+@@ -179,6 +198,7 @@
+                     && slot.settlement != Settlement::Unknown
+                     && slot.phase != Phase::Unknown
+             })
++            && self.p12.as_ref().is_none_or(|p12| p12.current(document,state))
+             && document.inner.bridge.registry_generation() == self.roster.generation
+             && document
+                 .inner
+@@ -232,6 +252,7 @@
+         for root in &self.roster.roots {
+             bytes = bytes.checked_add(root.path.capacity())?;
+         }
++        if let Some(p12)=&self.p12 { bytes=bytes.checked_add(p12.own_retained_bytes())?; }
+         if self.certificate.is_some() {
+             bytes=bytes.checked_add(certificate::CertificateSource::weak_backing_bytes()?)?;
+         }
+diff --git a/desktop/src-tauri/src/macos_store_runtime.rs b/desktop/src-tauri/src/macos_store_runtime.rs
+--- a/desktop/src-tauri/src/macos_store_runtime.rs
++++ b/desktop/src-tauri/src/macos_store_runtime.rs
+@@ -15,6 +15,7 @@
+     "store/tooling/fastlane/apple_provisioning.rb", "store/tooling/fastlane/apple_provisioning_bundle_read.rb",
+     "store/tooling/fastlane/apple_provisioning_profile_read.rb",
+     "store/tooling/fastlane/apple_provisioning_p12.rb",
++    "store/tooling/fastlane/apple_provisioning_p12_assemble.rb",
+     "store/tooling/fastlane/apple_provisioning_signing.rb",
+     "store/tooling/fastlane/apple_provisioning_bundle_registration.rb",
+     "store/tooling/fastlane/apple_distribution_key.rb",
+diff --git a/desktop/src-tauri/src/saved_command_apple_certificate.rs b/desktop/src-tauri/src/saved_command_apple_certificate.rs
+--- a/desktop/src-tauri/src/saved_command_apple_certificate.rs
++++ b/desktop/src-tauri/src/saved_command_apple_certificate.rs
+@@ -116,7 +116,7 @@
+     owner: &Arc<Session>, writer: &mut W, bytes: &[u8], stopped: bool,
+ ) -> bool {
+     use tokio::io::AsyncWriteExt;
+-    if !matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate())
++    if !matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate() || context.mode.p12() && !stopped)
+         || bytes.is_empty() || bytes.len() > wire::ACK_LIMIT { return false; }
+     let mut stop = owner.stop.subscribe();
+     let mut cutoff = owner.native_audit_cutoff.subscribe();
+@@ -145,7 +145,7 @@
+     let asset = parent.original.get().and_then(Weak::upgrade).ok_or_else(invalid)?;
+     let loan = parent.loan.get().and_then(Weak::upgrade).ok_or_else(invalid)?;
+     let request = parent.binding.get().ok_or_else(invalid)?.clone();
+-    if !parent.mode.certificate() || !parent.same_asset(&asset)
++    if !(parent.mode.certificate() || parent.mode.p12()) || !parent.same_asset(&asset)
+         || !parent.source_returned.load(Ordering::SeqCst) || parent.clock.interrupted()
+         || owner.resource_unknown.load(Ordering::SeqCst)
+         || request.scope.certificate.as_ref().is_none_or(|scope| scope.source_key != loan.reference()) {
+@@ -273,20 +273,38 @@
+ /// worker/IO/runtime/driver joins and BEFORE Asset loan release. No DTO or ACK
+ /// calls it. A nonpositive/cancelled outcome simply has no association.
+ pub(in crate::saved_command_owner) fn producer_joined(owner: &Arc<Session>, result: Option<&wire::CertificateResult>) -> Result<(), BridgeError> {
+-    let parent = original(owner)?;
+-    if !parent.worker_joined.load(Ordering::SeqCst) { return Err(BridgeError::cleanup_unknown()); }
+-    let Some(result) = result.filter(|value| value.positive_identity()) else { return Ok(()); };
+-    let (_, asset, loan, binding) = originals(owner)?;
+-    let mut facts = state(parent)?.facts.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+-    let key = facts.key.as_ref().ok_or_else(invalid)?;
+-    if facts.policy.is_none() || !loan.matches_public_material(&asset, key.csr.as_bytes(), &key.spki) { return Err(invalid()); }
+-    let spki_sha256 = key.spki_sha256.clone();
+-    let selected = facts.batch.as_mut().and_then(|batch| batch.selected.take()).ok_or_else(invalid)?;
+-    if result.certificate_id.as_ref() != Some(&selected.id) || current_time()? >= selected.after { return Err(invalid()); }
++    if !original(owner)?.mode.certificate() { return Err(invalid()); }
++    positive_joined(owner,result.filter(|value|value.positive_identity()).and_then(|value|value.certificate_id.as_deref()),None)
++}
++/// Same sole producer; P12 supplies its own typed result, never a fabricated
++/// certificate terminal or a holder transferred from an earlier operation.
++pub(in crate::saved_command_owner) fn producer_joined_p12(owner:&Arc<Session>,result:Option<&wire::P12Result>)->Result<(),BridgeError> {
++    if !original(owner)?.mode.p12() {return Err(invalid());}
++    let positive=result.filter(|value|value.positive_identity());
++    positive_joined(owner,positive.and_then(|value|value.certificate_id.as_deref()),
++        positive.and_then(|value|value.certificate_sha256.as_deref().zip(value.public_key_sha256.as_deref())))
++}
++fn positive_joined(owner:&Arc<Session>,id:Option<&str>,hashes:Option<(&str,&str)>)->Result<(),BridgeError> {
++    let parent=original(owner)?;
++    if !parent.worker_joined.load(Ordering::SeqCst) {return Err(BridgeError::cleanup_unknown());}
++    let Some(id)=id else{return Ok(());};
++    let (_,asset,loan,binding)=originals(owner)?;
++    let mut facts=state(parent)?.facts.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
++    let key=facts.key.as_ref().ok_or_else(invalid)?;
++    if facts.policy.is_none() || !loan.matches_public_material(&asset,key.csr.as_bytes(),&key.spki) {return Err(invalid());}
++    let spki_sha256=key.spki_sha256.clone();
++    let selected=facts.batch.as_mut().and_then(|batch|batch.selected.take()).ok_or_else(invalid)?;
++    if id!=selected.id || current_time()? >= selected.after
++        || hashes.is_some_and(|(leaf,spki)|leaf!=selected.sha256 || spki!=spki_sha256) {return Err(invalid());}
+     state(parent)?.association.set(AppleDistributionCertificateBinding {
+-        parent: Arc::downgrade(parent), original: Arc::downgrade(&asset), loan: Arc::downgrade(&loan),
+-        request: binding, certificate: selected, public_key_sha256: spki_sha256,
+-    }).map_err(|_| invalid())
++        parent:Arc::downgrade(parent),original:Arc::downgrade(&asset),loan:Arc::downgrade(&loan),
++        request:binding,certificate:selected,public_key_sha256:spki_sha256,
++    }).map_err(|_|invalid())
++}
++pub(super) fn confirms_p12(parent:&Arc<AppleKeySession>,original:&Arc<OriginalWork>,loan:&Arc<AppleDistributionKeyLoan>,
++    request:&Arc<wire::RequestBinding>,leaf:&str,spki:&str)->bool {
++    parent.mode.p12() && state(parent).ok().and_then(|state|state.association.get())
++        .is_some_and(|binding|binding.confirms_p12(parent,original,loan,request,leaf,spki))
+ }
+ 
+ pub(in crate::saved_command_owner) fn native_joined(owner: &Arc<Session>, native_use: Arc<NativeUse>, reservation: Arc<CertificateOriginalReservation>) -> Result<AppleCertificateNativeJoined, BridgeError> {
+diff --git a/desktop/src-tauri/src/saved_command_apple_key.rs b/desktop/src-tauri/src/saved_command_apple_key.rs
+--- a/desktop/src-tauri/src/saved_command_apple_key.rs
++++ b/desktop/src-tauri/src/saved_command_apple_key.rs
+@@ -23,6 +23,13 @@
+ #[path = "saved_command_apple_certificate.rs"]
+ pub(in crate::saved_command_owner) mod certificate;
+ pub(crate) use certificate::AppleDistributionCertificateBinding;
++#[path="saved_command_apple_p12.rs"]
++pub(in crate::saved_command_owner) mod p12;
++pub(crate) use p12::{AppleP12PendingAck,AppleP12SavePermit,AppleP12NoSaveJoined,AppleP12NativeJoined};
++#[cfg(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++pub(crate) use p12::PrivateAppleP12Input;
++/// Closed variants on the original one-use Asset save slot. Never a second writer.
++pub(crate) enum AppleKeySaveCommand { Key(AppleKeySavePermit), P12(AppleP12SavePermit) }
+ 
+ /// Pre-final-CAS fact. The final journal CAS and NativeUse retirement are
+ /// deliberately later original jobs, and are not claimed by this token.
+@@ -75,12 +82,13 @@
+     clock: Arc<super::apple_signing::AppleProvisioningClock>,
+     mode: wire::Mode,
+     certificate: Option<certificate::State>,
++    p12: Option<p12::State>,
+     original: OnceLock<Weak<OriginalWork>>,
+     destination: OnceLock<Weak<AppleDistributionKeyDestination>>,
+     loan: OnceLock<Weak<AppleDistributionKeyLoan>>,
+     binding: OnceLock<Arc<wire::RequestBinding>>,
+     receive: Option<Arc<private::ReceiveBook>>,
+-    dispatch: Mutex<Option<oneshot::Sender<Option<AppleKeySavePermit>>>>,
++    dispatch: Mutex<Option<oneshot::Sender<Option<AppleKeySaveCommand>>>>,
+     phase: AtomicU8,
+     source_returned: AtomicBool,
+     before_pending_returned: AtomicBool,
+@@ -132,7 +140,8 @@
+         owner: Arc::downgrade(owner),
+         clock: super::apple_signing::AppleProvisioningClock::for_session(owner)?,
+         mode: context.mode,
+-        certificate: context.mode.certificate().then(certificate::State::default),
++        certificate: (context.mode.certificate() || context.mode.p12()).then(certificate::State::default),
++        p12: p12::State::reserve(context.mode)?,
+         original: OnceLock::new(),
+         destination: OnceLock::new(),
+         loan: OnceLock::new(),
+@@ -174,7 +183,8 @@
+         .checked_add(std::mem::size_of::<AppleKeyNeverGeneratedJoined>())?
+         .checked_add(std::mem::size_of::<AppleKeyUseJoined>())?
+         .checked_add(2 * (4 * 32) + 3 * 64)?
+-        .checked_add(if mode.certificate() { certificate::backing_bytes()? } else { 0 })
++        .checked_add(if mode.certificate() || mode.p12() { certificate::backing_bytes()? } else { 0 })?
++        .checked_add(p12::backing_bytes(mode)?)
+ }
+ 
+ pub(super) fn stopped(owner: &Session, reason: Reason, at: Instant) {
+@@ -301,7 +311,7 @@
+     pub(crate) fn attach(
+         &self,
+         original: &Arc<OriginalWork>,
+-        dispatch: oneshot::Sender<Option<AppleKeySavePermit>>,
++        dispatch: oneshot::Sender<Option<AppleKeySaveCommand>>,
+     ) -> Result<(), BridgeError> {
+         let owner = self.owner()?;
+         let mut slot = self
+@@ -772,6 +782,7 @@
+     if let Some(receive) = &key.receive {
+         receive.bind_request(bytes)?;
+     }
++    if key.mode.p12() { p12::bind_request(owner,binding,bytes)?; }
+     key.binding.set(binding.clone()).map_err(|_| invalid())
+ }
+ 
+@@ -1035,7 +1046,7 @@
+         },
+     )?;
+     let send = slot.take().ok_or_else(BridgeError::cleanup_unknown)?;
+-    if send.send(permit).is_err() && saving {
++    if send.send(permit.map(AppleKeySaveCommand::Key)).is_err() && saving {
+         return Err(BridgeError::cleanup_unknown());
+     }
+     // A refused Initial/BeforePending child may already have returned before
+@@ -1138,6 +1149,7 @@
+         if key.phase() != Some(SavePhase::NotCreated) {
+             return false;
+         }
++        if key.mode.p12() && !p12::finish_without_asset(key) { return false; }
+         if key.receive.as_ref().is_some_and(|receive| {
+             !key.generator_never_entered.load(Ordering::SeqCst) || !receive.drain_never_generated()
+         }) {
+@@ -1146,7 +1158,9 @@
+         key.private_drained.store(true, Ordering::SeqCst);
+         return key.clock.mark_completed(owner);
+     };
+-    if key.phase() == Some(SavePhase::ReturnedRefused) {
++    if key.mode.p12() {
++        if p12::prepare_private_finish(key,&asset).is_err() { return false; }
++    } else if key.phase() == Some(SavePhase::ReturnedRefused) {
+         if let Some(destination) = key.destination.get().and_then(Weak::upgrade) {
+             if !key.generator_never_entered.load(Ordering::SeqCst) {
+                 return false;
+@@ -1195,6 +1209,10 @@
+     if input.retire_key_asset(&asset).await.is_err() {
+         return false;
+     }
++    if key.mode.p12() && !key.private_drained.load(Ordering::SeqCst)
++        && p12::finish_unloaded_after_asset(key) {
++        key.private_drained.store(true, Ordering::SeqCst);
++    }
+     key.private_drained.load(Ordering::SeqCst) && key.clock.mark_completed(owner)
+ }
+ 
+diff --git a/desktop/src-tauri/src/saved_command_apple_provisioning.rs b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+@@ -17,6 +17,8 @@
+ mod key_review;
+ #[path = "saved_command_apple_certificate_review.rs"]
+ mod certificate_review;
++#[path="saved_command_apple_p12_review.rs"]
++mod p12_review;
+ #[path = "saved_command_apple_profile_recovery.rs"]
+ mod profile_recovery;
+ 
+@@ -97,6 +99,7 @@
+     profile_review: Option<Arc<profile_review::Review>>,
+     key_review: Option<Arc<key_review::Review>>,
+     certificate_review: Option<Arc<certificate_review::Review>>,
++    p12_review: Option<Arc<p12_review::Review>>,
+ }
+ #[derive(Default)]
+ pub(super) struct Registry {
+@@ -106,7 +109,9 @@
+     profile_saved: Option<profile_review::SavedPublication>,
+     key_review: Option<Arc<key_review::Review>>,
+     certificate_review: Option<Arc<certificate_review::Review>>,
++    p12_review: Option<Arc<p12_review::Review>>,
+     key_saved: Option<key_review::SavedPublication>,
++    p12_saved: Option<p12_review::SavedPublication>,
+     profile_recovery: Option<profile_recovery::Publication>,
+     certificate_recovery: Option<certificate_review::Publication>,
+ }
+@@ -216,17 +221,19 @@
+     registry.key_review = None;
+     let saved_changed=registry.profile_saved.take().is_some();
+     let key_saved_changed = registry.key_saved.take().is_some();
++    registry.p12_review=None;let p12_saved_changed=registry.p12_saved.take().is_some();
+     registry.certificate_review = None;
+     let certificate_history_changed = registry.certificate_recovery.take().is_some();
+     let profile_history_changed = registry.profile_recovery.take().is_some();
+     // Public historical DATA may be withdrawn, never replaced or upgraded.
+     // Idle context invalidation must advance the same original status revision.
+-    registry.recovery.take().is_some() || saved_changed || profile_history_changed || key_saved_changed || certificate_history_changed
++    registry.recovery.take().is_some() || saved_changed || profile_history_changed || key_saved_changed || certificate_history_changed || p12_saved_changed
+ }
+ 
+ pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
+     profile_review::project(registry,projection);
+     key_review::project(registry, projection);
++    p12_review::project(registry,projection);
+     profile_recovery::project(registry, projection);
+     certificate_review::project(registry, projection);
+     projection.recovery = None;
+@@ -253,7 +260,8 @@
+         .checked_add(apple_wire::IPC_LIMIT)?
+         .checked_add(std::mem::size_of::<RecoveryPublication>())?
+         .checked_add(profile_recovery::backing_bytes()?)?
+-        .checked_add(certificate_review::backing_bytes()?)
++        .checked_add(certificate_review::backing_bytes()?)?
++        .checked_add(p12_review::backing_bytes()?)
+ }
+ 
+ pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
+@@ -305,7 +313,7 @@
+         .checked_add(super::apple_signing::backing_bytes()?)?
+         .checked_add(std::mem::size_of::<key_review::Review>())?
+         .checked_add(super::apple_key::backing_bytes(apple_wire::Mode::KeyPrepare)?.max(
+-            super::apple_key::backing_bytes(apple_wire::Mode::CertificateCreate)?))?
++            super::apple_key::backing_bytes(apple_wire::Mode::CertificateCreate)?).max(super::apple_key::backing_bytes(apple_wire::Mode::P12Save)?))?
+         .checked_add(6*1024*1024)?
+         .checked_sub(retained_document_backing_bytes()?)
+ }
+@@ -392,6 +400,7 @@
+     key_observed: Option<(apple_wire::KeyObserved, Instant)>,
+     key_not_generated: Option<apple_wire::KeyNotGenerated>,
+     certificate_observed: Option<(apple_wire::CertificateObserved, Instant)>,
++    p12_observed: Option<(apple_wire::P12Observed,Instant)>,
+     certificate_pending: Option<u32>,
+     ack_writing: bool,
+     ack_entered: [bool; apple_wire::CERTIFICATE_EVENTS as usize],
+@@ -420,7 +429,7 @@
+                 pending: None,
+                 observed: None, profile_observed: None,
+                 key_observed: None, key_not_generated: None,
+-                certificate_observed: None, certificate_pending: None,
++                certificate_observed: None, certificate_pending: None,p12_observed:None,
+                 ack_writing: false,
+                 ack_entered: [false; apple_wire::CERTIFICATE_EVENTS as usize],
+                 failed: false,
+@@ -441,6 +450,22 @@
+             .as_ref()
+             .map(|intent| &intent.input)
+             .ok_or_else(apple_wire::invalid)
++    }
++    /// Same consumed P12 review and current Document only. The caller must
++    /// separately prove the original normal Terminal and positive worker joins;
++    /// this method is not a replacement for ordinary pre-worker work_clear.
++    pub(super) fn p12_save_current(&self) -> Result<(), BridgeError> {
++        let intent = self.intent.as_ref().ok_or_else(apple_wire::invalid)?;
++        if intent.input.context().mode != apple_wire::Mode::P12Save
++            || intent.review.is_some()
++            || intent.profile_review.is_some()
++            || intent.key_review.is_some()
++            || intent.certificate_review.is_some()
++            || !intent.p12_review.as_ref().is_some_and(|review| review.current_claim(&intent.input))
++        {
++            return Err(apple_wire::invalid());
++        }
++        intent.input.current()
+     }
+     pub(super) fn request_binding(&self) -> Result<Arc<apple_wire::RequestBinding>, BridgeError> {
+         self.binding
+@@ -516,7 +541,16 @@
+                 route.certificate_observed = Some((observed,at)); route.received = event.sequence;
+                 if !route.ack_writing { route.completed=event.sequence; }
+             },
+-            data @ apple_wire::EventData::Certificate(_) if input.context().mode.certificate() => {
++            apple_wire::EventData::P12(apple_wire::P12Event::Observed(observed))
++                if input.context().mode==apple_wire::Mode::P12Review && route.p12_observed.is_none()=>{
++                route.p12_observed=Some((observed,at));route.received=event.sequence;
++                if !route.ack_writing {route.completed=event.sequence;}
++            },
++            data @ apple_wire::EventData::P12(apple_wire::P12Event::Pending{..}|apple_wire::P12Event::Output(_))
++                if input.context().mode==apple_wire::Mode::P12Save=>{
++                route.received=event.sequence;route.pending=Some(apple_wire::EventDataFrame{sequence:event.sequence,data});
++            },
++            data @ apple_wire::EventData::Certificate(_) if input.context().mode.certificate() || input.context().mode.p12() => {
+                 if matches!(&data, apple_wire::EventData::Certificate(apple_wire::CertificateEvent::Pending { .. })) {
+                     if route.certificate_pending.is_some() { route.failed=true; return Err(apple_wire::invalid()); }
+                     route.certificate_pending=Some(event.sequence);
+@@ -630,6 +664,10 @@
+             Some(registry.apple.certificate_review.as_ref().filter(|review|review.matches(&document,now))
+                 .cloned().ok_or_else(apple_wire::invalid)?)
+         } else { None };
++        let p12_review=if matches!(input.context.mode,apple_wire::Mode::P12Reuse|apple_wire::Mode::P12Save) {
++            let registry=self.inner.lock();Some(registry.apple.p12_review.as_ref().filter(|review|review.matches(&document,now))
++                .cloned().ok_or_else(apple_wire::invalid)?)
++        } else {None};
+         let material = document.material().clone();
+         let status = self.prepare_bound(
+             Context::AppleProvisioning(input.context),
+@@ -650,10 +688,11 @@
+         if let Some(review)=&profile_review { prepared.expires=prepared.expires.min(review.expires()); }
+         if let Some(review) = &key_review { prepared.expires = prepared.expires.min(review.expires()); }
+         if let Some(review)=&certificate_review { prepared.expires=prepared.expires.min(review.expires()); }
++        if let Some(review)=&p12_review {prepared.expires=prepared.expires.min(review.expires());}
+         prepared.apple = Some(Arc::new(Intent {
+             input: document,
+             review,
+-            profile_review, key_review, certificate_review,
++            profile_review, key_review, certificate_review,p12_review,
+         }));
+         status.apple()
+     }
+@@ -704,6 +743,7 @@
+             if let Some(review)=&intent.profile_review { review.claim(&document,Instant::now())?; }
+             if let Some(review) = &intent.key_review { review.claim(&document, Instant::now())?; }
+             if let Some(review) = &intent.certificate_review { review.claim(&document,Instant::now())?; }
++            if let Some(review)=&intent.p12_review {review.claim(&document,Instant::now())?;}
+         }
+         let admitted = self.start_bound(
+             Start {
+@@ -773,11 +813,12 @@
+     registry.recovery = None;
+     registry.profile_review=None;registry.profile_saved=None;
+     registry.profile_recovery = None;
+-    registry.key_review = None; registry.key_saved = None;
++    registry.key_review = None; registry.key_saved = None;registry.p12_review=None;registry.p12_saved=None;
+     registry.certificate_review = None; registry.certificate_recovery = None;
+     // Detached saved-key DATA may survive a known cancellation only after
+     // the actual native/Asset/private/watchdog retirement. Never a new loan.
+     key_review::publish_saved(registry, active, owner);
++    p12_review::publish_saved(registry,active,owner);
+     if owner.domain != SavedCommandDomain::AppleProvisioning
+         || active.unknown
+         || active.context_invalidated
+@@ -812,6 +853,7 @@
+         key_review::publish_review(registry, owner, terminal); return;
+     }
+     if context.mode.certificate() { certificate_review::publish(registry,owner,terminal); return; }
++    if context.mode.p12() {p12_review::publish_review(registry,owner,terminal);return;}
+     if context.mode != apple_wire::Mode::Review { return; }
+     // A denied/inconclusive provider query may accompany a known joined local
+     // journal read. Publish only that historical DATA, never a Register review.
+diff --git a/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs b/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
+@@ -30,6 +30,8 @@
+ mod key_phases;
+ #[path = "saved_command_apple_certificate_native.rs"]
+ mod certificate_phases;
++#[path="saved_command_apple_p12_native.rs"]
++mod p12_phases;
+ const STATE_CALL: Duration = Duration::from_secs(60);
+ 
+ #[derive(Default)]
+@@ -43,9 +45,13 @@
+     ProfileWritten(crate::apple_provisioning_journal::ProfileJournalAck),
+     KeyWritten(crate::apple_provisioning_journal::KeyJournalAck),
+     CertificateWritten(crate::apple_provisioning_journal::CertificateJournalAck),
++    P12Written(crate::apple_provisioning_journal::P12JournalAck),
+     Retired,
+ }
+ enum Call {
++    P12Reserve(crate::apple_provisioning_journal::P12SaveIntent,crate::apple_provisioning_journal::P12SaveUpdate),
++    P12Record(Revision,Arc<crate::apple_provisioning_journal::P12OriginalReservation>,crate::apple_provisioning_journal::P12SaveUpdate),
++    P12Finish(Revision,Arc<crate::apple_provisioning_journal::P12OriginalReservation>,super::super::apple_key::AppleP12NativeJoined),
+     Initialize,
+     CertificateReserve(crate::apple_provisioning_journal::CertificateIssuanceIntent, crate::apple_provisioning_journal::CertificateUpdate),
+     CertificateRecord(Revision, Arc<crate::apple_provisioning_journal::CertificateOriginalReservation>, crate::apple_provisioning_journal::CertificateUpdate),
+@@ -120,6 +126,9 @@
+             Some(Ok(Value::KeyWritten(ack))) => Some(ack), _ => None,
+         })
+     }
++    fn last_p12_ack(&self)->Option<&crate::apple_provisioning_journal::P12JournalAck> {
++        self.slots.iter().rev().find_map(|slot|match slot.returned.as_ref(){Some(Ok(Value::P12Written(ack)))=>Some(ack),_=>None})
++    }
+     fn last_certificate_ack(&self) -> Option<&crate::apple_provisioning_journal::CertificateJournalAck> {
+         self.slots.iter().rev().find_map(|slot|match slot.returned.as_ref() {
+             Some(Ok(Value::CertificateWritten(ack)))=>Some(ack),_=>None,
+@@ -198,13 +207,14 @@
+         return Err(apple_wire::invalid());
+     }
+     if intent.certificate_review.as_ref().is_some_and(|review|!review.current_claim(&intent.input)) { return Err(apple_wire::invalid()); }
++    if intent.p12_review.as_ref().is_some_and(|review|!review.current_claim(&intent.input)) {return Err(apple_wire::invalid());}
+     intent.input.current()
+ }
+ fn journal_cutoff(owner: &Session) -> Instant {
+     // Local key cleanup jobs (including final CAS/NativeUse retirement) use
+-    // the SAME original cleanup window. Every new effect still work_clear;
++    // the SAME original cleanup window. New effects retain their work gate;
+     // private preservation additionally checks its fixed all-failure permit.
+-    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key()) {
++    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key() || context.mode.p12()) {
+         owner.apple_key.get().map_or(*owner.native_audit_cutoff.borrow(), |key|key.clock().cleanup_end())
+     } else { *owner.native_audit_cutoff.borrow() }
+ }
+@@ -237,8 +247,8 @@
+     let mode = owner.apple.input()?.context().mode;
+     let profile_mode = mode.profile();
+     let key_mode = mode.local_key();
+-    let certificate_mode=mode.certificate();
+-    let role_ok = !profile_mode && !key_mode && !certificate_mode && matches!(
++    let certificate_mode=mode.certificate();let p12_mode=mode.p12();
++    let role_ok = !profile_mode && !key_mode && !certificate_mode && !p12_mode && matches!(
+         (&selected, index),
+         (Call::Initialize, INITIAL)
+             | (Call::Reserve(_, _), 1)
+@@ -255,15 +265,27 @@
+             | (Call::KeyFinish(_, _, _), PROFILE_FINISH))
+         || certificate_mode && matches!((&selected,index), (Call::Initialize,INITIAL)
+             | (Call::CertificateReserve(_,_),1) | (Call::CertificateRecord(_,_,_),2..=AUDIT)
+-            | (Call::CertificateFinish(_,_,_),PROFILE_FINISH) | (Call::Retire(_),PROFILE_RETIRE));
+-    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode || certificate_mode { PROFILE_RETIRE } else { RETIRE }) {
++            | (Call::CertificateFinish(_,_,_),PROFILE_FINISH) | (Call::Retire(_),PROFILE_RETIRE))
++        || p12_mode && matches!((&selected,index),(Call::Initialize,INITIAL)|(Call::Retire(_),PROFILE_RETIRE))
++        || mode==apple_wire::Mode::P12Save && matches!((&selected,index),
++            (Call::P12Reserve(_,_),1)|(Call::P12Record(_,_,_),AUDIT|PROFILE_ARM|PROFILE_SAVED)|(Call::P12Finish(_,_,_),PROFILE_FINISH));
++    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode || certificate_mode || p12_mode { PROFILE_RETIRE } else { RETIRE }) {
+         return Err(local_error(owner, apple_wire::invalid()));
+     }
+     let end = call_end(owner)?;
+     // New effects require currentness; an already-armed audit uses only the
+     // original immutable reservation and cannot authorize a provider call.
+-    if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _) | Call::CertificateReserve(_,_)) {
++    let requires_work = matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _) | Call::CertificateReserve(_,_) | Call::P12Reserve(_,_));
++    // Only this closed post-worker P12 CAS distinguishes a normal Terminal's
++    // input-close signal from genuine STOP. All pre-worker gates are unchanged.
++    let p12_save_parent = (index == PROFILE_ARM && matches!(&selected, Call::P12Record(_,_,_)))
++        .then(|| inner.clone());
++    if requires_work {
+         work_clear(owner).map_err(|error| local_error(owner, error))?;
++    }
++    if let Some(parent) = &p12_save_parent {
++        super::super::apple_key::p12::post_worker_save_clear(parent, owner)
++            .map_err(|error| local_error(owner, error))?;
+     }
+     let input = owner.apple.input()?.clone();
+     let held = jobs.hold.clone();
+@@ -278,8 +300,12 @@
+         if !audit_clear(&original, end) {
+             return Err(local_error(&original, BridgeError::cleanup_unknown()));
+         }
+-        if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _) | Call::CertificateReserve(_,_)) {
++        if requires_work {
+             work_clear(&original).map_err(|error| local_error(&original, error))?;
++        }
++        if let Some(parent) = &p12_save_parent {
++            super::super::apple_key::p12::post_worker_save_clear(parent, &original)
++                .map_err(|error| local_error(&original, error))?;
+         }
+         // This mutex is ONLY the finite operation's journal backing. Neither
+         // STOP nor a Document/Host status path takes it. The slot's actual
+@@ -345,6 +371,14 @@
+                 .record_key(revision, &reservation, update).map(Value::KeyWritten),
+             Call::KeyFinish(revision, reservation, joined) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                 .finish_key_native(revision, &reservation, &joined).map(Value::KeyWritten),
++            Call::P12Reserve(intent,update)=>{
++                let binding=original.apple.request_binding()?;
++                held.journal.as_mut().ok_or_else(apple_wire::invalid)?.reserve_p12(binding.revision,intent,update).map(Value::P12Written)
++            },
++            Call::P12Record(revision,reservation,update)=>held.journal.as_mut().ok_or_else(apple_wire::invalid)?
++                .record_p12(revision,&reservation,update).map(Value::P12Written),
++            Call::P12Finish(revision,reservation,joined)=>held.journal.as_mut().ok_or_else(apple_wire::invalid)?
++                .finish_p12_native(revision,&reservation,&joined).map(Value::P12Written),
+             Call::CertificateReserve(intent,update) => {
+                 let binding=original.apple.request_binding()?;
+                 held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+@@ -458,7 +492,8 @@
+             .map(|review| review.observed_at.clone())
+             .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data().observed_at))
+             .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.key_review.as_ref()).map(|review|review.data().observed_at))
+-            .or_else(||owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data().observed_at)),
++            .or_else(||owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data().observed_at))
++            .or_else(||owner.apple.intent.as_ref().and_then(|intent|intent.p12_review.as_ref()).map(|review|review.data().observed_at)),
+     )?;
+     if input.context().mode.profile() {
+         let parent=owner.apple_profile.get().ok_or_else(apple_wire::invalid)?;
+@@ -473,6 +508,12 @@
+     if input.context().mode.certificate() {
+         let review=owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data());
+         scope.certificate=Some(input.certificate_scope(review)?);
++    }
++    if input.context().mode.p12() {
++        let parent=owner.apple_key.get().ok_or_else(apple_wire::invalid)?;
++        scope.certificate=Some(input.certificate_scope(None)?);
++        let review=owner.apple.intent.as_ref().and_then(|intent|intent.p12_review.as_ref()).map(|review|review.data());
++        scope.p12=Some(input.p12_scope(parent,review)?);
+     }
+     let jobs = owner
+         .apple
+@@ -485,6 +526,19 @@
+     let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
+         return Err(apple_wire::invalid());
+     };
++    if input.context().mode.p12() {
++        let held=scope.p12.as_mut().ok_or_else(apple_wire::invalid)?;
++        held.previous.try_reserve_exact(account.p12_rows.len()).map_err(|_|apple_wire::invalid())?;
++        for row in &account.p12_rows {
++            // Bounded relevant hints only. Never decrypt all rows, and never
++            // promote a saved/journal descriptor to a current selected loan.
++            if row.intent.target.team_id==scope.target.team_id && row.intent.source_key==held.source_key {
++                held.previous.push(apple_wire::P12HistoryHint {destination:row.intent.destination.clone(),
++                    certificate_sha256:row.intent.certificate.certificate_sha256.clone(),
++                    public_key_sha256:row.intent.certificate.public_key_sha256.clone(),unresolved:row.unresolved()});
++            }
++        }
++    }
+     if input.context().mode.certificate() {
+         let key_preparation=apple_wire::certificate_key_preparation(account,&scope)?;
+         let prior=if input.context().mode == apple_wire::Mode::CertificateReconcile {
+@@ -575,6 +629,7 @@
+         return key_phases::write_phases(inner, owner, writer).await;
+     }
+     if mode.certificate() { return certificate_phases::write_phases(inner,owner,writer).await; }
++    if mode.p12() {return p12_phases::write_phases(inner,owner,writer).await;}
+     if mode != apple_wire::Mode::Register && !mode.profile() {
+         return Ok(());
+     }
+@@ -801,6 +856,7 @@
+     if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate()) {
+         return certificate_phases::finish(inner,owner).await;
+     }
++    if owner.apple.input().is_ok_and(|input|input.context().mode.p12()) {return p12_phases::finish(inner,owner).await;}
+     let mut jobs = owner.apple.native.lock().await;
+     if jobs.sealed || !jobs.pre_joined() || !worker {
+         return false;
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -77,7 +77,9 @@
+     AppleProfilePendingAck, AppleProfileSavePermit, AppleProfileNoSaveJoined};
+ pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
+ pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
+-pub(crate) use apple_key::AppleDistributionCertificateBinding;
++pub(crate) use apple_key::{AppleDistributionCertificateBinding,AppleKeySaveCommand,AppleP12PendingAck,AppleP12SavePermit,AppleP12NoSaveJoined,AppleP12NativeJoined};
++#[cfg(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++pub(crate) use apple_key::PrivateAppleP12Input;
+ pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;
+ 
+ #[path = "saved_command_android_catalog.rs"]
+@@ -267,7 +269,7 @@
+     fn signing_check_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signing_check()) }
+     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::AppleProvisioning(_) | Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
+     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
+-    fn frame_limit(&self) -> usize { match self { Self::AppleProvisioning(context) if context.mode.certificate() => context.mode.events() as usize + 2, Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
++    fn frame_limit(&self) -> usize { match self { Self::AppleProvisioning(context) if (context.mode.certificate() || context.mode.p12()) => context.mode.events() as usize + 2, Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
+     fn domain(&self) -> SavedCommandDomain { match self {
+         Self::GenerateUploadKey(_) => SavedCommandDomain::GenerateUploadKey,
+         Self::AppleProvisioning(_) => SavedCommandDomain::AppleProvisioning,
+@@ -3539,11 +3541,15 @@
+         Some(PrivateSigningMaterial::Store(value)) => value.certificate_input(),
+         _ => Ok(None),
+     };
+-    let header = match &certificate {
++    let p12 = match material.as_ref() {
++        Some(PrivateSigningMaterial::Store(value)) => value.p12_input(), _=>Ok(None),
++    };
++    let header = if let Ok(Some(value))=&p12 { value.header().map(Some) }
++        else if p12.is_err() { Err(BridgeError::protocol()) } else { match &certificate {
+         Ok(Some(value)) => value.header().map(Some),
+         Ok(None) => material.as_ref().map(|value| value.header()).transpose(),
+         Err(_) => Err(BridgeError::protocol()),
+-    };
++    }};
+     if owner.context.requires_private_material() != material.is_some() || header.is_err()
+         || material.as_ref().is_some_and(|value| !value.matches(&owner.context, owner.registration, &owner.project)) { failed = true; }
+     if !*stop.borrow() {
+@@ -3556,7 +3562,18 @@
+                         if let Some(material) = material.as_ref().filter(|_|!owner.candidate_android()&&!owner.candidate_ios()&&!matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStoreExecute)) {
+                             let header = header.as_ref().ok().and_then(Option::as_ref)
+                                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+-                            if let Some(certificate)=certificate.as_ref().ok().and_then(Option::as_ref) {
++                            if let Some(p12)=p12.as_ref().ok().and_then(Option::as_ref) {
++                                if matches!(&owner.context,Context::AppleProvisioning(context) if context.mode==apple_wire::Mode::P12Save) {
++                                    #[cfg(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++                                    apple_key::p12::write_material(&owner,writer,material,p12,header).await?;
++                                    #[cfg(not(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
++                                    return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
++                                } else {
++                                    let parts=p12.parts().map_err(|_|std::io::Error::from(std::io::ErrorKind::InvalidData))?;
++                                    writer.write_all(material.prefix()).await?;writer.write_all(header).await?;
++                                    for(_,bytes)in parts{writer.write_all(bytes).await?;}writer.write_all(material.suffix()).await?;
++                                }
++                            } else if let Some(certificate)=certificate.as_ref().ok().and_then(Option::as_ref) {
+                                 let parts=certificate.parts().map_err(|_|std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                                 writer.write_all(material.prefix()).await?;writer.write_all(header).await?;
+                                 for(_,bytes)in parts{writer.write_all(bytes).await?;}writer.write_all(material.suffix()).await?;
+@@ -3798,6 +3815,9 @@
+ }
+ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, owner: Arc<Session>,
+     slot: Arc<AsyncMutex<Pipe<T>>>, stderr: bool, mut guard: Guard) -> ReadEnd {
++    if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::P12Save) {
++        return apple_key::p12::read_output(inner,owner,slot,guard).await;
++    }
+     if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::KeyPrepare) {
+         return apple_key::read_output(inner, owner, slot, guard).await;
+     }
+@@ -3814,7 +3834,7 @@
+     // Only certificate mode enlarges the original JSON reader's aggregate.
+     // Profile/key private receivers and every other domain retain their limits.
+     let response_limit = match &owner.context {
+-        Context::AppleProvisioning(context) if context.mode.certificate() => context.mode.response_limit(),
++        Context::AppleProvisioning(context) if (context.mode.certificate() || context.mode.p12()) => context.mode.response_limit(),
+         _ => owner.domain.response_limit(),
+     };
+     let mut pipe = slot.lock().await; let mut buffer = [0u8; 4096]; let mut bytes = Vec::new();
+diff --git a/desktop/src-tauri/src/vault_crypto.rs b/desktop/src-tauri/src/vault_crypto.rs
+--- a/desktop/src-tauri/src/vault_crypto.rs
++++ b/desktop/src-tauri/src/vault_crypto.rs
+@@ -15,6 +15,9 @@
+ // key and does not turn a restored record into an assessment or assignment.
+ #[path = "vault_backup.rs"]
+ pub(crate) mod backup;
++#[path = "vault_crypto_apple_p12.rs"]
++mod apple_p12;
++pub(crate) use apple_p12::{ReservedAppleP12, P12_CRYPTO_BYTES as APPLE_P12_CRYPTO_BYTES};
+ #[path = "vault_crypto_apple_distribution_key.rs"]
+ mod apple_distribution_key;
+ pub(crate) use apple_distribution_key::{ReservedAppleDistributionKey, KEY_CRYPTO_BYTES as APPLE_KEY_CRYPTO_BYTES};
+@@ -190,7 +193,7 @@
+         let descriptor_bytes = Zeroizing::new(descriptor.encode()?);
+         let counter = previous.map_or(Some(1), |previous| previous.counter.checked_add(1)).ok_or(Error::Bounds)?;
+         let revision = match reserved {
+-            Some(value) if previous.is_none() && value.counter == 1 && matches!(descriptor.kind, commands::Kind::AppleDistributionKey | commands::Kind::AppleProfile) => value,
++            Some(value) if previous.is_none() && value.counter == 1 && matches!(descriptor.kind, commands::Kind::AppleDistributionKey | commands::Kind::AppleProfile | commands::Kind::AppleP12) => value,
+             Some(_) => return Err(Error::Format),
+             None => Revision::new(fresh_id(random)?, counter)?,
+         };
+diff --git a/desktop/src-tauri/src/vault_store_linux.rs b/desktop/src-tauri/src/vault_store_linux.rs
+--- a/desktop/src-tauri/src/vault_store_linux.rs
++++ b/desktop/src-tauri/src/vault_store_linux.rs
+@@ -134,6 +134,7 @@
+ enum AppleKeyRead<'a> {
+     Stored(&'a ReadWitness),
+     New { record: Id, revision: format::Revision, length: usize },
++    P12New { record: Id, revision: format::Revision, length: usize },
+ }
+ struct AppleKeyBody { witness: ReadWitness, capacity_limit: usize }
+ fn apple_key_read_limit(length: usize, allowance: usize) -> Result<usize> {
+@@ -147,11 +148,15 @@
+     // The unauthenticated prefix never gets to choose a generic32MiB body
+     // allocation. Charge the fixed codec/control partition before requesting
+     // any full-body backing, even when the remaining document cap is larger.
+-    let capacity_limit = apple_key_read_limit(length, allowance)?;
++    let capacity_limit = if matches!(expected,AppleKeyRead::P12New {..}) {
++        need(allowance<=crate::vault_crypto::APPLE_P12_CRYPTO_BYTES,Problem::Bounds)?;
++        let limit=allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
++        need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length<=limit,Problem::Bounds)?;limit
++    } else { apple_key_read_limit(length, allowance)? };
+     need(actual.file.bytes == length as u64, Problem::Identity)?;
+     match expected {
+         AppleKeyRead::Stored(witness) => need(actual == *witness, Problem::Identity)?,
+-        AppleKeyRead::New { record, revision, length: known } =>
++        AppleKeyRead::New { record, revision, length: known } | AppleKeyRead::P12New { record, revision, length: known } =>
+             need(actual.record == record && actual.revision == revision && length == known, Problem::Identity)?,
+     }
+     Ok(AppleKeyBody { witness: actual, capacity_limit })
+@@ -628,6 +633,16 @@
+                 && apple_key_new_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
+             book.read_record_inner_with_apple_key(record, true,
+                 Some((AppleKeyRead::New { record, revision, length }, allowance)), stop)
++        })
++    }
++    /// Only the fixed P12 NEW sink calls this, on this Book's actual
++    /// successful NEW intent. Bound the original prefix before body allocation.
++    pub(crate) fn read_new_apple_p12_record(&mut self,record:Id,revision:format::Revision,length:usize,
++        allowance:usize,stop:&mut dyn FnMut()->bool)->Result<ReadOriginal> {
++        self.work(Work::ReadRecord,stop,|book,stop| {
++            need(book.mutation.as_ref().is_some_and(MutationProgress::success)
++                && apple_key_new_read_intent(&book.mutation_files()?.prefix,record,revision,length),Problem::State)?;
++            book.read_record_inner_with_apple_key(record,true,Some((AppleKeyRead::P12New {record,revision,length},allowance)),stop)
+         })
+     }
+     fn read_record_inner(&mut self, record: Id, complete: bool, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
+diff --git a/desktop/src-tauri/src/vault_store_macos.rs b/desktop/src-tauri/src/vault_store_macos.rs
+--- a/desktop/src-tauri/src/vault_store_macos.rs
++++ b/desktop/src-tauri/src/vault_store_macos.rs
+@@ -166,6 +166,7 @@
+ enum AppleKeyRead<'a> {
+     Stored(&'a ReadWitness),
+     New { record: Id, revision: format::Revision, length: usize },
++    P12New { record: Id, revision: format::Revision, length: usize },
+ }
+ struct AppleKeyBody { witness: ReadWitness, capacity_limit: usize }
+ fn apple_key_read_limit(length: usize, allowance: usize) -> Result<usize> {
+@@ -179,11 +180,15 @@
+     // The unauthenticated prefix never gets to choose a generic32MiB body
+     // allocation. Charge the fixed codec/control partition before requesting
+     // any full-body backing, even when the remaining document cap is larger.
+-    let capacity_limit = apple_key_read_limit(length, allowance)?;
++    let capacity_limit = if matches!(expected,AppleKeyRead::P12New {..}) {
++        need(allowance<=crate::vault_crypto::APPLE_P12_CRYPTO_BYTES,Problem::Bounds)?;
++        let limit=allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
++        need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length<=limit,Problem::Bounds)?;limit
++    } else { apple_key_read_limit(length, allowance)? };
+     need(actual.file.bytes == length as u64, Problem::Identity)?;
+     match expected {
+         AppleKeyRead::Stored(witness) => need(actual == *witness, Problem::Identity)?,
+-        AppleKeyRead::New { record, revision, length: known } =>
++        AppleKeyRead::New { record, revision, length: known } | AppleKeyRead::P12New { record, revision, length: known } =>
+             need(actual.record == record && actual.revision == revision && length == known, Problem::Identity)?,
+     }
+     Ok(AppleKeyBody { witness: actual, capacity_limit })
+@@ -729,6 +734,16 @@
+                 && apple_key_new_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
+             book.read_record_inner_with_apple_key(record, true,
+                 Some((AppleKeyRead::New { record, revision, length }, allowance)), stop)
++        })
++    }
++    /// Only the fixed P12 NEW sink calls this, on this Book's actual
++    /// successful NEW intent. Bound the original prefix before body allocation.
++    pub(crate) fn read_new_apple_p12_record(&mut self,record:Id,revision:format::Revision,length:usize,
++        allowance:usize,stop:&mut dyn FnMut()->bool)->Result<ReadOriginal> {
++        self.work(Work::ReadRecord,stop,|book,stop| {
++            need(book.mutation.as_ref().is_some_and(MutationProgress::success)
++                && apple_key_new_read_intent(&book.mutation_files()?.prefix,record,revision,length),Problem::State)?;
++            book.read_record_inner_with_apple_key(record,true,Some((AppleKeyRead::P12New {record,revision,length},allowance)),stop)
+         })
+     }
+     fn read_record_inner(&mut self, record: Id, complete: bool, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -46,6 +46,7 @@
+   "fastlane/apple_provisioning_bundle_read.rb",
+   "fastlane/apple_provisioning_profile_read.rb",
+   "fastlane/apple_provisioning_p12.rb",
++    "fastlane/apple_provisioning_p12_assemble.rb",
+   "fastlane/apple_provisioning_signing.rb",
+   "fastlane/apple_distribution_key.rb",
+   "fastlane/apple_distribution_key_verify.rb",
+diff --git a/src/mobile_release/_command_process.py b/src/mobile_release/_command_process.py
+--- a/src/mobile_release/_command_process.py
++++ b/src/mobile_release/_command_process.py
+@@ -3270,6 +3270,8 @@
+             bind_original_command_slot(apple_source.require_operation(), self, self.slot)
+             from ._desktop_apple_certificate_control import bind_post_command_slot
+             bind_post_command_slot(apple_source.require_operation(), self, self.slot)
++            from ._desktop_apple_p12_assembly import bind_original_command_slot as bind_p12_original
++            bind_p12_original(apple_source.require_operation(), self, self.slot)
+ 
+     def prepared_reservation(self) -> bool:
+         self.ctx.check()
+diff --git a/src/mobile_release/_desktop_apple_certificate_control.py b/src/mobile_release/_desktop_apple_certificate_control.py
+--- a/src/mobile_release/_desktop_apple_certificate_control.py
++++ b/src/mobile_release/_desktop_apple_certificate_control.py
+@@ -125,7 +125,9 @@
+ 
+ def exchange(source, kind, payload):
+     from ._desktop_apple_provisioning_control import AppleProvisioningInput
+-    wire.need(type(source) is AppleProvisioningInput and source.initial.context["mode"] in wire.MODES)
++    wire.need(type(source) is AppleProvisioningInput and (source.initial.context["mode"] in wire.MODES
++              or source.initial.context["mode"] in wire.common.P12_MODES
++              and kind in {"certificate-key", "certificate-identities", "certificate-policy"}))
+     operation = source.require_operation()
+     steps = operation._certificate
+     wire.need(steps is not None)
+diff --git a/src/mobile_release/_desktop_apple_certificate_protocol.py b/src/mobile_release/_desktop_apple_certificate_protocol.py
+--- a/src/mobile_release/_desktop_apple_certificate_protocol.py
++++ b/src/mobile_release/_desktop_apple_certificate_protocol.py
+@@ -202,7 +202,9 @@
+ 
+ 
+ def validate_event(request, kind, value, sequence):
+-    need(request.context["mode"] in MODES and integer(sequence, EVENTS, 1) and kind in KEYS)
++    need((request.context["mode"] in MODES or request.context["mode"] in common.P12_MODES
++          and kind in {"certificate-key", "certificate-identities", "certificate-policy"})
++         and integer(sequence, EVENTS, 1) and kind in KEYS)
+     if kind == "certificate-key":
+         need(sequence == 1)
+         validate_key(request, value)
+diff --git a/src/mobile_release/_desktop_apple_certificate_worker.py b/src/mobile_release/_desktop_apple_certificate_worker.py
+--- a/src/mobile_release/_desktop_apple_certificate_worker.py
++++ b/src/mobile_release/_desktop_apple_certificate_worker.py
+@@ -27,7 +27,9 @@
+     def __init__(self, operation):
+         from .desktop_apple_provisioning import AppleProvisioningRun
+         wire.need(type(operation) is AppleProvisioningRun and operation.source.require_operation() is operation
+-                  and operation.request.context["mode"] in wire.MODES and operation._certificate is None)
++                  and (operation.request.context["mode"] in wire.MODES or
++                       operation.request.context["mode"] in wire.common.P12_MODES and operation._p12_steps is not None)
++                  and operation._certificate is None)
+         self.operation = operation
+         operation._certificate = self
+         self.public_csr = self.key_payload = self.key_ack = self.key_ack_bytes = None
+@@ -50,7 +52,13 @@
+ 
+     def _bound(self):
+         op = self.operation
+-        wire.need(op._certificate is self and op.source.require_operation() is op and op.request.context["mode"] in wire.MODES)
++        wire.need(op._certificate is self and op.source.require_operation() is op)
++        if op.request.context["mode"] in wire.common.P12_MODES:
++            from ._desktop_apple_p12_worker import P12Steps
++            wire.need(type(op._p12_steps) is P12Steps and op._p12_steps.operation is op
++                      and op._p12_steps.certificate is self)
++        else:
++            wire.need(op.request.context["mode"] in wire.MODES)
+         return op
+ 
+     @staticmethod
+@@ -98,7 +106,8 @@
+ 
+     def admit_exchange(self, kind, payload):
+         op = self._bound()
+-        wire.need(self._exchange is None)
++        wire.need(self._exchange is None and (op.request.context["mode"] in wire.MODES
++                  or kind in {"certificate-key", "certificate-identities", "certificate-policy"}))
+         if kind == "certificate-key":
+             wire.need(not self._key_sent and op.source.reply_step == 0 and op._next_command == 7
+                       and self.key_payload is payload and op._distribution_key is not None)
+@@ -153,7 +162,7 @@
+     def helper_environment(self):
+         op = self._bound()
+         request = op._wire_request
+-        wire.need(request is not None)
++        wire.need(request is not None and (op.request.context["mode"] in wire.MODES or request.method == "GET"))
+         issuance.validate_request(request, op.target, csr=self.public_csr)
+         selected = op.material.lane_environment(platform="ios")
+         wire.need(set(selected) == {"MOBILE_RELEASE_ASC_KEY_ID", "MOBILE_RELEASE_ASC_ISSUER_ID", "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"})
+@@ -377,6 +386,7 @@
+ 
+     def run(self):
+         op = self._bound()
++        wire.need(op.request.context["mode"] in wire.MODES) # P12 borrows fixed GET/policy phases only.
+         op.check(op.context)
+         wire.need(op._next_command == 6)
+         child = AppleDistributionKeyWork(op).run() # Fixed resource preflight + real fresh PKCS8/CSR/SPKI verifier.
+diff --git a/src/mobile_release/_desktop_apple_distribution_key.py b/src/mobile_release/_desktop_apple_distribution_key.py
+--- a/src/mobile_release/_desktop_apple_distribution_key.py
++++ b/src/mobile_release/_desktop_apple_distribution_key.py
+@@ -20,7 +20,7 @@
+ 
+ 
+ PREPARE_MODE = "key-prepare"
+-VERIFY_MODES = frozenset(("key-recover", "certificate-review", "certificate-create", "certificate-reconcile"))
++VERIFY_MODES = frozenset(("key-recover", "certificate-review", "certificate-create", "certificate-reconcile", "p12-review", "p12-reuse", "p12-save"))
+ MODES = VERIFY_MODES | {PREPARE_MODE}
+ MAGIC = b"MRK-APPLE-DISTRIBUTION-KEY/1\n"
+ PUBLIC_MAGIC = b"MRK-APPLE-DISTRIBUTION-KEY-PUBLIC/1\n"
+@@ -151,7 +151,7 @@
+         self._binding(self._operation)
+         _need(runtime is self._runtime and type(self._scratch) is FiniteScratch)
+         name = "apple_distribution_key.rb" if self._mode == PREPARE_MODE else "apple_distribution_key_verify.rb"
+-        if self._mode in {"certificate-review", "certificate-create", "certificate-reconcile"}:
++        if self._mode in {"certificate-review", "certificate-create", "certificate-reconcile", "p12-review", "p12-reuse", "p12-save"}:
+             # Same actual key verifier, preceded by fixed offline resources.
+             # A missing/invalid G3/root refuses BEFORE any certificate POST.
+             name = "apple_distribution_certificate_prepare.rb"
+diff --git a/src/mobile_release/_desktop_apple_provisioning_control.py b/src/mobile_release/_desktop_apple_provisioning_control.py
+--- a/src/mobile_release/_desktop_apple_provisioning_control.py
++++ b/src/mobile_release/_desktop_apple_provisioning_control.py
+@@ -24,6 +24,7 @@
+         self.initial = self.operation = self.engine = None
+         self.material_pending = self.material_receiving = self._material_read = False
+         self._material = None
++        self._p12_material = self._p12_parts = self._p12_assembly_material = None
+         self._profile_material = self._profile_parts = None
+         self._certificate_material = self._certificate_parts = self._certificate_key_parts = None
+         self.reply_step = self.read_remaining = 0
+@@ -44,6 +45,9 @@
+ 
+     _request_material = StorePreflightInput._request_material
+     def receive_material(self, operation, scratch):
++        if operation.request.context["mode"] in wire.P12_MODES:
++            from ._desktop_apple_p12_private import receive_material
++            return receive_material(self, operation, scratch)
+         if operation.request.context["mode"] in wire.CERTIFICATE_MODES:
+             from ._desktop_apple_certificate_private import receive_material
+             return receive_material(self, operation, scratch)
+@@ -54,12 +58,26 @@
+         return StorePreflightInput.receive_material(self, operation, scratch)
+ 
+     def profile_material(self, operation):
++        if operation.request.context["mode"] in wire.P12_MODES:
++            from ._desktop_apple_p12_private import profile_material
++            return profile_material(self, operation)
+         from ._desktop_apple_profile_private import profile_material
+         return profile_material(self, operation)
+ 
+     def distribution_key_material(self, operation):
++        if operation.request.context["mode"] in wire.P12_MODES:
++            from ._desktop_apple_p12_private import distribution_key_material
++            return distribution_key_material(self, operation)
+         from ._desktop_apple_certificate_private import distribution_key_material
+         return distribution_key_material(self, operation)
++
++    def p12_material(self, operation):
++        from ._desktop_apple_p12_private import p12_material
++        return p12_material(self, operation)
++
++    def consume_p12_pending_ack(self, operation, child):
++        from ._desktop_apple_p12_control import consume_pending
++        return consume_pending(self, operation, child)
+ 
+     def request(self):
+         request = super().request()
+@@ -270,10 +288,12 @@
+         self.buffer[:] = b"\0" * len(self.buffer)
+         self.buffer.clear()
+         self._material = None  # No process-wide secure-erasure claim.
++        self._p12_material = self._p12_parts = self._p12_assembly_material = None
+         self._profile_material = self._profile_parts = None
+         self._certificate_material = self._certificate_parts = self._certificate_key_parts = None
+ 
+     def material_closed(self):
+         return (StorePreflightInput.material_closed(self)
++                and self._p12_material is None and self._p12_parts is None and self._p12_assembly_material is None
+                 and self._profile_material is None and self._profile_parts is None
+                 and self._certificate_material is None and self._certificate_parts is None and self._certificate_key_parts is None)
+diff --git a/src/mobile_release/_desktop_apple_provisioning_engine.py b/src/mobile_release/_desktop_apple_provisioning_engine.py
+--- a/src/mobile_release/_desktop_apple_provisioning_engine.py
++++ b/src/mobile_release/_desktop_apple_provisioning_engine.py
+@@ -35,6 +35,11 @@
+             from ._desktop_apple_key_private import KeyOutput
+             self._require(type(key) is KeyOutput)
+             key.retire(self)
++        p12 = getattr(original, "_p12_output", None)
++        if p12 is not None:
++            from ._desktop_apple_p12_private import P12Output
++            self._require(type(p12) is P12Output)
++            p12.retire(self)
+ 
+     def _service_resources_closed(self):
+         if not super()._service_resources_closed():
+@@ -42,7 +47,8 @@
+         original = self.service if self.service is not None else self.input.operation
+         profile = getattr(original, "_profile_output", None)
+         key = getattr(original, "_key_output", None)
+-        return (profile is None or profile.closed()) and (key is None or key.closed())
++        p12 = getattr(original, "_p12_output", None)
++        return (profile is None or profile.closed()) and (key is None or key.closed()) and (p12 is None or p12.closed())
+ 
+ 
+ def main(*, started):
+diff --git a/src/mobile_release/_desktop_apple_provisioning_p12.py b/src/mobile_release/_desktop_apple_provisioning_p12.py
+--- a/src/mobile_release/_desktop_apple_provisioning_p12.py
++++ b/src/mobile_release/_desktop_apple_provisioning_p12.py
+@@ -24,7 +24,7 @@
+ MAGIC = b"MRK-P12-PUBLIC/1\n"
+ HEADER = struct.Struct(">IIB")
+ OUTPUT_LIMIT = len(MAGIC) + HEADER.size + CERTIFICATE_LIMIT + SPKI_LIMIT + CHAIN_LIMIT * (4 + CERTIFICATE_LIMIT)
+-MODES = frozenset(("profile-review", "profile-reuse", "profile-create", "profile-reconcile"))
++MODES = frozenset(("profile-review", "profile-reuse", "profile-create", "profile-reconcile", "p12-review", "p12-reuse"))
+ LAYOUT = "apple-provisioning-p12"
+ 
+ 
+@@ -38,6 +38,14 @@
+     _need(bool(re.fullmatch(r"[0-9a-fA-F]{64}|(?:[0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}", value)),
+           "p12_expected_certificate_required")
+     return value.replace(":", "").lower()
++
++
++def _selected_expected(operation):
++    if operation.request.context["mode"] in {"p12-review", "p12-reuse"}:
++        # Comparison from the SAME native bound record, not a renderer hash or
++        # permission to rewrite the saved project's expected signer.
++        return _expected(operation.request.native["p12"]["expectedCertificateSha256"])
++    return _expected(operation.config.section("ios").get("distributionCertificateSha256"))
+ 
+ 
+ def _material(value):
+@@ -101,7 +109,7 @@
+         operation.checkpoint()
+         self._operation, self._source, self._runtime = operation, operation.source, operation.runtime
+         self._material = _material(self._source.profile_material(operation))
+-        self._expected = _expected(operation.config.section("ios").get("distributionCertificateSha256"))
++        self._expected = _selected_expected(operation)
+         self._started = self._claimed = self._complete = self._retired = False
+         self._scratch = self._p12 = self._password = self._result = self._facts = self._failure = None
+         # Retain the original before finite_scratch constructs/acquires any FD.
+@@ -114,7 +122,7 @@
+               and self._source.profile_material(operation) is self._material)
+         operation.checkpoint()
+         self._runtime.require(root=operation.root, invocation=operation.invocation)
+-        _need(_expected(operation.config.section("ios").get("distributionCertificateSha256")) == self._expected)
++        _need(_selected_expected(operation) == self._expected)
+ 
+     def bind_scratch(self, scratch):
+         """Called by original operation.bind_scratch BEFORE native acquire.
+diff --git a/src/mobile_release/_desktop_apple_provisioning_protocol.py b/src/mobile_release/_desktop_apple_provisioning_protocol.py
+--- a/src/mobile_release/_desktop_apple_provisioning_protocol.py
++++ b/src/mobile_release/_desktop_apple_provisioning_protocol.py
+@@ -28,9 +28,10 @@
+ # separate branches. A new mode is never an alias for local key-save authority.
+ KEY_MODES = frozenset({"key-review", "key-prepare"})
+ CERTIFICATE_MODES = frozenset({"certificate-review", "certificate-create", "certificate-reconcile"})
+-MODES = BUNDLE_MODES | PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES
++P12_MODES = frozenset({"p12-review", "p12-reuse", "p12-save"})
++MODES = BUNDLE_MODES | PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES | P12_MODES
+ CONSENTS = {mode: "local-ios-bundle-" + mode + "-v1" for mode in BUNDLE_MODES}
+-CONSENTS.update({mode: "local-ios-" + mode + "-v1" for mode in PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES})
++CONSENTS.update({mode: "local-ios-" + mode + "-v1" for mode in PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES | P12_MODES})
+ OBSERVATIONS = frozenset({"found", "not-returned", "not-permitted", "inconclusive", "not-checked"})
+ DECISIONS = frozenset({"reuse", "review-required", "blocked", "registration-unconfirmed", "registration-confirmed", "comparison-only"})
+ ATTEMPT_STATUSES = frozenset({"running", "cancellation_requested", "succeeded", "failed", "cancelled", "recovery_required", "unknown"})
+@@ -140,8 +141,8 @@
+     for row in value:
+         row = _keys(row, {"accountRef", "operationId", "action", "status", "nativeSettlement"})
+         require(row["accountRef"] == account and token(row["operationId"]) and row["operationId"] not in seen
+-                and row["action"] in {"register_bundle_id", "profile_setup", "key_prepare", "create_certificate"} and row["status"] in ATTEMPT_STATUSES)
+-        if row["action"] in {"profile_setup", "key_prepare", "create_certificate"}:
++                and row["action"] in {"register_bundle_id", "profile_setup", "key_prepare", "create_certificate", "p12_setup"} and row["status"] in ATTEMPT_STATUSES)
++        if row["action"] in {"profile_setup", "key_prepare", "create_certificate", "p12_setup"}:
+             require(row["status"] in {"unknown", "succeeded"})  # Native coarse cross-family fence only.
+         seen.add(row["operationId"])
+         result.append(PendingMutation(row["accountRef"], row["operationId"], row["action"], row["status"], row["nativeSettlement"]))
+@@ -149,6 +150,9 @@
+ 
+ 
+ def context(value):
++    if type(value) is dict and value.get("mode") in P12_MODES:
++        from ._desktop_apple_p12_protocol import context as p12_context
++        return p12_context(value)
+     if type(value) is dict and value.get("mode") in CERTIFICATE_MODES:
+         from ._desktop_apple_certificate_protocol import context as certificate_context
+         return certificate_context(value)
+@@ -243,7 +247,7 @@
+         selected = context(value["context"])
+         native = _keys(value["native"], {"profile", "projectRoot", "rootIdentity", "cwd", "credentialConfig", "clock", "nonce",
+             "provisioning", "target", "reviewedAt", "journalRevision", "pending", "prior"} |
+-            ({"certificate"} if selected["mode"] in CERTIFICATE_MODES else
++            ({"p12", "certificate"} if selected["mode"] in P12_MODES else {"certificate"} if selected["mode"] in CERTIFICATE_MODES else
+              {"signing"} if selected["mode"] in PROFILE_MODES else {"key"} if selected["mode"] in KEY_MODES else set()))
+         require(native["profile"] in access.PROFILES and token(native["nonce"]))
+         _path(native["projectRoot"]); _path(native["cwd"]); _identity(native["rootIdentity"]); content(native["credentialConfig"])
+@@ -258,7 +262,10 @@
+         require(chosen.display_name == selected["displayName"])
+         pending(native["pending"], owned.account_ref)
+         require(integer(native["journalRevision"], 2**64 - 2))
+-        if selected["mode"] in CERTIFICATE_MODES:
++        if selected["mode"] in P12_MODES:
++            from ._desktop_apple_p12_protocol import validate_native as validate_p12_native
++            validate_p12_native(selected, native)
++        elif selected["mode"] in CERTIFICATE_MODES:
+             from ._desktop_apple_certificate_protocol import validate_native as validate_certificate_native
+             validate_certificate_native(selected, native)
+         elif selected["mode"] in KEY_MODES:
+@@ -285,6 +292,8 @@
+ 
+ def command_count(mode):
+     require(mode in MODES)
++    if mode in P12_MODES:
++        return 15
+     if mode in CERTIFICATE_MODES:
+         return 21 if mode == "certificate-create" else 14
+     return 12 if mode == "key-review" else 7 if mode == "key-prepare" else 15 if mode in PROFILE_MODES else 9 if mode == "register" else 7
+@@ -292,6 +301,8 @@
+ 
+ def max_events(mode):
+     require(mode in MODES)
++    if mode in P12_MODES:
++        return 8
+     if mode in CERTIFICATE_MODES:
+         return 12
+     return 5 if mode in KEY_MODES else 4 if mode in PROFILE_MODES else MAX_EVENTS
+@@ -299,6 +310,9 @@
+ 
+ def response_limit(mode):
+     require(mode in MODES)
++    if mode in P12_MODES:
++        from ._desktop_apple_p12_private import TRANSFER_LIMIT
++        return 768 * 1024 + (TRANSFER_LIMIT if mode == "p12-save" else 0)
+     if mode in CERTIFICATE_MODES:
+         return 768 * 1024
+     if mode in KEY_MODES:
+@@ -319,6 +333,12 @@
+ 
+ 
+ def validate_event(request, kind, payload, sequence):
++    if request.context["mode"] in P12_MODES:
++        if kind in {"certificate-key", "certificate-identities", "certificate-policy"}:
++            from ._desktop_apple_certificate_protocol import validate_event as certificate_event
++            return certificate_event(request, kind, payload, sequence)
++        from ._desktop_apple_p12_protocol import validate_event as p12_event
++        return p12_event(request, kind, payload, sequence)
+     if request.context["mode"] in CERTIFICATE_MODES:
+         from ._desktop_apple_certificate_protocol import validate_event as certificate_event
+         return certificate_event(request, kind, payload, sequence)
+@@ -369,7 +389,7 @@
+ def response(request, kind, payload, sequence):
+     require(type(request) is AppleProvisioningRequest and integer(sequence, max_events(request.context["mode"]) + 1)
+             and kind in {"accepted", "observed", "pending", "attempt", "terminal", "identity", "profile-observed", "profile-pending", "profile-attempt", "key-observed", "key-pending", "key-output", "key-not-generated",
+-                         "certificate-key", "certificate-identities", "certificate-policy", "certificate-observed", "certificate-pending", "certificate-attempt"})
++                         "certificate-key", "certificate-identities", "certificate-policy", "certificate-observed", "certificate-pending", "certificate-attempt", "p12-observed", "p12-pending", "p12-output"})
+     if kind == "accepted":
+         require(sequence == 0 and payload == {"schemaVersion": 1, "context": request.context})
+     elif kind == "terminal":
+@@ -378,7 +398,7 @@
+         validate_event(request, kind, payload, sequence)
+     raw = api.canonical({"protocol": PROTOCOL, "operationId": request.operation_id, "ownerGeneration": request.owner_generation,
+         "nonce": request.native["nonce"], "requestSha256": request.digest, "sequence": sequence, "kind": kind, "payload": payload}) + b"\n"
+-    require(len(raw) <= (256 * 1024 if kind == "certificate-identities" and request.context["mode"] in CERTIFICATE_MODES else
++    require(len(raw) <= (256 * 1024 if kind == "certificate-identities" and request.context["mode"] in CERTIFICATE_MODES | P12_MODES else
+         128 * 1024 if kind == "identity" and request.context["mode"] in PROFILE_MODES else
+         EVENT_LIMIT if kind not in {"accepted", "terminal"} else 32 * 1024))
+     return raw
+@@ -399,6 +419,9 @@
+ 
+ 
+ def validate_result(value, request):
++    if request.context["mode"] in P12_MODES:
++        from ._desktop_apple_p12_protocol import validate_result as p12_result
++        return p12_result(value, request)
+     if request.context["mode"] in CERTIFICATE_MODES:
+         from ._desktop_apple_certificate_protocol import validate_result as certificate_result
+         return certificate_result(value, request)
+diff --git a/src/mobile_release/build_inputs.py b/src/mobile_release/build_inputs.py
+--- a/src/mobile_release/build_inputs.py
++++ b/src/mobile_release/build_inputs.py
+@@ -695,6 +695,10 @@
+     "apple-distribution-key": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233)},
+     # One fixed public leaf+binding frame, not a general certificate/path API.
+     "apple-distribution-certificate": {"certificate": _ScratchSpec("apple-distribution-certificate.mrk", 65843)},
++    # Fixed P12 assembler inputs only; native random password is never argv/env.
++    "apple-p12-assembly": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233),
++        "p12-password": _ScratchSpec("p12-password", 64),
++        "certificate": _ScratchSpec("distribution-certificate.der", 64 * 1024)},
+     "online-readback": {platform: _ScratchSpec(platform + ".json", _SMALL, "exclusive-output")
+                         for platform in ("android", "ios")},
+ }
+diff --git a/src/mobile_release/desktop_apple_provisioning.py b/src/mobile_release/desktop_apple_provisioning.py
+--- a/src/mobile_release/desktop_apple_provisioning.py
++++ b/src/mobile_release/desktop_apple_provisioning.py
+@@ -57,7 +57,8 @@
+         self._profile = self._p12_extraction = self._profile_output = None
+         self._key_steps = self._distribution_key = self._key_output = None
+         self._certificate = None
+-        if request.context["mode"] in wire.CERTIFICATE_MODES:
++        self._p12_steps = self._p12_assembly = self._p12_output = self._p12_reuse = None
++        if request.context["mode"] in wire.CERTIFICATE_MODES | wire.P12_MODES:
+             from ._desktop_apple_certificate_protocol import target
+             self.target = target(request)
+         if request.context["mode"] in wire.PROFILE_MODES:
+@@ -72,7 +73,10 @@
+         self._post_receipt = None
+         self._last_persisted = None
+         source.bind_operation(self)  # Before the first filesystem/process effect.
+-        if request.context["mode"] in wire.CERTIFICATE_MODES:
++        if request.context["mode"] in wire.P12_MODES:
++            from ._desktop_apple_p12_worker import P12Steps
++            P12Steps(self)
++        elif request.context["mode"] in wire.CERTIFICATE_MODES:
+             from ._desktop_apple_certificate_worker import CertificateSteps
+             CertificateSteps(self)
+         if request.context["mode"] in wire.PROFILE_MODES:
+@@ -99,6 +103,8 @@
+             self._p12_extraction.retire(self)
+         if self._key_output is not None:
+             self._key_output.retire_worker()
++        if self._p12_output is not None:
++            self._p12_output.retire_worker()
+         if self._certificate is not None and self._distribution_key is not None:
+             # A fresh verification loan never generates a new private key.
+             # Its actual original command/scratch/Invocation closures are still
+@@ -128,6 +134,8 @@
+             raise
+ 
+     def bind_scratch(self, scratch):
++        if self._p12_steps is not None and len(self.scratches) >= 3:
++            return self._p12_steps.bind_scratch(scratch)
+         if self._certificate is not None and len(self.scratches) >= 3:
+             return self._certificate.bind_scratch(scratch)
+         layouts = ("online-runner", "store-selection", "store-selection")
+@@ -203,6 +211,8 @@
+         elif index == 6 and self._profile is not None:
+             wire.require(self._p12_extraction is not None and self._wire_request is None)
+             expected = self._p12_extraction.argv(runtime)
++        elif self._p12_steps is not None and self._p12_steps._extra_scratch and self._wire_request is None:
++            expected = tuple(self._p12_steps.extra_child().argv(runtime))
+         elif self._certificate is not None and self._wire_request is None:
+             wire.require(self._certificate.policy is not None)
+             expected = self._certificate.policy.argv()
+@@ -241,6 +251,15 @@
+         elif self._pending == 6 and self._profile is not None:
+             self._p12_extraction.admit_command(self.runtime, argv, environ=environ)
+             expected_env, expected_cwd, limit, expected_text = self._base_environment(), self.runtime.tooling_root, PRIVATE_OUTPUT_LIMIT, False
++        elif self._p12_steps is not None and self._p12_steps._extra_scratch and self._wire_request is None:
++            from ._desktop_apple_p12_assembly import PRIVATE_LIMIT
++            child = self._p12_steps.extra_child()
++            self._private_current()
++            child.admit_command(self.runtime, argv, environ=environ)
++            save = self.request.context["mode"] == "p12-save"
++            expected_env, expected_cwd, limit, expected_text = (self._base_environment(),
++                child._scratch._path if save else self.runtime.tooling_root,
++                PRIVATE_LIMIT if save else PRIVATE_OUTPUT_LIMIT, False)
+         elif self._certificate is not None and self._wire_request is None:
+             from ._desktop_apple_certificate_private import OUTPUT_LIMIT
+             self._private_current()
+@@ -260,6 +279,10 @@
+     def command_limits(self, timeout, capture, output_limit):
+         self.checkpoint()
+         wire.require(self._pending is not None and self._command_claimed and capture is True)
++        if self._p12_steps is not None and self._p12_steps._extra_scratch and self._wire_request is None:
++            from ._desktop_apple_p12_assembly import PRIVATE_LIMIT
++            limit = PRIVATE_LIMIT if self.request.context["mode"] == "p12-save" else PRIVATE_OUTPUT_LIMIT
++            return min(timeout, 60), min(output_limit, limit)
+         if self._certificate is not None and self._pending >= 6:
+             from ._desktop_apple_distribution_key import PUBLIC_LIMIT
+             from ._desktop_apple_certificate_private import OUTPUT_LIMIT
+@@ -474,7 +497,7 @@
+         try:
+             self.config, _ = self._saved()
+             self._target_current()
+-            if self.request.context["mode"] in {"register", "profile-reuse", "profile-create", "key-prepare", "certificate-create"} and any(
++            if self.request.context["mode"] in {"register", "profile-reuse", "profile-create", "key-prepare", "certificate-create", "p12-save", "p12-reuse"} and any(
+                     row.unresolved for row in wire.pending(self.request.native["pending"], self.context.account_ref)):
+                 raise _Refused("journal-unavailable")
+             with invocation_custody(self.root, mode="online", cancellation=self.guard) as invocation:
+@@ -501,13 +524,17 @@
+                                 ("apple_provisioning_signing.rb",) if self.request.context["mode"] == "key-review" else
+                                 ("apple_provisioning_p12.rb", "apple_provisioning_signing.rb") if self._profile is not None else
+                                 ("apple_provisioning_bundle_registration.rb",))
++                            if self._p12_steps is not None:
++                                needed += ("apple_provisioning_p12.rb", "apple_provisioning_p12_assemble.rb")
+                             tooling = self.runtime.tooling_root
+                             if not _complete_tooling_root(tooling) or any((tooling / "fastlane" / name).is_symlink()
+                                     or not (tooling / "fastlane" / name).is_file() for name in needed):
+                                 raise _Refused("query-prerequisites")
+                             self.check(self.context)
+                             _require_fastlane_bundle(tooling, cancellation=self.guard, runtime_context=self.runtime)
+-                            if self._certificate is not None:
++                            if self._p12_steps is not None:
++                                self._p12_steps.run()
++                            elif self._certificate is not None:
+                                 self._certificate.run()
+                             elif self._key_steps is not None:
+                                 self._key_steps.run()
+@@ -529,6 +556,8 @@
+         return (self._close_claimed and self._pending is None and invocation_closed
+             and (self._p12_extraction is None or self._p12_extraction.private_closed())
+             and (self._key_output is None or self._key_output.worker_closed())
++            and (self._p12_output is None or self._p12_output.worker_closed())
++            and (self._p12_assembly is None or self._p12_assembly.private_closed())
+             and (self._distribution_key is None or self._distribution_key.private_closed())
+             and all(directory.slots and all(slot.number is None and slot.close_state == "CLOSED" for slot in directory.slots)
+                     for directory in self.directories)
+diff --git a/src/mobile_release/tooling.py b/src/mobile_release/tooling.py
+--- a/src/mobile_release/tooling.py
++++ b/src/mobile_release/tooling.py
+@@ -21,6 +21,7 @@
+     "fastlane/apple_provisioning_bundle_read.rb",
+     "fastlane/apple_provisioning_profile_read.rb",
+     "fastlane/apple_provisioning_p12.rb",
++    "fastlane/apple_provisioning_p12_assemble.rb",
+     "fastlane/apple_provisioning_signing.rb",
+     "fastlane/apple_provisioning_bundle_registration.rb",
+     "fastlane/apple_distribution_key.rb",

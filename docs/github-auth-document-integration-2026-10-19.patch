@@ -1,0 +1,204 @@
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -84,6 +84,9 @@
+ pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+ #[path = "asset_session_github_variable.rs"]
+ mod github_variable;
++#[path = "asset_session_gh_auth.rs"]
++mod gh_auth;
++pub(crate) use gh_auth::{GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
+ #[path = "asset_session_github_publication.rs"]
+ mod github_publication;
+ pub(crate) use github_publication::GitHubPublicationGoGate;
+@@ -722,6 +725,7 @@
+     context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
+     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
+     github: ConnectionState,
++    gh_auth: Option<gh_auth::Entry>,
+     evidence: EvidenceRegistry,
+     images: images::Registry,
+     installation: installation::Registry,
+@@ -951,6 +955,7 @@
+ }
+ fn assets_can_exit_locked(state: &DocumentState) -> bool {
+     !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
++        && gh_auth::can_exit(state)
+ }
+ fn complete_empty_session_lock(state: &mut DocumentState) -> bool {
+     // The caller must have reinserted its exact original slot. Empty data alone
+@@ -1851,6 +1856,7 @@
+             if state.retiring { return Err(Problem::CleanupUnknown); }
+             self.add(std::mem::size_of::<DocumentState>())?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
++            self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+             if let Some(context) = &state.context { self.context(context)?; }
+@@ -1910,4 +1916,11 @@
+         { crate::macos_history_inventory::admission_bytes(census.bytes,future).ok_or(Problem::Capacity) }
+         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         { census.add(future)?;if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes) }
++    }
++
++    // The same pure Document/storage census, not History execution authority.
++    // Gh-auth reserves its distinct complete runtime and held source set; only
++    // one joined serial capture may release that debit for the next capture.
++    pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
++        history_admission_bytes(document,state,future)
+     }
+@@ -2272,7 +2285,7 @@
+     // lock/loss and reconciliation intentionally do not call this predicate.
+     allocation_conflict_gate(
+         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+-        state.github.setup_secret_work_pending() || state.github.history_work_pending())
++        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state))
+ }
+ fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
+@@ -2289,7 +2302,7 @@
+     // The caller still holds this same document mutex through Supervisor claim.
+     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+     if state.stopping { return Err(BridgeError::shutdown()); }
+-    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) {
++    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) {
+         return Err(BridgeError::new("busy", "Finish the original native operation first."));
+     }
+     Ok(())
+@@ -2313,7 +2326,7 @@
+     if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+     owner_gate()?;
+-    if state.compatibility_picker_pending || installation::pending(state) { return Err(AssetError::new(Reason::Busy)); }
++    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
+         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
+     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+@@ -2467,7 +2480,7 @@
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+-            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2680,7 +2693,7 @@
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         vault::observe_stop(state, Instant::now());
+         if state.exhausted { return; }
+-        if state.unknown { self.inner.android_registration_control.poisoned(); state.saved_input = None; state.github.unknown(); state.evidence.revoke(true); }
++        if state.unknown { self.inner.android_registration_control.poisoned(); state.saved_input = None; gh_auth::stop(state, GitHubReason::CleanupUnknown); state.github.unknown(); state.evidence.revoke(true); }
+         images::refresh(state);
+         let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
+         state.evidence.revision = revision;
+@@ -3600,6 +3613,12 @@
+         Ok(())
+     }
+     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
++        let base = self.github_base_gate(state);
++        if base == GitHubReason::None && gh_auth::pending(state) { GitHubReason::Busy } else { base }
++    }
++    // Only the retained gh-auth original uses this companion to avoid treating
++    // its OWN pending capture as unrelated new-work admission.
++    fn github_base_gate(&self, state: &DocumentState) -> GitHubReason {
+         if state.maintenance.closed() { return GitHubReason::Busy; }
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+             || self.inner.bridge.diagnostics.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+@@ -3615,6 +3634,7 @@
+         GitHubReason::None
+     }
+     fn github_observe_locked(&self, state: &mut DocumentState, now: Instant) {
++        gh_auth::observe_locked(self, state, now);
+         // Recheck the real document and native ID registry BEFORE consuming a
+         // positive receipt. This does not inspect a path, launch work or acquire
+         // another document owner; lock order stays document -> registry -> owner.
+@@ -3632,6 +3652,7 @@
+         }
+         let gate = self.github_gate(state);
+         state.github.reconcile(now, gate);
++        gh_auth::retire_joined(self, state);
+         self.github_setup_observe_locked(state, now, gate);
+         self.github_publication_observe_locked(state, now, gate);
+         self.github_history_observe_locked(state, now, gate);
+@@ -4048,6 +4069,8 @@
+         }
+         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
++        // SAME Document lock: reject reciprocal edits before publisher/context side effects.
++        if gh_auth::pending(state) { return Err(BridgeError::new("busy", "Finish the original GitHub connection first.")); }
+         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+         state.saved_input = None;
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+@@ -4451,6 +4474,9 @@
+     idle(state)
+ }
+ fn invalidate_all(state: &mut DocumentState) {
++    gh_auth::stop(state, if state.unknown { GitHubReason::CleanupUnknown }
++        else if state.stopping || state.lost_observed { GitHubReason::Cancelled }
++        else { GitHubReason::TargetChanged });
+     if state.github.setup_has_material(){state.github.setup_context_changed();}
+     for assignment in &mut state.assignments { assignment.availability = AssignmentAvailability::Unavailable; }
+     if let Some(slot) = state.slot.as_mut() { slot.selection = None; slot.preview = None; }
+@@ -4493,5 +4519,7 @@
+ enum ChildJob {
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    GitHubAuth(gh_auth::ChildCall),
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     Artifact{path:std::path::PathBuf,binding:Arc<ArtifactBinding>},
+     Installation,
+     Tokens, Capture { path: std::path::PathBuf, roots: Vec<asset_source::RegisteredRoot>, kind: credential_format::FileKind },
+@@ -4506,6 +4534,8 @@
+     KeyringHelper(DocumentBinding),
+ }
+ enum ChildEnd {
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    GitHubAuth(Result<(), Reason>),
+     Artifact(asset_source::ArtifactProbe), Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
+     Images(asset_source::CapturedPublicImageBatch),
+     Installation(Result<crate::installation::Matching, crate::installation::CheckReason>),
+@@ -4591,6 +4621,8 @@
+     let mut stop = || owner.interrupted();
+     if stop() && !cleanup_child(&job) { return ChildEnd::Refused(Reason::UserCancelled); }
+     match job {
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        ChildJob::GitHubAuth(call) => ChildEnd::GitHubAuth(gh_auth::execute_child(owner, call)),
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         ChildJob::Artifact{path,binding}=>match owner.source.lock(){
+             Ok(mut book)=>match asset_source::probe_artifact(&mut book,&binding.root,path,binding.role,&mut stop){Ok(proof)=>ChildEnd::Artifact(proof),Err(reason)=>ChildEnd::Refused(reason)},
+@@ -4662,7 +4694,8 @@
+ }
+ fn cleanup_child(_job: &ChildJob) -> bool {
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-    { return matches!(_job, ChildJob::KeyringHelper(_)) || matches!(_job, ChildJob::Vault(job) if job.cleanup()); }
++    { return matches!(_job, ChildJob::KeyringHelper(_)) || matches!(_job, ChildJob::Vault(job) if job.cleanup())
++        || matches!(_job, ChildJob::GitHubAuth(call) if call.cleanup()); }
+     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     { matches!(_job, ChildJob::Vault(job) if job.cleanup()) || matches!(_job, ChildJob::KeyringProvider { step: crate::vault_keyring_linux::ProviderStep::Release }) }
+     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+@@ -7744,7 +7777,7 @@
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -7877,7 +7910,7 @@
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -7974,7 +8007,7 @@
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+-            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

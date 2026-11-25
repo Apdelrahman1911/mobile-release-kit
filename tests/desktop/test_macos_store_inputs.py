@@ -1,0 +1,160 @@
+"""Offline fixture coverage for dependency authentication and safe extraction."""
+import hashlib
+import importlib.util
+import io
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from unittest import mock
+
+SPEC = importlib.util.spec_from_file_location('store_input_test_tool',
+    Path(__file__).resolve().parents[2] / 'desktop/tools/prepare_macos_store_inputs.py')
+TOOL = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(TOOL)
+
+
+class StoreInputs(unittest.TestCase):
+    def test_tooling_copy_uses_core_completeness_without_overwriting(self):
+        # Actual first-party imports are stdlib only; no release/build action.
+        import sys
+        sys.path.insert(0, str(TOOL.ROOT / 'src'))
+        try:
+            from mobile_release.tooling import REQUIRED_TOOLING_FILES, _complete_tooling_root
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source'; source.mkdir()
+            for relative in REQUIRED_TOOLING_FILES:
+                file = source / relative; file.parent.mkdir(parents=True, exist_ok=True)
+                contents = ((TOOL.ROOT / relative).read_bytes() if relative in ('Gemfile', 'Gemfile.lock')
+                            else ('synthetic:' + relative).encode())
+                file.write_bytes(contents)
+            destination = root / 'tooling'
+            TOOL.copy_tooling(source, destination)
+            self.assertTrue(_complete_tooling_root(destination))
+            self.assertEqual({str(p.relative_to(destination)) for p in destination.rglob('*') if p.is_file()},
+                             set(REQUIRED_TOOLING_FILES))
+            for relative in REQUIRED_TOOLING_FILES:
+                expected = (source / relative).read_bytes()
+                if relative in ('Gemfile', 'Gemfile.lock'):
+                    expected = expected.replace(b'3.3.12', b'3.3.14', 1)
+                self.assertEqual((destination / relative).read_bytes(), expected)
+            with self.assertRaises(FileExistsError): TOOL.copy_tooling(source, destination)
+            missing = source / 'schemas/project.schema.json'; missing.unlink()
+            with self.assertRaises(ValueError): TOOL.copy_tooling(source, root / 'missing')
+            self.assertFalse((root / 'missing').exists())
+            missing.symlink_to(destination / 'schemas/project.schema.json')
+            with self.assertRaises(ValueError): TOOL.copy_tooling(source, root / 'linked')
+            self.assertFalse((root / 'linked').exists())
+
+    def test_phase_selection_never_fetches_native_sources_for_assembly(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); calls = []
+            spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
+            module = SimpleNamespace(load_assets=lambda *_: (None, None, [
+                {'filename': 'synthetic.gem', 'url': 'https://example.invalid/gem', 'sha256': 'a' * 64}], None, None))
+            with mock.patch.object(TOOL, 'ROOT', root), \
+                    mock.patch.object(TOOL.sys, 'argv', ['prepare', '--gems-only', str(root / 'inputs')]), \
+                    mock.patch.object(TOOL.shutil, 'disk_usage', return_value=SimpleNamespace(free=8 * 1024**3)), \
+                    mock.patch.object(TOOL.importlib.util, 'spec_from_file_location', return_value=spec), \
+                    mock.patch.object(TOOL.importlib.util, 'module_from_spec', return_value=module), \
+                    mock.patch.object(TOOL, 'fetch', side_effect=lambda asset, path: calls.append((asset, path))), \
+                    mock.patch.object(TOOL, 'unpack', side_effect=AssertionError('assembly must not extract native sources')):
+                TOOL.main()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], root / 'inputs/gems/synthetic.gem')
+            self.assertEqual([p.name for p in (root / 'inputs').iterdir()], ['gems'])
+
+    def test_download_authentication_and_no_overwrite(self):
+        data = b'public synthetic dependency'
+        asset = {'url': 'https://example.invalid/dependency', 'bytes': len(data),
+                 'sha256': hashlib.sha256(data).hexdigest()}
+        def download(argv, *, stdout, check, timeout):
+            self.assertIn('=https', argv)
+            self.assertIn('--disable', argv)
+            self.assertEqual(timeout, 125)
+            stdout.write(data)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(TOOL.subprocess, 'run', side_effect=download) as call:
+            target = Path(tmp) / 'asset'
+            TOOL.fetch(asset, target)
+            self.assertEqual(target.read_bytes(), data)
+            with self.assertRaises(FileExistsError): TOOL.fetch(asset, target)
+            self.assertEqual(call.call_count, 1)
+            for field, value in [('sha256', 'f' * 64), ('bytes', len(data) + 1)]:
+                with self.assertRaises(ValueError): TOOL.fetch({**asset, field: value}, Path(tmp) / field)
+            call.side_effect = subprocess.CalledProcessError(22, 'curl')
+            with self.assertRaises(subprocess.CalledProcessError): TOOL.fetch(asset, Path(tmp) / 'failed')
+
+    @staticmethod
+    def archive(path, name, *, target=None, size=1):
+        with tarfile.open(path, 'w:gz') as archive:
+            row = tarfile.TarInfo(name)
+            row.mode = 0o755
+            if target is not None:
+                row.type = tarfile.SYMTYPE
+                row.linkname = target
+                archive.addfile(row)
+            else:
+                row.size = size
+                archive.addfile(row, io.BytesIO(b'x' * size))
+
+    def test_safe_archive_preserves_executable_and_expected_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / 'source.tar.gz'
+            self.archive(archive, 'source/configure')
+            result = TOOL.unpack(archive, root / 'extracted', 'source')
+            self.assertEqual((result / 'configure').read_bytes(), b'x')
+            self.assertEqual((result / 'configure').stat().st_mode & 0o777, 0o755)
+
+    def test_wrong_root_traversal_and_outside_link_refuse(self):
+        for name, target in [('other/file', None), ('source/../../escaped', None),
+                             ('source/link', '/outside'), ('source/link', '../../outside')]:
+            with self.subTest(name=name, target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                archive = root / 'source.tar.gz'
+                self.archive(archive, name, target=target)
+                with self.assertRaises((ValueError, tarfile.FilterError)):
+                    TOOL.unpack(archive, root / 'extracted', 'source')
+                self.assertFalse((root / 'escaped').exists())
+
+
+class RubyHeaderInputsTests(unittest.TestCase):
+    def archive(self, path, extra=()):
+        with tarfile.open(path, 'w:gz') as archive:
+            for name, kind in [(name, tarfile.REGTYPE) for name in
+                    ('ruby.h', 'ruby/ruby.h', 'ruby/version.h', 'ruby/detail.hpp', 'ruby/win32.h')] + list(extra):
+                member = tarfile.TarInfo('ruby-3.3.14/include/' + name)
+                member.type = kind
+                member.mode = 0o644
+                if kind == tarfile.REGTYPE:
+                    member.size = 7
+                    archive.addfile(member, io.BytesIO(b'fixture'))
+                else:
+                    member.linkname = '/outside'
+                    archive.addfile(member)
+
+    def test_selects_common_headers_without_windows_or_source_programs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); archive = root / 'ruby.tar.gz'
+            self.archive(archive, [('ignored.c', tarfile.REGTYPE)])
+            TOOL.unpack_ruby_headers(archive, root / 'headers')
+            self.assertEqual({p.relative_to(root / 'headers').as_posix() for p in (root / 'headers').rglob('*') if p.is_file()},
+                             {'ruby.h', 'ruby/ruby.h', 'ruby/version.h', 'ruby/detail.hpp'})
+
+    def test_duplicate_traversal_and_link_headers_refuse(self):
+        for extra in [('ruby.h', tarfile.REGTYPE), ('../escaped.h', tarfile.REGTYPE),
+                      ('link.h', tarfile.SYMTYPE), ('ruby/RUBY.h', tarfile.REGTYPE)]:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); archive = root / 'ruby.tar.gz'
+                self.archive(archive, [extra])
+                with self.assertRaises(ValueError): TOOL.unpack_ruby_headers(archive, root / 'headers')
+                self.assertFalse((root / 'escaped.h').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

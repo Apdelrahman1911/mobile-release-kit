@@ -1,0 +1,33 @@
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1998,6 +1998,19 @@
+     pub(crate) fn start_offline(&self, input: wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
+         gate: wire::Availability) -> Result<crate::offline_preflight_owner::Admitted, BridgeError> {
+         self.require_domain(SavedCommandDomain::OfflinePreflight)?;
++        {
++            let registry = self.inner.lock();
++            let prepared = registry.prepared.as_ref().filter(|p|
++                p.projection.operation_id == input.operation_id && p.projection.owner_generation == input.owner_generation)
++                .ok_or_else(|| self.inner.domain.invalid_owner())?;
++            if !matches!(&prepared.projection.context, Context::OfflinePreflight(context) if input.consents_to(context)) {
++                return Err(wire::invalid());
++            }
++            // The immutable prepared context belongs to these exact original
++            // IDs. start() checks the same IDs under its original lock before
++            // taking the one-use intent; an intervening retirement cannot
++            // transfer this consent to a new preparation or scope.
++        }
+         let admitted = self.start(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
+             admitted_at, registered, Availability::from_offline(gate))?;
+         Ok(crate::offline_preflight_owner::Admitted::new(admitted.status.offline()?, admitted.release))
+--- a/desktop/src-tauri/src/offline_preflight_owner_tests.rs
++++ b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+@@ -508,7 +508,7 @@
+             Ok(Self { bridge, document, permit, session: None, intent: None })
+         }
+         fn prepare_input(&self) -> wire::Prepare { let c = &self.permit.context;
+-            wire::Prepare { project_id: c.project_id.clone(), draft_revision: c.draft_revision, baseline_generation: c.baseline_generation, saved_config: c.saved_config.clone() } }
++            wire::Prepare { project_id: c.project_id.clone(), draft_revision: c.draft_revision, baseline_generation: c.baseline_generation, saved_config: c.saved_config.clone(), operation: c.operation } }
+         fn consent(&mut self) -> Check<()> {
+             end_check(self.permit.end)?;
+             let status = self.document.prepare_offline_preflight(self.prepare_input()).map_err(|_| "fixture_prepare_refused")?;

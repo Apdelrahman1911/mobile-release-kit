@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "source": "public/version.properties",
+  "version": {
+    "name": "1.0.0",
+    "build": 1
+  },
+  "savedConfig": {
+    "bytes": 767,
+    "sha256": "1587df62157ac6aa34ebb63c2b3716370de3918ac4847bf4bdc257625036e800"
+  },
+  "savedVersion": {
+    "bytes": 34,
+    "sha256": "84c26a9833e9d891c59b798c399bd93aa6c23de4948c40e719618eb77afa4d68"
+  },
+  "observationScope": "single-request-non-atomic",
+  "assurance": {
+    "basis": "static-text",
+    "projectCodeExecuted": false,
+    "toolsProbed": false,
+    "credentialsRead": false,
+    "gitObserved": false,
+    "storeContacted": false,
+    "writesPerformed": false,
+    "releaseReadiness": "unknown"
+  }
+}

@@ -1,0 +1,433 @@
+diff --git a/src/mobile_release/github_workflow_edit.py b/src/mobile_release/github_workflow_edit.py
+--- a/src/mobile_release/github_workflow_edit.py
++++ b/src/mobile_release/github_workflow_edit.py
+@@ -24,7 +24,8 @@
+ from .config_edit import ConfigEditFailure, CoreEditOutcome
+ from .errors import ConfigurationError
+ from .init_transaction import TypedEditProfile
+-from .workflow_payloads import GITHUB_WORKFLOWS, canonical_workflow_reference
++from .workflow_payloads import GITHUB_WORKFLOWS
++from .github_workflow_candidate_compat import before_workflow_reference
+
+ if TYPE_CHECKING:
+     from .init_workspace_custody import InitRootLease, RootedRevision
+@@ -324,7 +325,7 @@
+                             and row["sha256"] == hashlib.sha256(content).hexdigest())
+             observed = _observed(original)
+             differs = original.data is not None and original.data != content
+-            if differs and canonical_workflow_reference(templates[identity], original.data) is None:
++            if differs and before_workflow_reference(identity, templates[identity], original.data) is None:
+                 conflicts.append({"id": cast(WorkflowId, identity),
+                                   "observed": cast(PresentWorkflowObservation, observed)})
+                 continue
+diff --git a/src/mobile_release/init_transaction.py b/src/mobile_release/init_transaction.py
+--- a/src/mobile_release/init_transaction.py
++++ b/src/mobile_release/init_transaction.py
+@@ -23,6 +23,7 @@
+
+ from .errors import ValidationError
+ from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS, canonical_workflow_reference
++from .github_workflow_candidate_compat import before_workflow_reference
+
+ PREPARING = ".mobile-release-init-prepare"
+ READY = ".mobile-release-init"
+@@ -2032,9 +2033,9 @@
+         for identity, item, payload in updates:
+             template = resource["workflows"][identity].encode("utf-8")
+             _require(item.data != payload
+-                     and canonical_workflow_reference(template, item.data) is not None
++                     and before_workflow_reference(identity, template, item.data) is not None
+                      and canonical_workflow_reference(template, payload) is not None,
+-                     "workflow update is not an exact current canonical caller")
++                     "workflow update lacks an exact supported before-image or current canonical after-image")
+         # Derivative finite paths only. Original captured bytes, rooted facts
+         # and later original controls remain the authority for the transaction.
+         self._workflow_updates = frozenset(item.path for _, item, _ in updates)
+diff --git a/src/mobile_release/github_setup_publication.py b/src/mobile_release/github_setup_publication.py
+--- a/src/mobile_release/github_setup_publication.py
++++ b/src/mobile_release/github_setup_publication.py
+@@ -20,7 +20,8 @@
+ from .config import validate_config_data
+ from .errors import ConfigurationError
+ from .github_preflight import HttpRequest, TOOLING_REPOSITORY, _DIGEST, _MARKER, _SHA, _match, _object, _quote, _require, branch
+-from .workflow_payloads import GITHUB_WORKFLOWS, canonical_workflow_reference, render_workflow_caller
++from .workflow_payloads import GITHUB_WORKFLOWS, render_workflow_caller
++from .github_workflow_candidate_compat import before_workflow_reference
+
+ PROTOCOL = "mrk-github-setup-publication/1"
+ CONFIG_PATH = "release/mobile-release.json"
+@@ -237,7 +238,8 @@
+             if old is None:
+                 continue
+             if index:
+-                _require(canonical_workflow_reference(source.templates[index - 1], old) is not None)
++                _require(before_workflow_reference(GITHUB_WORKFLOWS[index - 1][0],
++                                                  source.templates[index - 1], old) is not None)
+             else:
+                 validate_config_data(_decode_json(old, limit=MAX_CONFIG_BYTES, nodes=20000, depth=32, exact=True))
+         result = cls(target, _match(row["baseCommit"], _SHA), _match(row["baseTree"], _SHA),
+@@ -373,7 +375,8 @@
+         _need(len(raw) == size and git_hash("blob", raw) == sha, "source-changed")
+         raw.decode("utf-8")
+         if index:
+-            _need(canonical_workflow_reference(source.templates[index - 1], raw) is not None, "caller-mismatch")
++            _need(before_workflow_reference(GITHUB_WORKFLOWS[index - 1][0],
++                                           source.templates[index - 1], raw) is not None, "caller-mismatch")
+         else:
+             validate_config_data(_decode_json(raw, limit=MAX_CONFIG_BYTES, nodes=20000, depth=32, exact=True))
+         old.append(raw)
+diff --git a/tests/desktop/test_github_setup.py b/tests/desktop/test_github_setup.py
+--- a/tests/desktop/test_github_setup.py
++++ b/tests/desktop/test_github_setup.py
+@@ -224,15 +224,51 @@
+             self.assertEqual(item["content"].encode(), render_workflow_caller(raw, "Example/mobile-release-kit", "A" * 40))
+             expected_source = ("${{ inputs.desktop_source_sha || github.sha }}"
+                                if item["id"] == "preflight" else "${{ github.sha }}")
++            invocations = 2 if item["id"] == "candidate" else 1
+             self.assertEqual(
+                 [line for line in item["content"].splitlines() if line.lstrip().startswith("source_sha:")],
+-                [f"      source_sha: {expected_source}"],
++                [f"      source_sha: {expected_source}"] * invocations,
+             )
+-            self.assertEqual(item["content"].count("a" * 40), 2)
++            self.assertEqual(item["content"].count("a" * 40), 2 * invocations)
++            self.assertEqual([line.strip() for line in item["content"].splitlines()
++                              if line.lstrip().startswith("tooling_sha:")],
++                             ["tooling_sha: " + "a" * 40] * invocations)
+             self.assertNotIn("secrets: inherit", item["content"])
+             if item["id"] != "preflight":
+                 self.assertIn("recovery_confirmation:", item["content"])
+                 self.assertIn("permissions: {}", item["content"])
++
++    def test_real_generators_share_version_operations_without_dispatch_or_private_inputs(self):
++        from mobile_release.github_setup_publication import Source, Target, TOOLING_REPOSITORY
++        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE, before_workflow_reference
++        from mobile_release.workflow_payloads import canonical_workflow_reference
++
++        result = propose(toolingRepository=TOOLING_REPOSITORY, toolingSha="B" * 40)
++        candidate = result["workflows"][1]
++        target = Target.parse({"projectBinding": "c" * 64, "repository": "owner/app", "accountId": "11",
++            "repositoryId": "22", "base": "main", "toolingRepository": TOOLING_REPOSITORY,
++            "toolingSha": "b" * 40, "marker": "e" * 32})
++        source = Source.from_saved(json.dumps(draft()).encode(), target)
++        self.assertEqual(source.files[2], candidate["content"].encode())
++        self.assertEqual([line.strip() for line in candidate["content"].splitlines() if line.strip().startswith("- ")][:3],
++                         ["- candidate", "- reserve-version", "- recover-play-edit"])
++        self.assertIn("default: candidate", candidate["content"])
++        self.assertIn("operation: ${{ inputs.operation }}", candidate["content"])
++        self.assertIn("recover-play-edit:<candidateUUID>:<attemptUUID>", candidate["content"])
++        for private in ("editId:", "recovery_key:", "MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64", "secrets: inherit"):
++            self.assertNotIn(private, candidate["content"])
++        self.assertFalse(any(result["facts"][key] for key in ("githubContacted", "repositoryObserved", "applyAvailable")))
++
++        old = render_workflow_caller(_PREVIOUS_CANDIDATE, "Previous/toolkit", "a" * 40)
++        template = source.templates[1]
++        self.assertEqual(before_workflow_reference("candidate", template, old), ("Previous/toolkit", "a" * 40))
++        self.assertIsNone(canonical_workflow_reference(template, old))  # Not dispatch/current-output authority.
++        for identity in ("preflight", "external-testing", "production-submit", "unknown"):
++            self.assertIsNone(before_workflow_reference(identity, template, old))
++        for changed in (old + b"# user change\n", old.replace(b"\n", b"\r\n"), old[:-1],
++                        old.replace(b"a" * 40, b"b" * 40, 1), old.replace(b"Previous/toolkit", b"../unsafe"),
++                        old.replace(b"permissions: {}", b"permissions: write-all")):
++            self.assertIsNone(before_workflow_reference("candidate", template, changed))
+
+     def test_invalid_configuration_is_redacted_and_has_no_generated_payload_or_resource_read(self):
+         value = draft()
+diff --git a/tests/desktop/test_github_workflow_edit.py b/tests/desktop/test_github_workflow_edit.py
+--- a/tests/desktop/test_github_workflow_edit.py
++++ b/tests/desktop/test_github_workflow_edit.py
+@@ -1,10 +1,11 @@
+ """Bounded in-memory workflow adapter checks, not native qualification.
+
+ The exact imported lease/workspace names are replaced by explicit inert types,
+-as in test_config_edit. No real custody object, resource file, descriptor,
+-flock, signal, thread, process, transaction, recovery or filesystem probe runs.
+-The synthetic resource exercises the existing proposal service, not a second
+-generator or a claim about canonical/installed/native workflow behavior.
++as in test_config_edit. No real custody object, descriptor, flock, signal,
++thread, process, transaction, recovery or project filesystem probe runs.
++Most cases use a synthetic resource. The predecessor case reads the fixed
++shipped public resource before entering the inert boundary, then exercises
++the same proposal service; it is not installed/native workflow evidence.
+ Source and exact command admission are required separately before execution.
+ """
+ from __future__ import annotations
+@@ -465,6 +466,39 @@
+             self.assertEqual([row["id"] for row in conflict.view["conflicts"]], [_IDS[2]])
+             self.assertNotIn("content", json.dumps(conflict.view))
+             self.assertEqual(conflict_lease.applies, [])
++
++    def test_shipped_candidate_predecessor_has_complete_review_and_custom_bytes_stay_conflicts(self):
++        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
++        # Read the one shipped public resource before the inert no-IO boundary;
++        # the actual proposal/derive functions, not a second generator, run below.
++        raw = (Path(__file__).resolve().parents[2] / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
++        templates = json.loads(raw)["workflows"]
++        generated = tuple(render_workflow_caller(templates[identity].encode(), _REPOSITORY, _SHA)
++                          for identity in _IDS)
++        old = render_workflow_caller(_PREVIOUS_CANDIDATE, "Previous/toolkit", "b" * 40)
++        with inert_native(), patch.object(setup, "_read_resource_bytes", return_value=raw), \
++                patch(f"{__name__}.resource_bytes", return_value=raw):
++            lease = InertLease((generated[0], old, generated[2], generated[3]))
++            _, plan = prepare(lease)
++            view = plan.view
++            self.assertEqual([row["action"] for row in view["files"]], ["preserve", "update", "preserve", "preserve"])
++            self.assertEqual(view["files"][1]["previous"], {
++                "content": old.decode(), "byteLength": len(old), "sha256": hashlib.sha256(old).hexdigest()})
++            self.assertEqual(view["files"][1]["generated"]["content"].encode(), generated[1])
++            self.assertEqual(view["templateSet"]["resourceSha256"], hashlib.sha256(raw).hexdigest())
++            self.assertEqual(edit.apply_github_workflow_edit(lease, plan).effect, "committed")
++            self.assertEqual(lease.applies[0][1][0].data, old)
++            self.assertEqual([payload for _, payload in lease.applies[0]], [None, generated[1], None, None])
++            self.assertEqual(edit.apply_github_workflow_edit(lease, plan).reason, "invalid_params")
++            for changed in (old + b"# user change\n", old.replace(b"permissions: {}", b"permissions: write-all"),
++                            old.replace(b"b" * 40, b"c" * 40, 1)):
++                with self.subTest(change=changed[-48:]):
++                    refused = InertLease((generated[0], changed, generated[2], generated[3]))
++                    _, conflict = prepare(refused)
++                    self.assertEqual(conflict.kind, "conflict")
++                    self.assertEqual([row["id"] for row in conflict.view["conflicts"]], ["candidate"])
++                    self.assertFalse(hasattr(conflict, "token"))
++                    self.assertEqual(refused.applies, [])
+
+     def test_observation_or_conflict_recheck_failure_never_publishes_partial_rows(self):
+         with inert_native() as token:
+diff --git a/tests/desktop/test_workflow_transaction_profile.py b/tests/desktop/test_workflow_transaction_profile.py
+--- a/tests/desktop/test_workflow_transaction_profile.py
++++ b/tests/desktop/test_workflow_transaction_profile.py
+@@ -204,7 +204,8 @@
+                                                           profile=profile, registered_identity=registered)
+                             admitted = platform == "linux" or (platform == "darwin" and profile in (
+                                 tx.TypedEditProfile.CONFIGURATION, PROFILE, tx.TypedEditProfile.METADATA_TEXT,
+-                                tx.TypedEditProfile.RELEASE_VERSION, tx.TypedEditProfile.METADATA_IMAGES))
++                                tx.TypedEditProfile.RELEASE_VERSION, tx.TypedEditProfile.METADATA_IMAGES,
++                                tx.TypedEditProfile.PROJECT_INITIALIZATION, tx.TypedEditProfile.PROJECT_IDENTITY))
+                             if admitted:
+                                 lease.acquire()
+                                 self.assertTrue(lease._acquired)
+@@ -593,7 +594,7 @@
+ class WorkflowUpdateFilesystemTests(unittest.TestCase):
+     """Actual Linux/macOS filesystem cases, separately admitted from inert tests."""
+
+-    def _run_update(self, fail_after_first):
++    def _run_update(self, fail_after_first, *, previous_candidate=False):
+         import tempfile
+         from mobile_release.cancellation import CleanupScope, DefaultCancellation
+         from mobile_release.init_workspace_custody import InitRootLease
+@@ -608,6 +609,10 @@
+         with tempfile.TemporaryDirectory(prefix="mrk-workflow-update-") as directory_name:
+             root = Path(directory_name).resolve(); callers = root / ".github" / "workflows"; callers.mkdir(parents=True)
+             initial = (old[0], None, new[2], old[3]); modes = (0o640, None, 0o644, 0o604)
++            if previous_candidate:
++                from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
++                prior = render_workflow_caller(_PREVIOUS_CANDIDATE, "old/toolkit", "a" * 40)
++                initial = (old[0], prior, new[2], old[3]); modes = (0o640, 0o640, 0o644, 0o604)
+             for path, data, mode in zip(PROFILE.paths, initial, modes):
+                 if data is not None:
+                     target = root / path; target.write_bytes(data); target.chmod(mode)
+@@ -677,6 +682,73 @@
+     def test_failure_after_first_real_replacement_restores_originals_and_primary(self):
+         self._run_update(True)
+
++    def test_previous_candidate_actual_apply_and_rollback_keep_all_originals(self):
++        for failure in (False, True):
++            with self.subTest(failure=failure):
++                self._run_update(failure, previous_candidate=True)
++
++    def test_previous_candidate_stale_before_or_noncurrent_after_refuses_without_replacement(self):
++        import tempfile
++        from mobile_release.cancellation import CleanupScope, DefaultCancellation
++        from mobile_release.init_workspace_custody import InitRootLease
++        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
++
++        def full_facts(value):
++            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
++                    value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
++
++        self.assertTrue(sys.platform.startswith("linux") or sys.platform == "darwin")
++        resource_raw, resource = setup._resource()
++        new = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "new/toolkit", "b" * 40)
++                    for identity, _ in tx.WORKFLOWS)
++        prior = render_workflow_caller(_PREVIOUS_CANDIDATE, "old/toolkit", "a" * 40)
++        for fault in ("stale-before", "custom-before", "legacy-after", "custom-after", "resource-changed"):
++            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="mrk-workflow-prior-") as name:
++                root = Path(name).resolve(); callers = root / ".github/workflows"; callers.mkdir(parents=True)
++                initial = (new[0], prior + (b"# user change\n" if fault == "custom-before" else b""), new[2], new[3])
++                for path, raw in zip(PROFILE.paths, initial):
++                    (root / path).write_bytes(raw)
++                sentinel = callers / "unrelated.yml"; sentinel.write_bytes(b"# preserve user workflow\n")
++                registered = root.stat()
++                guard = DefaultCancellation(ValidationError, "workflow predecessor fixture cleanup failed")
++                lease = InitRootLease(root, cancellation=guard, profile=PROFILE,
++                    registered_identity={"device": registered.st_dev, "inode": registered.st_ino,
++                        "mode": registered.st_mode, "uid": registered.st_uid, "gid": registered.st_gid})
++                cleanup = CleanupScope(guard, lease.close, owns_cancellation=True, first_primary=True)
++                expected = list(initial)
++                try:
++                    with cleanup:
++                        guard.install(); guard.activate(); lease.acquire()
++                        with lease.workspace_scope() as owner:
++                            originals = tuple(owner.observe(path, limit=limit)
++                                for path, limit in zip(PROFILE.paths, PROFILE.observation_limits))
++                            revision = lease.bind_revision(owner, originals)
++                        if fault == "stale-before":
++                            expected[1] += b"# later user edit\n"
++                            (root / PROFILE.paths[1]).write_bytes(expected[1])
++                        payload = (render_workflow_caller(_PREVIOUS_CANDIDATE, "new/toolkit", "b" * 40)
++                                   if fault == "legacy-after" else new[1] + (b"# not canonical\n" if fault == "custom-after" else b""))
++                        selected_digest = "f" * 64 if fault == "resource-changed" else hashlib.sha256(resource_raw).hexdigest()
++                        before = {path: full_facts((root / path).stat()) for path in PROFILE.paths}
++                        sentinel_before = full_facts(sentinel.stat())
++                        with self.assertRaises(tx.InitOperationFailure) as caught, patch.object(
++                                tx.InitWorkspace, "_move", side_effect=forbidden) as moves:
++                            with lease.workspace_scope(revision) as owner:
++                                owner.apply_workflows_typed([(item, payload if i == 1 else None)
++                                    for i, item in enumerate(originals)], resource_sha256=selected_digest)
++                finally:
++                    cleanup.__exit__(*sys.exc_info())
++                self.assertTrue(lease.closed); self.assertFalse(guard.lifetime_ledger.fatal)
++                self.assertEqual(guard.handler_state, "RESTORED")
++                moves.assert_not_called()
++                self.assertEqual(caught.exception.outcome.effect, "not_started")
++                self.assertFalse(any((root / state).exists() for state in tx.ALL_STATE_NAMES))
++                for path, raw in zip(PROFILE.paths, expected):
++                    self.assertEqual((root / path).read_bytes(), raw)
++                    self.assertEqual(full_facts((root / path).stat()), before[path])
++                self.assertEqual(sentinel.read_bytes(), b"# preserve user workflow\n")
++                self.assertEqual(full_facts(sentinel.stat()), sentinel_before)
++
+
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/desktop/test_github_setup_publication.py b/tests/desktop/test_github_setup_publication.py
+--- a/tests/desktop/test_github_setup_publication.py
++++ b/tests/desktop/test_github_setup_publication.py
+@@ -228,6 +228,44 @@
+         prepared, _ = self.prepared(Reader({path: old}))
+         self.assertEqual(prepared.view()["files"][1]["before"], old.decode())
+
++    def test_previous_candidate_review_and_publication_keep_exact_before_and_current_after(self):
++        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
++        path = p.PATHS[2]
++        old = p.render_workflow_caller(_PREVIOUS_CANDIDATE, "Previous/toolkit", "1" * 40)
++        for stale in (False, True):
++            with self.subTest(stale=stale):
++                reader = Reader({path: old, "README.md": b"unchanged application", ".github/workflows/custom.yml": b"# user workflow\n"})
++                prepared, _ = self.prepared(reader)
++                view = prepared.view()
++                self.assertEqual(view["files"][2]["before"].encode(), old)
++                self.assertEqual(view["files"][2]["after"].encode(), source().files[2])
++                self.assertIn("recover-play-edit", view["files"][2]["after"])
++                self.assertEqual(p.Prepared.parse(view), prepared)
++                self.assertTrue(all(call.method == "GET" for call in reader.calls))
++                reader.calls.clear(); reader.changed_base = stale
++                result = p.publish(prepared, source(), reader, MemoryJournal())
++                posts = [call for call in reader.calls if call.method == "POST"]
++                if stale:
++                    self.assertEqual(result["reason"], "source-changed")
++                    self.assertEqual(posts, [])
++                else:
++                    self.assertEqual(result["effect"], "draft-pr-observed")
++                    self.assertEqual(json.loads(posts[0].body)["base_tree"], reader.base_tree)
++                    self.assertEqual([item["path"] for item in json.loads(posts[0].body)["tree"]], list(p.PATHS))
++                    self.assertEqual(json.loads(posts[0].body)["tree"][2]["content"].encode(), source().files[2])
++                    self.assertEqual(json.loads(posts[2].body), {"ref": "refs/heads/" + target().head, "sha": COMMIT})
++                self.assertFalse(any(call.method in {"PUT", "PATCH", "DELETE"} or "dispatch" in call.path for call in reader.calls))
++
++        for changed in (old + b"# user edit\n", old.replace(b"\n", b"\r\n"),
++                        old.replace(b"1" * 40, b"2" * 40, 1)):
++            reader = Reader({path: changed})
++            with self.assertRaises(p.Refused): self.prepared(reader)
++            self.assertTrue(all(call.method == "GET" for call in reader.calls))
++            invalid = copy.deepcopy(view); invalid["files"][2]["before"] = changed.decode()
++            with self.assertRaises(ValueError): p.Prepared.parse(invalid)
++        invalid = copy.deepcopy(view); invalid["files"][2]["after"] = old.decode()
++        with self.assertRaises(ValueError): p.Prepared.parse(invalid)  # No legacy AFTER grant.
++
+     def test_actual_publication_sequence_preserves_siblings_and_never_updates_refs(self):
+         prepared, reader = self.prepared()
+         reader.calls.clear(); journal = MemoryJournal()
+diff --git a/tests/unit/test_version_hosted_play_recovery.py b/tests/unit/test_version_hosted_play_recovery.py
+--- a/tests/unit/test_version_hosted_play_recovery.py
++++ b/tests/unit/test_version_hosted_play_recovery.py
+@@ -309,6 +309,80 @@
+                 with self.assertRaises(Exception): self.recover(c, retained)
+                 self.assertEqual(c.repo.journal, before)
+                 self.assertEqual(c.recovery_calls, [])
++
++    def test_advanced_branch_head_keeps_original_source_and_missing_history_refuses_before_claim(self):
++        for schema in (3, 4):
++            for missing in (False, True):
++                with self.subTest(schema=schema, missing=missing), self.case(schema) as c:
++                    retained = self.retain(c)
++                    original = retained.state.candidates[-1].request.source
++                    advanced = c.fixture.final
++                    self.assertNotEqual(advanced, original.commit)
++                    c.context = replace(c.context, authority={**c.context.authority, "headSha": advanced, "runId": "51"})
++                    c.repo.source_commit = advanced
++                    self.restart_cleanup(c, retained)
++                    before = c.repo.journal; writes = c.repo.journal_puts
++                    c.events.clear()
++
++                    def git(argv, **kwargs):
++                        # Only the explicitly fake Git boundary changes. The
++                        # actual source decoder verifies original object hashes.
++                        args = argv[argv.index("-C") + 2:]
++                        result = c.git(argv, **kwargs)
++                        if args == ["rev-parse", "--verify", "HEAD"] and kwargs["cwd"] == c.root:
++                            return subprocess.CompletedProcess(argv, 0, (advanced + "\n").encode(), b"")
++                        if args[:2] == ["cat-file", "commit"]:
++                            self.assertEqual(args[2], original.commit)
++                            if missing:
++                                return subprocess.CompletedProcess(argv, 1, b"", b"INERT unavailable original object")
++                        if args[:3] == ["ls-tree", "-z", "--full-tree"]:
++                            self.assertEqual(args[3], original.commit)
++                        return result
++
++                    with patch.object(ci, "run_owned", git):
++                        if missing:
++                            with self.assertRaises(ci.Refused): self.recover(c, retained)
++                        else:
++                            result = self.recover(c, retained)
++                            self.assertEqual(result["allocation"], "not-performed")
++                    self.assertEqual(c.source.context.authority["headSha"], advanced)
++                    self.assertEqual(c.repo.ledger_puts, 0)
++                    if missing:
++                        self.assertEqual(c.repo.journal, before)
++                        self.assertEqual(c.repo.journal_puts, writes)
++                        self.assertEqual(c.recovery_calls, [])
++                    else:
++                        self.assertEqual(c.source.binding, original)
++                        self.assertEqual(c.source.enabled, c.fixture.platforms)
++                        self.assertEqual(c.recovery_calls, ["verify", "delete"])
++                        self.assertEqual(h.Envelope.parse(c.repo.journal).state, retained.state)
++                        self.assertIsNone(h.Envelope.parse(c.repo.journal).play_query)
++                    self.assertFalse(any(event[0] == "git" and event[1][0] in {"fetch", "checkout", "reset"}
++                                         for event in c.events))
++
++    def test_actual_cleanup_context_requires_current_branch_not_sha_tag_or_rebound_head(self):
++        with self.case() as c:
++            retained = self.retain(c); self.restart_cleanup(c, retained)
++            authority = c.context.authority
++            env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": c.context.repository["fullName"],
++                "GITHUB_REPOSITORY_ID": c.context.repository["id"], "GITHUB_SHA": authority["headSha"],
++                "GITHUB_REF": authority["ref"], "GITHUB_JOB": "version_reserve", "GITHUB_EVENT_NAME": "workflow_dispatch",
++                "GITHUB_WORKFLOW": authority["workflow"], "GITHUB_RUN_ID": authority["runId"],
++                "GITHUB_RUN_ATTEMPT": str(authority["attempt"]), "MOBILE_RELEASE_SELECTED_PLATFORM": c.platform,
++                "MOBILE_RELEASE_CONFIRMATION": c.context.confirmation,
++                "MOBILE_RELEASE_CALLER_WORKFLOW_PATH": authority["callerPath"],
++                "MOBILE_RELEASE_REUSABLE_WORKFLOW_PATH": authority["reusablePath"],
++                "MOBILE_RELEASE_REUSABLE_WORKFLOW_REPOSITORY": authority["reusableRepository"],
++                "MOBILE_RELEASE_TOOLING_SHA": authority["reusableCommit"],
++                "MOBILE_RELEASE_DISPATCH_SHA": authority["headSha"], "MOBILE_RELEASE_DISPATCH_REF": authority["ref"]}
++            with patch.dict(os.environ, env):
++                self.assertEqual(h.workflow.Context.current("candidate", c.platform), c.context)
++                for ref in (authority["headSha"], "refs/tags/recovery"):
++                    with patch.dict(os.environ, {"GITHUB_REF": ref, "MOBILE_RELEASE_DISPATCH_REF": ref}), self.assertRaises(Exception):
++                        h.workflow.Context.current("candidate", c.platform)
++                with patch.dict(os.environ, {"GITHUB_SHA": c.fixture.final}), self.assertRaises(h.workflow.WorkflowError):
++                    h.workflow.Context.current("candidate", c.platform)
++            self.assertEqual(c.recovery_calls, [])
+
+     def test_ios_progress_preserves_full_v3_capsule_and_claim_without_rewriting_default_versions(self):
+         for spent in (False, True):

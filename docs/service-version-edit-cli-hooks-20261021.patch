@@ -1,0 +1,1036 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -12,7 +12,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -288,6 +288,7 @@
+     "revoke_agent_git_commit",
+     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
++    "agent_version_edit_status", "allow_agent_version_edit_apply", "revoke_agent_version_edit",
+     "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
+     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -5,6 +5,9 @@
+   "windows": ["main"],
+   "local": true,
+   "permissions": [
++    "allow-agent-version-edit-status",
++    "allow-allow-agent-version-edit-apply",
++    "allow-revoke-agent-version-edit",
+     "allow-agent-configuration-status", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
+     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -93,6 +93,8 @@
+ mod agent_configuration;
+ #[path="service_version_reserve_application.rs"]
+ mod agent_version_reserve;
++#[path="service_version_edit_application.rs"]
++mod agent_version_edit;
+ #[path="service_play_cleanup_application.rs"]
+ mod agent_play_cleanup;
+ #[path="application_service_upload_key_requests.rs"]
+@@ -101,6 +103,7 @@
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+     history_lease: Option<Arc<HistoryLease>>,
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
++    version_edit_requests: Arc<crate::service_version_edit_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+     store_requests: Arc<crate::service_store_requests::Inbox>,
+     apple_provisioning_requests:Arc<crate::service_apple_provisioning_requests::Inbox>,
+@@ -139,6 +142,7 @@
+         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
+         for operation in &mut saved.operations { operation.stale = true; }
+         let instance = Id::random()?;
++        let version_edit_requests = Arc::new(crate::service_version_edit_requests::Inbox::new(instance.clone()));
+         let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
+         let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
+         let apple_provisioning_requests=Arc::new(crate::service_apple_provisioning_requests::Inbox::new(instance.clone()));
+@@ -149,7 +153,7 @@
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, version_edit_requests, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -202,7 +206,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.version_edit_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -447,6 +451,9 @@
+                 p::RequestBody::AppleProvisioningStatus(q)=>return self.service_apple_provisioning_query(client,q,false),
+                 p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
+                 p::RequestBody::AppleProvisioningCancel(q)=>return self.service_apple_provisioning_query(client,q,true),
++                p::RequestBody::VersionEditSubmit(v)=>return self.service_version_edit_submit(client,v.clone()),
++                p::RequestBody::VersionEditStatus(q)=>return self.service_version_edit_query(client,q,false),
++                p::RequestBody::VersionEditCancel(q)=>return self.service_version_edit_query(client,q,true),
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
+@@ -508,6 +515,7 @@
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
++                p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+@@ -557,7 +565,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.version_edit_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -63,6 +63,7 @@
+         additional_requests.extend(self.configuration_requests.catalogue(project)?);
+         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
++        additional_requests.extend(self.version_edit_requests.catalogue(project)?.into_iter().map(|request_id|data::AdditionalRequest{family:data::AdditionalFamily::VersionEdit,request_id}));
+         additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::PlayCleanup,request_id}));
+         let view = data::Catalogue {
+             schema_version: 2,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -1158,6 +1158,9 @@
+         && state.quit.as_ref().is_none_or(|quit| quit.normally_declined())
+ }
+ #[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_service_version_edit.rs"]
++pub(crate) mod agent_version_edit;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path="asset_session_service_configuration.rs"]
+ mod agent_configuration;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -2208,6 +2211,8 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(agent_upload_key::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_version_edit_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
+diff --git a/desktop/src-tauri/src/asset_session_version_reserve.rs b/desktop/src-tauri/src/asset_session_version_reserve.rs
+--- a/desktop/src-tauri/src/asset_session_version_reserve.rs
++++ b/desktop/src-tauri/src/asset_session_version_reserve.rs
+@@ -1292,6 +1292,11 @@
+     }
+     /// Prepare/Apply reuse their existing commands and writer. A normal manual
+     /// Session has no handoff and follows the UNCHANGED registered edit path.
++    pub(super) fn release_version_prepared_current(&self,state:&DocumentState,session:&str)->Result<(),BridgeError>{
++        if let Some(access)=self.inner.bridge.edits.reserved_version_access(MAIN,session)?{
++            let h=access.handoff();h.gate().locked(self,state,h,None)
++        } else if state.github.native_work_pending()||version_allocation::pending(state){Err(p::refused())} else {state.github.setup_ensure_idle()}
++    }
+     pub(crate) fn release_version_phase_admit<T>(
+         &self,
+         session: &str,
+diff --git a/desktop/src-tauri/src/bridge.rs b/desktop/src-tauri/src/bridge.rs
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -616,6 +616,8 @@
+     pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+         #[cfg(any(target_os="linux",target_os="macos"))]
++        if self.edits.version_edit_has_lease(session_id){return document.apply_version_edit_permitted(window,session_id,plan_token,None);}
++        #[cfg(any(target_os="linux",target_os="macos"))]
+         if let Some(observed)=self.edits.reserved_version_apply_observation(window,session_id,plan_token)? {return Ok(observed);}
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         return document.release_version_phase_admit(session_id,crate::edit_owner::ReservedVersionStep::Apply,|bridge,registration,publisher|
+diff --git a/desktop/src-tauri/src/edit_owner.rs b/desktop/src-tauri/src/edit_owner.rs
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -45,6 +45,14 @@
+ pub(crate) struct ConfigurationAgentLink;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ pub(crate) use agent_configuration::Step as ConfigurationAgentStep;
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path="edit_owner_service_version_edit.rs"]
++mod agent_version_edit;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use agent_version_edit::{Claim as VersionEditClaim, Decision as VersionEditDecision};
++#[cfg(not(any(target_os = "linux", target_os = "macos")))]
++pub(crate) struct VersionEditClaim;
+ 
+ const NATIVE_EDIT_QUALIFIED: bool = false;
+ const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
+@@ -982,6 +990,8 @@
+     reserved_version: Option<NativeReservedVersionHandoff>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_configuration: Option<Arc<ConfigurationAgentLink>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    agent_version_edit: std::sync::OnceLock<Arc<agent_version_edit::Link>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_failure: Mutex<Option<(Reason, Instant)>>,
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -993,7 +1003,7 @@
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     fixture_metadata_context: Option<metadata_wire::Context>,
+     id: String, commands: mpsc::Sender<Vec<u8>>, receiver: AsyncMutex<Option<mpsc::Receiver<Vec<u8>>>>,
+-    stop: watch::Sender<bool>, wake: Notify, force_due: AtomicBool, driver_done: AtomicBool,
++    stop: watch::Sender<bool>, wake: Arc<Notify>, force_due: AtomicBool, driver_done: AtomicBool,
+     pipes: watch::Sender<PipeAcquisition>, frames: mpsc::Sender<ChildFrame>,
+     driver_joined: AtomicBool, driver_join_failed: AtomicBool,
+     watchdog_joined: AtomicBool, watchdog_join_failed: AtomicBool, manager_join_failed: AtomicBool,
+@@ -1635,6 +1645,8 @@
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             installed_macos_observation::retire(&a.session);
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            agent_version_edit::unknown(&a.session);
+             a.unknown = true;
+             a.projection.phase = Phase::Unknown;
+             a.projection.native_finality = NativeFinality::Unknown;
+@@ -1684,6 +1696,11 @@
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
+             agent_configuration::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
++            self.trigger_locked(publication,r,id,reason,at);
++        }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
++            agent_version_edit::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+             self.trigger_locked(publication,r,id,reason,at);
+         }
+         // Evaluate the original phase endpoint before a new native F can clear
+@@ -2331,6 +2348,8 @@
+             reserved_version,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_configuration,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            agent_version_edit:std::sync::OnceLock::new(),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2341,7 +2360,7 @@
+             fixture_version,
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             fixture_metadata_context: metadata.clone(),
+-            wake: Notify::new(), force_due: AtomicBool::new(false), driver_done: AtomicBool::new(false), resource_unknown: AtomicBool::new(false),
++            wake: Arc::new(Notify::new()), force_due: AtomicBool::new(false), driver_done: AtomicBool::new(false), resource_unknown: AtomicBool::new(false),
+             pipes, frames, driver_joined: AtomicBool::new(false), driver_join_failed: AtomicBool::new(false),
+             watchdog_joined: AtomicBool::new(false), watchdog_join_failed: AtomicBool::new(false), manager_join_failed: AtomicBool::new(false),
+             driver_join_panicked: AtomicBool::new(false), watchdog_join_panicked: AtomicBool::new(false), manager_join_panicked: AtomicBool::new(false),
+@@ -2663,11 +2682,12 @@
+     }
+     fn apply_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+         registration: Option<WorkflowRegistration>, recovery_intent: bool, agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
+-        self.apply_domain_configuration(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,None)
++        self.apply_domain_configuration(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,None,None)
+     }
+     fn apply_domain_configuration(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
+         registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
+-        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>)->Result<DomainStatus,BridgeError>{
++        if agent_version.is_some()&&(domain!=EditDomain::ReleaseVersion||recovery_intent){return Err(invalid_owner());}
+         if agent_config.is_some()&&(domain!=EditDomain::Configuration||recovery_intent){return Err(invalid_owner());}
+         if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
+         let mut publication = self.inner.publication(supplied, false)?;
+@@ -2722,6 +2742,8 @@
+             if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Start) {
+                 self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+             }
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if !agent_version_edit::consume(a,agent_version){return Err(invalid_owner());}
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3534,7 +3556,7 @@
+ }
+ fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
++    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+     end
+ }
+ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+@@ -3550,10 +3572,16 @@
+         let now = Instant::now();
+         return if let Some(start) = cleanup {
+             if now >= reserved_cleanup_end(owner,start + FINALIZATION) && !unknown { inner.unknown(&owner.id); continue; }
+-            if now >= start + SOFT_STOP {
++            let end=if now >= start + SOFT_STOP {
+                 if !owner.force_due.swap(true, Ordering::SeqCst) { owner.wake.notify_waiters(); }
+                 if unknown { None } else { Some(reserved_cleanup_end(owner,start + FINALIZATION)) }
+-            } else { Some(reserved_cleanup_end(owner,start + SOFT_STOP)) }
++            } else { Some(reserved_cleanup_end(owner,start + SOFT_STOP)) };
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            let end=match owner.agent_version_edit.get(){
++                Some(link) if !unknown=>end.map(|end|link.lease.cleanup_poll_end(end,now)),
++                _=>end,
++            };
++            end
+         } else {
+             let end = phase_deadline(review, phase, applying).unwrap_or(review);
+             if now >= end {
+@@ -4575,7 +4603,8 @@
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
+           agent_identity::actions::retired(&r, &a.session, a.unknown);
+-          agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current); }
++          agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current);
++          agent_version_edit::retired(&r,&a.session,a.unknown); }
+     }
+     guard.completed = true;
+     })();
+diff --git a/desktop/src-tauri/src/edit_owner_service_configuration.rs b/desktop/src-tauri/src/edit_owner_service_configuration.rs
+--- a/desktop/src-tauri/src/edit_owner_service_configuration.rs
++++ b/desktop/src-tauri/src/edit_owner_service_configuration.rs
+@@ -11,7 +11,7 @@
+ };
+ use std::sync::{OnceLock, Weak};
+ #[path = "edit_owner_service_configuration_memory.rs"]
+-mod memory;
++pub(super) mod memory;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(crate) enum Step {
+@@ -376,6 +376,7 @@
+             false,
+             None,
+             Some(&link.entry),
++            None,
+         )?
+         .configuration()
+     }
+diff --git a/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs b/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
+--- a/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
++++ b/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
+@@ -407,6 +407,39 @@
+         }
+         n.add(FUTURE)?;
+         Ok(n.bytes)
++    }
++}
++
++// Prepared version delegation has consumed Opened+Prepared out of THREE
++// TOTAL reader frames. A malformed third Prepared can still be decoded before
++// sequence rejection: reserve BOTH the Seed Value and typed nested Value
++// backing, not only the expected 16KiB terminal. Four response-size terms cover
++// rounded raw Vec capacity plus independent JSON/typed string backing. The
++// actual closed version encoder (not write-side generic wire ceiling) caps
++// each of the existing one-slot command and writer buffers at 16KiB.
++const VERSION_FUTURE:usize = 2*crate::protocol::NODE_LIMIT*512
++    + 4*v::RESPONSE_LIMIT + 2*v::REQUEST_LIMIT + 2*v::STATUS_LIMIT + 1024*1024;
++impl EditOwner {
++    pub(crate) fn version_agent_edit_backing(&self)->Result<usize,BridgeError>{
++        let r=self.inner.registry.try_lock().map_err(|_|invalid_owner())?;
++        if self.inner.poisoned.load(Ordering::SeqCst)||r.exhausted{return Err(edit_unknown())}
++        let mut n=Usage{bytes:size_of::<Registry>(),nodes:0};
++        r.generation.heap(&mut n)?;r.loss_generation.heap(&mut n)?;r.window.heap(&mut n)?;
++        for keys in [&r.blocked_projects,&r.image_recovery_projects,&r.workflow_recovery_projects]{
++            n.add(keys.len().checked_mul(1024).ok_or_else(invalid_owner)?)?;
++            for key in keys{key.heap(&mut n)?;}
++        }
++        n.add(r.domain_blocks.0.len().checked_mul(4096).ok_or_else(invalid_owner)?)?;
++        for key in r.domain_blocks.0.keys(){key.heap(&mut n)?;}
++        for p in r.last.iter().chain(r.active.iter().map(|a|&a.projection)){
++            n.add(projection(p)?.checked_mul(if p.domain==EditDomain::ReleaseVersion{3}else{1}).ok_or_else(invalid_owner)?)?;
++        }
++        if let Some(a)=&r.active{
++            if a.session.domain!=EditDomain::ReleaseVersion{return Err(invalid_owner())}
++            n.add(size_of::<Session>())?;
++            if a.session.reserved_version.is_some(){n.add(NativeReservedVersionHandoff::backing_bytes().ok_or_else(invalid_owner)?)?;}
++        }
++        n.add(VERSION_FUTURE)?;Ok(n.bytes)
+     }
+ }
+ 
+diff --git a/desktop/src-tauri/src/edit_owner_version_reserve.rs b/desktop/src-tauri/src/edit_owner_version_reserve.rs
+--- a/desktop/src-tauri/src/edit_owner_version_reserve.rs
++++ b/desktop/src-tauri/src/edit_owner_version_reserve.rs
+@@ -150,6 +150,7 @@
+             sources: Mutex::new(crate::asset_source::GitReadSources::new()),
+         })
+     }
++    pub(crate) fn candidate_data(&self) -> &str { self.data["reservation"]["request"]["candidateId"].as_str().unwrap_or("") }
+     pub(crate) fn backing_bytes() -> Option<usize> {
+         let bytes = std::mem::size_of::<Self>().checked_add(6 * 12 * 1024 + 8192)?;
+         #[cfg(all(
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -29,6 +29,8 @@
+ mod git_remote;
+ #[path="installed_cli_version_reserve.rs"]
+ mod version_reserve;
++#[path="installed_cli_version_edit.rs"]
++mod version_edit;
+ #[path="installed_cli_store.rs"]
+ mod store;
+ #[path="installed_cli_apple_provisioning.rs"]
+@@ -64,6 +66,9 @@
+   mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n\
++  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -275,6 +280,9 @@
+                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
++            "versionEdit": {"scope":"already-desktop-prepared-version-save","commands":version_edit::COMMANDS,"defaultEnabled":false,"oneUse":true,
++                "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
++                "cliOpenPrepare":false,"readGrantAuthorizesEdits":false,"reservedHandoffReconstructed":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
+@@ -348,6 +356,7 @@
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+         }
+         text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
++        text.push_str("\nVersion editing delegates only one existing Desktop-prepared review. No CLI Open/Prepare or automatic allocation.\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+@@ -447,6 +456,7 @@
+         p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
+         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
++        p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
+         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
+             "Use git-remote-status with the same original request IDs; do not repeat a send.\n".into(),
+@@ -481,6 +491,7 @@
+     if configuration::recognizes(&args){return configuration::run(args);}
+     if identity::recognizes(&args) { return identity::run(args); }
+     if upload_key::recognizes(&args) { return upload_key::run(args); }
++    if version_edit::recognizes(&args) { return version_edit::run(args); }
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+     if store::recognizes(&args){return store::run(args);}
+     if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
+@@ -573,7 +584,7 @@
+         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
+         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
+-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 320); // Two detail inboxes plus eight distinct 32-row metadata namespaces.
++        assert_eq!(caps["requestDiscovery"]["maxRequests"], 352); // Two detail inboxes plus nine distinct 32-row metadata namespaces.
+         assert!(caps["requestDiscovery"]["families"].as_array().unwrap().iter().any(|family| family == "play-cleanup"));
+     }
+     #[test]
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -256,6 +256,7 @@
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
+         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
++        p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -9,6 +9,8 @@
+ mod service_protocol;
+ mod service_upload_key_protocol;
+ mod service_upload_key_requests;
++mod service_version_edit_protocol;
++mod service_version_edit_requests;
+ mod service_configuration_protocol;
+ mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -125,6 +125,8 @@
+ mod service_protocol;
+ mod service_upload_key_protocol;
+ mod service_upload_key_requests;
++mod service_version_edit_protocol;
++mod service_version_edit_requests;
+ mod service_configuration_protocol;
+ mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -224,6 +224,9 @@
+     #[serde(rename="apple-provisioning.status")] AppleProvisioningStatus(crate::service_apple_provisioning_protocol::Query),
+     #[serde(rename="store.cancel")] StoreCancel(crate::service_store_protocol::Query),
+     #[serde(rename="apple-provisioning.cancel")] AppleProvisioningCancel(crate::service_apple_provisioning_protocol::Query),
++    #[serde(rename="version-edit.submit")] VersionEditSubmit(crate::service_version_edit_protocol::Submit),
++    #[serde(rename="version-edit.status")] VersionEditStatus(crate::service_version_edit_protocol::Query),
++    #[serde(rename="version-edit.cancel")] VersionEditCancel(crate::service_version_edit_protocol::Query),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -294,6 +297,7 @@
+     UploadKeyAccess(crate::service_upload_key_protocol::Access),
+     UploadKeyRequest(crate::service_upload_key_protocol::Status),
+     ConfigurationRequest(crate::service_configuration_protocol::Status),
++    VersionEditRequest(crate::service_version_edit_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+     StoreRequest(crate::service_store_protocol::Status),
+     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
+@@ -349,6 +353,9 @@
+     nesting(bytes)?;
+     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
++    if matches!(&request.request,RequestBody::VersionEditSubmit(_)|RequestBody::VersionEditStatus(_)|RequestBody::VersionEditCancel(_))
++        && bytes.len()>crate::service_version_edit_protocol::REQUEST_BYTES {return Err(Error::InvalidRequest)}
++    if let RequestBody::VersionEditSubmit(v)=&request.request{v.validate()?;}
+     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
+         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
+@@ -421,6 +428,11 @@
+     }
+     if response.version != VERSION { return Err(Error::InvalidRequest); }
+     match &response.response {
++        ResponseBody::VersionEditRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
++            crate::service_version_edit_protocol::bounded(response,crate::service_version_edit_protocol::STATUS_BYTES)?;
++        },
+         ResponseBody::PlayCleanupRequest(row)=>{
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_play_cleanup_protocol::STATUS_LIMIT {
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -15,7 +15,8 @@
+     + crate::service_configuration_protocol::REQUEST_LIMIT
+     + crate::service_store_protocol::REQUEST_LIMIT
+     + crate::service_play_cleanup_protocol::REQUEST_LIMIT
+-    + crate::service_apple_provisioning_protocol::REQUEST_LIMIT;
++    + crate::service_apple_provisioning_protocol::REQUEST_LIMIT
++    + crate::service_version_edit_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -177,6 +178,7 @@
+     Store,
+     PlayCleanup,
+     AppleProvisioning,
++    VersionEdit,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+@@ -189,6 +191,7 @@
+             Self::Store => 5,
+             Self::PlayCleanup => 6,
+             Self::AppleProvisioning=>7,
++            Self::VersionEdit=>8,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -204,6 +207,7 @@
+             Self::Store => "store-status",
+             Self::PlayCleanup => "play-cleanup-status",
+             Self::AppleProvisioning=>"apple-provisioning-status",
++            Self::VersionEdit=>"version-edit-status",
+         }
+     }
+ }
+@@ -265,7 +269,7 @@
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 8];
++        let mut counts = [0usize; 9];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -283,6 +287,7 @@
+             || counts[5] > crate::service_store_protocol::REQUEST_LIMIT
+             || counts[6] > crate::service_play_cleanup_protocol::REQUEST_LIMIT
+             || counts[7] > crate::service_apple_provisioning_protocol::REQUEST_LIMIT
++            || counts[8] > crate::service_version_edit_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+@@ -493,7 +498,7 @@
+         }
+         fullest.schema_version = 2;
+         fullest.additional_requests = Some(
+-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning]
++            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit]
+                 .into_iter()
+                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
+                 .collect(),
+@@ -552,12 +557,13 @@
+             AdditionalRequest { family: AdditionalFamily::Store, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::PlayCleanup, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::AppleProvisioning, request_id: id(3) },
++            AdditionalRequest { family: AdditionalFamily::VersionEdit, request_id: id(3) },
+         ]);
+         current.validate().unwrap();
+         let text = human(&current);
+         assert!(!text.contains("No requests retained"));
+         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
+-            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3)] {
++            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3)] {
+             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
+         }
+         let encoded = serde_json::to_value(&current).unwrap();
+@@ -572,7 +578,7 @@
+         assert!(!accepted(changed));
+         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
+         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
+-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning] {
++        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit] {
+             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
+             assert!(current.validate().is_err());
+             current.additional_requests = Some(vec![AdditionalRequest { family, request_id: id(3) }; 2]);
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1057,6 +1057,13 @@
+         tauri::ipc::InvokeBody::Raw(_) => Err(BridgeError::invalid()),
+     }
+ }
++#[cfg(any(target_os="linux",target_os="macos"))]
++fn version_edit_agent_request_body(body:&tauri::ipc::InvokeBody)->Result<Value,BridgeError>{
++    match body {
++        tauri::ipc::InvokeBody::Raw(bytes)=>crate::asset_session::agent_version_edit::raw_request(bytes),
++        tauri::ipc::InvokeBody::Json(_)=>Err(BridgeError::invalid()),
++    }
++}
+ fn artifact_inspection_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
+     match body {
+         tauri::ipc::InvokeBody::Raw(bytes) => crate::artifact_inspection_protocol::raw_request(bytes),
+@@ -1644,6 +1651,34 @@
+     #[cfg(not(any(target_os="linux",target_os="macos")))]
+     {let _=(window,request,state);Err(BridgeError::unavailable("Upload-key delegation is unavailable on this platform."))}
+ }
++#[tauri::command]
++async fn agent_version_edit_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=crate::asset_session::agent_version_edit::status_request(version_edit_agent_request_body(request.body())?)?;serde_json::to_value(state.document.agent_version_edit_status(args.as_ref())?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_version_edit_apply(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=crate::asset_session::agent_version_edit::allow_request(version_edit_agent_request_body(request.body())?)?;serde_json::to_value(state.document.allow_agent_version_edit_apply(window,args)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_version_edit(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=crate::asset_session::agent_version_edit::revoke_request(version_edit_agent_request_body(request.body())?)?;serde_json::to_value(state.document.revoke_agent_version_edit(window,args)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
++}
++
+ #[tauri::command]
+ async fn agent_configuration_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+@@ -2235,7 +2270,17 @@
+ async fn release_version_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if matches!(request.body(),tauri::ipc::InvokeBody::Raw(_)) {
++        let origin=crate::asset_session::agent_version_edit::apply_request(version_edit_agent_request_body(request.body())?)?;
++        return state.document.apply_agent_version_edit(window,&origin);
++    }
+     let body = request_body(&request);
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if body.as_ref().is_ok_and(|v|v.get("intent").is_none()&&v["sessionId"].as_str().is_some_and(|id|state.bridge.edits.version_edit_has_lease(id))) {
++        let args=body.and_then(edit_commands::apply)?;
++        return state.document.apply_version_edit_permitted(window,&args.session_id,&args.plan_token,None);
++    }
+     if body.as_ref().is_ok_and(|body| body.get("intent").is_some()) {
+         let result = body.and_then(crate::saved_text_recovery_protocol::apply)
+             .and_then(|args| state.bridge.apply_release_version_recovery(&state.document, window, args));
+@@ -3435,6 +3480,10 @@
+ impl Drop for UploadKeyRelayGuard {fn drop(&mut self){if !self.closed{self.slot.lost(&self.document);}}}
+ #[deny(unused_variables, unused_assignments)]
+ #[cfg(any(target_os="linux",target_os="macos"))]
++struct VersionEditAgentRelayGuard(crate::asset_session::DocumentBinding);
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for VersionEditAgentRelayGuard{fn drop(&mut self){self.0.agent_version_edit_relay_lost();}}
++#[cfg(any(target_os="linux",target_os="macos"))]
+ struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();}}
+@@ -3456,6 +3505,8 @@
+     let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let configuration_guard=ConfigurationAgentRelayGuard(document.clone());
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let version_edit_guard=VersionEditAgentRelayGuard(document.clone());
+     let mut revisions = edits.subscribe();
+     let mut assets = document.subscribe();
+     let mut diagnostics = document.environment_diagnostics_subscribe();
+@@ -3533,6 +3584,10 @@
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let _configuration_guard=configuration_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
++        let _version_edit_guard=version_edit_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut version_edit_key=None;
++        #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut configuration_revision=None;
+         let mut ios_archive_guard = ios_archive_guard;
+         if enter.await.is_err() { return; }
+@@ -3588,6 +3643,13 @@
+             // SAME retained relay owns the call; no detached writer is created.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let _ = application_history.publish_identity_history();
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Ok(status)=document.agent_version_edit_status(None){
++                let key=(status.grant_id.clone(),status.live,status.request.as_ref().map(|r|(r.origin.request_id.clone(),r.revision,r.phase)));
++                if version_edit_key.as_ref()!=Some(&key){
++                    let _=app.emit_to(MAIN_WINDOW,"mrk:agent-version-edit",&status);version_edit_key=Some(key);
++                }
++            }
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             if let Ok(Some(status))=document.agent_configuration_relay(){
+                 let key=(status.service_instance.clone(),status.revision);
+@@ -5545,6 +5607,7 @@
+             allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
+             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
++            agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
+             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
+             agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -36,6 +36,8 @@
+ #[path = "../src/service_upload_key_requests.rs"] mod service_upload_key_requests;
+ #[path = "../src/service_play_cleanup_protocol.rs"] mod service_play_cleanup_protocol;
+ #[path = "../src/service_play_cleanup_requests.rs"] mod service_play_cleanup_requests;
++#[path="../src/service_version_edit_protocol.rs"] mod service_version_edit_protocol;
++#[path="../src/service_version_edit_requests.rs"] mod service_version_edit_requests;
+ #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
+ #[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
+ #[path="../src/service_version_reserve_protocol.rs"]
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -1,3 +1,4 @@
++import { createVersionEditAgentApi } from './serviceVersionEditProtocol.ts';
+ import { createConfigurationApi } from './serviceConfigurationProtocol.ts';
+ import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
+ import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
+@@ -111,7 +112,7 @@
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+ 
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'mrk:agent-version-edit' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+ 
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -715,6 +716,7 @@
+         return structuredClone(result);
+       } catch (error) { throw githubSetupError(error); }
+     },
++    agentVersionEdit: createVersionEditAgentApi(mode, invoke, listen),
+     agentConfiguration: createConfigurationApi(mode, invoke, listen),
+     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+     openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),
+diff --git a/desktop/src/components/ReleaseVersionEditor.tsx b/desktop/src/components/ReleaseVersionEditor.tsx
+--- a/desktop/src/components/ReleaseVersionEditor.tsx
++++ b/desktop/src/components/ReleaseVersionEditor.tsx
+@@ -1,3 +1,4 @@
++import { AgentVersionEditAccess } from './AgentVersionEditAccess.tsx';
+ import { useEffect, useId, useRef, useState } from 'react';
+ import { isDirty } from '../drafts.ts';
+ import type { ProjectSession } from '../drafts.ts';
+@@ -160,6 +161,7 @@
+       <p>Original review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Later draft changes cannot retarget this review.</p>
+       <button type="button" className="button primary" disabled={!current || !controller.canApply(current)} onClick={() => { if (current) setConfirmation(current); }}>
+         {versionNoOp(prepared.view) ? 'Confirm unchanged values…' : prepared.view.intent === 'create' ? 'Create version file…' : 'Save version values…'}</button></>}
++    <AgentVersionEditAccess controller={controller.agent} />
+     {confirmation && prepared && <Confirmation view={prepared.view} allowed={controller.canApply(confirmation)} onCancel={() => setConfirmation(null)}
+       onConfirm={() => { if (controller.apply(confirmation)) setConfirmation(null); }} />}
+     {reset && <ResetConfirmation action={reset.action} allowed={!retained && sameVersionData(reset.binding, controller.resetBinding()) && (reset.action === 'discard' || openReason === null)}
+diff --git a/desktop/src/releaseVersionEditController.ts b/desktop/src/releaseVersionEditController.ts
+--- a/desktop/src/releaseVersionEditController.ts
++++ b/desktop/src/releaseVersionEditController.ts
+@@ -1,5 +1,8 @@
+ // App-retained two-string draft and observer. The SAME native EditOwner owns
+ // all leases, one-use plans, processes, journals, cancellation and finality.
++import { ServiceVersionEditController } from './serviceVersionEditController.ts';
++import type { VersionEditCandidate } from './serviceVersionEditController.ts';
++import type { VersionEditOrigin, VersionEditReview } from './serviceVersionEditProtocol.ts';
+ import { savedTextRecoveryApplyBinding, savedTextRecoveryPreparedMatches, savedTextRecoverySettled, savedTextRecoverySucceeded } from './savedTextRecovery.ts';
+ import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
+ import { parseReservedVersion } from './versionReserve.ts';
+@@ -130,7 +133,8 @@
+   private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
+   private proposal: { binding: ContextBinding; git: HostedImportGitCapture; draft: VersionDraft | null; retired: boolean; copied: boolean } | null = null;
+   private readonly context: Context;
+-  constructor(context: Context) { this.context = context; }
++  readonly agent: ServiceVersionEditController;
++  constructor(context: Context) { this.context = context; this.agent = new ServiceVersionEditController(() => this.agentCandidate()); }
+   getSnapshot = (): VersionEditState => this.state;
+   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+   private publish(next: VersionEditState): void {
+@@ -140,6 +144,7 @@
+         this.state.edit.status?.windowGeneration !== this.recoveryCompletion.binding.windowGeneration ||
+         !usable(this.state.edit) || this.state.edit.unknownEvidence)) this.recoveryCompletion = null;
+     for (const listener of this.listeners) listener();
++    this.agent.sourceChanged();
+   }
+   private edit(next: OwnerState): void { this.publish({ ...this.state, edit: next }); }
+   private attempt(patch: Partial<VersionAttempt>): void {
+@@ -223,7 +228,7 @@
+     return this.configReason() ?? this.context.otherEditReason(this.state.projectId ?? '') ?? this.operationReason(reserved);
+   }
+   openReason(): string | null {
+-    return this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
++    return (this.agent.retains() ? 'Wait for the original delegated Save call AND native retirement. Do not resend Apply.' : null) ?? this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+       (!this.selectedEntry() && Object.keys(this.state.entries).length >= 16 ? 'Sixteen in-memory version drafts are already retained. No draft will be evicted automatically.' : null);
+   }
+   private sameContext(binding: ContextBinding, selected = true): boolean {
+@@ -308,7 +313,7 @@
+   }
+   reservedOpenReason(): string | null {
+     const entry = this.selectedEntry();
+-    return this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
++    return (this.agent.retains() ? 'Wait for the original delegated Save call and native retirement.' : null) ?? this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+       (!entry && Object.keys(this.state.entries).length >= 16 ? 'Existing version drafts are retained; no draft will be evicted.' : null) ??
+       (entry && (entry.stale || versionDraftDirty(entry)) ?
+       'Keep or explicitly discard the existing version draft before opening a reservation. It will not be overwritten.' : null);
+@@ -319,7 +324,7 @@
+     return this.start(false, false, reserved);
+   }
+   private start(review: boolean, reload: boolean, reserved?: ReservedVersion, proposal?: HostedVersionProposal): boolean {
+-    if (this.disposed || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
++    if (this.disposed || this.agent.retains() || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
+     const project = this.context.selectedProject(), status = this.state.edit.status, entry = this.selectedEntry();
+     if (!project || !status || review && (!entry || entry.stale || !versionValuesBounded(entry.values))) return false;
+     const git = proposal ? captureHostedImportGit(this.hostedGit(), proposal, 'before-open') : null;
+@@ -332,6 +337,9 @@
+       reload, expectedOriginal: reload ? null : entry?.original ?? null, ...(reserved ? { reserved } : {}), ...(proposal ? { proposal } : {}) });
+     const submission = review && entry ? this.submission(entry) : null;
+     const originalApi = this.api;
++    this.agent.newOriginal();
++    // Revoking the previous unused permission can synchronously notify UI.
++    if (this.disposed || this.api !== originalApi || this.context.selectedProject() !== project || this.selectedEntry() !== entry || this.agent.retains()) return false;
+     this.proposal = proposal && git ? { binding, git, draft: entry, retired: false, copied: false } : null;
+     this.publish({ ...this.state, error: null, hostedImportIssue: null, edit: { ...this.state.edit, attempt: { binding, submission, sessionId: null, projection: null,
+       projectionRevision: status.statusRevision, openAdopted: false, prepareClaimed: false, applyClaimed: false, submittedPlanToken: null,
+@@ -393,7 +401,7 @@
+       (!attempt.binding.proposal || this.proposalServiceMatches(attempt.binding)) && (!binding || same(current, binding));
+   }
+   apply(binding: VersionApplyBinding): boolean {
+-    if (!this.api || !this.canApply(binding)) return false;
++    if (!this.api || this.agent.delegated() || !this.canApply(binding)) return false;
+     const original = this.state.edit.attempt!.binding, api = this.api;
+     this.attempt({ applyClaimed: true, submittedPlanToken: binding.planToken });
+     this.context.onSaveBoundary(original.projectId);
+@@ -404,6 +412,35 @@
+       void this.command('apply', original, () => api.applyReleaseVersionEdit(binding.sessionId, binding.planToken));
+     return true;
+   }
++  private agentCandidate(): VersionEditCandidate | null {
++    const api = this.api, port = api?.agentVersionEdit, attempt = this.state.edit.attempt, entry = this.selectedEntry();
++    const project = this.context.selectedProject(), status = this.state.edit.status, binding = currentVersionApplyBinding(this.state);
++    const owner = attempt?.projection, view = owner?.prepared?.view;
++    if (!api || !port || !attempt || !entry || !project || !status || !binding || !view || !owner?.checkout ||
++        attempt.binding.proposal || view.intent !== 'edit' || view.file.before.state !== 'present' || !this.canApply(binding)) return null;
++    const original = attempt.binding;
++    const review: VersionEditReview = freeze({original:{sessionId:binding.sessionId,ownerGeneration:owner.ownerGeneration,
++      revision:owner.checkout.revision,planToken:binding.planToken},nativeStatusRevision:status.statusRevision,
++      name:view.values.name,build:view.values.build,source:view.source,beforeBytes:view.file.before.bytes,beforeSha256:view.file.before.sha256,
++      afterBytes:view.file.after.bytes,afterSha256:view.file.after.sha256,candidateId:original.reserved?.candidateId ?? null});
++    const live = () => !this.disposed && this.api === api && this.api.agentVersionEdit === port &&
++      this.state.edit.attempt?.binding === original && this.context.selectedProject() === project && this.sameContext(original) &&
++      !this.state.edit.integrityFailed && !this.state.edit.generationLost && !this.state.edit.nativeBlocked && !this.state.edit.observationIssue &&
++      !this.configReason() && !this.context.otherEditReason(original.projectId) && !this.operationReason(!!original.reserved);
++    const current = () => live() && this.selectedEntry() === entry && this.state.edit.status?.statusRevision === review.nativeStatusRevision && this.canApply(binding);
++    return {projectId:project.project.id,api:port,review,current,live,apply:async (origin: VersionEditOrigin) => {
++      if (!current()) throw new Error('Version edit source or approval changed.');
++      this.attempt({applyClaimed:true,submittedPlanToken:binding.planToken});
++      this.context.onSaveBoundary(original.projectId);
++      // Applies equally to manual and genuine reserved inputs. Nothing from
++      // a listener, navigation or another draft can retarget this native call.
++      if (!live() || this.selectedEntry() !== entry || this.state.edit.attempt?.closeRequested ||
++          this.state.edit.status?.statusRevision !== review.nativeStatusRevision || this.remainingReviewMs() <= 0) {
++        this.requestClose(); throw new Error('Original delegated Save refused before invocation.');
++      }
++      await this.command('apply',original,() => port.apply(origin)); // Retain actual caller return, not apply()'s boolean.
++    }};
++  }
+   requestClose(): void {
+     const attempt = this.state.edit.attempt;
+     if (!attempt || settled(attempt) || attempt.handled || attempt.closeRequested) return;
+@@ -426,7 +463,7 @@
+   beginConnection(): void {
+     if (this.disposed) return;
+     this.invalidate();
+-    const held = !settled(this.state.edit.attempt) || !savedTextRecoverySettled(this.state.edit.recovery) || !!this.state.edit.status?.active || this.state.edit.nativeBlocked || this.state.edit.integrityFailed;
++    const held = this.agent.retains() || !settled(this.state.edit.attempt) || !savedTextRecoverySettled(this.state.edit.recovery) || !!this.state.edit.status?.active || this.state.edit.nativeBlocked || this.state.edit.integrityFailed;
+     this.publish({ ...this.state, mode: 'unavailable', help: null, connectionGeneration: Math.min(U32_MAX, this.state.connectionGeneration + 1),
+       edit: { ...this.state.edit, nativeBlocked: this.state.edit.nativeBlocked || held } });
+     if (held) return; // Retain the ORIGINAL API/subscription for its own finality.
+@@ -439,6 +476,7 @@
+     if (this.api) this.beginConnection();
+     if (this.api || this.state.edit.nativeBlocked || this.state.edit.integrityFailed || this.state.edit.generationLost) return;
+     this.api = api; this.publish({ ...this.state, mode: api.mode, edit: { ...this.state.edit, mode: api.mode } });
++    await this.agent.connect(api.agentVersionEdit);
+     this.syncProject(); if (api.mode === 'native') await this.checkStatus();
+   }
+   async checkStatus(): Promise<void> {
+@@ -625,6 +663,7 @@
+   }
+   inspectRecoveryReason(): string | null {
+     const edit = this.state.edit, project = this.context.selectedProject();
++    if (this.agent.retains()) return 'Wait for the original delegated Save call and native retirement.';
+     if (this.disposed || this.state.mode !== 'native' || edit.mode !== 'native') return 'Recovery inspection requires the qualified native saved-version service; browser preview cannot inspect files.';
+     if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.unknownEvidence || edit.observationIssue)
+       return 'Original native ownership or cleanup is unverified. Keep the original operation; recovery cannot reset that block.';
+@@ -780,6 +819,8 @@
+           this.adoptOutcome(attempt);
+         }
+         attempt = this.state.edit.attempt; if (!attempt) continue;
++        if (attempt.projection?.phase === 'final' && attempt.projection.nativeFinality === 'settled' && !attempt.projection.lateSettled)
++          this.agent.nativeFinal(attempt.projection.sessionId,attempt.projection.ownerGeneration,!this.state.edit.integrityFailed && !this.state.edit.unknownEvidence);
+         if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && !attempt.handled) this.attempt({ handled: true });
+         attempt = this.state.edit.attempt;
+         if (!attempt || attempt.handled || !attempt.sessionId || !attempt.projection || this.state.edit.generationLost ||
+@@ -818,6 +859,7 @@
+   }
+   dispose(): void {
+     if (this.disposed) return;
++    this.agent.dispose();
+     this.shutdownIntent();
+     const attempt = this.state.edit.attempt;
+     if (this.api?.mode === 'native' && attempt?.sessionId && attempt.projection && !attempt.closeClaimed && !this.state.edit.generationLost &&
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -424,6 +424,7 @@
+   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
+   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
++  readonly agentVersionEdit?: import('./serviceVersionEditProtocol.ts').VersionEditAgentApi | null;
+   readonly agentConfiguration?: import('./serviceConfigurationProtocol.ts').ConfigurationApi | null;
+   readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
+   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
+diff --git a/desktop/tests/release-version-edit.test.mjs b/desktop/tests/release-version-edit.test.mjs
+--- a/desktop/tests/release-version-edit.test.mjs
++++ b/desktop/tests/release-version-edit.test.mjs
+@@ -1002,3 +1002,81 @@
+   lost.h.publish(lost.h.owner('unknown'));
+   assert.equal(lost.h.controller.prefillHostedCommitMessage(), false); assert.equal(lost.git.repository.getSnapshot().draft.message, '');
+ });
++
++// Existing actual controller, original native-status parser and controlled API
++// promises. These tests do not claim a fake native lease, write or joined IO.
++function versionDelegate(h) {
++  let listener, access, allowHook = null;
++  const requests = [], revokes = [];
++  const api = {
++    subscribe: async fn => { listener=fn; return ()=>{listener=null;}; },
++    allow: async input => {
++      requests.push(input);if(allowHook)await allowHook();
++      const owner=h.state.edit.attempt.projection, v=owner.prepared.view;
++      return access={schemaVersion:1,serviceInstance:'1'.repeat(32),projectId:'2'.repeat(32),grantId:'3'.repeat(32),nonce:input.nonce,
++        review:{original:clone(input.original),nativeStatusRevision:input.statusRevision,name:v.values.name,build:v.values.build,source:v.source,
++          beforeBytes:v.file.before.bytes,beforeSha256:v.file.before.sha256,afterBytes:v.file.after.bytes,afterSha256:v.file.after.sha256,candidateId:h.state.edit.attempt.binding.reserved?.candidateId??null},
++        live:true,remainingMs:800000,request:null};
++    },
++    revoke: async nonce => {revokes.push(nonce);return access?{...access,live:false,remainingMs:0}:{schemaVersion:1,serviceInstance:null,projectId:null,grantId:null,nonce:null,review:null,live:false,remainingMs:0,request:null};},
++    status: async()=>access,
++    apply: origin => {const p=deferred();requests.push({kind:'apply',origin:clone(origin),...p});return p.promise;},
++  };
++  h.api.agentVersionEdit=api;
++  return {requests,revokes,api,get access(){return access;},allowHook:fn=>{allowHook=fn;},submit:()=>{
++    const a=clone(access);a.live=false;a.remainingMs=0;a.request={schemaVersion:1,origin:{projectId:a.projectId,serviceInstance:a.serviceInstance,requestId:'4'.repeat(32)},grantId:a.grantId,revision:1,phase:'queued',settlement:'pending',review:clone(a.review),cancelRequested:false,result:null,doNotReplay:true};
++    listener(a);return a;
++  }};
++}
++async function delegateReview({reserved=false,onSaveBoundary}={}) {
++  const h=harness({onSaveBoundary});const d=versionDelegate(h);await h.controller.connect(h.api);
++  if(reserved){
++    const value={id:'e'.repeat(32),candidateId:'f1234567-1234-4234-8234-123456789012',name:VALUES.name,build:Number(VALUES.build)};
++    assert.equal(h.controller.openReserved(value),true);h.publish(h.owner('opening'));h.publish(h.owner('editing'));assert.equal(h.controller.review(),true);h.publish(h.owner('reviewing'));
++  } else await reviewing(h);
++  assert.equal(h.controller.agent.canAllow(),true);await h.controller.agent.allow();assert.ok(d.access?.live);return {h,d};
++}
++
++test('manual and genuine reserved controller review delegate one Apply; final event cannot join pending API',async()=>{
++ for(const reserved of [false,true]){
++  const {h,d}=await delegateReview({reserved});d.submit();await flush();const apply=d.requests.find(x=>x.kind==='apply');assert.ok(apply);
++  assert.equal(h.count('apply'),0);assert.equal(h.state.edit.attempt.applyClaimed,true);assert.equal(h.controller.apply(currentVersionApplyBinding(h.state)),false);
++  h.publish(h.owner('applying'));const final=h.publish(h.owner('final'));assert.equal(h.state.edit.attempt.handled,true);assert.equal(versionDraftDirty(h.controller.selectedEntry()),false);
++  assert.equal(h.controller.agent.retains(),true);assert.notEqual(h.controller.openReason(),null);assert.equal(h.controller.open(),false);
++  apply.resolve(final);await flush();assert.equal(h.controller.agent.retains(),false);assert.equal(d.requests.filter(x=>x.kind==='apply').length,1);assert.equal(h.count('open'),1);
++ }
++});
++
++test('claimed delegation rechecks subscriber and save-boundary drift before Apply, retains STOP until original final',async()=>{
++ for(const cut of ['event','boundary','draft','peer']){
++  let h,armed=false;const v=await delegateReview({onSaveBoundary:()=>{if(armed&&cut==='boundary')h.controller.selectionIntent();}});h=v.h;const d=v.d;armed=true;
++  let fired=false;const off=h.controller.agent.subscribe(()=>{if(!fired&&h.controller.agent.delegated()){fired=true;
++   if(cut==='event')h.controller.selectionIntent();if(cut==='draft')h.controller.editField('build','9');if(cut==='peer')h.operation('another original');
++  }});
++  d.submit();await flush();off();assert.equal(d.requests.filter(x=>x.kind==='apply').length,0,cut);assert.equal(d.revokes.length,1,cut);assert.equal(h.controller.agent.retains(),true);
++  h.closeFinal();await flush();assert.equal(h.controller.agent.retains(),false,cut);if(cut==='draft')assert.equal(h.controller.selectedEntry().values.build,'9');
++ }
++});
++
++test('delegated lost ACK never replays; newer draft and original exact final survive later status',async()=>{
++ const {h,d}=await delegateReview();d.submit();await flush();const apply=d.requests.find(x=>x.kind==='apply');h.publish(h.owner('applying'));h.controller.editField('build','9');
++ const final=h.publish(h.owner('final'));assert.equal(h.controller.selectedEntry().values.build,'9');assert.equal(h.controller.selectedEntry().stale,true);
++ // A later, different lastTerminal is not the old caller's return or outcome.
++ const next={...clone(final.lastTerminal),sessionId:'f'.repeat(32)};h.emit(status(final.statusRevision+1,null,next));assert.equal(h.controller.agent.retains(),true);
++ apply.reject({code:'IpcReplyLost'});await flush();assert.equal(d.requests.filter(x=>x.kind==='apply').length,1);assert.equal(h.controller.agent.retains(),false);
++ assert.equal(h.state.edit.attempt.projection.sessionId,ID.session);assert.equal(h.controller.selectedEntry().values.build,'9');
++});
++
++test('Allow pending retains old API; reentrant revoke and replaced context never issue delegated Apply',async()=>{
++ const h=harness(),d=versionDelegate(h);await h.controller.connect(h.api);await reviewing(h);const wait=deferred();d.allowHook(()=>wait.promise);
++ const allowed=h.controller.agent.allow();await flush();assert.equal(d.requests.length,1);h.controller.agent.revoke();h.controller.beginConnection();
++ assert.equal(h.controller.agent.retains(),true);wait.resolve();await allowed;await flush();assert.equal(d.revokes.length,1);assert.equal(d.requests.filter(x=>x.kind==='apply').length,0);
++});
++
++test('GUI winner before Submit remains ordinary Apply; unused allowance revokes without another command', async()=>{
++ const {h,d}=await delegateReview();const binding=currentVersionApplyBinding(h.state);
++ assert.equal(h.controller.apply(binding),true);await flush();assert.equal(h.count('apply'),1);assert.equal(d.revokes.length,1);
++ assert.equal(d.requests.filter(x=>x.kind==='apply').length,0);assert.equal(h.controller.agent.delegated(),false);
++ h.publish(h.owner('applying'));const final=h.publish(h.owner('final'));h.last('apply').resolve(final);await flush();
++ assert.equal(h.state.edit.attempt.handled,true);assert.equal(h.controller.agent.retains(),false);assert.equal(h.count('close'),0);
++});

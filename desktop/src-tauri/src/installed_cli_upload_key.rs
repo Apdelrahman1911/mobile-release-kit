@@ -1,0 +1,291 @@
+//! Fixed IDs-only delegation to the running Desktop. No key material, paths,
+//! native admission, generation or assessment exists in the installed client.
+use super::*;
+use crate::service_upload_key_protocol as key;
+pub(super) const COMMANDS: [&str; 4] = [
+    "upload-key-scope",
+    "upload-key-submit",
+    "upload-key-status",
+    "upload-key-cancel",
+];
+pub(super) const CREDENTIAL_COMMANDS: [&str; 4] = ["credential-scope", "credential-submit", "credential-status", "credential-cancel"];
+enum Command {
+    Scope(Id),
+    Submit {
+        project: Id,
+        instance: Id,
+        grant: Id,
+    },
+    Status(key::Query),
+    Cancel(key::Query),
+}
+struct Parsed {
+    command: Command,
+    json: bool,
+    credential: bool,
+}
+pub(super) fn recognizes(args: &[OsString]) -> bool {
+    args.first()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| COMMANDS.contains(&s) || CREDENTIAL_COMMANDS.contains(&s))
+}
+fn parse(args: &[OsString]) -> Result<Parsed, Error> {
+    let mut words = args
+        .iter()
+        .map(|s| s.to_str().ok_or(Error::InvalidRequest))
+        .collect::<Result<Vec<_>, _>>()?;
+    if words.iter().any(|s| s.len() > 64) {
+        return Err(Error::InvalidRequest);
+    }
+    let json = words.last() == Some(&"--json");
+    if json {
+        words.pop();
+    }
+    // Fixed aliases to the SAME Inbox and request grammar. Kind/material may
+    // only come from the exact native Desktop grant, never the command name.
+    let credential = words.first().is_some_and(|s| CREDENTIAL_COMMANDS.contains(s));
+    if let Some(index) = words.first().and_then(|s| CREDENTIAL_COMMANDS.iter().position(|a| a == s)) {
+        words[0] = COMMANDS[index];
+    }
+    let command = match words.as_slice() {
+        ["upload-key-scope", project] => Command::Scope(Id::parse(project)?),
+        ["upload-key-submit", project, instance, grant, "--reviewed"] => Command::Submit {
+            project: Id::parse(project)?,
+            instance: Id::parse(instance)?,
+            grant: Id::parse(grant)?,
+        },
+        [kind @ ("upload-key-status" | "upload-key-cancel"), project, instance, request] => {
+            let q = key::Query {
+                project_id: Id::parse(project)?,
+                service_instance: Id::parse(instance)?,
+                request_id: Id::parse(request)?,
+            };
+            if *kind == COMMANDS[2] {
+                Command::Status(q)
+            } else {
+                Command::Cancel(q)
+            }
+        }
+        _ => return Err(Error::InvalidRequest),
+    };
+    Ok(Parsed { command, json, credential })
+}
+fn receipt(q: &key::Query) -> String { receipt_named(q, false) }
+fn receipt_named(q: &key::Query, credential: bool) -> String {
+    let family = if credential { "credential" } else { "upload-key" };
+    format!("Request {}\nCheck: mrk {family}-status {} {} {} --json\nStop: mrk {family}-cancel {} {} {} --json\n",q.request_id.as_str(),q.project_id.as_str(),q.service_instance.as_str(),q.request_id.as_str(),q.project_id.as_str(),q.service_instance.as_str(),q.request_id.as_str())
+}
+fn unconfirmed(q: &key::Query, error: Error, json: bool) -> Vec<u8> {
+    if json {
+        let mut out=serde_json::to_vec(&serde_json::json!({"version":1,"ok":false,"error":error,"request":q,"doNotReplay":true,"message":"Outcome not confirmed. Keep this request ID and check or stop its original; do not submit again."})).unwrap_or_else(|_|b"{\"ok\":false,\"error\":\"state_unknown\"}".to_vec());
+        out.push(b'\n');
+        out
+    } else {
+        format!(
+            "Outcome not confirmed. Do not submit again.\n{}",
+            receipt(q)
+        )
+        .into_bytes()
+    }
+}
+fn output(
+    response: &p::Response,
+    q: &key::Query,
+    grant: Option<&Id>,
+    json: bool,
+) -> Result<(u8, Vec<u8>), Error> {
+    if let p::ResponseBody::Error(e) = response.response {
+        return Err(e);
+    }
+    let p::ResponseBody::UploadKeyRequest(row) = &response.response else {
+        return Err(Error::StateUnknown);
+    };
+    row.validate()?;
+    if row.origin != *q
+        || response.service_instance != q.service_instance
+        || grant.is_some_and(|g| g != &row.grant_id)
+    {
+        return Err(Error::StateUnknown);
+    }
+    let code = match row.state {
+        key::State::Unknown | key::State::RecoveryRequired => 6,
+        key::State::Refused | key::State::Cancelled | key::State::Failed => 5,
+        _ => 0,
+    };
+    let bytes = if json {
+        let mut b = p::encode_response(response)?;
+        b.push(b'\n');
+        b
+    } else {
+        let mut out = format!(
+            "{}: {:?}; {:?}.\n{}",
+            if row.kind.credential() { "Credential" } else { "Upload key" }, row.state,
+            row.settlement,
+            receipt_named(q, row.kind.credential())
+        );
+        out.push_str(match row.state {
+            key::State::ReviewReady => {
+                "The original stored-record Load and assessment returned. This is not assignment, a save, or private cleanup. In the same Desktop view, Check original permission for the current review, withdraw this permission, then separately review and allow Bind.\n"
+            }
+            key::State::ImportedUnassigned => {
+                "The exact prepared import was saved as a NEW encrypted, unassigned record. Save authenticates its descriptor, not a fresh payload assessment: withdraw this permission, separately load and assess the stored record, then separately review and allow Assign.\n"
+            }
+            key::State::SavedUnassigned => {
+                "Encrypted key saved, not assigned. Review and assign in Desktop before use.\n"
+            }
+            key::State::Assigned => {
+                "The explicitly reviewed existing record is assigned in this Desktop session.\n"
+            }
+            key::State::BackupDelivered => {
+                "The original encrypted backup and recovery-code file were delivered through Desktop's two native dialogs. Keep both safe and separate; no private output is returned here.\n"
+            }
+            key::State::RestoredUnassigned => {
+                "Encrypted Android key restored as a NEW, unassigned record. Withdraw the original permission, then separately select/assess the record and review Assign in Desktop.\n"
+            }
+            _ => "No saved or assigned success is implied by this observation.\n",
+        });
+        out.push_str(if matches!(row.kind, key::Kind::BackupEncrypted | key::Kind::RestoreEncrypted) {
+            "No assignment, replacement, remember-assignment, recovery acknowledgment or retry was authorized. A stopped or unknown result may have left files or a NEW record; do not repeat it.\n"
+        } else {
+            "No backup, restore, remember-assignment, recovery acknowledgment or retry was authorized.\n"
+        });
+        out.into_bytes()
+    };
+    Ok((code, bytes))
+}
+fn scope_output(response: &p::Response, project: &Id, json: bool) -> Result<(u8, Vec<u8>), Error> {
+    if let p::ResponseBody::Error(e) = response.response {
+        return Err(e);
+    }
+    let p::ResponseBody::UploadKeyAccess(a) = &response.response else {
+        return Err(Error::StateUnknown);
+    };
+    a.validate()?;
+    if a.project_id.as_ref().is_some_and(|p| p != project)
+        || a.service_instance
+            .as_ref()
+            .is_some_and(|i| i != &response.service_instance)
+    {
+        return Err(Error::StateUnknown);
+    }
+    if json {
+        let mut out = p::encode_response(response)?;
+        out.push(b'\n');
+        Ok((0, out))
+    } else {
+        let mut out=String::from("One exact Desktop-reviewed credential action in the shared upload-key namespace; CLI read access alone never authorizes it.\n");
+        if let (Some(kind), Some(instance), Some(grant)) =
+            (a.kind, &a.service_instance, &a.grant_id)
+        {
+            out.push_str(&format!(
+                "Kind: {kind:?}; enabled: {}; consumed: {}.\nInstance: {}\nConsent: {}\n",
+                a.enabled,
+                a.consumed,
+                instance.as_str(),
+                grant.as_str()
+            ));
+        } else {
+            out.push_str("No credential consent is retained. Prepare or review the existing record in Desktop, then explicitly allow one action.\n");
+        }
+        out.push_str("Desktop may separately allow loading one selected existing encrypted Android key; review-ready is not Bind, and no record selector is accepted in CLI arguments. Never generate a replacement for an existing/reserved/unknown key. Encrypted backup/restore require separate exact Desktop consent and both genuine native dialogs; no CLI path, key, password or recovery code is accepted. Restore is NEW and unassigned, not a Bind or recovery acknowledgment. Native qualification is still required.\n");
+        out.push_str("General credential aliases reuse this same grant and 32-request inbox. Desktop must choose the source and enter private fields and prepare a NEW encrypted Save first; CLI Choose is not implemented. Prepared Save, fresh stored Load/assessment and Assign each need separate consent. Android Load/Bind keep their existing actions. No replacement, session-only import, automatic follow-on, credential/account verification or native availability is granted.\n");
+        Ok((0, out.into_bytes()))
+    }
+}
+pub(super) fn run(args: Vec<OsString>) -> u8 {
+    let json = args.iter().any(|v| v == "--json");
+    let (code, bytes) = parse(&args)
+        .and_then(execute)
+        .unwrap_or_else(|e| (exit_code(e), error_bytes(e, json)));
+    if std::io::stdout().write_all(&bytes).is_err() {
+        6
+    } else {
+        code
+    }
+}
+fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let (origin, grant, project, body) = match options.command {
+            Command::Scope(project) => (
+                None,
+                None,
+                Some(project.clone()),
+                p::RequestBody::UploadKeyScope(p::ProjectQuery {
+                    project_id: project,
+                }),
+            ),
+            Command::Submit {
+                project,
+                instance,
+                grant,
+            } => {
+                let q = key::Query {
+                    project_id: project,
+                    service_instance: instance,
+                    request_id: Id::random()?,
+                };
+                // Actual original request ID exists before any connection/send.
+                std::io::stderr()
+                    .write_all(receipt_named(&q, options.credential).as_bytes())
+                    .map_err(|_| Error::Unavailable)?;
+                (
+                    Some(q.clone()),
+                    Some(grant.clone()),
+                    None,
+                    p::RequestBody::UploadKeySubmit(key::Submit {
+                        origin: q,
+                        grant_id: grant,
+                    }),
+                )
+            }
+            Command::Status(q) => (
+                Some(q.clone()),
+                None,
+                None,
+                p::RequestBody::UploadKeyStatus(q),
+            ),
+            Command::Cancel(q) => (
+                Some(q.clone()),
+                None,
+                None,
+                p::RequestBody::UploadKeyCancel(q),
+            ),
+        };
+        let result = (|| {
+            let path = application_data()?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| Error::Unavailable)?;
+            let request = p::Request {
+                version: p::VERSION,
+                request_id: Id::random()?,
+                request: body,
+            };
+            let response = rt.block_on(crate::installed_cli_ipc::request(&path, &request))?;
+            if let Some(q) = &origin {
+                output(&response, q, grant.as_ref(), options.json)
+            } else {
+                scope_output(
+                    &response,
+                    project.as_ref().ok_or(Error::InvalidRequest)?,
+                    options.json,
+                )
+            }
+        })();
+        match (result, origin) {
+            (Ok(v), _) => Ok(v),
+            (Err(e), Some(q)) => Ok((6, unconfirmed(&q, e, options.json))),
+            (Err(e), None) => Err(e),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = options;
+        Err(Error::UnsupportedPlatform)
+    }
+}
+#[cfg(test)]
+#[path = "installed_cli_upload_key_tests.rs"]
+mod tests;

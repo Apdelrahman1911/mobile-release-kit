@@ -1,0 +1,722 @@
+--- a/desktop/src-tauri/src/apple_provisioning_protocol.rs
++++ b/desktop/src-tauri/src/apple_provisioning_protocol.rs
+@@ -27,6 +27,14 @@
+     Availability, ExecutionMode, Outcome, Phase, Profile,
+ };
+
++#[path = "apple_provisioning_recovery_selection.rs"]
++mod recovery_selection;
++pub(crate) use recovery_selection::{
++    recovery_history, recovery_scope_matches, RecoveryHistory, RECOVERY_LIMIT,
++};
++#[cfg(test)]
++pub(crate) use recovery_selection::tests::sample as recovery_comparison_fixture;
++
+ pub(crate) const PROTOCOL: &str = "mrk-apple-bundle-provisioning/1";
+ pub(crate) const EVENT: &str = "apple-bundle-provisioning-state-changed";
+ pub(crate) const IPC_LIMIT: usize = 8192;
+@@ -35,7 +43,8 @@
+ pub(crate) const EVENT_LIMIT: usize = 16 * 1024;
+ pub(crate) const FRAME_LIMIT: usize = 32 * 1024;
+ pub(crate) const ACK_LIMIT: usize = 2048;
+-pub(crate) const STATUS_LIMIT: usize = 16 * 1024;
++// The bounded native historical list is not part of any worker frame.
++pub(crate) const STATUS_LIMIT: usize = 64 * 1024;
+ pub(crate) const MAX_EVENTS: u32 = 3;
+
+ pub(crate) fn invalid() -> BridgeError {
+@@ -428,6 +437,7 @@
+             account.rows.iter().any(|row| row == prior)
+                 && prior.intent.provenance.operation_id.as_str() == reference.operation_id
+                 && prior.intent.provenance.owner_generation.as_str() == reference.owner_generation
++                && recovery_scope_matches(prior, &scope)
+                 && prior.intent.target == scope.target,
+         )?;
+     } else {
+@@ -1056,6 +1066,7 @@
+     pub(crate) outcome: Option<Outcome>,
+     pub(crate) reason: Reason,
+     pub(crate) result: Option<ResultData>,
++    pub(crate) recovery: Option<RecoveryHistory>,
+ }
+ #[derive(Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+@@ -90,6 +90,15 @@
+ #[derive(Default)]
+ pub(super) struct Registry {
+     review: Option<Arc<AppleProvisioningReview>>,
++    recovery: Option<RecoveryPublication>,
++}
++
++// Detached historical DATA only. It must not keep a finished Session,
++// NativeUse, material loan or runtime alive after original retirement.
++struct RecoveryPublication {
++    reference: apple_wire::Reference,
++    context: apple_wire::Context,
++    history: apple_wire::RecoveryHistory,
+ }
+
+ impl Reason {
+@@ -176,12 +185,42 @@
+             outcome: self.outcome.map(Outcome::store),
+             reason: self.reason.apple(),
+             result,
++            recovery: None,
+         })
+     }
+ }
+
+-pub(super) fn invalidate_review(registry: &mut Registry) {
++pub(super) fn invalidate_review(registry: &mut Registry) -> bool {
+     registry.review = None;
++    // Public historical DATA may be withdrawn, never replaced or upgraded.
++    // Idle context invalidation must advance the same original status revision.
++    registry.recovery.take().is_some()
++}
++
++pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
++    projection.recovery = None;
++    if let Some(stored) = &registry.recovery {
++        if projection.operation_id == stored.reference.operation_id
++            && projection.owner_generation == stored.reference.owner_generation
++            && projection.context == stored.context
++            && projection.context.mode == apple_wire::Mode::Review
++            && projection.phase == apple_wire::Phase::Terminal
++            && projection.outcome == Some(apple_wire::Outcome::Complete)
++            && projection.reason == apple_wire::Reason::None
++            && projection.result.is_some()
++        {
++            projection.recovery = Some(stored.history.clone());
++        }
++    }
++}
++
++fn recovery_backing_bytes() -> Option<usize> {
++    // Original list plus its bounded construction scratch. The ordinary two
++    // status copies below cover serialized/projected replies and events.
++    apple_wire::RECOVERY_LIMIT
++        .checked_mul(2)?
++        .checked_add(apple_wire::IPC_LIMIT)?
++        .checked_add(std::mem::size_of::<RecoveryPublication>())
+ }
+
+ pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
+@@ -192,6 +231,7 @@
+     store::document_backing_bytes()?
+         .checked_add(APPLE_PROVISIONING_INPUT_LIMIT)?
+         .checked_add(2 * apple_wire::STATUS_LIMIT)?
++        .checked_add(recovery_backing_bytes()?)?
+         .checked_add(8192)
+ }
+ /// Finite representations, NOT RSS or a replacement for the installed
+@@ -215,6 +255,7 @@
+         total = total.checked_add(count.checked_mul(size)?)?;
+     }
+     total
++        .checked_add(recovery_backing_bytes()?)?
+         .checked_add(std::mem::size_of::<State>())?
+         .checked_add(std::mem::size_of::<Intent>())?
+         .checked_add(std::mem::size_of::<AppleProvisioningReview>())?
+@@ -583,6 +624,7 @@
+ /// while that exact Active is still held. No status getter invokes this.
+ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, owner: &Arc<Session>) {
+     registry.review = None;
++    registry.recovery = None;
+     if owner.domain != SavedCommandDomain::AppleProvisioning
+         || active.unknown
+         || active.context_invalidated
+@@ -606,15 +648,29 @@
+     let Some(Terminal::AppleProvisioning(terminal)) = &active.projection.result else {
+         return;
+     };
+-    if !terminal.lifetime.settled()
+-        || terminal.result.as_ref().is_none_or(|result| {
+-            result.observation != apple_wire::Observation::NotReturned
+-                || result.decision != apple_wire::Decision::ReviewRequired
+-        })
+-    {
++    if !terminal.lifetime.settled() || terminal.result.is_none() {
+         return;
+     }
+     if !native_complete(owner) {
++        return;
++    }
++    // A denied/inconclusive provider query may accompany a known joined local
++    // journal read. Publish only that historical DATA, never a Register review.
++    if let Some(history) = native_history(owner) {
++        registry.recovery = Some(RecoveryPublication {
++            reference: apple_wire::Reference {
++                operation_id: owner.id.clone(),
++                owner_generation: owner.generation.clone(),
++            },
++            context: context.clone(),
++            history,
++        });
++    }
++    // Preserve the original private one-use Register-review predicate exactly.
++    if terminal.result.as_ref().is_none_or(|result| {
++        result.observation != apple_wire::Observation::NotReturned
++            || result.decision != apple_wire::Decision::ReviewRequired
++    }) {
+         return;
+     }
+     let Ok(input) = owner.apple.input() else {
+@@ -816,6 +872,26 @@
+     }
+ }
+
++fn native_history(owner: &Session) -> Option<apple_wire::RecoveryHistory> {
++    #[cfg(all(
++        target_os = "macos",
++        target_pointer_width = "64",
++        any(target_arch = "aarch64", target_arch = "x86_64")
++    ))]
++    {
++        native::history(owner)
++    }
++    #[cfg(not(all(
++        target_os = "macos",
++        target_pointer_width = "64",
++        any(target_arch = "aarch64", target_arch = "x86_64")
++    )))]
++    {
++        let _ = owner;
++        None
++    }
++}
++
+ #[cfg(test)]
+ #[path = "saved_command_apple_provisioning_tests.rs"]
+ mod tests;
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
+@@ -827,3 +827,21 @@
+         .try_lock()
+         .is_ok_and(|jobs| jobs.complete && jobs.sealed && jobs.slots.iter().all(Slot::known))
+ }
++
++// Called only from the SAME positive retirement arm, not a status/IO getter.
++// All slots, including the actual NativeUse-retirement call, have returned and
++// joined. No restored row or new observer creates these original facts.
++pub(super) fn history(owner: &Session) -> Option<apple_wire::RecoveryHistory> {
++    if owner.apple.input().ok()?.context().mode != apple_wire::Mode::Review {
++        return None;
++    }
++    let binding = owner.apple.request_binding().ok()?;
++    let jobs = owner.apple.native.try_lock().ok()?;
++    if !jobs.complete || !jobs.sealed || !jobs.slots.iter().all(Slot::known) {
++        return None;
++    }
++    let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
++        return None;
++    };
++    apple_wire::recovery_history(account, &binding.scope).ok()
++}
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -2658,7 +2658,7 @@
+     }
+     pub(crate) fn context_changed_published(&self, publisher: Option<&android_registration::Publisher>) {
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
++        let mut r = self.inner.lock(); let apple_history_changed = apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+         if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,at)
+             | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,at)
+             | r.artifact_inputs.stop(artifact_wire::SelectionReason::ContextChanged,at)
+@@ -2666,6 +2666,7 @@
+         r.recovery = None;
+         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
+         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, at); }
++        if apple_history_changed { self.inner.bump(&mut r); }
+     }
+     pub(crate) fn registration_matches(&self, registration: u32) -> bool {
+         let r = self.inner.lock(); r.active.as_ref().is_none_or(|a| a.owner.registration == registration)
+@@ -3150,8 +3151,10 @@
+         match self.domain {
+             SavedCommandDomain::GenerateUploadKey => Ok(Status::GenerateUploadKey(upload_key::snapshot(r.revision,reason,operation))),
+             SavedCommandDomain::AppleProvisioning => {
++                let mut operation = operation.map(RunProjection::apple).transpose()?;
++                if let Some(projection) = &mut operation { apple_provisioning::project_recovery(&r.apple, projection); }
+                 let status=apple_wire::Status{schema_version:1,status_revision:r.revision,availability:reason.store()?,
+-                    operation:operation.map(RunProjection::apple).transpose()?};
++                    operation};
+                 crate::edit_protocol::bounded(&status,apple_wire::STATUS_LIMIT)?;Ok(Status::AppleProvisioning(status))
+             },
+             SavedCommandDomain::ToolAcquisition => {
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
+@@ -214,6 +214,91 @@
+ }
+
+ #[test]
++fn historical_projection_requires_the_exact_complete_review_and_never_mints_consent() {
++    // Only the private cached DATA projection is exercised positively here.
++    // No test creates the original retirement, NativeUse or a Register review.
++    let (account, scope) = apple_wire::recovery_comparison_fixture();
++    let baseline = projection();
++    let Context::AppleProvisioning(context) = &baseline.context else { panic!("fixture context") };
++    let mut registry = Registry::default();
++    registry.recovery = Some(RecoveryPublication {
++        reference: apple_wire::Reference {
++            operation_id: baseline.operation_id.clone(), owner_generation: baseline.owner_generation.clone(),
++        }, context: context.clone(), history: apple_wire::recovery_history(&account, &scope).unwrap(),
++    });
++    let mut projected = baseline.clone().public().apple().unwrap();
++    project_recovery(&registry, &mut projected);
++    assert!(projected.recovery.is_some() && registry.review.is_none());
++    for field in 0..8 {
++        let mut value = baseline.clone();
++        match field {
++            0 => value.operation_id = "1".repeat(32),
++            1 => value.owner_generation = "2".repeat(32),
++            2 => value.phase = Phase::Running,
++            3 => value.phase = Phase::Unknown,
++            4 => value.outcome = Some(Outcome::Failed),
++            5 => value.reason = Reason::ContextChanged,
++            6 => { let Context::AppleProvisioning(c) = &mut value.context else { unreachable!() }; c.mode = apple_wire::Mode::Reconcile; }
++            _ => { let Context::AppleProvisioning(c) = &mut value.context else { unreachable!() }; c.record_revision += 1; }
++        }
++        let mut projected = value.public().apple().unwrap();
++        project_recovery(&registry, &mut projected);
++        assert!(projected.recovery.is_none() && registry.review.is_none());
++    }
++    invalidate_review(&mut registry);
++    let mut projected = baseline.public().apple().unwrap();
++    project_recovery(&registry, &mut projected);
++    assert!(projected.recovery.is_none());
++}
++
++#[test]
++fn original_idle_context_loss_withdraws_only_history_and_advances_status() {
++    let application = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
++        std::path::PathBuf::from("/unopened-apple-history-withdrawal-runtime"),
++    ));
++    let (account, scope) = apple_wire::recovery_comparison_fixture();
++    let baseline = projection();
++    let Context::AppleProvisioning(context) = &baseline.context else { panic!("fixture context") };
++    {
++        // Stored projection DATA only; no original operation, join witness,
++        // material loan, Register review or native-positive fixture is created.
++        let mut registry = application.inner.lock();
++        registry.apple.recovery = Some(RecoveryPublication {
++            reference: apple_wire::Reference {
++                operation_id: baseline.operation_id.clone(), owner_generation: baseline.owner_generation.clone(),
++            }, context: context.clone(), history: apple_wire::recovery_history(&account, &scope).unwrap(),
++        });
++        registry.last = Some(baseline);
++    }
++    let before = application.status_apple_provisioning(apple_wire::Availability::Busy).unwrap();
++    assert!(before.operation.as_ref().unwrap().recovery.is_some());
++    application.context_changed();
++    let after = application.status_apple_provisioning(apple_wire::Availability::Busy).unwrap();
++    assert!(after.status_revision > before.status_revision);
++    assert!(after.operation.as_ref().unwrap().recovery.is_none());
++    assert_eq!(serde_json::to_value(before.operation.as_ref().unwrap().result.as_ref()).unwrap(),
++        serde_json::to_value(after.operation.as_ref().unwrap().result.as_ref()).unwrap());
++    let registry = application.inner.lock();
++    assert!(registry.prepared.is_none() && registry.active.is_none() && registry.apple.review.is_none());
++}
++
++#[test]
++fn original_unjoined_session_cannot_publish_history_or_restore_a_review() {
++    let application = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
++        std::path::PathBuf::from("/unopened-apple-history-runtime"),
++    ));
++    let (application, original) = super::super::tests::active_with_context(application, Context::AppleProvisioning(context()));
++    let parent = application.inner.lock();
++    let active = parent.active.as_ref().unwrap();
++    let mut registry = Registry::default();
++    retire_review(&mut registry, active, &original);
++    assert!(registry.recovery.is_none() && registry.review.is_none());
++    assert!(!original.watchdog_joined.load(Ordering::SeqCst));
++    assert!(!original.material_retired.load(Ordering::SeqCst));
++    assert!(!native_complete(&original));
++}
++
++#[test]
+ fn apple_unadmitted_original_status_cannot_start_state_or_borrow_access_consent() {
+     let owner = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
+         std::path::PathBuf::from("/unopened-apple-provisioning-runtime"),
+--- a/desktop/src-tauri/src/apple_provisioning_journal_tests.rs
++++ b/desktop/src-tauri/src/apple_provisioning_journal_tests.rs
+@@ -257,6 +257,45 @@
+         error
+     );
+     close(&store, &native);
++}
++
++#[test]
++fn historical_selection_after_real_store_reopen_preserves_unknown_and_native_fence() {
++    let (fixture, store, native) = opened(true);
++    let value = intent();
++    let mut first = AppleProvisioningJournal::new(store.clone(), native.clone());
++    let ack = first.reserve(Revision(0), value.clone(), armed(&value)).unwrap();
++    first.record_attempt(ack.revision, &ack.original, unknown_attempt(&value)).unwrap();
++    // Only the actual synchronous Store calls above ran. No worker, native
++    // joined receipt or provider authority is constructed by this fixture.
++    close(&store, &native);
++
++    let reopened = Arc::new(PrivateStateDirectory::open(&fixture.app).unwrap());
++    let later_use = Arc::new(reopened.begin_native_use().unwrap());
++    let mut later = AppleProvisioningJournal::new(reopened.clone(), later_use.clone());
++    let before = reopened.read(Namespace::AppleProvisioning).unwrap();
++    let found = later.inspect_account(&value.context.account_ref).unwrap();
++    let mut current = crate::apple_provisioning_protocol::ScopeData {
++        provisioning: value.context.clone(), provenance: value.provenance.clone(),
++        target: value.target.clone(), reviewed_at: None,
++    };
++    // Runtime aliases, current key revision and the explicit display name may
++    // differ. The stable original project/root/issuer and target must match.
++    current.provisioning.project_id = "new-runtime-alias".into();
++    current.provisioning.credential_revision += 1;
++    current.target.display_name = "New review label".into();
++    let history = crate::apple_provisioning_protocol::recovery_history(&found, &current).unwrap();
++    assert!(history.attempts.len() == 1 && history.hidden_unresolved == 0);
++    assert!(history.attempts[0].reference.operation_id == value.context.operation_id);
++    assert!(history.attempts[0].status == AttemptStatus::Unknown);
++    assert!(history.attempts[0].native_settlement == NativeSettlement::Pending);
++    assert!(later.retained_reservation().is_none());
++    let after = reopened.read(Namespace::AppleProvisioning).unwrap();
++    assert_eq!(before.revision, after.revision);
++    assert_eq!(before.bytes, after.bytes);
++    let another = variant(2, 1);
++    assert_eq!(later.reserve(found.revision, another.clone(), armed(&another)).err().unwrap().code, Error::RecoveryRequired);
++    close(&reopened, &later_use);
+ }
+
+ #[test]
+--- a/desktop/src/appleProvisioningTypes.ts
++++ b/desktop/src/appleProvisioningTypes.ts
+@@ -37,9 +37,21 @@
+   observation: AppleBundleObservation; decision: AppleBundleDecision; attempt: AppleAttemptSummary | null;
+   comparison: AppleBundleComparison | null; limitations: readonly string[];
+ }
++// Local historical records only, not an adopted operation or current account
++// disposition. Readback does not change any recorded settlement below.
++export interface AppleRecoveryAttempt {
++  reference: AppleProvisioningIdentity; displayName: string; observedAt: string;
++  status: AppleAttemptStatus; reason: AppleAttemptReason;
++  nativeSettlement: 'pending' | 'known' | 'unknown'; cancellationRequested: boolean;
++}
++export interface AppleRecoveryHistory {
++  schemaVersion: 1; scope: 'local-ios-bundle-attempts';
++  attempts: readonly AppleRecoveryAttempt[]; hiddenUnresolved: number;
++}
+ export interface AppleProvisioningOperation extends AppleProvisioningIdentity {
+   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
+   outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | null;
++  recovery: AppleRecoveryHistory | null;
+ }
+ export interface AppleProvisioningStatus {
+   schemaVersion: 1; statusRevision: number; availability: OfflinePreflightAvailability;
+--- a/desktop/src/appleProvisioningProtocol.ts
++++ b/desktop/src/appleProvisioningProtocol.ts
+@@ -3,7 +3,7 @@
+ import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
+ import { parseAndroidBuildSavedVersion } from './androidBuildProtocol.ts';
+ import type { AppleProvisioningContext, AppleProvisioningIdentity, AppleProvisioningMode, AppleProvisioningConsent,
+-  AppleProvisioningOperation, AppleProvisioningStatus, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
++  AppleProvisioningOperation, AppleProvisioningStatus, AppleRecoveryHistory, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
+
+ export const APPLE_PROVISIONING_EVENT = 'apple-bundle-provisioning-state-changed';
+ export const APPLE_PROVISIONING_LIMITATIONS = Object.freeze(['bundle-id-only', 'no-release-or-signing-readiness',
+@@ -24,6 +24,7 @@
+   'provider_result_requires_reconciliation', 'reconciliation_read_unavailable', 'reconciliation_context_changed',
+   'resource_validation_required', 'provider_outcome_still_unknown', 'ambiguous_recovery_resources', 'resource_found_review_required',
+   'response_readback_disagrees', 'provider_resource_confirmed', 'cancelled_after_settlement'] as const;
++const attemptStatuses = ['running', 'cancellation_requested', 'succeeded', 'failed', 'cancelled', 'recovery_required', 'unknown'] as const;
+ const fields = ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'credentialContextRevision',
+   'recordId', 'recordRevision', 'executionMode', 'platform', 'mode', 'reference', 'newApplication', 'displayName'] as const;
+ const keys = (value: unknown, names: readonly string[]): value is Record<string, unknown> => !!value &&
+@@ -34,6 +35,28 @@
+ const identity = (value: unknown): value is AppleProvisioningIdentity => keys(value, ['operationId', 'ownerGeneration']) && token(value.operationId) && token(value.ownerGeneration);
+ export function appleDisplayName(value: unknown): value is string {
+   return typeof value === 'string' && value.length > 0 && [...value].length <= 128 && !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value);
++}
++function recordedTimestamp(value: unknown): value is string {
++  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?\+00:00$/.test(value) || value.endsWith('.000000+00:00')) return false;
++  const date = new Date(value);
++  return Number.isFinite(date.valueOf()) && date.toISOString().slice(0, 19) === value.slice(0, 19);
++}
++export function parseAppleRecoveryHistory(value: unknown): AppleRecoveryHistory | null {
++  try {
++    const v = copyBoundedComparisonData(value, 32768);
++    if (!keys(v, ['schemaVersion', 'scope', 'attempts', 'hiddenUnresolved']) || v.schemaVersion !== 1 ||
++        v.scope !== 'local-ios-bundle-attempts' || !Array.isArray(v.attempts) || v.attempts.length > 32 ||
++        !counter(v.hiddenUnresolved, 32 - v.attempts.length)) return null;
++    const seen = new Set<string>();
++    for (const row of v.attempts) {
++      if (!keys(row, ['reference', 'displayName', 'observedAt', 'status', 'reason', 'nativeSettlement', 'cancellationRequested']) ||
++          !identity(row.reference) || seen.has(row.reference.operationId) || !appleDisplayName(row.displayName) ||
++          !recordedTimestamp(row.observedAt) || !oneOf(row.status, attemptStatuses) || !oneOf(row.reason, attemptReasons) ||
++          !oneOf(row.nativeSettlement, ['pending', 'known', 'unknown']) || typeof row.cancellationRequested !== 'boolean') return null;
++      seen.add(row.reference.operationId);
++    }
++    return v as unknown as AppleRecoveryHistory;
++  } catch { return null; }
+ }
+ export function appleProvisioningConsent(mode: AppleProvisioningMode): AppleProvisioningConsent {
+   return mode === 'register' ? 'local-ios-bundle-register-v1' : mode === 'reconcile' ? 'local-ios-bundle-reconcile-v1' : 'local-ios-bundle-review-v1';
+@@ -82,7 +105,7 @@
+   const a = value.attempt;
+   if (a !== null && (!keys(a, ['operationId', 'action', 'status', 'reason', 'retryAllowed', 'credentialReady', 'cancellationRequested']) ||
+       a.operationId !== op.operationId || a.action !== 'register_bundle_id' ||
+-      !oneOf(a.status, ['running', 'cancellation_requested', 'succeeded', 'failed', 'cancelled', 'recovery_required', 'unknown']) ||
++      !oneOf(a.status, attemptStatuses) ||
+       !oneOf(a.reason, attemptReasons) || a.retryAllowed !== false || a.credentialReady !== false || typeof a.cancellationRequested !== 'boolean')) return false;
+   if (value.decision === 'registration-confirmed') return value.observation === 'found' && a !== null && a.status === 'succeeded';
+   if (value.decision === 'registration-unconfirmed') return a !== null;
+@@ -90,16 +113,23 @@
+ }
+ export function parseAppleProvisioningStatus(value: unknown): AppleProvisioningStatus | null {
+   try {
+-    const v = copyBoundedComparisonData(value, 16384);
++    const v = copyBoundedComparisonData(value, 65536);
+     if (!keys(v, ['schemaVersion', 'statusRevision', 'availability', 'operation']) || v.schemaVersion !== 1 || !counter(v.statusRevision) ||
+         !oneOf(v.availability, ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified'])) return null;
+     const op = v.operation;
+     if (op === null) return v as unknown as AppleProvisioningStatus;
+-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result']) ||
++    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery']) ||
+         !token(op.operationId) || !token(op.ownerGeneration) || !oneOf(op.phase, phases) || typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, reasons) ||
+         !keys(op.context, [...fields, 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
+     const prepared = { ...op.context }; delete prepared.operation;
+     if (!request(prepared)) return null;
++    if (op.recovery !== null) {
++      const history = parseAppleRecoveryHistory(op.recovery);
++      if (!history || op.context.mode !== 'review' || op.phase !== 'terminal' || op.outcome !== 'complete') return null;
++      const unresolved = history.hiddenUnresolved > 0 || history.attempts.some(row =>
++        row.nativeSettlement !== 'known' || !['succeeded', 'failed', 'cancelled'].includes(row.status));
++      if (unresolved && (!op.result || typeof op.result !== 'object' || !('decision' in op.result) || op.result.decision !== 'blocked')) return null;
++    }
+     if (op.phase === 'terminal') {
+       if (!oneOf(op.outcome, outcomes) || op.outcome === 'unknown' || op.intentUsable) return null;
+       if (op.outcome === 'complete') {
+@@ -116,6 +146,10 @@
+ }
+ export function appleProvisioningProgress(before: AppleProvisioningOperation, after: AppleProvisioningOperation): boolean {
+   if (!sameAppleIdentity(before, after) || !sameOfflineData(before.context, after.context)) return false;
+-  if (before.phase === 'unknown' || before.phase === 'terminal') return sameOfflineData(before, after);
++  if (before.phase === 'unknown') return sameOfflineData(before, after);
++  if (before.phase === 'terminal') return sameOfflineData(before, after) ||
++    // Context loss may withdraw historical DATA at a newer original status
++    // revision. No terminal result, recorded disposition or list is replaced.
++    before.recovery !== null && after.recovery === null && sameOfflineData({ ...before, recovery: null }, after);
+   return (before.intentUsable || !after.intentUsable) && phases.indexOf(after.phase) >= phases.indexOf(before.phase);
+ }
+--- a/desktop/src/appleProvisioningController.ts
++++ b/desktop/src/appleProvisioningController.ts
+@@ -8,7 +8,7 @@
+   parseAppleProvisioningRequest, parseAppleProvisioningStatus, sameAppleIdentity } from './appleProvisioningProtocol.ts';
+ import type { AppleProvisioningApi } from './appleProvisioningNative.ts';
+ import type { AppleProvisioningIdentity, AppleProvisioningMode, AppleProvisioningOperation, AppleProvisioningResult,
+-  AppleProvisioningStatus, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
++  AppleProvisioningStatus, AppleRecoveryHistory, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
+
+ interface Source {
+   project(): LocalStoreProject | null;
+@@ -33,6 +33,7 @@
+   native: boolean; visible: boolean; listening: boolean; initialized: boolean; reading: boolean;
+   pending: 'prepare' | 'start' | null; requestPending: boolean; cancelPending: boolean;
+   status: AppleProvisioningStatus | null; projectId: string | null; ios: boolean;
++  previousAttempts: AppleRecoveryHistory | null; continueReason: string | null;
+   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
+   consent: (AppleProvisioningIdentity & { mode: AppleProvisioningMode; acknowledged: boolean }) | null;
+   result: AppleProvisioningResult | null; reviewReference: AppleProvisioningIdentity | null;
+@@ -62,6 +63,7 @@
+   private attempt: Attempt | null = null;
+   private review: Reference | null = null;
+   private registration: Reference | null = null;
++  private restored: Reference | null = null;
+   private witness: Witness | null = null;
+   private status: AppleProvisioningStatus | null = null;
+   private issue: Issue | null = null;
+@@ -120,13 +122,22 @@
+     return !!value && sameWitness(value.witness, this.witness) && value.displayName === this.displayName &&
+       (value.expires === null || this.now() < value.expires);
+   }
++  private reconciliationReference(): Reference | null {
++    return this.referenceCurrent(this.restored) ? this.restored : this.referenceCurrent(this.registration) ? this.registration : null;
++  }
++  private previousAttempts(): AppleRecoveryHistory | null {
++    const a = this.attempt, op = this.status?.operation;
++    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
++        !sameAppleIdentity(a.identity, op) || a.request.mode !== 'review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
++    return op.recovery;
++  }
+   private reason(mode: AppleProvisioningMode): string | null {
+     const base = this.baseReason(); if (base) return base;
+     if (mode === 'register') {
+       if (!this.referenceCurrent(this.review)) return 'First finish a current reuse-first review. A key-only not-returned result is not global availability or permission.';
+       if (!this.declaredNew) return 'Explicitly declare this is a new application, not a change to an existing store identity.';
+     }
+-    if (mode === 'reconcile' && !this.referenceCurrent(this.registration)) return 'Readback requires the exact retained prior registration in this same saved/key context. It never retries the write.';
++    if (mode === 'reconcile' && !this.reconciliationReference()) return 'Choose a saved attempt below, or use the prior registration from this session. Readback never repeats the write.';
+     return null;
+   }
+   private startReason(): string | null {
+@@ -150,7 +161,8 @@
+       consent: a?.identity && this.consentUntil !== null && current && !a.startClaimed ?
+         Object.freeze({ ...identity(a.identity), mode: a.request.mode, acknowledged: this.acknowledged }) : null,
+       result: readResult, reviewReference: this.referenceCurrent(this.review) ? this.review.identity : null,
+-      registrationReference: this.registration?.identity ?? null,
++      registrationReference: this.restored?.identity ?? this.registration?.identity ?? null,
++      previousAttempts: this.previousAttempts(), continueReason: this.baseReason(),
+       reviewReason: this.reason('review'), registerReason: this.reason('register'), reconcileReason: this.reason('reconcile'),
+       startReason: this.startReason(), canRead: !!this.original && !this.read && (!this.connectionRetired || !this.settled()),
+       canCancel: !!this.original && !!cancelId && !this.cancellation && !sameAppleIdentity(this.cancelClaim, cancelId) && active(op),
+@@ -162,7 +174,7 @@
+     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
+   }
+   private fail(issue: Issue = 'unconfirmed'): void {
+-    this.issue ??= issue; this.clearConsent(); this.review = null;
++    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null;
+     if (this.attempt) this.attempt.retired = true;
+     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
+   }
+@@ -174,7 +186,7 @@
+     this.publish();
+   };
+   invalidate = (): void => {
+-    this.epoch++; this.clearConsent(); this.review = null; this.declaredNew = false;
++    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.declaredNew = false;
+     if (this.attempt) this.attempt.retired = true;
+     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
+     this.publish();
+@@ -211,7 +223,7 @@
+       try { this.off?.(); } catch { this.fail(); return; }
+     }
+     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
+-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.clearConsent(); this.witness = this.capture(); this.publish();
++    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+     if (!api) return;
+     const pending = (async () => {
+       try {
+@@ -268,9 +280,33 @@
+     const previous = this.read?.promise; if (previous) await previous;
+     await this.checkStatus();
+   }
+-  prepare = (mode: AppleProvisioningMode): Promise<void> => {
+-    this.syncProject(); if (this.disposed || !this.visible || this.reason(mode) || !this.original || !this.witness || !this.status) return Promise.resolve();
+-    const reference = mode === 'review' ? null : mode === 'register' ? this.review?.identity : this.registration?.identity;
++  continuePrevious = (operationId: string, ownerGeneration: string): Promise<void> => {
++    this.syncProject();
++    if (this.disposed || !this.visible || this.baseReason() || !this.original || !this.witness) return Promise.resolve();
++    const row = this.previousAttempts()?.attempts.find(candidate => sameAppleIdentity(candidate.reference, { operationId, ownerGeneration }));
++    if (!row) return Promise.resolve();
++    const continuation = { api: this.original, witness: this.witness, epoch: this.epoch + 1 };
++    const sameContinuation = () => this.original === continuation.api && this.witness === continuation.witness &&
++      this.epoch === continuation.epoch && !this.disposed && !this.connectionRetired;
++    this.invalidate();
++    if (!sameContinuation()) return Promise.resolve();
++    // Only this explicit UI choice adopts a DISPLAY name and historical IDs.
++    // No saved identity/key/state is edited, and no Register review is minted.
++    this.displayName = row.displayName;
++    this.restored = freeze({ identity: identity(row.reference), witness: continuation.witness, displayName: row.displayName, expires: null });
++    this.publish();
++    if (!sameContinuation()) return Promise.resolve();
++    return this.prepareIntent('reconcile', continuation);
++  };
++  prepare = (mode: AppleProvisioningMode): Promise<void> => this.prepareIntent(mode);
++  private prepareIntent(mode: AppleProvisioningMode, continuation?: { api: AppleProvisioningApi; witness: Witness; epoch: number }): Promise<void> {
++    this.syncProject();
++    // syncProject publishes too. A subscriber's cancellation/currentness veto
++    // must survive that seam, not become a new continuation epoch or reference.
++    if (continuation && (this.original !== continuation.api || this.witness !== continuation.witness ||
++        this.epoch !== continuation.epoch)) return Promise.resolve();
++    if (this.disposed || !this.visible || this.reason(mode) || !this.original || !this.witness || !this.status) return Promise.resolve();
++    const reference = mode === 'review' ? null : mode === 'register' ? this.review?.identity : this.reconciliationReference()?.identity;
+     const request = parseAppleProvisioningRequest({ ...this.witness.base, mode, reference, newApplication: mode === 'register', displayName: this.displayName });
+     if (!request) return Promise.resolve();
+     const api = this.original, a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
+@@ -298,7 +334,7 @@
+         this.cleanupListener(); this.publish();
+       }
+     })(); this.publish(); return slot.promise;
+-  };
++  }
+   start = (operationId: string, ownerGeneration: string): Promise<void> => {
+     this.syncProject(); const a = this.attempt, api = this.original;
+     if (!a || !api || a.startClaimed || !sameAppleIdentity(a.identity, { operationId, ownerGeneration }) || this.startReason()) return Promise.resolve();
+--- a/desktop/src/components/AppleBundleRegistration.tsx
++++ b/desktop/src/components/AppleBundleRegistration.tsx
+@@ -94,9 +94,22 @@
+       <p>Complete means the bounded native operation and cleanup finished—not that signing is ready. No private-key match or authenticated profile has been established.</p>
+       {result.attempt && <p>Recorded attempt: {result.attempt.status.replaceAll('_', ' ')} · {result.attempt.reason.replaceAll('_', ' ')}. Retry and credential-ready flags remain false.</p>}
+     </div>}
++    {state.previousAttempts && <section aria-label="Previous Bundle ID setup">
++      <h3>Continue previous setup</h3>
++      <p>MRK found these saved attempts for this project and Bundle ID. Choose one to check with Apple again, without registering again.</p>
++      {state.previousAttempts.attempts.length === 0 && <p>No matching attempt was recorded in this journal snapshot. This does not prove that Apple received no earlier request.</p>}
++      <ul>{state.previousAttempts.attempts.map(row => <li key={`${row.reference.operationId}:${row.reference.ownerGeneration}`}>
++        <strong>{row.displayName}</strong> — recorded {row.observedAt}
++        <p>{row.nativeSettlement !== 'known' ? 'The earlier request or cleanup is still unconfirmed. Checking with Apple will not clear that uncertainty.' :
++          row.status === 'succeeded' ? 'MRK recorded a confirmed registration. This check will not register it again.' : 'Review this earlier attempt with a read-only check.'}</p>
++        <button disabled={!!state.continueReason} onClick={() => void controller.continuePrevious(row.reference.operationId, row.reference.ownerGeneration)}>Continue previous setup</button>
++      </li>)}</ul>
++      {state.previousAttempts.hiddenUnresolved > 0 && <p>Another saved context has an unresolved attempt for this App Store Connect account. Its details are not shown here. Do not start another registration to bypass it.</p>}
++      <details><summary>What these saved records mean</summary><p>These are historical local records, not a new Apple result or permission to register. The selected key and current project are checked again. A missing, denied or incomplete response never clears an uncertain attempt.</p></details>
++    </section>}
+     <details open={!!state.registrationReference}>
+       <summary>Read back a prior registration without retrying</summary>
+-      <p>This uses the exact retained registration reference in the same saved/key context. Missing history, a pending native owner or uncertain cleanup never means the account is safe for another write.</p>
++      <p>This checks the selected prior attempt without repeating its write. Missing history or uncertain cleanup never means it is safe to register again.</p>
+       <button disabled={!state.ios || !!state.reconcileReason} onClick={() => void controller.prepare('reconcile')}>Prepare read-only reconciliation</button>
+       {state.reconcileReason && <p className="save-note">{state.reconcileReason}</p>}
+     </details>
+--- a/desktop/tests/apple-provisioning-controller.test.mjs
++++ b/desktop/tests/apple-provisioning-controller.test.mjs
+@@ -22,7 +22,7 @@
+ const status = (revision = 1, operation = null, availability = operation && operation.phase !== 'terminal' ? 'busy' : 'available') =>
+   ({ schemaVersion: 1, statusRevision: revision, availability, operation });
+ const operation = (request, digit = '1') => ({ ...id(digit), context: appleProvisioningContext(copy(request)), phase: 'awaiting-consent',
+-  intentUsable: true, outcome: null, reason: 'none', result: null });
++  intentUsable: true, outcome: null, reason: 'none', result: null, recovery: null });
+ const result = (mode, observation = 'not-returned', decision = mode === 'reconcile' ? 'comparison-only' : 'review-required') =>
+   ({ schemaVersion: 1, scope: 'local-ios-bundle-provisioning', mode, observation, decision, attempt: null,
+     comparison: mode === 'reconcile' ? 'not-returned' : null, limitations: [...APPLE_PROVISIONING_LIMITATIONS] });
+--- a/desktop/tests/apple-provisioning-protocol.test.mjs
++++ b/desktop/tests/apple-provisioning-protocol.test.mjs
+@@ -16,7 +16,7 @@
+   credentialContextRevision: 5, recordId: RECORD, recordRevision: 6, executionMode: 'local', platform: 'ios', mode,
+   reference: mode === 'review' ? null : reference(), newApplication: mode === 'register', displayName: 'Explicit 🍎 name' });
+ const operation = (mode = 'review') => ({ ...reference(), context: appleProvisioningContext(request(mode)), phase: 'awaiting-consent',
+-  intentUsable: true, outcome: null, reason: 'none', result: null });
++  intentUsable: true, outcome: null, reason: 'none', result: null, recovery: null });
+ const result = (mode = 'review') => ({ schemaVersion: 1, scope: 'local-ios-bundle-provisioning', mode,
+   observation: 'not-returned', decision: mode === 'reconcile' ? 'comparison-only' : 'review-required', attempt: null,
+   comparison: mode === 'reconcile' ? 'not-returned' : null, limitations: [...APPLE_PROVISIONING_LIMITATIONS] });
+--- a/tests/unit/test_desktop_apple_provisioning.py
++++ b/tests/unit/test_desktop_apple_provisioning.py
+@@ -189,10 +189,17 @@
+                     status, failure = 403, "provider_request_unconfirmed"
+                 elif fault == "post-unknown" and request.method == "POST":
+                     status, failure = 503, "provider_request_unconfirmed"
++                elif fault == "incomplete-page":
++                    document["meta"]["paging"]["total"] += 1
++                elif fault == "foreign-identifier":
++                    document["data"][0]["attributes"]["identifier"] = "com.other.inert"
++                body = api.canonical(document)
++                if fault == "truncated-body":
++                    body = body[:-1]
+                 raw = encode({"schemaVersion": 1, "contextSha256": api.digest(api.canonical(wire.core_context_wire(operation.context))),
+                     "operationId": OP, "bundleId": operation.target.bundle_id, "requestSha256": api.request_sha256(request),
+                     "ackSha256": engine.input._pending_ack if request.method == "POST" else None,
+-                    "response": {"status": status, "failure": failure, "bodyBase64": None if failure else __import__("base64").b64encode(api.canonical(document)).decode()}})
++                    "response": {"status": status, "failure": failure, "bodyBase64": None if failure else __import__("base64").b64encode(body).decode()}})
+                 if fault == "stop-post" and request.method == "POST":
+                     engine.input.stop("cancelled")
+                 return subprocess.CompletedProcess(argv, 0, raw, b"")
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/git-local.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {

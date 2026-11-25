@@ -1,0 +1,24 @@
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -97,7 +97,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
+-    GitCommit, GitFetch, GitPush, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
++    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+ }
+ 
+ /// Future operation-specific adapters may compare this DATA with a genuine
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -244,7 +244,7 @@
+                 "defaultEnabled":false,"oneUse":true,"sharesGitGrantAnd32Requests":true,"requiresRunningDesktop":true,
+                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"fetch":false,"push":false,"nativeAvailabilityChecked":false,
+                 "commands":git_repository::COMMANDS},
+-            "gitRemote": {"actions":["fetch","push"],"commands":git_remote::NAMES,
++            "gitRemote": {"actions":["fetch","push","push-new-branch"],"commands":git_remote::NAMES,
+                 "argumentPattern":"gitRepository.commands by position","defaultEnabled":false,"oneUse":true,
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},

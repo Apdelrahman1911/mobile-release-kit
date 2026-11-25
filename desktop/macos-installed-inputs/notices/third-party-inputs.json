@@ -1,0 +1,4868 @@
+{
+ "components": [
+  {
+   "checksum": "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa",
+   "files": [
+    {
+     "bytes": 665,
+     "name": "LICENSE-0BSD",
+     "sha256": "861399f8c21c042b110517e76dc6b63a2b334276c8cf17412fc3c8908ca8dc17"
+    },
+    {
+     "bytes": 10860,
+     "name": "LICENSE-APACHE",
+     "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "0BSD OR MIT OR Apache-2.0",
+   "name": "adler2",
+   "version": "2.0.1"
+  },
+  {
+   "checksum": "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99",
+   "files": [
+    {
+     "bytes": 10850,
+     "name": "LICENSE-APACHE",
+     "sha256": "b1cf9a3333ca78152b859012cd4a804156e5243e9ca20ad1df7327ba5ea7405c"
+    },
+    {
+     "bytes": 1117,
+     "name": "LICENSE-MIT",
+     "sha256": "33b32a251d445c5c03a634e64c53314c55540fc367fabdd45d9b6c8f260c028c"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "aead",
+   "version": "0.6.1"
+  },
+  {
+   "checksum": "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense OR MIT",
+   "name": "aho-corasick",
+   "version": "1.1.5"
+  },
+  {
+   "checksum": "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3",
+   "files": [
+    {
+     "bytes": 1483,
+     "name": "LICENSE",
+     "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+    }
+   ],
+   "kind": "crate",
+   "license": "BSD-3-Clause",
+   "name": "alloc-no-stdlib",
+   "version": "2.0.4"
+  },
+  {
+   "checksum": "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195",
+   "files": [],
+   "kind": "crate",
+   "license": "BSD-3-Clause",
+   "name": "alloc-stdlib",
+   "version": "0.2.4"
+  },
+  {
+   "checksum": "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "anyhow",
+   "version": "1.0.104"
+  },
+  {
+   "checksum": "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1076,
+     "name": "LICENSE-MIT",
+     "sha256": "0dd882e53de11566d50f8e8e2d5a651bcf3fabee4987d70f306233cf39094ba7"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "base64",
+   "version": "0.21.7"
+  },
+  {
+   "checksum": "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1076,
+     "name": "LICENSE-MIT",
+     "sha256": "0dd882e53de11566d50f8e8e2d5a651bcf3fabee4987d70f306233cf39094ba7"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "base64",
+   "version": "0.22.1"
+  },
+  {
+   "checksum": "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1093,
+     "name": "LICENSE-MIT",
+     "sha256": "ab499c75a0f0da8e0fe83bf9ba3a27e5c39705310f07107c6c66b69958d2401c"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "base64",
+   "version": "0.23.1"
+  },
+  {
+   "checksum": "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1148,
+     "name": "LICENSE-MIT",
+     "sha256": "2d1c57bff28344b9e698f51063bc8509799cc4c99a4e0cf2aa3f7e7c3e1f9a9d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "base64ct",
+   "version": "1.8.3"
+  },
+  {
+   "checksum": "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3",
+   "files": [
+    {
+     "bytes": 10850,
+     "name": "LICENSE-APACHE",
+     "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "f51ac2c59a222f7476ce507ca879960e2b64ea64bb2786eefdbeb7b0b538d1b7"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "bit-set",
+   "version": "0.8.0"
+  },
+  {
+   "checksum": "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7",
+   "files": [
+    {
+     "bytes": 10850,
+     "name": "LICENSE-APACHE",
+     "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "f51ac2c59a222f7476ce507ca879960e2b64ea64bb2786eefdbeb7b0b538d1b7"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "bit-vec",
+   "version": "0.8.0"
+  },
+  {
+   "checksum": "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "bitflags",
+   "version": "1.3.2"
+  },
+  {
+   "checksum": "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "bitflags",
+   "version": "2.13.2"
+  },
+  {
+   "checksum": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "d5c22aa3118d240e877ad41c5d9fa232f9c77d757d4aac0c2f943afc0a95e0ef"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "block-buffer",
+   "version": "0.10.4"
+  },
+  {
+   "checksum": "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "98181e7249d0c01737645ec982499ce99a0f07eb8f7d625b8840d799d10dbc01"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "block-buffer",
+   "version": "0.12.1"
+  },
+  {
+   "checksum": "710f1dd022ef4e93f8a438b4ba958de7f64308434fa6a87104481645cc30068b",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "98181e7249d0c01737645ec982499ce99a0f07eb8f7d625b8840d799d10dbc01"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "block-padding",
+   "version": "0.4.2"
+  },
+  {
+   "checksum": "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "block2",
+   "version": "0.6.2"
+  },
+  {
+   "checksum": "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3",
+   "files": [
+    {
+     "bytes": 1483,
+     "name": "LICENSE.BSD-3-Clause",
+     "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+    },
+    {
+     "bytes": 1084,
+     "name": "LICENSE.MIT",
+     "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
+    }
+   ],
+   "kind": "crate",
+   "license": "BSD-3-Clause AND MIT",
+   "name": "brotli",
+   "version": "8.0.4"
+  },
+  {
+   "checksum": "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583",
+   "files": [
+    {
+     "bytes": 1483,
+     "name": "LICENSE",
+     "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+    }
+   ],
+   "kind": "crate",
+   "license": "BSD-3-Clause/MIT",
+   "name": "brotli-decompressor",
+   "version": "5.0.3"
+  },
+  {
+   "checksum": "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "42d3bf7e7d4d49d72c0555d14ed99c3ee7ce9ce3cbffbc38bbafe8c103f50969"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "bs58",
+   "version": "0.5.1"
+  },
+  {
+   "checksum": "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense OR MIT",
+   "name": "byteorder",
+   "version": "1.5.0"
+  },
+  {
+   "checksum": "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04",
+   "files": [
+    {
+     "bytes": 1055,
+     "name": "LICENSE",
+     "sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "bytes",
+   "version": "1.12.1"
+  },
+  {
+   "checksum": "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "camino",
+   "version": "1.2.6"
+  },
+  {
+   "checksum": "e35af189006b9c0f00a064685c727031e3ed2d8020f7ba284d78cc2671bd36ea",
+   "files": [
+    {
+     "bytes": 10860,
+     "name": "LICENSE-APACHE",
+     "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "cargo-platform",
+   "version": "0.1.9"
+  },
+  {
+   "checksum": "dd5eb614ed4c27c5d706420e4320fbe3216ab31fa1c33cd8246ac36dae4479ba",
+   "files": [
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "cargo_metadata",
+   "version": "0.19.2"
+  },
+  {
+   "checksum": "d38f2da7a0a2c4ccf0065be06397cc26a81f4e528be095826eee9d4adbb8c60f",
+   "files": [
+    {
+     "bytes": 1074,
+     "name": "LICENSE",
+     "sha256": "ebaac853b53fec0ed475796f533ce676912a4df9ad9d8a621fa76d5060591e10"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "cfb",
+   "version": "0.7.3"
+  },
+  {
+   "checksum": "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "cfg-if",
+   "version": "1.0.5"
+  },
+  {
+   "checksum": "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "chacha20",
+   "version": "0.10.2"
+  },
+  {
+   "checksum": "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "chacha20poly1305",
+   "version": "0.11.0"
+  },
+  {
+   "checksum": "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327",
+   "files": [
+    {
+     "bytes": 12307,
+     "name": "LICENSE.txt",
+     "sha256": "946c9835d8034d24404f8cfec5f4654cee5dad17e944afc3d06d742cf2882831"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "chrono",
+   "version": "0.4.45"
+  },
+  {
+   "checksum": "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1070,
+     "name": "LICENSE-MIT",
+     "sha256": "950d712c518a02fcb7cff96950aee304a1cc5283361712c980ea21e8d6d669a5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "cipher",
+   "version": "0.5.2"
+  },
+  {
+   "checksum": "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "70c9d40f1f9545c3f133b8a67206e89da850f6468eed072281bb3701514114a9"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "cmov",
+   "version": "0.5.4"
+  },
+  {
+   "checksum": "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730",
+   "files": [],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "cms",
+   "version": "0.2.3"
+  },
+  {
+   "checksum": "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "const-oid",
+   "version": "0.10.2"
+  },
+  {
+   "checksum": "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "bada9e7ed8dc00d63502053c455d7c8d7575dfb7e8277a2a832531844d900682"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "const-oid",
+   "version": "0.9.6"
+  },
+  {
+   "checksum": "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87",
+   "files": [
+    {
+     "bytes": 10863,
+     "name": "LICENSE-APACHE",
+     "sha256": "2773e20df8f4c52a026b5b578c7f2457341f5aa3fb6612fd87e1d2e1bd8f48ad"
+    },
+    {
+     "bytes": 1091,
+     "name": "LICENSE-MIT",
+     "sha256": "f28420c1906af38be726cd7842798f0194b27c41d6051c0d1e9ee348b8a4a0ea"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "cookie",
+   "version": "0.18.2"
+  },
+  {
+   "checksum": "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1067,
+     "name": "LICENSE-MIT",
+     "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "core-foundation",
+   "version": "0.10.1"
+  },
+  {
+   "checksum": "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1067,
+     "name": "LICENSE-MIT",
+     "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "core-foundation-sys",
+   "version": "0.8.7"
+  },
+  {
+   "checksum": "064badf302c3194842cf2c5d61f56cc88e54a759313879cdf03abdd27d0c3b97",
+   "files": [
+    {
+     "bytes": 321,
+     "name": "COPYRIGHT",
+     "sha256": "ec82b96487e9e778ee610c7ab245162464782cfa1f555c2299333f8dbe5c036a"
+    },
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1067,
+     "name": "LICENSE-MIT",
+     "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "core-graphics",
+   "version": "0.25.0"
+  },
+  {
+   "checksum": "3d44a101f213f6c4cdc1853d4b78aef6db6bdfa3468798cc1d9912f4735013eb",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1067,
+     "name": "LICENSE-MIT",
+     "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "core-graphics-types",
+   "version": "0.2.0"
+  },
+  {
+   "checksum": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "ae9baa7beea910273c2f384c2a6b721fb7bd02bda3436074a1072e4ee689f985"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "cpufeatures",
+   "version": "0.2.17"
+  },
+  {
+   "checksum": "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "cpufeatures",
+   "version": "0.3.1"
+  },
+  {
+   "checksum": "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1097,
+     "name": "LICENSE-MIT",
+     "sha256": "61d383b05b87d78f94d2937e2580cce47226d17823c0430fbcad09596537efcf"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "crc32fast",
+   "version": "1.5.2"
+  },
+  {
+   "checksum": "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1099,
+     "name": "LICENSE-MIT",
+     "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab"
+    },
+    {
+     "bytes": 33447,
+     "name": "LICENSE-THIRD-PARTY",
+     "sha256": "b16db96b93b1d7cf7bea533f572091ec6bca3234fbe0a83038be772ff391a44c"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "crossbeam-channel",
+   "version": "0.5.17"
+  },
+  {
+   "checksum": "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1099,
+     "name": "LICENSE-MIT",
+     "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "crossbeam-utils",
+   "version": "0.8.23"
+  },
+  {
+   "checksum": "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1065,
+     "name": "LICENSE-MIT",
+     "sha256": "3521672491a3479422d5fe1aca6645dd2984090f85da6e5205abfb18fb7a6897"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "crypto-common",
+   "version": "0.1.7"
+  },
+  {
+   "checksum": "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1070,
+     "name": "LICENSE-MIT",
+     "sha256": "d2e7ec5355c96eeade56b09187ceb48a6a30299da3ce7531a66d3d11405ab963"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "crypto-common",
+   "version": "0.2.2"
+  },
+  {
+   "checksum": "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2",
+   "files": [
+    {
+     "bytes": 16726,
+     "name": "LICENSE",
+     "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+    }
+   ],
+   "kind": "crate",
+   "license": "MPL-2.0",
+   "name": "cssparser",
+   "version": "0.36.0"
+  },
+  {
+   "checksum": "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331",
+   "files": [
+    {
+     "bytes": 16726,
+     "name": "LICENSE",
+     "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+    }
+   ],
+   "kind": "crate",
+   "license": "MPL-2.0",
+   "name": "cssparser-macros",
+   "version": "0.6.1"
+  },
+  {
+   "checksum": "352d39c2f7bef1d6ad73db6f5160efcaed66d94ef8c6c573a8410c00bf909a98",
+   "files": [
+    {
+     "bytes": 11324,
+     "name": "LICENSE-APACHE",
+     "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
+    },
+    {
+     "bytes": 1022,
+     "name": "LICENSE-MIT",
+     "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "ctor",
+   "version": "0.8.0"
+  },
+  {
+   "checksum": "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1",
+   "files": [
+    {
+     "bytes": 11324,
+     "name": "LICENSE-APACHE",
+     "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
+    },
+    {
+     "bytes": 1022,
+     "name": "LICENSE-MIT",
+     "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "ctor-proc-macro",
+   "version": "0.0.7"
+  },
+  {
+   "checksum": "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "91585c36e4fb9ab4ca0d3dfac5d66d3c0c62cc51f640a0e1196542daf2267eae"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "ctutils",
+   "version": "0.4.4"
+  },
+  {
+   "checksum": "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d",
+   "files": [
+    {
+     "bytes": 1067,
+     "name": "LICENSE",
+     "sha256": "8ea93490d74a5a1b1af3ff71d786271b3f1e5f0bea79ac16e02ec533cef040d6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "darling",
+   "version": "0.23.0"
+  },
+  {
+   "checksum": "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0",
+   "files": [
+    {
+     "bytes": 1067,
+     "name": "LICENSE",
+     "sha256": "8ea93490d74a5a1b1af3ff71d786271b3f1e5f0bea79ac16e02ec533cef040d6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "darling_core",
+   "version": "0.23.0"
+  },
+  {
+   "checksum": "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d",
+   "files": [
+    {
+     "bytes": 1067,
+     "name": "LICENSE",
+     "sha256": "8ea93490d74a5a1b1af3ff71d786271b3f1e5f0bea79ac16e02ec533cef040d6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "darling_macro",
+   "version": "0.23.0"
+  },
+  {
+   "checksum": "e2953bfe4f93bbd20cc71198842756f77d161884c99ebbabc41d80231ded88d1",
+   "files": [
+    {
+     "bytes": 10850,
+     "name": "LICENSE-APACHE",
+     "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+    },
+    {
+     "bytes": 1053,
+     "name": "LICENSE-MIT",
+     "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "defmt",
+   "version": "1.1.1"
+  },
+  {
+   "checksum": "bad9c72e7ca2137e0dc3813245a0d282fd6daad32fd800af018306a9169b5fe8",
+   "files": [
+    {
+     "bytes": 10850,
+     "name": "LICENSE-APACHE",
+     "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+    },
+    {
+     "bytes": 1053,
+     "name": "LICENSE-MIT",
+     "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "defmt-macros",
+   "version": "1.1.1"
+  },
+  {
+   "checksum": "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "defmt-parser",
+   "version": "1.0.0"
+  },
+  {
+   "checksum": "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "ad64fcb9589f162720f3cc5010ad76ca6ad3764e11861f9192c489df176bb71d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "der",
+   "version": "0.7.10"
+  },
+  {
+   "checksum": "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "bada9e7ed8dc00d63502053c455d7c8d7575dfb7e8277a2a832531844d900682"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "der_derive",
+   "version": "0.7.3"
+  },
+  {
+   "checksum": "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c",
+   "files": [
+    {
+     "bytes": 11349,
+     "name": "LICENSE-Apache",
+     "sha256": "edd65bdd88957a205c47d53fa499eed8865a70320f0f03f6391668cb304ea376"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "231c837c45eb53f108fb48929e488965bc4fcc14e9ea21d35f50e6b99d98685b"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "deranged",
+   "version": "0.5.8"
+  },
+  {
+   "checksum": "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e",
+   "files": [
+    {
+     "bytes": 11349,
+     "name": "LICENSE-Apache",
+     "sha256": "edd65bdd88957a205c47d53fa499eed8865a70320f0f03f6391668cb304ea376"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "231c837c45eb53f108fb48929e488965bc4fcc14e9ea21d35f50e6b99d98685b"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "deranged",
+   "version": "0.5.9"
+  },
+  {
+   "checksum": "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134",
+   "files": [
+    {
+     "bytes": 1080,
+     "name": "LICENSE",
+     "sha256": "8a35369f3ca263b3c62fbb5032947e53b6bfebc6c8a4d1bb982de1c069f6fba5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "derive_more",
+   "version": "2.1.1"
+  },
+  {
+   "checksum": "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb",
+   "files": [
+    {
+     "bytes": 1080,
+     "name": "LICENSE",
+     "sha256": "8a35369f3ca263b3c62fbb5032947e53b6bfebc6c8a4d1bb982de1c069f6fba5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "derive_more-impl",
+   "version": "2.1.1"
+  },
+  {
+   "checksum": "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "digest",
+   "version": "0.10.7"
+  },
+  {
+   "checksum": "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1103,
+     "name": "LICENSE-MIT",
+     "sha256": "af59cea35d7f5e2777a713b8d155d65efa2c339eb43f3c14e868c6ac8506edad"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "digest",
+   "version": "0.11.3"
+  },
+  {
+   "checksum": "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e",
+   "files": [
+    {
+     "bytes": 9694,
+     "name": "LICENSE-APACHE",
+     "sha256": "d3174ad63e721d4c9dccb8ad4320848992d314369bc46319720b5802c9153fe9"
+    },
+    {
+     "bytes": 1069,
+     "name": "LICENSE-MIT",
+     "sha256": "6a2e0ade09a7d5f816f11566fee2b151b32235a7fad52b41d49cce96f833c1a9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "dirs",
+   "version": "6.0.0"
+  },
+  {
+   "checksum": "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab",
+   "files": [
+    {
+     "bytes": 9694,
+     "name": "LICENSE-APACHE",
+     "sha256": "d3174ad63e721d4c9dccb8ad4320848992d314369bc46319720b5802c9153fe9"
+    },
+    {
+     "bytes": 1069,
+     "name": "LICENSE-MIT",
+     "sha256": "6a2e0ade09a7d5f816f11566fee2b151b32235a7fad52b41d49cce96f833c1a9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "dirs-sys",
+   "version": "0.5.0"
+  },
+  {
+   "checksum": "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38",
+   "files": [],
+   "kind": "crate",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "name": "dispatch2",
+   "version": "0.3.1"
+  },
+  {
+   "checksum": "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "displaydoc",
+   "version": "0.2.7"
+  },
+  {
+   "checksum": "521e380c0c8afb8d9a1e83a1822ee03556fc3e3e7dbc1fd30be14e37f9cb3f89",
+   "files": [
+    {
+     "bytes": 1328,
+     "name": "LICENSE",
+     "sha256": "7554701d1e74fc434f68c522b1dd743c8c16d816a4b761b5213f367b898884c8"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "dom_query",
+   "version": "0.27.0"
+  },
+  {
+   "checksum": "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76",
+   "files": [
+    {
+     "bytes": 11323,
+     "name": "LICENSE",
+     "sha256": "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+    },
+    {
+     "bytes": 2444,
+     "name": "LICENSE-LIBM-MIT",
+     "sha256": "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 AND MIT",
+   "name": "dpi",
+   "version": "0.1.2"
+  },
+  {
+   "checksum": "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "dtoa",
+   "version": "1.0.11"
+  },
+  {
+   "checksum": "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87",
+   "files": [
+    {
+     "bytes": 16725,
+     "name": "LICENSE",
+     "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MPL-2.0",
+   "name": "dtoa-short",
+   "version": "0.3.5"
+  },
+  {
+   "checksum": "f1057d6c64987086ff8ed0fd3fbf377a6b7d205cc7715868cd401705f715cbe4",
+   "files": [
+    {
+     "bytes": 11324,
+     "name": "LICENSE-APACHE",
+     "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
+    },
+    {
+     "bytes": 1022,
+     "name": "LICENSE-MIT",
+     "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "dtor",
+   "version": "0.3.0"
+  },
+  {
+   "checksum": "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5",
+   "files": [
+    {
+     "bytes": 11324,
+     "name": "LICENSE-APACHE",
+     "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
+    },
+    {
+     "bytes": 1022,
+     "name": "LICENSE-MIT",
+     "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "dtor-proc-macro",
+   "version": "0.0.6"
+  },
+  {
+   "checksum": "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813",
+   "files": [
+    {
+     "bytes": 7048,
+     "name": "LICENSE",
+     "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    }
+   ],
+   "kind": "crate",
+   "license": "CC0-1.0 OR MIT-0 OR Apache-2.0",
+   "name": "dunce",
+   "version": "1.0.5"
+  },
+  {
+   "checksum": "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "dyn-clone",
+   "version": "1.0.20"
+  },
+  {
+   "checksum": "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "daacc37f680c7dd0a758ac99a109f2f57d9f21d3683df9e9245055922842a695"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "embed_plist",
+   "version": "1.2.2"
+  },
+  {
+   "checksum": "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1049,
+     "name": "LICENSE-MIT",
+     "sha256": "7365cc8878a1d7ce155a58c4ca09c3d7a6be413efa5334a80ea842912b669349"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "equivalent",
+   "version": "1.0.2"
+  },
+  {
+   "checksum": "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1049,
+     "name": "LICENSE-MIT",
+     "sha256": "7365cc8878a1d7ce155a58c4ca09c3d7a6be413efa5334a80ea842912b669349"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "equivalent",
+   "version": "1.0.3"
+  },
+  {
+   "checksum": "d2add8a07dd6a8d93ff627029c51de145e12686fbc36ecb298ac22e74cf02dec",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "erased-serde",
+   "version": "0.4.10"
+  },
+  {
+   "checksum": "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1054,
+     "name": "LICENSE-MIT",
+     "sha256": "8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "errno",
+   "version": "0.3.14"
+  },
+  {
+   "checksum": "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "fastrand",
+   "version": "2.5.0"
+  },
+  {
+   "checksum": "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-APACHE",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1036,
+     "name": "LICENSE-MIT",
+     "sha256": "c77a4cf9da729987d0fe7ccd811e3bd27393914ddf3d23467c18cc22954513b3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "fdeflate",
+   "version": "0.3.7"
+  },
+  {
+   "checksum": "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0",
+   "name": "flagset",
+   "version": "0.4.7"
+  },
+  {
+   "checksum": "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "025436edff4cfcdde17a5811fdea78892d8482efd1abdec5a17872d07a4f2112"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "flate2",
+   "version": "1.1.10"
+  },
+  {
+   "checksum": "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1056,
+     "name": "LICENSE-MIT",
+     "sha256": "65fdb6c76cd61612070c066eec9ecdb30ee74fb27859d0d9af58b9f499fd0c3e"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 / MIT",
+   "name": "fnv",
+   "version": "1.0.7"
+  },
+  {
+   "checksum": "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb",
+   "files": [
+    {
+     "bytes": 856,
+     "name": "LICENSE",
+     "sha256": "b1181a40b2a7b25cf66fd01481713bc1005df082c53ef73e851e55071b102744"
+    }
+   ],
+   "kind": "crate",
+   "license": "Zlib",
+   "name": "foldhash",
+   "version": "0.2.0"
+  },
+  {
+   "checksum": "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "333ea3aaa3cadb819f4acd9f9153f9feee060a995ca8710f32bc5bd9a4b91734"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "foreign-types",
+   "version": "0.5.0"
+  },
+  {
+   "checksum": "ea5190182e6915eb873ddbc16e23b711b6eb1f9c00a0d0a3a91b5f6228475225",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "333ea3aaa3cadb819f4acd9f9153f9feee060a995ca8710f32bc5bd9a4b91734"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "foreign-types-macros",
+   "version": "0.2.4"
+  },
+  {
+   "checksum": "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "333ea3aaa3cadb819f4acd9f9153f9feee060a995ca8710f32bc5bd9a4b91734"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "foreign-types-shared",
+   "version": "0.3.1"
+  },
+  {
+   "checksum": "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "20c7855c364d57ea4c97889a5e8d98470a9952dade37bd9248b9a54431670e5e"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "form_urlencoded",
+   "version": "1.2.2"
+  },
+  {
+   "checksum": "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a",
+   "files": [
+    {
+     "bytes": 1107,
+     "name": "LICENSE",
+     "sha256": "c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "generic-array",
+   "version": "0.14.7"
+  },
+  {
+   "checksum": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf"
+    },
+    {
+     "bytes": 1130,
+     "name": "LICENSE-MIT",
+     "sha256": "29e9fe5074bd27e0e5d5d110394fbbcd841baee2651a3c4b4560a632702cede4"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "getrandom",
+   "version": "0.3.4"
+  },
+  {
+   "checksum": "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf"
+    },
+    {
+     "bytes": 1130,
+     "name": "LICENSE-MIT",
+     "sha256": "523a42c25d245dde9c015f882cec7f4555aad883382a6cf19b4b7d9b2cd5419b"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "getrandom",
+   "version": "0.4.3"
+  },
+  {
+   "checksum": "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "glob",
+   "version": "0.3.4"
+  },
+  {
+   "checksum": "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1060,
+     "name": "LICENSE-MIT",
+     "sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "hashbrown",
+   "version": "0.12.3"
+  },
+  {
+   "checksum": "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1060,
+     "name": "LICENSE-MIT",
+     "sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "hashbrown",
+   "version": "0.17.1"
+  },
+  {
+   "checksum": "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "heck",
+   "version": "0.5.0"
+  },
+  {
+   "checksum": "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1125,
+     "name": "LICENSE-MIT",
+     "sha256": "f7bdb3426d045cd50efd4953026e3eb5a83d0199f458a075602611b9344da5b9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "hex",
+   "version": "0.4.3"
+  },
+  {
+   "checksum": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "hmac",
+   "version": "0.13.0"
+  },
+  {
+   "checksum": "1054432bae2f14e0061e33d23402fbaa67a921d319d56adc6bcf887ddad1cbc2",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1076,
+     "name": "LICENSE-MIT",
+     "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "html5ever",
+   "version": "0.38.0"
+  },
+  {
+   "checksum": "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0",
+   "files": [
+    {
+     "bytes": 10835,
+     "name": "LICENSE-APACHE",
+     "sha256": "8bb1b50b0e5c9399ae33bd35fab2769010fa6c14e8860c729a52295d84896b7a"
+    },
+    {
+     "bytes": 1059,
+     "name": "LICENSE-MIT",
+     "sha256": "dc91f8200e4b2a1f9261035d4c18c33c246911a6c0f7b543d75347e61b249cff"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "http",
+   "version": "1.5.0"
+  },
+  {
+   "checksum": "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "70c9d40f1f9545c3f133b8a67206e89da850f6468eed072281bb3701514114a9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "hybrid-array",
+   "version": "0.4.14"
+  },
+  {
+   "checksum": "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470",
+   "files": [
+    {
+     "bytes": 10832,
+     "name": "LICENSE-APACHE",
+     "sha256": "696759d65dfe558ff7d9f031c76db19ec5c0767470fb67c4e8d990820d1e99c9"
+    },
+    {
+     "bytes": 1059,
+     "name": "LICENSE-MIT",
+     "sha256": "da28ccc6b158fc2d8cccc74e99794b1cff1d29bd7bbeb019442fcf0c04c6cad9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "iana-time-zone",
+   "version": "0.1.65"
+  },
+  {
+   "checksum": "3e795dff5605e0f04bff85ca41b51a96b83e80b281e96231bcaaf1ac35103371",
+   "files": [
+    {
+     "bytes": 1074,
+     "name": "LICENSE",
+     "sha256": "41ca90213441b294e7517d5858f0cc85bc12e19ec044001b45bc213de461d33b"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "ico",
+   "version": "0.5.0"
+  },
+  {
+   "checksum": "fa68d21081c4a05d5a901a1c62add574c77048b6a1c67be3b50ce0b60d4ca513",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_collections",
+   "version": "2.3.0"
+  },
+  {
+   "checksum": "d56e28588da92eee5c3201a6eff33fabdd49b62269c8938d4ff050ce4d900deb",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_locale_core",
+   "version": "2.3.0"
+  },
+  {
+   "checksum": "12f9cf5f235641ed274641dd81c3f28d870e276763d0797aeeab72317b1c646f",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_normalizer",
+   "version": "2.3.0"
+  },
+  {
+   "checksum": "1563da1ed3e0b3bf3d74c9b85917ac9c56464d2f57242270c09c9e752f8021a0",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_normalizer_data",
+   "version": "2.3.0"
+  },
+  {
+   "checksum": "7e7ca276ad3145661a65914e6daf131ca5120cd3dcee8f8f3214b8875184a148",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_properties",
+   "version": "2.3.0"
+  },
+  {
+   "checksum": "e590f038c1464a96894fd6d10127e90a8be4509f56ff7ecef851b15cee0b7caa",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_properties_data",
+   "version": "2.3.0"
+  },
+  {
+   "checksum": "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "icu_provider",
+   "version": "2.3.1"
+  },
+  {
+   "checksum": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39",
+   "files": [
+    {
+     "bytes": 1036,
+     "name": "LICENSE",
+     "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "ident_case",
+   "version": "1.0.1"
+  },
+  {
+   "checksum": "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "idna",
+   "version": "1.1.0"
+  },
+  {
+   "checksum": "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "8b43ce8accd61e9d370b5ca9e9c4f953279b5c239926c62315b40e24df51b726"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "idna_adapter",
+   "version": "1.2.2"
+  },
+  {
+   "checksum": "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1049,
+     "name": "LICENSE-MIT",
+     "sha256": "ecc269ef87fd38a1d98e30bfac9ba964a9dbd9315c3770fed98d4d7cb5882055"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "indexmap",
+   "version": "1.9.3"
+  },
+  {
+   "checksum": "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1049,
+     "name": "LICENSE-MIT",
+     "sha256": "ecc269ef87fd38a1d98e30bfac9ba964a9dbd9315c3770fed98d4d7cb5882055"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "indexmap",
+   "version": "2.14.2"
+  },
+  {
+   "checksum": "a588916bfdfd92e71cacef98a63d9b1f0d74d6599980d11894290e7ddefffcf7",
+   "files": [
+    {
+     "bytes": 1062,
+     "name": "LICENSE",
+     "sha256": "270b0d81891aa44c7e8726cf9432dade9556a01c848bacd2f3ef839c9c1a1859"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "infer",
+   "version": "0.19.0"
+  },
+  {
+   "checksum": "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1115,
+     "name": "LICENSE-MIT",
+     "sha256": "a07fcacc3c60de4dc0fab10ac9d6aaba7379974e28451c99da7f7df09c25b28c"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "inout",
+   "version": "0.2.2"
+  },
+  {
+   "checksum": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "itoa",
+   "version": "1.0.18"
+  },
+  {
+   "checksum": "0ab1baf72f08796de0260609515130699b890ac25f30e610ad894bc5856cafdb",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense OR MIT",
+   "name": "jiff",
+   "version": "0.2.37"
+  },
+  {
+   "checksum": "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense OR MIT",
+   "name": "jiff-core",
+   "version": "0.1.1"
+  },
+  {
+   "checksum": "863726d7afb6bc2590eeff7135d923545e5e964f004c2ccf8716c25e70a86f08",
+   "files": [
+    {
+     "bytes": 11357,
+     "name": "LICENSE-APACHE",
+     "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+    },
+    {
+     "bytes": 1068,
+     "name": "LICENSE-MIT",
+     "sha256": "87f7527b1066337751f7f4d717089bf514ff8f7ee7d66c4c5b891b09e744ec11"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "json-patch",
+   "version": "3.0.1"
+  },
+  {
+   "checksum": "5dea2b27dd239b2556ed7a25ba842fe47fd602e7fc7433c2a8d6106d4d9edd70",
+   "files": [
+    {
+     "bytes": 10867,
+     "name": "LICENSE-APACHE",
+     "sha256": "2cf31f2ae7f3feba667d50fc1d4d21ecf217703c04c3068b83c9a73b6dde723a"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "2bc107bdc18a74263d20bdefdb8073e17bc1a01b6b374dc5835683a33ee5ba7d"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "jsonptr",
+   "version": "0.6.3"
+  },
+  {
+   "checksum": "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a",
+   "files": [
+    {
+     "bytes": 10846,
+     "name": "LICENSE-APACHE",
+     "sha256": "769f80b5bcb42ed0af4e4d2fd74e1ac9bf843cb80c5a29219d1ef3544428a6bb"
+    },
+    {
+     "bytes": 1050,
+     "name": "LICENSE-MIT",
+     "sha256": "31dbbab009f1b2e59a1622d5955dfafc38ebe834000215b49d954c6f85fe927c"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "keyboard-types",
+   "version": "0.7.0"
+  },
+  {
+   "checksum": "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1066,
+     "name": "LICENSE-MIT",
+     "sha256": "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "libc",
+   "version": "0.2.189"
+  },
+  {
+   "checksum": "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "litemap",
+   "version": "0.8.3"
+  },
+  {
+   "checksum": "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "lock_api",
+   "version": "0.4.14"
+  },
+  {
+   "checksum": "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "log",
+   "version": "0.4.34"
+  },
+  {
+   "checksum": "8983d30f2915feeaaab2d6babdd6bc7e9ed1a00b66b5e6d74df19aa9c0e91862",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1076,
+     "name": "LICENSE-MIT",
+     "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "markup5ever",
+   "version": "0.38.0"
+  },
+  {
+   "checksum": "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense OR MIT",
+   "name": "memchr",
+   "version": "2.8.3"
+  },
+  {
+   "checksum": "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1058,
+     "name": "LICENSE-MIT",
+     "sha256": "df9cfd06d8a44d9a671eadd39ffd97f166481da015a30f45dfd27886209c5922"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "mime",
+   "version": "0.3.17"
+  },
+  {
+   "checksum": "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316",
+   "files": [
+    {
+     "bytes": 1213,
+     "name": "LICENSE",
+     "sha256": "4108245a1f2df9d4e94df8abed5b4ba0759bb2f9b40a6b939f1be141077ae50b"
+    },
+    {
+     "bytes": 10174,
+     "name": "LICENSE-APACHE.md",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1212,
+     "name": "LICENSE-MIT.md",
+     "sha256": "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d"
+    },
+    {
+     "bytes": 984,
+     "name": "LICENSE-ZLIB.md",
+     "sha256": "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Zlib OR Apache-2.0",
+   "name": "miniz_oxide",
+   "version": "0.8.9"
+  },
+  {
+   "checksum": "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c",
+   "files": [
+    {
+     "bytes": 1213,
+     "name": "LICENSE",
+     "sha256": "4108245a1f2df9d4e94df8abed5b4ba0759bb2f9b40a6b939f1be141077ae50b"
+    },
+    {
+     "bytes": 10174,
+     "name": "LICENSE-APACHE.md",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1212,
+     "name": "LICENSE-MIT.md",
+     "sha256": "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d"
+    },
+    {
+     "bytes": 984,
+     "name": "LICENSE-ZLIB.md",
+     "sha256": "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Zlib OR Apache-2.0",
+   "name": "miniz_oxide",
+   "version": "0.9.1"
+  },
+  {
+   "checksum": "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8",
+   "files": [
+    {
+     "bytes": 1082,
+     "name": "LICENSE",
+     "sha256": "07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "mio",
+   "version": "1.2.3"
+  },
+  {
+   "checksum": "1dd04e60bc0b07438a6771710ee1698f98f6ebbc7f89b61264af1563b8aeb878",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1108,
+     "name": "LICENSE-MIT",
+     "sha256": "2ab5537b8c0cb1d475e2145b6a7994b04e7c71e6e5bd836f7f9c47c221a5ad9a"
+    },
+    {
+     "bytes": 809,
+     "name": "LICENSE.spdx",
+     "sha256": "b99f9d43803f2ac979c50949df630bd8eeaf2fcd1b9fdb9093710d70f5dfb63d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "muda",
+   "version": "0.19.3"
+  },
+  {
+   "checksum": "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086",
+   "files": [
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "f7715d38a3fa1b4ac97c5729740752505a39cb92ee83ab5b102aeb5eaa7cdea4"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "new_debug_unreachable",
+   "version": "1.0.6"
+  },
+  {
+   "checksum": "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6",
+   "files": [
+    {
+     "bytes": 1097,
+     "name": "LICENSE",
+     "sha256": "66e3ee1fa7f909ad3c612d556f2a0cdabcd809ad6e66f3b0605015ac64841b70"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "nix",
+   "version": "0.30.1"
+  },
+  {
+   "checksum": "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-Apache",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1050,
+     "name": "LICENSE-MIT",
+     "sha256": "e2e245f2b566d0bfafb0f6a04c16b82d710c4e6e7d799e39bb4ef6e541b85b98"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "num-conv",
+   "version": "0.2.2"
+  },
+  {
+   "checksum": "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "num-traits",
+   "version": "0.2.19"
+  },
+  {
+   "checksum": "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "objc2",
+   "version": "0.6.4"
+  },
+  {
+   "checksum": "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c",
+   "files": [],
+   "kind": "crate",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "name": "objc2-app-kit",
+   "version": "0.3.2"
+  },
+  {
+   "checksum": "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536",
+   "files": [],
+   "kind": "crate",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "name": "objc2-core-foundation",
+   "version": "0.3.2"
+  },
+  {
+   "checksum": "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "objc2-encode",
+   "version": "4.1.0"
+  },
+  {
+   "checksum": "c7a1c5fbb72d7735b076bb47b578523aedc40f3c439bea6dfd595c089d79d98a",
+   "files": [],
+   "kind": "crate",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "name": "objc2-exception-helper",
+   "version": "0.1.1"
+  },
+  {
+   "checksum": "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "objc2-foundation",
+   "version": "0.3.2"
+  },
+  {
+   "checksum": "b2e5aaab980c433cf470df9d7af96a7b46a9d892d521a2cbbb2f8a4c16751e7f",
+   "files": [],
+   "kind": "crate",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "name": "objc2-web-kit",
+   "version": "0.3.2"
+  },
+  {
+   "checksum": "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "once_cell",
+   "version": "1.21.4"
+  },
+  {
+   "checksum": "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d",
+   "files": [
+    {
+     "bytes": 16727,
+     "name": "LICENSE.txt",
+     "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+    }
+   ],
+   "kind": "crate",
+   "license": "MPL-2.0",
+   "name": "option-ext",
+   "version": "0.2.0"
+  },
+  {
+   "checksum": "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "parking_lot",
+   "version": "0.12.5"
+  },
+  {
+   "checksum": "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "parking_lot_core",
+   "version": "0.9.12"
+  },
+  {
+   "checksum": "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1077,
+     "name": "LICENSE-MIT",
+     "sha256": "90c503b61dee04e1449c323ec34c229dfb68d7adcb96c7e140ee55f70fce2d8e"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "pem-rfc7468",
+   "version": "0.7.0"
+  },
+  {
+   "checksum": "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "percent-encoding",
+   "version": "2.3.2"
+  },
+  {
+   "checksum": "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf",
+   "files": [
+    {
+     "bytes": 1099,
+     "name": "LICENSE",
+     "sha256": "0ab4d106b6faac07fb6a051815fd1b4d862d730895e2d7d7358c2f13565e7a38"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "phf",
+   "version": "0.13.1"
+  },
+  {
+   "checksum": "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737",
+   "files": [
+    {
+     "bytes": 1099,
+     "name": "LICENSE",
+     "sha256": "0ab4d106b6faac07fb6a051815fd1b4d862d730895e2d7d7358c2f13565e7a38"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "phf_generator",
+   "version": "0.13.1"
+  },
+  {
+   "checksum": "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef",
+   "files": [
+    {
+     "bytes": 1099,
+     "name": "LICENSE",
+     "sha256": "0ab4d106b6faac07fb6a051815fd1b4d862d730895e2d7d7358c2f13565e7a38"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "phf_macros",
+   "version": "0.13.1"
+  },
+  {
+   "checksum": "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266",
+   "files": [
+    {
+     "bytes": 1099,
+     "name": "LICENSE",
+     "sha256": "0ab4d106b6faac07fb6a051815fd1b4d862d730895e2d7d7358c2f13565e7a38"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "phf_shared",
+   "version": "0.13.1"
+  },
+  {
+   "checksum": "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-APACHE",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "pin-project-lite",
+   "version": "0.2.17"
+  },
+  {
+   "checksum": "695b3df3d3cc1015f12d70235e35b6b79befc5fa7a9b95b951eab1dd07c9efc2",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1077,
+     "name": "LICENSE-MIT",
+     "sha256": "d0ecd11d389ec949eeea36b59f2164ded631f7bee8be809eece3805a6cfe71ec"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "pkcs12",
+   "version": "0.1.0"
+  },
+  {
+   "checksum": "2896bade328c13f7042a297ea5ac5b0951f6cf989dea5f32c2fd98da398195cb",
+   "files": [
+    {
+     "bytes": 1057,
+     "name": "LICENCE",
+     "sha256": "5b0ae40d1a35f7ae6591a28e44771240e6a88cb03a66c9189a45b9681639b466"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "plist",
+   "version": "1.10.1"
+  },
+  {
+   "checksum": "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1048,
+     "name": "LICENSE-MIT",
+     "sha256": "eaf40297c75da471f7cda1f3458e8d91b4b2ec866e609527a13acfa93b638652"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "png",
+   "version": "0.17.16"
+  },
+  {
+   "checksum": "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1048,
+     "name": "LICENSE-MIT",
+     "sha256": "eaf40297c75da471f7cda1f3458e8d91b4b2ec866e609527a13acfa93b638652"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "png",
+   "version": "0.18.1"
+  },
+  {
+   "checksum": "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "b67acfaaf787b346e1d3bf7654b4fabfd20360fdeb4351cc5e9d624147824527"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "poly1305",
+   "version": "0.9.1"
+  },
+  {
+   "checksum": "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "potential_utf",
+   "version": "0.1.6"
+  },
+  {
+   "checksum": "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391",
+   "files": [
+    {
+     "bytes": 11349,
+     "name": "LICENSE-Apache",
+     "sha256": "155420c6403d4e0fca34105e3c03fdd6939b64c393c7ec6f95f5b72c5474eab0"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "070dbc7dda03a29296f2d58bdb9b7331af90f2abc9f31df22875d1eabaf29852"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "powerfmt",
+   "version": "0.2.0"
+  },
+  {
+   "checksum": "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958",
+   "files": [
+    {
+     "bytes": 11349,
+     "name": "LICENSE-Apache",
+     "sha256": "155420c6403d4e0fca34105e3c03fdd6939b64c393c7ec6f95f5b72c5474eab0"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "070dbc7dda03a29296f2d58bdb9b7331af90f2abc9f31df22875d1eabaf29852"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "powerfmt",
+   "version": "0.2.1"
+  },
+  {
+   "checksum": "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c",
+   "files": [
+    {
+     "bytes": 1078,
+     "name": "LICENSE",
+     "sha256": "7ca6700600dfa9c9497bf5556365067daa802c871ea78239f129309c7a2048f7"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "precomputed-hash",
+   "version": "0.1.1"
+  },
+  {
+   "checksum": "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "proc-macro2",
+   "version": "1.0.107"
+  },
+  {
+   "checksum": "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b",
+   "files": [
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT.md",
+     "sha256": "f0cf9b1c62bbe3bd3a69f5f79c7158f513f612b4940a0a812d1db39d605318bc"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "quick-xml",
+   "version": "0.42.0"
+  },
+  {
+   "checksum": "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "quote",
+   "version": "1.0.47"
+  },
+  {
+   "checksum": "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-APACHE.md",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1064,
+     "name": "LICENSE-MIT.md",
+     "sha256": "9c5a80639a57c1c945570e7ebbca0706305849ce3c098021325cca9db2f7acc4"
+    },
+    {
+     "bytes": 836,
+     "name": "LICENSE-ZLIB.md",
+     "sha256": "ae895c8576e682f310fb70d93d9f99b1dd82872094c54a8f6cdfe2ca5c2d6ecb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0 OR Zlib",
+   "name": "raw-window-handle",
+   "version": "0.6.2"
+  },
+  {
+   "checksum": "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "ref-cast",
+   "version": "1.0.27"
+  },
+  {
+   "checksum": "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "ref-cast-impl",
+   "version": "1.0.27"
+  },
+  {
+   "checksum": "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "regex",
+   "version": "1.13.1"
+  },
+  {
+   "checksum": "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "regex-automata",
+   "version": "0.4.18"
+  },
+  {
+   "checksum": "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "regex-syntax",
+   "version": "0.8.11"
+  },
+  {
+   "checksum": "ef2bee61e6cffa4635c72d7d81a84294e28f0930db0ddcb0f66d10244674ebed",
+   "files": [
+    {
+     "bytes": 1079,
+     "name": "LICENSE",
+     "sha256": "65fc947f4bac882a2cd104ef73c246b1b037059df9f2b3a58b7f77f0b9e56071"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "rfd",
+   "version": "0.15.4"
+  },
+  {
+   "checksum": "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d",
+   "files": [
+    {
+     "bytes": 9722,
+     "name": "LICENSE-APACHE",
+     "sha256": "95bd3988beee069fa2848f648dab43cc6e0b2add2ad6bcb17360caf749802bcc"
+    },
+    {
+     "bytes": 1022,
+     "name": "LICENSE-MIT",
+     "sha256": "30fefc3a7d6a0041541858293bcbea2dde4caa4c0a5802f996a7f7e8c0085652"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "rustc-hash",
+   "version": "2.1.3"
+  },
+  {
+   "checksum": "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1338,
+     "name": "LICENSE-BOOST",
+     "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR BSL-1.0",
+   "name": "ryu",
+   "version": "1.0.23"
+  },
+  {
+   "checksum": "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "cb3c929a05e6cbc9de9ab06a4c57eeb60ca8c724bef6c138c87d3a577e27aa14"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense/MIT",
+   "name": "same-file",
+   "version": "1.0.6"
+  },
+  {
+   "checksum": "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615",
+   "files": [
+    {
+     "bytes": 1068,
+     "name": "LICENSE",
+     "sha256": "1954992a2b32e8a2af24a4c11b726902e344c1934b947a77f04d404908f8db30"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "schemars",
+   "version": "0.8.22"
+  },
+  {
+   "checksum": "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f",
+   "files": [
+    {
+     "bytes": 1068,
+     "name": "LICENSE",
+     "sha256": "1954992a2b32e8a2af24a4c11b726902e344c1934b947a77f04d404908f8db30"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "schemars",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a",
+   "files": [
+    {
+     "bytes": 1068,
+     "name": "LICENSE",
+     "sha256": "1954992a2b32e8a2af24a4c11b726902e344c1934b947a77f04d404908f8db30"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "schemars",
+   "version": "1.2.2"
+  },
+  {
+   "checksum": "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d",
+   "files": [
+    {
+     "bytes": 1068,
+     "name": "LICENSE",
+     "sha256": "1954992a2b32e8a2af24a4c11b726902e344c1934b947a77f04d404908f8db30"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "schemars_derive",
+   "version": "0.8.22"
+  },
+  {
+   "checksum": "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1097,
+     "name": "LICENSE-MIT",
+     "sha256": "fb77f0a9c53e473abe5103c8632ef9f0f2874d4fb3f17cb2d8c661aab9cee9d7"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "scopeguard",
+   "version": "1.2.0"
+  },
+  {
+   "checksum": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
+   "files": [],
+   "kind": "crate",
+   "license": "MPL-2.0",
+   "name": "selectors",
+   "version": "0.36.1"
+  },
+  {
+   "checksum": "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "semver",
+   "version": "1.0.28"
+  },
+  {
+   "checksum": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde",
+   "version": "1.0.228"
+  },
+  {
+   "checksum": "f9faf48a4a2d2693be24c6289dbe26552776eb7737074e6722891fadbe6c5058",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde-untagged",
+   "version": "0.1.9"
+  },
+  {
+   "checksum": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_core",
+   "version": "1.0.228"
+  },
+  {
+   "checksum": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_derive",
+   "version": "1.0.228"
+  },
+  {
+   "checksum": "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_derive_internals",
+   "version": "0.29.1"
+  },
+  {
+   "checksum": "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_json",
+   "version": "1.0.145"
+  },
+  {
+   "checksum": "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_repr",
+   "version": "0.1.21"
+  },
+  {
+   "checksum": "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_spanned",
+   "version": "1.1.1"
+  },
+  {
+   "checksum": "ee78f1fbe43ac4a0e47aadb3dbd357b69eb0d3793e948624cd03dd2750ab1c0a",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1043,
+     "name": "LICENSE-MIT",
+     "sha256": "7576269ea71f767b99297934c0b2367532690f8c4badc695edf8e04ab6a1e545"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_with",
+   "version": "3.22.0"
+  },
+  {
+   "checksum": "8705578779c2b6bd90d84d66eb2e206b708b1a4d7b9f17641b293545bf1c7e46",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1043,
+     "name": "LICENSE-MIT",
+     "sha256": "7576269ea71f767b99297934c0b2367532690f8c4badc695edf8e04ab6a1e545"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serde_with_macros",
+   "version": "3.22.0"
+  },
+  {
+   "checksum": "04f3666a07a197cdb77cdf306c32be9b7f598d7060d50cfd4d5aa04bfd92f6c5",
+   "files": [
+    {
+     "bytes": 11357,
+     "name": "LICENSE-APACHE",
+     "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+     "bytes": 1066,
+     "name": "LICENSE-MIT",
+     "sha256": "e53a7165e8bc3ced5e5628404b3d2d28ecc14ad720f1c09ba28385d5151ecf93"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serialize-to-javascript",
+   "version": "0.1.2"
+  },
+  {
+   "checksum": "772ee033c0916d670af7860b6e1ef7d658a4629a6d0b4c8c3e67f09b3765b75d",
+   "files": [
+    {
+     "bytes": 11357,
+     "name": "LICENSE-APACHE",
+     "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+     "bytes": 1066,
+     "name": "LICENSE-MIT",
+     "sha256": "e53a7165e8bc3ced5e5628404b3d2d28ecc14ad720f1c09ba28385d5151ecf93"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "serialize-to-javascript-impl",
+   "version": "0.1.2"
+  },
+  {
+   "checksum": "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "servo_arc",
+   "version": "0.4.3"
+  },
+  {
+   "checksum": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1138,
+     "name": "LICENSE-MIT",
+     "sha256": "b4eb00df6e2a4d22518fcaa6a2b4646f249b3a3c9814509b22bd2091f1392ff1"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "sha2",
+   "version": "0.10.9"
+  },
+  {
+   "checksum": "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1196,
+     "name": "LICENSE-MIT",
+     "sha256": "831e0f43ad0bf014c1c4fec5767aae470434c1d66d6e671be2d823e729063e25"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "sha2",
+   "version": "0.11.0"
+  },
+  {
+   "checksum": "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1068,
+     "name": "LICENSE-MIT",
+     "sha256": "503558bfefe66ca15e4e3f7955b3cb0ec87fd52f29bf24b336af7bd00e946d5c"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "signal-hook-registry",
+   "version": "1.4.8"
+  },
+  {
+   "checksum": "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea",
+   "files": [
+    {
+     "bytes": 1078,
+     "name": "LICENSE.md",
+     "sha256": "42a35170233e83e18856792e748de4c1ce4a63b2afce9a370c89ef3fe23f9f2d"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "simd-adler32",
+   "version": "0.3.10"
+  },
+  {
+   "checksum": "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649",
+   "files": [
+    {
+     "bytes": 281,
+     "name": "COPYING",
+     "sha256": "c962ee4d1d05ddc138b202b2540219ebc57893fcf97b364852094a9a94ce1365"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "siphasher",
+   "version": "1.0.3"
+  },
+  {
+   "checksum": "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "0b28172679e0009b655da42797c03fd163a3379d5cfa67ba1f1655e974a2a1a9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "smallvec",
+   "version": "1.16.1"
+  },
+  {
+   "checksum": "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "socket2",
+   "version": "0.6.5"
+  },
+  {
+   "checksum": "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "c995204cc6bad2ed67dd41f7d89bb9f1a9d48e0edd745732b30640d7912089a4"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "spki",
+   "version": "0.7.3"
+  },
+  {
+   "checksum": "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1056,
+     "name": "LICENSE-MIT",
+     "sha256": "5e05b024f653a5ce199e77cbbbd42fb5553562ec714b819421ed0c3e552a75d7"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "stable_deref_trait",
+   "version": "1.2.1"
+  },
+  {
+   "checksum": "a18596f8c785a729f2819c0f6a7eae6ebeebdfffbfe4214ae6b087f690e31901",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1067,
+     "name": "LICENSE-MIT",
+     "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "string_cache",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f",
+   "files": [
+    {
+     "bytes": 1166,
+     "name": "LICENSE",
+     "sha256": "1e697ce8d21401fbf1bddd9b5c3fd4c4c79ae1e3bdf51f81761c85e11d5a89cd"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "strsim",
+   "version": "0.11.1"
+  },
+  {
+   "checksum": "e45c444e496845d3f2a351146bff59aae4975b2280238df1dfaa0c7d1846f38e",
+   "files": [
+    {
+     "bytes": 11354,
+     "name": "LICENSE-APACHE",
+     "sha256": "908a661cf763bddfa04f2739bea561be62a246f03ad53fcb2272d3ddbd1d943f"
+    },
+    {
+     "bytes": 1067,
+     "name": "LICENSE-MIT",
+     "sha256": "f3c3e9f4febe81ff14ccc233c344e6e60051290d1c1e5a2c670d63cc3608a5bb"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "swift-rs",
+   "version": "1.0.8"
+  },
+  {
+   "checksum": "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "syn",
+   "version": "2.0.119"
+  },
+  {
+   "checksum": "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "syn",
+   "version": "3.0.6"
+  },
+  {
+   "checksum": "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02",
+   "files": [
+    {
+     "bytes": 1052,
+     "name": "LICENSE",
+     "sha256": "219920e865eee70b7dcfc948a86b099e7f4fe2de01bcca2ca9a20c0a033f2b59"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "synstructure",
+   "version": "0.14.0"
+  },
+  {
+   "checksum": "d1c93047acf68669466a34690ac58cca7010bd1b201e1ec86f1fd0a75d3dd4a9",
+   "files": [
+    {
+     "bytes": 11323,
+     "name": "LICENSE",
+     "sha256": "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+    },
+    {
+     "bytes": 793,
+     "name": "LICENSE.spdx",
+     "sha256": "02b6448337b757772d90e5f31caaa0f9e6afaad2221c01771d0a3deaa4d4196c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0",
+   "name": "tao",
+   "version": "0.35.3"
+  },
+  {
+   "checksum": "667b20e2726d572dea2de7370da16e188eb06008faf9a92fab7cdc46791190b5",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "tauri",
+   "version": "2.11.5"
+  },
+  {
+   "checksum": "08279169ff42f8fc45a1dbc9dcae888893ba95288142e5880c59b93a26d2cfc5",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "tauri-codegen",
+   "version": "2.6.3"
+  },
+  {
+   "checksum": "e8b394794f399a421811d06966343e7933fcae92d59f5180b9388d1174497a45",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "tauri-macros",
+   "version": "2.6.3"
+  },
+  {
+   "checksum": "b0b4bc95aed361b0019067d189a1174a603d460d0f6c72606512d59fc9c12ec8",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "tauri-runtime",
+   "version": "2.11.3"
+  },
+  {
+   "checksum": "4e6fac707727b7a2f48e4ded90976324267371073edbb415ffb73bb0458d203f",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "tauri-runtime-wry",
+   "version": "2.11.4"
+  },
+  {
+   "checksum": "3e176a18e67764923c4f1ce66f25ae4abe5f688384d5eb1a0fa6c77f3d90f887",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "tauri-utils",
+   "version": "2.9.3"
+  },
+  {
+   "checksum": "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1061,
+     "name": "LICENSE-MIT",
+     "sha256": "60a7062291b01ba068f300612cdbdc20382ac1d4934f07bcdd7167c15299f309"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "tendril",
+   "version": "0.5.1"
+  },
+  {
+   "checksum": "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "thiserror",
+   "version": "1.0.69"
+  },
+  {
+   "checksum": "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "thiserror",
+   "version": "2.0.20"
+  },
+  {
+   "checksum": "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "thiserror-impl",
+   "version": "1.0.69"
+  },
+  {
+   "checksum": "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "thiserror-impl",
+   "version": "2.0.20"
+  },
+  {
+   "checksum": "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-Apache",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "2537228d9a1b44a5dc595241349cae7090b326c8de165aaf89bfddef4a00d0fc"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "time",
+   "version": "0.3.55"
+  },
+  {
+   "checksum": "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-Apache",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "2537228d9a1b44a5dc595241349cae7090b326c8de165aaf89bfddef4a00d0fc"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "time-core",
+   "version": "0.1.9"
+  },
+  {
+   "checksum": "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85",
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE-Apache",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1057,
+     "name": "LICENSE-MIT",
+     "sha256": "2537228d9a1b44a5dc595241349cae7090b326c8de165aaf89bfddef4a00d0fc"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "time-macros",
+   "version": "0.2.32"
+  },
+  {
+   "checksum": "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "tinystr",
+   "version": "0.8.4"
+  },
+  {
+   "checksum": "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE.md",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT.md",
+     "sha256": "fd80a26fbb3f644af1fa994134446702932968519797227e07a1368dea80f0bc"
+    },
+    {
+     "bytes": 851,
+     "name": "LICENSE-ZLIB.md",
+     "sha256": "84b34dd7608f7fb9b17bd588a6bf392bf7de504e2716f024a77d89f1b145a151"
+    }
+   ],
+   "kind": "crate",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "name": "tinyvec",
+   "version": "1.13.3"
+  },
+  {
+   "checksum": "a13e32eacd0222f9658be2ccbd83b718bfd9bfb0d54b5921913c184cb86124a5",
+   "files": [
+    {
+     "bytes": 1070,
+     "name": "LICENSE",
+     "sha256": "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "tokio",
+   "version": "1.51.6"
+  },
+  {
+   "checksum": "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e",
+   "files": [
+    {
+     "bytes": 1102,
+     "name": "LICENSE",
+     "sha256": "0b83dc40cba89b9922bb84b0a9c7d2768ce37c1d7e138b7424fd4549915778c9"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "tokio-macros",
+   "version": "2.7.2"
+  },
+  {
+   "checksum": "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "toml",
+   "version": "1.1.6+spec-1.1.0"
+  },
+  {
+   "checksum": "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "toml_datetime",
+   "version": "1.1.1+spec-1.1.0"
+  },
+  {
+   "checksum": "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "toml_parser",
+   "version": "1.1.3+spec-1.1.0"
+  },
+  {
+   "checksum": "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+    },
+    {
+     "bytes": 1062,
+     "name": "LICENSE-MIT",
+     "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "toml_writer",
+   "version": "1.1.2+spec-1.1.0"
+  },
+  {
+   "checksum": "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "typeid",
+   "version": "1.0.3"
+  },
+  {
+   "checksum": "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20",
+   "files": [
+    {
+     "bytes": 17,
+     "name": "LICENSE",
+     "sha256": "db11fec9946737df39ca3898d9cd8c10ec6f6c3a884a6802b0ad0b81b4e8f23a"
+    },
+    {
+     "bytes": 10835,
+     "name": "LICENSE-APACHE",
+     "sha256": "516b24e051bf5630880ebbd55c40a25ce9552ebaf8970a53e8976eb70e522406"
+    },
+    {
+     "bytes": 1083,
+     "name": "LICENSE-MIT",
+     "sha256": "a825bd853ab71619a4923d7b4311221427848070ff44d990da39b0b274c1683f"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "typenum",
+   "version": "1.20.1"
+  },
+  {
+   "checksum": "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "unic-char-property",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "unic-char-range",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "unic-common",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "unic-ucd-ident",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4",
+   "files": [],
+   "kind": "crate",
+   "license": "MIT/Apache-2.0",
+   "name": "unic-ucd-version",
+   "version": "0.9.0"
+  },
+  {
+   "checksum": "ab72a15cf68d77cb0987d3684aa8a45c5ef827e8cb49ee2f30bfd7ba2feb519f",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+     "bytes": 1995,
+     "name": "LICENSE-UNICODE",
+     "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
+    }
+   ],
+   "kind": "crate",
+   "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+   "name": "unicode-ident",
+   "version": "1.0.25"
+  },
+  {
+   "checksum": "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563",
+   "files": [
+    {
+     "bytes": 9723,
+     "name": "LICENSE-APACHE",
+     "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+     "bytes": 1995,
+     "name": "LICENSE-UNICODE",
+     "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
+    }
+   ],
+   "kind": "crate",
+   "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+   "name": "unicode-ident",
+   "version": "1.0.27"
+  },
+  {
+   "checksum": "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8",
+   "files": [
+    {
+     "bytes": 321,
+     "name": "COPYRIGHT",
+     "sha256": "23860c2a7b5d96b21569afedf033469bab9fe14a1b24a35068b8641c578ce24d"
+    },
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1071,
+     "name": "LICENSE-MIT",
+     "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "unicode-segmentation",
+   "version": "1.13.3"
+  },
+  {
+   "checksum": "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1070,
+     "name": "LICENSE-MIT",
+     "sha256": "efa52eb70a774b62c50cf50f5e57e2625c29d375d09b91132f4f020e47b9944e"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "universal-hash",
+   "version": "0.6.1"
+  },
+  {
+   "checksum": "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1072,
+     "name": "LICENSE-MIT",
+     "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "url",
+   "version": "2.5.8"
+  },
+  {
+   "checksum": "70acd30e3aa1450bc2eece896ce2ad0d178e9c079493819301573dae3c37ba6d",
+   "files": [
+    {
+     "bytes": 1073,
+     "name": "LICENSE",
+     "sha256": "5cf1c9dc617e4cad7fa03181ff893601ad5243aa3be527ef39034e1cd6377676"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "urlpattern",
+   "version": "0.3.0"
+  },
+  {
+   "checksum": "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be",
+   "files": [
+    {
+     "bytes": 1742,
+     "name": "COPYRIGHT",
+     "sha256": "c30152c94a6d75e021adbc52b3a52470366a46edb917e17deae3259251af244c"
+    },
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+     "bytes": 1053,
+     "name": "LICENSE-MIT",
+     "sha256": "3fa4ca83dcc9237839b1bdeb2e6d16bdfb5ec0c5ce42b24694d8bbf0dcbef72c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "utf8_iter",
+   "version": "1.0.4"
+  },
+  {
+   "checksum": "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1157,
+     "name": "LICENSE-MIT",
+     "sha256": "436bc5a105d8e57dcd8778730f3754f7bf39c14d2f530e4cde4bd2d17a83ec3d"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "uuid",
+   "version": "1.26.1"
+  },
+  {
+   "checksum": "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b",
+   "files": [
+    {
+     "bytes": 126,
+     "name": "COPYING",
+     "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+     "bytes": 1081,
+     "name": "LICENSE-MIT",
+     "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+     "bytes": 1211,
+     "name": "UNLICENSE",
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unlicense/MIT",
+   "name": "walkdir",
+   "version": "2.5.0"
+  },
+  {
+   "checksum": "ba8b815c1b593dc0baf78dd0f4fc8fdb2de53198fb1163738093e9a311c33fb3",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1076,
+     "name": "LICENSE-MIT",
+     "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT OR Apache-2.0",
+   "name": "web_atoms",
+   "version": "0.2.6"
+  },
+  {
+   "checksum": "d9bec5a31f3f9362f2258fd0e9c9dd61a9ca432e7306cc78c444258f0dce9a9c",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1108,
+     "name": "LICENSE-MIT",
+     "sha256": "617b85f62a4f1b6a62d3d9f28f6d7003b7f68a70b7675a8174bbcc68401ac62d"
+    },
+    {
+     "bytes": 840,
+     "name": "LICENSE.spdx",
+     "sha256": "7ccef0d35e8507fa02d7e904a5277d62723f9ec576d52f6a865cab7b4dbf12ad"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "window-vibrancy",
+   "version": "0.6.0"
+  },
+  {
+   "checksum": "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81",
+   "files": [
+    {
+     "bytes": 1023,
+     "name": "LICENSE-MIT",
+     "sha256": "cb5aedb296c5246d1f22e9099f925a65146f9f0d6b4eebba97fd27a6cdbbab2d"
+    }
+   ],
+   "kind": "crate",
+   "license": "MIT",
+   "name": "winnow",
+   "version": "1.0.4"
+  },
+  {
+   "checksum": "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "writeable",
+   "version": "0.6.4"
+  },
+  {
+   "checksum": "186f9871daa55fd9c016578b810d149de58367113db7fb72b462d2323ce19514",
+   "files": [
+    {
+     "bytes": 10847,
+     "name": "LICENSE-APACHE",
+     "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+     "bytes": 1121,
+     "name": "LICENSE-MIT",
+     "sha256": "ef88893533af22ffbb68ceef0724ba1389518df26165a34f3c99ad30b884df4f"
+    },
+    {
+     "bytes": 833,
+     "name": "LICENSE.spdx",
+     "sha256": "26235c41e314fb0da35b33b2bb5bcbc4dd523839f8eeca52efcd43586f441fb5"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "wry",
+   "version": "0.55.1"
+  },
+  {
+   "checksum": "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94",
+   "files": [
+    {
+     "bytes": 10849,
+     "name": "LICENSE-APACHE",
+     "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5"
+    },
+    {
+     "bytes": 1077,
+     "name": "LICENSE-MIT",
+     "sha256": "90c503b61dee04e1449c323ec34c229dfb68d7adcb96c7e140ee55f70fce2d8e"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "x509-cert",
+   "version": "0.2.5"
+  },
+  {
+   "checksum": "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "yoke",
+   "version": "0.8.3"
+  },
+  {
+   "checksum": "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "yoke-derive",
+   "version": "0.8.3"
+  },
+  {
+   "checksum": "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "zerofrom",
+   "version": "0.1.8"
+  },
+  {
+   "checksum": "f75b4683f6c7f45248d4d64056a24298c6281e0993356d7d1b4a1a962ef10d4a",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "zerofrom-derive",
+   "version": "0.1.8"
+  },
+  {
+   "checksum": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
+   "files": [
+    {
+     "bytes": 11358,
+     "name": "LICENSE-APACHE",
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+     "bytes": 1082,
+     "name": "LICENSE-MIT",
+     "sha256": "8c7516d4b27b1e495be5e38b612298b63de48d05f49cdac94f70f3cd70f8864b"
+    }
+   ],
+   "kind": "crate",
+   "license": "Apache-2.0 OR MIT",
+   "name": "zeroize",
+   "version": "1.9.0"
+  },
+  {
+   "checksum": "4ea269c3bd32f0a32c321907a2ae912ba6f4649bb0fc764a15627e99a7095a3f",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "zerotrie",
+   "version": "0.2.5"
+  },
+  {
+   "checksum": "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "zerovec",
+   "version": "0.11.8"
+  },
+  {
+   "checksum": "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da",
+   "files": [
+    {
+     "bytes": 2195,
+     "name": "LICENSE",
+     "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
+    }
+   ],
+   "kind": "crate",
+   "license": "Unicode-3.0",
+   "name": "zerovec-derive",
+   "version": "0.11.6"
+  },
+  {
+   "checksum": "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112",
+   "files": [
+    {
+     "bytes": 856,
+     "name": "LICENSE",
+     "sha256": "e72111c52b7d96ebe25348dee19f0744f444d3c95ae6b1ecb6ccaecc5bce05ba"
+    }
+   ],
+   "kind": "crate",
+   "license": "Zlib",
+   "name": "zlib-rs",
+   "version": "0.6.8"
+  },
+  {
+   "files": [
+    {
+     "bytes": 10174,
+     "name": "LICENSE_APACHE-2.0",
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "bytes": 1090,
+     "name": "LICENSE_MIT",
+     "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+   ],
+   "integrity": "sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==",
+   "kind": "npm",
+   "license": "Apache-2.0 OR MIT",
+   "name": "@tauri-apps/api",
+   "version": "2.11.1"
+  },
+  {
+   "files": [
+    {
+     "bytes": 1088,
+     "name": "LICENSE",
+     "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+    }
+   ],
+   "integrity": "sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==",
+   "kind": "npm",
+   "license": "MIT",
+   "name": "react",
+   "version": "19.3.0"
+  },
+  {
+   "files": [
+    {
+     "bytes": 1088,
+     "name": "LICENSE",
+     "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+    }
+   ],
+   "integrity": "sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==",
+   "kind": "npm",
+   "license": "MIT",
+   "name": "react-dom",
+   "version": "19.3.0"
+  },
+  {
+   "files": [
+    {
+     "bytes": 1088,
+     "name": "LICENSE",
+     "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+    }
+   ],
+   "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+   "kind": "npm",
+   "license": "MIT",
+   "name": "scheduler",
+   "version": "0.28.0"
+  },
+  {
+   "files": [
+    {
+     "bytes": 101182,
+     "name": "LICENSE.md",
+     "sha256": "2ef0b8a67599690e6abccc21a3678b54457b420fb402654112d45c4e71cce364"
+    }
+   ],
+   "integrity": "sha512-w+N7Hifpc3gRjZ63vYBXA56dvvRlNWRczTdmCBBa+CotUzAPf5b7YMdMR/8CQoeYE5LX3W4wj6RYTgonm1b9DA==",
+   "kind": "npm",
+   "license": "MIT",
+   "name": "vite",
+   "version": "7.3.1"
+  }
+ ],
+ "lockfiles": {
+  "desktop/helpers/macos-android-register/Cargo.lock": "b6a71df2106e986755768b594ec2f6e523ef1b0a254d7dcc060bcdda5d19d222",
+  "desktop/helpers/macos-desktop-image/Cargo.lock": "692e024498b75b0fda7549d918333c5354695acf3f8bcb0d86125717c58ee500",
+  "desktop/helpers/macos-github-seal/Cargo.lock": "bed5621628fafce21707d508559b97d4563a3b464af0e1a8054877a0b75ff0a3",
+  "desktop/helpers/macos-vault-helper/Cargo.lock": "9bcfd7b513f22676f813218b7b9f4b502fe2fbf0b89326fca0615325afe306f9",
+  "desktop/native/macos-installed-native/Cargo.lock": "7af492c0d710ce3ccc1776369d9807bd82aade3d97c9e0bdafb01ec704343117",
+  "desktop/package-lock.json": "cff755a78025dafe5f002aca8f59211d9a061a61f2bf0c0e50e286378394093c",
+  "desktop/src-tauri/Cargo.lock": "619efb8eea638a14e3f10d9f1cc701b16b961bab339d2f7ccdeb675cedb0a450"
+ },
+ "noticeBytes": 715140,
+ "noticeSha256": "4e79b32c850d62423af999a89c5c7a108dec637ff592ca04c4a895b3a10e1873",
+ "schemaVersion": 1,
+ "targets": [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin"
+ ],
+ "workspaces": [
+  "src-tauri",
+  "native/macos-installed-native",
+  "helpers/macos-android-register",
+  "helpers/macos-desktop-image",
+  "helpers/macos-vault-helper",
+  "helpers/macos-github-seal"
+ ]
+}

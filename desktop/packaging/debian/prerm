@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+# Published versions are not package-owned files and MUST remain untouched.
+# In particular, an app exiting is not proof that its Python child has exited.
+case "${1-}" in
+  remove|upgrade|deconfigure|failed-upgrade) exit 0 ;;
+  *) exit 1 ;;
+esac

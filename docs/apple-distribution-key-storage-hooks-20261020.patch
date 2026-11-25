@@ -1,0 +1,306 @@
+diff --git a/desktop/src-tauri/src/asset_commands.rs b/desktop/src-tauri/src/asset_commands.rs
+--- a/desktop/src-tauri/src/asset_commands.rs
++++ b/desktop/src-tauri/src/asset_commands.rs
+@@ -14,6 +14,14 @@
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+ pub(crate) use upload_key_fields::UploadKeySecrets;
+
++#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++#[path = "credential_apple_distribution_key_fields.rs"]
++mod apple_distribution_key_fields;
++#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++pub(crate) use apple_distribution_key_fields::{AppleDistributionKeyFields, AppleDistributionKeyMetadata,
++    PRIVATE_FRAME_LIMIT as APPLE_KEY_PRIVATE_FRAME_LIMIT, CONSTRUCTION_BYTES as APPLE_KEY_CONSTRUCTION_BYTES,
++    public_parts_match as apple_distribution_key_public_matches};
++
+ pub(crate) const POLICY: &str = "credential-policy-v1";
+ pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;
+ const SMALL_LIMIT: usize = 1024;
+@@ -23,6 +31,8 @@
+ #[serde(rename_all = "kebab-case")]
+ pub(crate) enum Kind {
+     AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8,
++    // Native storage only: deliberately absent from kind()/enabled()/FileKind.
++    AppleDistributionKey,
+     IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment, GoogleServiceAccount,
+ }
+ impl Kind {
+@@ -35,6 +45,7 @@
+             Self::AppleReviewDemo => "apple-review-demo",
+             Self::OperationCommitment => "operation-commitment",
+             Self::GoogleServiceAccount => "google-service-account",
++            Self::AppleDistributionKey => "apple-distribution-key",
+         }
+     }
+     pub(crate) fn enabled(self) -> bool {
+@@ -328,6 +339,7 @@
+     match kind {
+         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
+         Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile | Kind::GoogleServiceAccount => &[],
++        Kind::AppleDistributionKey => &["privateKeyPkcs8Base64", "csrPem", "publicKeySpkiBase64"],
+         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
+         Kind::AscP8 => &["keyId", "issuerId"],
+         Kind::AppleReviewContact => &["contactFirstName", "contactLastName", "contactEmail", "contactPhone"],
+@@ -359,6 +371,13 @@
+         else { values.push(Some(copy_text(text(source)?)?)); }
+     }
+     Ok(Fields { kind, values })
++}
++// Called only by authenticated vault/portable-backup decoding. It does not
++// widen ordinary renderer field admission, assessment or session kinds.
++#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++pub(crate) fn stored_fields(kind: Kind, value: &Value) -> Result<Fields, AssetError> {
++    if kind == Kind::AppleDistributionKey { apple_distribution_key_fields::stored_fields(value) }
++    else { validate_fields(kind, value)?; own_fields(kind, value) }
+ }
+ pub(crate) fn copy_text(text: &str) -> Result<String, AssetError> {
+     let mut copy = String::new(); copy.try_reserve_exact(text.len()).map_err(|_| AssetError::new(Reason::Capacity))?;
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -261,7 +261,7 @@
+         RECORD_METADATA_BYTES.saturating_add(self.material.as_ref().map_or(0, |m| m.retained_bytes().unwrap_or(usize::MAX)))
+             .saturating_add(self.fields.as_ref().map_or(0, Fields::byte_count))
+     }
+-    fn usable_source(&self) -> bool { self.kind.file().is_none() || self.material.as_ref().is_some_and(|m| m.observation.is_observed()) }
++    fn usable_source(&self) -> bool { self.kind != Kind::AppleDistributionKey && (self.kind.file().is_none() || self.material.as_ref().is_some_and(|m| m.observation.is_observed())) }
+ }
+ struct Record { key: RecordKey, payload: Arc<Payload>, mutation_pending: bool }
+ struct Candidate { payload: Arc<Payload>, record_id: Token, existing: Option<RecordKey> }
+@@ -2622,6 +2622,7 @@
+     }
+ }
+ fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
++    if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+     if kind == Kind::GoogleServiceAccount {
+         return if context.execution_mode == commands::ExecutionMode::Local && context.platform == Platform::Android
+             && matches!(context.purpose, Purpose::Full | Purpose::Store) && kind.enabled() { Ok(()) }
+diff --git a/desktop/src-tauri/src/asset_session_vault.rs b/desktop/src-tauri/src/asset_session_vault.rs
+--- a/desktop/src-tauri/src/asset_session_vault.rs
++++ b/desktop/src-tauri/src/asset_session_vault.rs
+@@ -260,9 +260,10 @@
+     if vault.revoked || vault.key.is_none() || !matches!(vault.state, State::Unlocked | State::Mutating | State::Interrupted) { return Vec::new(); }
+     vault.rows.iter().map(|row| {
+         let key = row.key();
+-        let assigned = vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
++        let pending_key = row.authenticated.descriptor.kind == Kind::AppleDistributionKey;
++        let assigned = !pending_key && vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
+             && assignment_available(state, assignment));
+-        let assessed = vault.writable() && record_assessed(state, &key);
++        let assessed = !pending_key && vault.writable() && record_assessed(state, &key);
+         RecordStatus { record_id: key.id, revision: key.revision, kind: row.authenticated.descriptor.kind,
+             availability: if row.mutation_pending { "mutation-pending" } else if assigned { "assigned" } else { "unassigned" },
+             storage: "encrypted", label: row.authenticated.descriptor.label.clone(), payload_state: if assessed { "assessed" } else { "not-checked" } }
+@@ -2243,6 +2244,9 @@
+         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
+         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
+         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
++        // A pending signing key is recovered by its original intent owner,
++        // never by ordinary assessment/Bind or generic removal.
++        if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+         let roster = self.vault_roster(state)?;
+         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
+         let mut slot = self.vault_owner(state, Operation::Prepare, Some(context.clone()), Some(key), Some(Instant::now() + REVIEW), true)?;
+@@ -2259,6 +2263,9 @@
+         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
+         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
+         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
++        // A pending signing key is recovered by its original intent owner,
++        // never by ordinary assessment/Bind or generic removal.
++        if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+         let roster = self.vault_roster(&mut state)?;
+         let mut slot = self.vault_owner(&mut state, Operation::PrepareDelete, None, Some(key.clone()), Some(Instant::now() + REVIEW), true)?;
+         slot.kind = Some(kind); slot.vault.reference = Some(reference); slot.vault.generation = Some(roster.generation);
+diff --git a/desktop/src-tauri/src/macos_store_runtime.rs b/desktop/src-tauri/src/macos_store_runtime.rs
+--- a/desktop/src-tauri/src/macos_store_runtime.rs
++++ b/desktop/src-tauri/src/macos_store_runtime.rs
+@@ -14,6 +14,8 @@
+     "store/tooling/fastlane/run_lane.rb", "store/tooling/fastlane/native_process_spawn.rb",
+     "store/tooling/fastlane/apple_provisioning.rb", "store/tooling/fastlane/apple_provisioning_bundle_read.rb",
+     "store/tooling/fastlane/apple_provisioning_profile_read.rb",
++    "store/tooling/fastlane/apple_distribution_key.rb",
++    "store/tooling/fastlane/apple_distribution_key_verify.rb",
+     "store/tooling/fastlane/apple_store_versions.rb",
+     "store/licenses/Ruby-COPYING", "store/licenses/Ruby-BSDL", "store/licenses/Ruby-LEGAL",
+     "store/licenses/OpenSSL-LICENSE.txt", "store/licenses/LibYAML-License",
+diff --git a/desktop/src-tauri/src/vault_crypto.rs b/desktop/src-tauri/src/vault_crypto.rs
+--- a/desktop/src-tauri/src/vault_crypto.rs
++++ b/desktop/src-tauri/src/vault_crypto.rs
+@@ -15,6 +15,9 @@
+ // key and does not turn a restored record into an assessment or assignment.
+ #[path = "vault_backup.rs"]
+ pub(crate) mod backup;
++#[path = "vault_crypto_apple_distribution_key.rs"]
++mod apple_distribution_key;
++pub(crate) use apple_distribution_key::{ReservedAppleDistributionKey, KEY_CRYPTO_BYTES as APPLE_KEY_CRYPTO_BYTES};
+
+ #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+ type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
+@@ -161,6 +164,13 @@
+     }
+     fn seal_record_with(&self, record: Id, previous: Option<Revision>, descriptor: &Descriptor,
+         fields: &Fields, file: Option<&[u8]>, allowance: usize, random: &mut impl Entropy) -> Result<SealedRecord> {
++        self.seal_record_with_revision(record, previous, descriptor, fields, file, allowance, random, None)
++    }
++    // SAME parent-private seam used by the fixed Apple-profile reservation.
++    // Root composes that child's separate kind arm, never an arbitrary kind.
++    fn seal_record_with_revision(&self, record: Id, previous: Option<Revision>, descriptor: &Descriptor,
++        fields: &Fields, file: Option<&[u8]>, allowance: usize, random: &mut impl Entropy,
++        reserved: Option<Revision>) -> Result<SealedRecord> {
+         capacity(0, allowance)?;
+         if descriptor.kind != fields.vault_kind() || descriptor.presence() != fields.vault_presence()
+             || descriptor.has_file() != file.is_some() { return Err(Error::Format); }
+@@ -175,7 +185,11 @@
+         let payload_length = 8usize.checked_add(scalars).and_then(|value| value.checked_add(file_length)).ok_or(Error::Bounds)?;
+         let descriptor_bytes = Zeroizing::new(descriptor.encode()?);
+         let counter = previous.map_or(Some(1), |previous| previous.counter.checked_add(1)).ok_or(Error::Bounds)?;
+-        let revision = Revision::new(fresh_id(random)?, counter)?;
++        let revision = match reserved {
++            Some(value) if previous.is_none() && value.counter == 1 && descriptor.kind == commands::Kind::AppleDistributionKey => value,
++            Some(_) => return Err(Error::Format),
++            None => Revision::new(fresh_id(random)?, counter)?,
++        };
+         if previous.is_some_and(|previous| previous.random == revision.random) { return Err(Error::Random); }
+         let data_key = random_key(random)?; let nonces = [nonce(random)?, nonce(random)?, nonce(random)?];
+         if nonces[0] == self.header_nonce { return Err(Error::Random); }
+@@ -380,8 +394,7 @@
+     let mut decoder = serde_json::Deserializer::from_slice(&payload[8..scalar_end]);
+     let values = ScalarSeed { kind: descriptor.kind }.deserialize(&mut decoder).map_err(|_| Error::Format)?;
+     decoder.end().map_err(|_| Error::Format)?;
+-    commands::validate_fields(descriptor.kind, &values.0).map_err(|_| Error::Format)?;
+-    let fields = commands::own_fields(descriptor.kind, &values.0).map_err(|_| Error::Format)?;
++    let fields = commands::stored_fields(descriptor.kind, &values.0).map_err(|_| Error::Format)?;
+     if fields.vault_presence() != descriptor.presence() { return Err(Error::Format); }
+     Ok((fields, file))
+ }
+diff --git a/desktop/src-tauri/src/vault_format.rs b/desktop/src-tauri/src/vault_format.rs
+--- a/desktop/src-tauri/src/vault_format.rs
++++ b/desktop/src-tauri/src/vault_format.rs
+@@ -216,7 +216,11 @@
+ }
+ impl Descriptor {
+     pub(crate) fn new(kind: Kind, label: Option<String>, field_presence: Vec<bool>, file_present: bool) -> Result<Self> {
+-        if !kind.enabled() || !valid_label(label.as_deref()) || field_presence.len() != commands::field_names(kind).len()
++        // The pending signing key is an encrypted storage kind only. Listing
++        // it must not require making it a general credential/picker input.
++        if (!kind.enabled() && kind != Kind::AppleDistributionKey)
++            || (kind == Kind::AppleDistributionKey && (label.is_some() || field_presence != [true; 3] || file_present))
++            || !valid_label(label.as_deref()) || field_presence.len() != commands::field_names(kind).len()
+             || file_present != kind.file().is_some() { return Err(Error::Shape); }
+         Ok(Self { kind, label, field_presence, file_present })
+     }
+@@ -226,7 +230,8 @@
+         // fields (including escaped spelling), unknown keys and trailing data.
+         let wire: DescriptorWire = serde_json::from_slice(bytes).map_err(|_| Error::Shape)?;
+         if wire.schema_version != 1 { return Err(Error::Shape); }
+-        let kind = commands::kind(&serde_json::Value::String(wire.kind)).map_err(|_| Error::Shape)?;
++        let kind = if wire.kind == "apple-distribution-key" { Kind::AppleDistributionKey }
++            else { commands::kind(&serde_json::Value::String(wire.kind)).map_err(|_| Error::Shape)? };
+         Self::new(kind, wire.label, wire.field_presence, wire.file_present)
+     }
+     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+diff --git a/desktop/src/assetSessionProtocol.ts b/desktop/src/assetSessionProtocol.ts
+--- a/desktop/src/assetSessionProtocol.ts
++++ b/desktop/src/assetSessionProtocol.ts
+@@ -171,7 +171,8 @@
+     if (value.context !== null && (!keys(value.context, object(value.context) && Object.hasOwn(value.context, 'executionMode') ? ['revision', 'projectId', 'platform', 'stage', 'purpose', 'executionMode'] : ['revision', 'projectId', 'platform', 'stage', 'purpose']) || !assetCounter(value.context.revision) ||
+         !projectId(value.context.projectId) || !scope({ platform: value.context.platform, stage: value.context.stage, purpose: value.context.purpose, ...(Object.hasOwn(value.context, 'executionMode') ? { executionMode: value.context.executionMode } : {}) }))) return null;
+     if (!list(value.records, encrypted ? 128 : 32, (record) => keys(record, ['recordId', 'revision', 'kind', 'availability', 'storage', 'label', 'payloadState']) && token(record.recordId) &&
+-        assetCounter(record.revision) && one(record.kind, ASSET_KINDS) && one(record.availability, ['unassigned', 'assigned', 'mutation-pending']) &&
++        assetCounter(record.revision) && (one(record.kind, ASSET_KINDS) || record.kind === 'apple-distribution-key' && encrypted &&
++          record.availability !== 'assigned' && record.payloadState === 'not-checked' && record.label === null) && one(record.availability, ['unassigned', 'assigned', 'mutation-pending']) &&
+         one(record.storage, ['session', 'encrypted']) && record.storage === value.mode && assetLabelFits(record.label) && one(record.payloadState, ['not-checked', 'assessed']) &&
+         (encrypted ? record.revision > 0 : record.label === null)) ||
+         new Set(value.records.map((record) => (record as ObjectValue).recordId)).size !== value.records.length) return null;
+diff --git a/desktop/src/assetSessionTypes.ts b/desktop/src/assetSessionTypes.ts
+--- a/desktop/src/assetSessionTypes.ts
++++ b/desktop/src/assetSessionTypes.ts
+@@ -4,6 +4,8 @@
+ export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'google-service-account';
+ export type AssetScalarKind = 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment';
+ export type AssetKind = AssetFileKind | AssetScalarKind;
++// Encrypted descriptor-only row; never an input/assessment/assignment kind.
++export type StoredAssetKind = AssetKind | 'apple-distribution-key';
+ export type AssetPlatform = 'android' | 'ios' | 'project';
+ export type AssetStage = 'candidate' | 'external-testing' | 'production';
+ export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning';
+@@ -92,7 +94,7 @@
+     selectionToken: string | null; assessment: CredentialAssessment | null;
+     preview: { token: string; action: AssetPreviewAction; expiresInMs: number; subject: AssetPreviewSubject } | null;
+   } | null;
+-  records: { recordId: string; revision: number; kind: AssetKind; availability: 'unassigned' | 'assigned' | 'mutation-pending'; storage: 'session' | 'encrypted'; label: string | null; payloadState: 'not-checked' | 'assessed' }[];
++  records: { recordId: string; revision: number; kind: StoredAssetKind; availability: 'unassigned' | 'assigned' | 'mutation-pending'; storage: 'session' | 'encrypted'; label: string | null; payloadState: 'not-checked' | 'assessed' }[];
+   assignments: { kind: AssetKind; recordId: string; recordRevision: number; contextRevision: number; availability: 'available' | 'unavailable' }[];
+ }
+
+diff --git a/desktop/src/components/CredentialSession.tsx b/desktop/src/components/CredentialSession.tsx
+--- a/desktop/src/components/CredentialSession.tsx
++++ b/desktop/src/components/CredentialSession.tsx
+@@ -310,8 +310,9 @@
+     {!!status?.records.length && <div className="session-records"><div className="inline-heading"><h3>{encrypted ? 'Encrypted stored records' : 'Kept session records'}</h3>{controlHelp('assign')}</div><p>{encrypted ? 'Authenticated descriptors only; a listed label is not payload assessment or assignment. At most 128 records / 1 GiB on disk. Labels are optional user text, never filled from original filenames.' : 'Fixed labels only; no secret value or original filename is displayed. At most 32 records / 64 MiB; retained only for this launch.'}</p>
+       {status.records.map((record, index) => {
+         const assigned = usable && status.assignments.some((assignment) => assignment.recordId === record.recordId && assignment.recordRevision === record.revision && assignment.kind === record.kind && assignment.contextRevision === status.context?.revision && assignment.availability === 'available');
+-        const recordLabel = `${guide?.kinds.find((kind) => kind.id === record.kind)?.label ?? 'Private input'} · item ${index + 1}${record.label ? ` · ${record.label}` : ''}`;
+-        return <article key={record.recordId} aria-label={`Private input · ${recordLabel}`}><div><h4>{recordLabel}</h4><p>Revision <span role="group" aria-label="Private-input record revision">{record.revision}</span> · {encrypted ? 'encrypted stored copy' : 'retained only in this session'}</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge><p>{record.payloadState === 'not-checked' ? 'Payload not checked for the current session and draft. Assess this exact revision before assigning.' : 'Payload assessed for its submitted context; a changed draft needs preparation again. Native signing, account access and release readiness remain unverified.'}</p></div><div className="button-row">{encrypted && <button type="button" className="button secondary small" disabled={backupReason !== null || record.availability === 'mutation-pending'} onClick={() => startBackupAction({ recordId: record.recordId, expectedRevision: record.revision })}>Back up…</button>}<button className="button secondary small" disabled={!usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>{encrypted ? 'Assess and assign…' : 'Review assignment'}</button><button className="button secondary small" disabled={!!baseReason || !writable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
++        const pendingAppleKey = record.kind === 'apple-distribution-key';
++        const recordLabel = `${pendingAppleKey ? 'Pending Apple signing key' : guide?.kinds.find((kind) => kind.id === record.kind)?.label ?? 'Private input'} · item ${index + 1}${record.label ? ` · ${record.label}` : ''}`;
++        return <article key={record.recordId} aria-label={`Private input · ${recordLabel}`}><div><h4>{recordLabel}</h4><p>Revision <span role="group" aria-label="Private-input record revision">{record.revision}</span> · {encrypted ? 'encrypted stored copy' : 'retained only in this session'}</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge><p>{pendingAppleKey ? 'Saved for Apple signing setup. Keep this key and an encrypted backup; finish or recover certificate setup with the original operation. It cannot be assigned or removed here.' : record.payloadState === 'not-checked' ? 'Payload not checked for the current session and draft. Assess this exact revision before assigning.' : 'Payload assessed for its submitted context; a changed draft needs preparation again. Native signing, account access and release readiness remain unverified.'}</p></div><div className="button-row">{encrypted && <button type="button" className="button secondary small" disabled={backupReason !== null || record.availability === 'mutation-pending'} onClick={() => startBackupAction({ recordId: record.recordId, expectedRevision: record.revision })}>Back up…</button>}<button className="button secondary small" disabled={pendingAppleKey || !usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>{encrypted ? 'Assess and assign…' : 'Review assignment'}</button><button className="button secondary small" disabled={pendingAppleKey || !!baseReason || !writable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
+       })}
+     </div>}
+     <details className="session-limit-note"><summary>Advanced: platform support and verification limits</summary>
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -45,6 +45,8 @@
+   "fastlane/apple_provisioning_bundle_registration.rb",
+   "fastlane/apple_provisioning_bundle_read.rb",
+   "fastlane/apple_provisioning_profile_read.rb",
++  "fastlane/apple_distribution_key.rb",
++  "fastlane/apple_distribution_key_verify.rb",
+   "fastlane/apple_production.rb",
+   "fastlane/apple_asset_upload.rb",
+   "fastlane/apple_create_retry.rb",
+diff --git a/src/mobile_release/_command_process.py b/src/mobile_release/_command_process.py
+--- a/src/mobile_release/_command_process.py
++++ b/src/mobile_release/_command_process.py
+@@ -3212,6 +3212,15 @@
+         self.observation: FenceObservationDecoder | None = None
+         if binding is not None and binding.fence_observation is FenceObservationPolicy.TRACE_V1:
+             self.observation = FenceObservationDecoder(self.nonce, binding._fields["sequence"], uid=binding._fields["uid"])
++        # Fixed Apple key child only. Bind the SAME original slot after its
++        # backing is initialized and BEFORE native command acquisition. A late
++        # STOP may suppress CompletedProcess; it must not lose generated bytes.
++        apple_source = getattr(guard, "_apple_provisioning_source", None)
++        if apple_source is not None:
++            from ._desktop_apple_provisioning_control import AppleProvisioningInput
++            from ._desktop_apple_distribution_key import bind_original_command_slot
++            _require(type(apple_source) is AppleProvisioningInput)
++            bind_original_command_slot(apple_source.require_operation(), self, self.slot)
+
+     def prepared_reservation(self) -> bool:
+         self.ctx.check()
+diff --git a/src/mobile_release/build_inputs.py b/src/mobile_release/build_inputs.py
+--- a/src/mobile_release/build_inputs.py
++++ b/src/mobile_release/build_inputs.py
+@@ -685,6 +685,9 @@
+     "store-metadata": {"metadata": _ScratchSpec("store-metadata.zip", 512 * 1024**2)},
+     "ios-snapshot": {},  # Fixed bounded tree implementation lives in ios_artifacts.
+     "online-runner": {},
++    # Fixed input for bundled Apple PKCS8/CSR/SPKI verification only. Existing
++    # private _FD/FiniteScratch publication, identity checks and cleanup apply.
++    "apple-distribution-key": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233)},
+     "online-readback": {platform: _ScratchSpec(platform + ".json", _SMALL, "exclusive-output")
+                         for platform in ("android", "ios")},
+ }
+diff --git a/src/mobile_release/tooling.py b/src/mobile_release/tooling.py
+--- a/src/mobile_release/tooling.py
++++ b/src/mobile_release/tooling.py
+@@ -20,6 +20,8 @@
+     "fastlane/apple_provisioning.rb",
+     "fastlane/apple_provisioning_bundle_read.rb",
+     "fastlane/apple_provisioning_profile_read.rb",
++    "fastlane/apple_distribution_key.rb",
++    "fastlane/apple_distribution_key_verify.rb",
+     "fastlane/apple_store_versions.rb",
+     "fastlane/apple_production.rb",
+     "fastlane/apple_asset_upload.rb",

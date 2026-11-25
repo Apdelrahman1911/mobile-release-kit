@@ -1,0 +1,1859 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -113,6 +113,7 @@
+ import { gitConnectionBlocksSavedWork } from './gitPushSelection.ts';
+ import type { GitConnectedAdmission } from './gitPushSelection.ts';
+ import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
++import { GitUpstreamSetup } from './components/GitUpstreamSetup.tsx';
+ import { GitBranches } from './components/GitBranches.tsx';
+ import { GitInitialization } from './components/GitInitialization.tsx';
+ import { GitFetch } from './components/GitFetch.tsx';
+@@ -2240,6 +2241,7 @@
+               <GitInitialization controller={gitLocal} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+                 originalProjectName={gitLocalProjectName} />
+               <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
++              <GitUpstreamSetup controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+               <GitFetch controller={gitLocal} repository={gitRepository} connection={connectionState} originalProjectName={gitLocalProjectName} />
+               <GitPush controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />
+diff --git a/desktop/src/components/GitLocalChanges.tsx b/desktop/src/components/GitLocalChanges.tsx
+--- a/desktop/src/components/GitLocalChanges.tsx
++++ b/desktop/src/components/GitLocalChanges.tsx
+@@ -1,3 +1,4 @@
++import { GitUpstreamRecovery } from './GitUpstreamSetup.tsx';
+ import { GitPushRecovery } from './GitPush.tsx';
+ import { GitFastForwardRecovery } from './GitFastForward.tsx';
+ import { useId, useSyncExternalStore } from 'react';
+@@ -32,13 +33,14 @@
+   const result = op?.phase === 'apply' && op.result ? op.result as GitLocalMutationResult : null;
+   const title = state.uncertain ? 'Git action needs attention' : state.recovery ? 'Git recovery is needed' : state.pending ? 'Waiting for the original Git request' :
+     state.review ? 'Review before changing Git' : active ? 'Git action is still running' : result?.state === 'succeeded' ?
+-      result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push-new-branch' ? 'New GitHub branch published' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
++      result.action === 'set-upstream' ? 'Local upstream configured' : result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push-new-branch' ? 'New GitHub branch published' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
+         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
+   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
+     <div><h3>{title}</h3>
+       {state.projectId && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
+       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files. Do not repeat the action, reconnect to dismiss it, or remove Git lock files.</p>}
+       {state.recovery && <p className="review-caution" role="alert">Preserve the original task and project files. This screen cannot prove recovery or safely repeat the change.</p>}
++      {result?.action === 'set-upstream' && <GitUpstreamRecovery result={result} />}
+       {(result?.action === 'push' || result?.action === 'push-new-branch') && <GitPushRecovery result={result} />}
+       {result?.action === 'fast-forward' && <GitFastForwardRecovery result={result} />}
+       {result?.action === 'fetch' && <GitFetchRecovery result={result} />}
+diff --git a/desktop/src/components/ServiceGitRepositoryAccess.tsx b/desktop/src/components/ServiceGitRepositoryAccess.tsx
+--- a/desktop/src/components/ServiceGitRepositoryAccess.tsx
++++ b/desktop/src/components/ServiceGitRepositoryAccess.tsx
+@@ -18,10 +18,10 @@
+   }, [controller, repository, reader, local]);
+   const current = controller.getContext(), action = current.project?.action, access = state.access;
+   const pending = !!state.pending || state.revokePending;
+-  return <ProgressiveDisclosure title="Let an AI or CLI agent make one local branch change"
++  return <ProgressiveDisclosure title="Let an AI or CLI agent make one local repository change"
+     needsAttention={pending || state.uncertain || !!state.message || access?.enabled === true}>
+     <section className="session-review" aria-label="Agent local repository permission">
+-      <p>Choose an action for <strong>{projectName}</strong>. Use the branch names already entered above; this does not grant general Git access.</p>
++      <p>Choose an action for <strong>{projectName}</strong>. Use the branch names or upstream settings already entered above; this does not grant general Git access.</p>
+       <label htmlFor={selectId}>One permitted action</label>
+       <select id={selectId} value={controller.getKind()} disabled={pending} onChange={e => controller.chooseKind(e.target.value)}>
+         {Object.entries(GIT_REPOSITORY_PERMISSION_LABELS).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
+diff --git a/desktop/src/gitLocalController.ts b/desktop/src/gitLocalController.ts
+--- a/desktop/src/gitLocalController.ts
++++ b/desktop/src/gitLocalController.ts
+@@ -1,4 +1,6 @@
+ import { gitPushNewBranchActionFor } from './gitPushNewBranchProtocol.ts';
++import { gitUpstreamAction, isGitUpstreamReview } from './gitUpstreamProtocol.ts';
++import type { GitUpstreamDraft } from './gitUpstreamProtocol.ts';
+ import type { GitPushReadbackSource } from './gitPushRecovery.ts';
+ import type { ActivitySelection } from './githubActivityProtocol.ts';
+ import { gitPushAccount, sameGitPushAccount, gitPushLocalSource, gitPushActionFor, pushReviewMatchesAccount } from './gitPushSelection.ts';
+@@ -32,7 +34,7 @@
+ export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
+   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
+   readonly reader?: GitReadController | null; readonly pushConnection?: GitHubConnectionViewState | null; readonly fetchConnection?: GitHubConnectionViewState | null }
+-interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation | null; readonly initialization?: GitRepositoryView;
++interface Capture { readonly upstream?: {readonly draft: GitUpstreamDraft; readonly source: GitReadObservation | GitBranches}; readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation | null; readonly initialization?: GitRepositoryView;
+   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
+   readonly fetch?: { readonly local: GitReadObservation; readonly account: GitFetchAccount; readonly draft: GitFetchDraft };
+   readonly push?: { readonly local: GitReadObservation; readonly account: GitPushAccount };
+@@ -188,7 +190,7 @@
+     }
+     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
+       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
+-      (c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
++      (c.action.kind === 'set-upstream' ? !!c.upstream && r.upstreamDraft === c.upstream.draft && (this.cachedTracking(now) ?? this.branchList(now)) === c.upstream.source : c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
+         c.action.kind === 'branch-switch' ? r.switchDraft === c.switchDraft && this.branchList(now) === c.branches :
+         c.action.kind === 'branch-create' ? r.branchDraft === c.branchDraft && this.branchList(now) === c.branches : r.selected === c.selected && r.draft === c.draft);
+   }
+@@ -341,6 +343,31 @@
+     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+   }
++  prepareUpstreamReason(): GitLocalIssue | null {
++    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
++    const reason = this.currentReason(); if (reason) return reason;
++    const b = this.current(), r = b.repository!.getSnapshot(), source = this.cachedTracking(b) ?? this.branchList(b);
++    if (!source || !r.observation?.branch || !r.observation.head) return 'upstream-read-required';
++    return gitUpstreamAction(r.upstreamDraft, r.observation, source.referenceRevision) ? null : 'upstream-draft-required';
++  }
++  async prepareUpstream(): Promise<boolean> {
++    const reason = this.prepareUpstreamReason(); if (reason) return this.report(reason);
++    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot();
++    const source = this.cachedTracking(binding) ?? this.branchList(binding);
++    if (!source || !r.observation) return this.report('upstream-read-required');
++    const action = gitUpstreamAction(r.upstreamDraft, r.observation, source.referenceRevision);
++    if (!action) return this.report('upstream-draft-required');
++    const request: GitLocalStartRequest = Object.freeze({phase:'prepare', projectId:binding.projectId!,
++      expectedDocumentRevision:this.state.status!.documentRevision, action, reviewId:null});
++    const raw = gitLocalRequest('prepare', {projectId:request.projectId, expectedDocumentRevision:request.expectedDocumentRevision, action});
++    if (!raw) return this.report('invalid-input');
++    const capture: Capture = Object.freeze({binding, repository, observation:r.observation, selected:r.selected, draft:r.draft,
++      branchDraft:r.branchDraft, switchDraft:r.switchDraft, renameDraft:r.renameDraft, action, tracking:null, branches:null, paths:Object.freeze([]),
++      upstream:Object.freeze({draft:r.upstreamDraft, source})});
++    const attempt = this.newAttempt(binding, request, action, capture, null);
++    this.attempt = attempt; this.approved = null; this.publish({original:null, submitted:null, issue:null});
++    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
++  }
+   prepareBranchReason(): GitLocalIssue | null {
+     if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+     const reason = this.currentReason(); if (reason) return reason;
+@@ -454,6 +481,8 @@
+     const r = prepared.review;
+     if (capture.action.kind === 'initialize') return r.action === 'initialize' && capture.observation === null && !!capture.initialization;
+     if (r.action === 'initialize' || !capture.observation || r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
++    if (capture.action.kind === 'set-upstream') return r.action === 'set-upstream' && !!capture.upstream &&
++      r.expectedReferenceRevision === capture.upstream.source.referenceRevision && isGitUpstreamReview(r, capture.action);
+     if (capture.action.kind === 'push' || capture.action.kind === 'push-new-branch') return r.action === capture.action.kind && !!capture.push &&
+       r.expectedReferenceRevision === capture.push.local.referenceRevision && pushReviewMatchesAccount(r, capture.push.account);
+     if (capture.action.kind === 'fast-forward') return r.action === 'fast-forward' && !!capture.tracking &&
+@@ -467,7 +496,7 @@
+       r.expectedReferenceRevision === capture.branches.referenceRevision &&
+       capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
+     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
+-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
++      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'set-upstream' && r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
+   }
+   reviewReason(): GitLocalIssue | null {
+     const h = this.held;
+@@ -479,6 +508,7 @@
+     if (h.stale || !h.capture || !this.captureCurrent(h.capture) || !this.observed || !same(h.binding, this.observed) ||
+         this.state.status?.review?.reviewId !== h.prepared.reviewId || !sameGitLocalData(this.state.status.review, h.prepared) ||
+         h.prepared.context.revision !== `document-${this.state.status.documentRevision}`) return 'review-changed';
++    if (h.prepared.review.action === 'set-upstream' && h.prepared.review.unchanged) return 'upstream-unchanged';
+     if (h.prepared.review.action === 'fetch' && h.prepared.review.expectedTarget === h.prepared.review.candidateRefOid) return 'fetch-up-to-date';
+     return h.prepared.action.kind === 'initialize' ? this.initializationReason() : this.currentReason(actionScope(h.prepared.action));
+   }
+diff --git a/desktop/src/gitLocalProtocol.ts b/desktop/src/gitLocalProtocol.ts
+--- a/desktop/src/gitLocalProtocol.ts
++++ b/desktop/src/gitLocalProtocol.ts
+@@ -1,5 +1,7 @@
+ import { isGitPushNewBranchAction, isGitPushNewBranchReview, isGitPushNewBranchIntent, isGitPushNewBranchMutation, pushNewBranchIntentMatchesReview } from './gitPushNewBranchProtocol.ts';
+ import type { GitPushNewBranchAction, GitPushNewBranchReview, GitPushNewBranchIntent, GitPushNewBranchMutation } from './gitPushNewBranchProtocol.ts';
++import { isGitUpstreamAction, isGitUpstreamReview, isGitUpstreamIntent, isGitUpstreamMutation, isGitUpstreamReason, upstreamIntentMatchesReview, sameUpstreamAction, gitUpstreamIssueHelp } from './gitUpstreamProtocol.ts';
++import type { GitUpstreamAction, GitUpstreamReview, GitUpstreamIntent, GitUpstreamMutationResult, GitUpstreamReason, GitUpstreamIssue } from './gitUpstreamProtocol.ts';
+ import { pushIntentMatchesReview, gitPushIssueHelp, isGitPushAction, isGitPushReview, isGitPushIntent, isGitPushMutation, isGitPushReason } from './gitPushProtocol.ts';
+ import type { GitPushAction, GitPushReview, GitPushIntent, GitPushMutationResult, GitPushReason, GitPushIssue } from './gitPushProtocol.ts';
+ import { fastForwardIntentMatchesReview, gitFastForwardIssueHelp, isGitFastForwardAction, isGitFastForwardIntent, isGitFastForwardMutation, isGitFastForwardReason, isGitFastForwardReview } from './gitFastForwardProtocol.ts';
+@@ -39,20 +41,20 @@
+     discard: (raw: Uint8Array) => call('discard', raw), status: (raw: Uint8Array) => call('status', raw), cancel: (raw: Uint8Array) => call('cancel', raw) });
+ }
+ export interface GitLocalFileAction { readonly kind: GitAction; readonly expectedRevision: string; readonly paths: readonly string[] }
+-export type GitLocalAction = GitLocalFileAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction | GitPushNewBranchAction;
++export type GitLocalAction = GitLocalFileAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction | GitPushNewBranchAction | GitUpstreamAction;
+ export interface GitLocalFileInput extends GitLocalFileAction { readonly message: string | null; readonly identity: { readonly name: string; readonly email: string } | null }
+-export type GitLocalInput = GitLocalFileInput | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction | GitPushNewBranchAction;
++export type GitLocalInput = GitLocalFileInput | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction | GitPushNewBranchAction | GitUpstreamAction;
+ export interface GitLocalFileReview { readonly action: GitAction; readonly expectedRevision: string; readonly paths: readonly string[];
+   readonly wholeIndex: boolean; readonly head: string | null; readonly branch: string | null; readonly expectedIndex: string; readonly reviewDigest: string }
+-export type GitLocalReview = GitLocalFileReview | GitBranchReview | GitSwitchReview | GitRenameReview | GitFastForwardReview | GitInitReview | GitFetchReview | GitPushReview | GitPushNewBranchReview;
+-export type GitLocalIntent = GitIntent | GitBranchIntent | GitSwitchIntent | GitRenameIntent | GitFastForwardIntent | GitInitIntent | GitFetchIntent | GitPushIntent | GitPushNewBranchIntent;
+-export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult | GitSwitchMutationResult | GitRenameMutationResult | GitFastForwardMutationResult | GitInitMutationResult | GitFetchMutationResult | GitPushMutationResult | GitPushNewBranchMutation;
+-export type GitLocalReason = GitReason | GitBranchReason | GitSwitchReason | GitRenameReason | GitFastForwardReason | GitInitReason | GitFetchReason | GitPushReason;
+-export type GitLocalIssue = GitIssue | GitBranchIssue | GitSwitchIssue | GitRenameIssue | GitFastForwardIssue | GitInitReason | GitFetchIssue | GitPushIssue;
+-export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview } | { readonly review: GitSwitchReview } | { readonly review: GitRenameReview } | { readonly review: GitFastForwardReview } | { readonly review: GitInitReview } | { readonly review: GitFetchReview; readonly diff: null } | { readonly review: GitPushReview } | { readonly review: GitPushNewBranchReview };
++export type GitLocalReview = GitLocalFileReview | GitBranchReview | GitSwitchReview | GitRenameReview | GitFastForwardReview | GitInitReview | GitFetchReview | GitPushReview | GitPushNewBranchReview | GitUpstreamReview;
++export type GitLocalIntent = GitIntent | GitBranchIntent | GitSwitchIntent | GitRenameIntent | GitFastForwardIntent | GitInitIntent | GitFetchIntent | GitPushIntent | GitPushNewBranchIntent | GitUpstreamIntent;
++export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult | GitSwitchMutationResult | GitRenameMutationResult | GitFastForwardMutationResult | GitInitMutationResult | GitFetchMutationResult | GitPushMutationResult | GitPushNewBranchMutation | GitUpstreamMutationResult;
++export type GitLocalReason = GitReason | GitBranchReason | GitSwitchReason | GitRenameReason | GitFastForwardReason | GitInitReason | GitFetchReason | GitPushReason | GitUpstreamReason;
++export type GitLocalIssue = GitIssue | GitBranchIssue | GitSwitchIssue | GitRenameIssue | GitFastForwardIssue | GitInitReason | GitFetchIssue | GitPushIssue | GitUpstreamIssue;
++export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview } | { readonly review: GitSwitchReview } | { readonly review: GitRenameReview } | { readonly review: GitFastForwardReview } | { readonly review: GitInitReview } | { readonly review: GitFetchReview; readonly diff: null } | { readonly review: GitPushReview } | { readonly review: GitPushNewBranchReview } | { readonly review: GitUpstreamReview };
+ export type GitLocalPrepared = { readonly reviewId: string; readonly context: GitReadContext } &
+   ({ readonly action: GitLocalFileAction; readonly review: GitLocalFileReview; readonly diff: GitDiff } |
+-   { readonly action: GitBranchAction; readonly review: GitBranchReview } | { readonly action: GitSwitchAction; readonly review: GitSwitchReview } | { readonly action: GitRenameAction; readonly review: GitRenameReview } | { readonly action: GitFastForwardAction; readonly review: GitFastForwardReview } | { readonly action: GitInitAction; readonly review: GitInitReview } | { readonly action: GitFetchAction; readonly review: GitFetchReview } | { readonly action: GitPushAction; readonly review: GitPushReview } | { readonly action: GitPushNewBranchAction; readonly review: GitPushNewBranchReview });
++   { readonly action: GitBranchAction; readonly review: GitBranchReview } | { readonly action: GitSwitchAction; readonly review: GitSwitchReview } | { readonly action: GitRenameAction; readonly review: GitRenameReview } | { readonly action: GitFastForwardAction; readonly review: GitFastForwardReview } | { readonly action: GitInitAction; readonly review: GitInitReview } | { readonly action: GitFetchAction; readonly review: GitFetchReview } | { readonly action: GitPushAction; readonly review: GitPushReview } | { readonly action: GitPushNewBranchAction; readonly review: GitPushNewBranchReview } | { readonly action: GitUpstreamAction; readonly review: GitUpstreamReview });
+ export interface GitLocalOperation { readonly operationId: string; readonly context: GitReadContext; readonly phase: 'prepare' | 'apply';
+   readonly action: GitLocalAction; readonly stage: 'starting' | 'running' | 'stopping' | 'settled' | 'cleanup-unknown';
+   readonly outcome: 'ok' | 'refused' | 'cancelled' | 'timed-out' | 'cleanup-unknown' | null; readonly reason: GitLocalReason | null;
+@@ -74,7 +76,7 @@
+ const kind = (v: unknown): v is GitAction => v === 'stage' || v === 'unstage' || v === 'commit';
+ const nullable = (v: unknown, check: (value: unknown) => boolean) => v === null || check(v);
+ const reason = (v: unknown, expected: GitLocalAction): v is GitLocalReason => typeof v === 'string' &&
+-  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'fetch' && isGitFetchReason(v) || (expected.kind === 'push' || expected.kind === 'push-new-branch') && isGitPushReason(v) || expected.kind === 'branch-create' && isGitBranchReason(v) || expected.kind === 'branch-switch' && isGitSwitchReason(v) || expected.kind === 'branch-rename' && isGitRenameReason(v) || expected.kind === 'fast-forward' && isGitFastForwardReason(v) || expected.kind === 'initialize' && isGitInitReason(v));
++  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'set-upstream' && isGitUpstreamReason(v) || expected.kind === 'fetch' && isGitFetchReason(v) || (expected.kind === 'push' || expected.kind === 'push-new-branch') && isGitPushReason(v) || expected.kind === 'branch-create' && isGitBranchReason(v) || expected.kind === 'branch-switch' && isGitSwitchReason(v) || expected.kind === 'branch-rename' && isGitRenameReason(v) || expected.kind === 'fast-forward' && isGitFastForwardReason(v) || expected.kind === 'initialize' && isGitInitReason(v));
+ function text(v: unknown, max: number, multiline = false): v is string {
+   return typeof v === 'string' && v.length <= max && utf8.encode(v).length <= max && !/\p{Cs}/u.test(v) &&
+     !(multiline ? /[\x00-\x08\x0b-\x1f\x7f]/ : /[\x00-\x1f\x7f]/).test(v);
+@@ -93,9 +95,9 @@
+   return connectionKeys(v, ['kind', 'expectedRevision', 'paths']) && kind(v.kind) && digest(v.expectedRevision) &&
+     (v.kind === 'commit' ? Array.isArray(v.paths) && v.paths.length === 0 : paths(v.paths));
+ }
+-function action(v: unknown): v is GitLocalAction { return isGitFetchAction(v) || isGitPushAction(v) || isGitPushNewBranchAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v) || fileAction(v); }
++function action(v: unknown): v is GitLocalAction { return isGitUpstreamAction(v) || isGitFetchAction(v) || isGitPushAction(v) || isGitPushNewBranchAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v) || fileAction(v); }
+ function input(v: unknown): v is GitLocalInput {
+-  if (isGitFetchAction(v) || isGitPushAction(v) || isGitPushNewBranchAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v)) return true;
++  if (isGitUpstreamAction(v) || isGitFetchAction(v) || isGitPushAction(v) || isGitPushNewBranchAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v)) return true;
+   if (!connectionKeys(v, ['kind', 'expectedRevision', 'paths', 'message', 'identity']) ||
+       !fileAction({ kind: v.kind, expectedRevision: v.expectedRevision, paths: v.paths })) return false;
+   if (v.kind !== 'commit') return v.message === null && v.identity === null;
+@@ -111,6 +113,7 @@
+     (expected.kind !== 'commit' || v.branch !== null) && digest(v.expectedIndex) && digest(v.reviewDigest);
+ }
+ function reviewed(v: unknown, expected: GitLocalAction): boolean {
++  if (expected.kind === 'set-upstream') return connectionKeys(v, ['review']) && isGitUpstreamReview(v.review, expected);
+   if (expected.kind === 'fetch') return connectionKeys(v, ['review', 'diff']) && v.diff === null && isGitFetchReview(v.review, expected);
+   if (expected.kind === 'push-new-branch') return connectionKeys(v, ['review']) && isGitPushNewBranchReview(v.review, expected);
+   if (expected.kind === 'push') return connectionKeys(v, ['review']) && isGitPushReview(v.review, expected);
+@@ -124,6 +127,7 @@
+   return !!diff && diff.revision === expected.expectedRevision && diff.staged === (expected.kind !== 'stage') && samePaths(diff.paths, v.review.paths);
+ }
+ function intent(v: unknown, expected: GitLocalAction): v is GitLocalIntent {
++  if (expected.kind === 'set-upstream') return isGitUpstreamIntent(v, expected);
+   if (expected.kind === 'fetch') return isGitFetchIntent(v, expected);
+   if (expected.kind === 'push-new-branch') return isGitPushNewBranchIntent(v, expected);
+   if (expected.kind === 'push') return isGitPushIntent(v, expected);
+@@ -139,6 +143,7 @@
+     (v.expectedHead === null || (v.expectedHead as string).length === v.candidateCommit.length) : digest(v.candidateIndex) && v.candidateCommit === null;
+ }
+ function mutation(v: unknown, expected: GitLocalAction, operationId: string): boolean {
++  if (expected.kind === 'set-upstream') return isGitUpstreamMutation(v, expected, operationId);
+   if (expected.kind === 'fetch') return isGitFetchMutation(v, expected, operationId);
+   if (expected.kind === 'push-new-branch') return isGitPushNewBranchMutation(v, expected, operationId);
+   if (expected.kind === 'push') return isGitPushMutation(v, expected, operationId);
+@@ -168,15 +173,16 @@
+ function prepared(v: unknown): boolean {
+   if (connectionKeys(v, ['reviewId', 'context', 'action', 'review'])) return id(v.reviewId) && context(v.context) &&
+     (isGitFetchAction(v.action) ? isGitFetchReview(v.review, v.action) :
+-      (isGitPushAction(v.action) || isGitPushNewBranchAction(v.action) || isGitInitAction(v.action) || isGitFastForwardAction(v.action) || isGitBranchAction(v.action) || isGitSwitchAction(v.action) || isGitRenameAction(v.action)) && reviewed({ review: v.review }, v.action));
++      (isGitUpstreamAction(v.action) || isGitPushAction(v.action) || isGitPushNewBranchAction(v.action) || isGitInitAction(v.action) || isGitFastForwardAction(v.action) || isGitBranchAction(v.action) || isGitSwitchAction(v.action) || isGitRenameAction(v.action)) && reviewed({ review: v.review }, v.action));
+   return connectionKeys(v, ['reviewId', 'context', 'action', 'review', 'diff']) && id(v.reviewId) && context(v.context) && fileAction(v.action) &&
+     reviewed({ review: v.review, diff: v.diff }, v.action);
+ }
+ export function gitLocalPreparedResult(v: GitLocalPrepared): GitLocalPrepareResult {
+   return 'diff' in v ? { review: v.review, diff: v.diff } :
+-    v.review.action === 'fetch' ? { review: v.review, diff: null } : v.review.action === 'push-new-branch' ? { review: v.review } : v.review.action === 'push' ? { review: v.review } : v.review.action === 'initialize' ? { review: v.review } : v.review.action === 'fast-forward' ? { review: v.review } : v.review.action === 'branch-switch' ? { review: v.review } : v.review.action === 'branch-rename' ? { review: v.review } : { review: v.review };
++    v.review.action === 'set-upstream' ? { review: v.review } : v.review.action === 'fetch' ? { review: v.review, diff: null } : v.review.action === 'push-new-branch' ? { review: v.review } : v.review.action === 'push' ? { review: v.review } : v.review.action === 'initialize' ? { review: v.review } : v.review.action === 'fast-forward' ? { review: v.review } : v.review.action === 'branch-switch' ? { review: v.review } : v.review.action === 'branch-rename' ? { review: v.review } : { review: v.review };
+ }
+ export function gitLocalIntentMatchesReview(v: GitLocalIntent, r: GitLocalReview): boolean {
++  if (v.action === 'set-upstream') return r.action === 'set-upstream' && upstreamIntentMatchesReview(v, r);
+   if (v.action === 'fetch') return r.action === 'fetch' && fetchIntentMatchesReview(v, r);
+   if (v.action === 'push-new-branch') return r.action === 'push-new-branch' && pushNewBranchIntentMatchesReview(v, r);
+   if (v.action === 'push') return r.action === 'push' && pushIntentMatchesReview(v, r);
+@@ -185,7 +191,7 @@
+   if (v.action === 'branch-rename') return r.action === 'branch-rename' && renameIntentMatchesReview(v, r);
+   if (v.action === 'branch-switch') return r.action === 'branch-switch' && switchIntentMatchesReview(v, r);
+   if (v.action === 'branch-create') return r.action === 'branch-create' && branchIntentMatchesReview(v, r);
+-  return r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'initialize' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
++  return r.action !== 'set-upstream' && r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'initialize' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
+     v.expectedIndex === r.expectedIndex && v.expectedHead === r.head && v.expectedRef === r.branch;
+ }
+ function immutable<T>(v: unknown): T {
+@@ -226,6 +232,7 @@
+ }
+ export function samePaths(a: readonly string[], b: readonly string[]): boolean { return a.length === b.length && a.every((p, i) => p === b[i]); }
+ export function sameGitLocalAction(a: GitLocalAction, b: GitLocalAction): boolean {
++  if (a.kind === 'set-upstream') return b.kind === 'set-upstream' && sameUpstreamAction(a, b);
+   if (a.kind === 'fetch') return b.kind === 'fetch' && a.expectedRevision === b.expectedRevision && a.expectedReferenceRevision === b.expectedReferenceRevision &&
+     a.remote === b.remote && a.reference === b.reference && a.connectionSessionId === b.connectionSessionId && a.expectedConnectionRevision === b.expectedConnectionRevision;
+   if (a.kind === 'push' || a.kind === 'push-new-branch') return b.kind === a.kind && a.expectedRevision === b.expectedRevision && a.expectedReferenceRevision === b.expectedReferenceRevision &&
+@@ -240,10 +247,10 @@
+     a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+   if (a.kind === 'branch-create') return b.kind === 'branch-create' && a.expectedRevision === b.expectedRevision &&
+     a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+-  return b.kind !== 'fetch' && b.kind !== 'push' && b.kind !== 'push-new-branch' && b.kind !== 'fast-forward' && b.kind !== 'initialize' && b.kind !== 'branch-create' && b.kind !== 'branch-switch' && b.kind !== 'branch-rename' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
++  return b.kind !== 'set-upstream' && b.kind !== 'fetch' && b.kind !== 'push' && b.kind !== 'push-new-branch' && b.kind !== 'fast-forward' && b.kind !== 'initialize' && b.kind !== 'branch-create' && b.kind !== 'branch-switch' && b.kind !== 'branch-rename' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
+ }
+ export function gitLocalIssueHelp(issue: GitLocalIssue): string {
+-  return gitFetchIssueHelp(issue) ?? gitPushIssueHelp(issue) ?? gitInitIssueHelp(issue) ?? gitFastForwardIssueHelp(issue) ?? gitRenameIssueHelp(issue) ?? gitSwitchIssueHelp(issue) ?? previousIssueHelp(issue as GitIssue | GitBranchIssue);
++  return gitUpstreamIssueHelp(issue) ?? gitFetchIssueHelp(issue) ?? gitPushIssueHelp(issue) ?? gitInitIssueHelp(issue) ?? gitFastForwardIssueHelp(issue) ?? gitRenameIssueHelp(issue) ?? gitSwitchIssueHelp(issue) ?? previousIssueHelp(issue as GitIssue | GitBranchIssue);
+ }
+ // Only finite decoded immutable DATA is passed here, never caller getters.
+ export function sameGitLocalData(a: unknown, b: unknown): boolean {
+diff --git a/desktop/src/gitRepositoryController.ts b/desktop/src/gitRepositoryController.ts
+--- a/desktop/src/gitRepositoryController.ts
++++ b/desktop/src/gitRepositoryController.ts
+@@ -1,3 +1,5 @@
++import { emptyGitUpstreamDraft, gitUpstreamDraftFits } from './gitUpstreamProtocol.ts';
++import type { GitUpstreamDraft } from './gitUpstreamProtocol.ts';
+ // One controller per original registered project/session. Root retains it across
+ // panel unmounts; switching projects never retargets a pending port or operation.
+ // This is UI coordination, not a native project lease or an authorization issuer.
+@@ -48,7 +50,7 @@
+ export interface GitRepositoryView {
+   readonly projectId: string; readonly active: boolean; readonly observation: GitObservation | null;
+   readonly stale: boolean; readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly branchDraft: { readonly name: string };
+-  readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string }; readonly fetchDraft: GitFetchDraft;
++  readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string }; readonly fetchDraft: GitFetchDraft; readonly upstreamDraft: GitUpstreamDraft;
+   readonly diff: GitDiff | null; readonly review: GitReview | null; readonly attempt: GitAttempt | null;
+   readonly busy: 'observe' | 'diff' | 'review' | 'discard' | 'apply' | null; readonly checkingStatus: boolean;
+   readonly issue: GitIssue | null; readonly blocked: 'unknown' | 'response-invalid' | 'recovery-required' | null;
+@@ -79,7 +81,7 @@
+   constructor(projectId: string, port: GitRepositoryPort | null) {
+     this.port = port?.projectId === projectId ? port : null;
+     this.state = freeze({ projectId, active: true, observation: null, stale: true, selected: freeze([]),
+-      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), switchDraft: freeze({ name: '' }), renameDraft: freeze({ name: '' }), fetchDraft: emptyGitFetchDraft(), diff: null, review: null, attempt: null,
++      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), switchDraft: freeze({ name: '' }), renameDraft: freeze({ name: '' }), fetchDraft: emptyGitFetchDraft(), upstreamDraft: emptyGitUpstreamDraft(), diff: null, review: null, attempt: null,
+       busy: null, checkingStatus: false, issue: port && !this.port ? 'authorization' : null, blocked: null });
+   }
+   getSnapshot = (): GitRepositoryView => this.state;
+@@ -107,6 +109,11 @@
+     this.patch({ draft: freeze({ ...this.state.draft, [field]: value }),
+       review: this.state.review?.plan.action === 'commit' ? this.staleReview() : this.state.review });
+     return true;
++  }
++  editUpstreamDraft(field: keyof GitUpstreamDraft, value: string): boolean {
++    if (!gitUpstreamDraftFits(field, value)) return this.report('limit');
++    if (this.state.upstreamDraft[field] !== value) this.patch({ upstreamDraft: freeze({ ...this.state.upstreamDraft, [field]: value }) });
++    return true; // Draft only; replacement identity prevents changed-and-restored approval.
+   }
+   editFetchDraft(field: keyof GitFetchDraft, value: string): boolean {
+     if (!gitFetchDraftFits(field, value)) return this.report('limit');
+diff --git a/desktop/src/gitRepositoryPermissionSelection.ts b/desktop/src/gitRepositoryPermissionSelection.ts
+--- a/desktop/src/gitRepositoryPermissionSelection.ts
++++ b/desktop/src/gitRepositoryPermissionSelection.ts
+@@ -1,5 +1,6 @@
+ // Current-view selection only. The native shared grant and its subsequent
+ // original Prepare still check the repository; this is not a Git inspection.
++import { gitUpstreamAction } from './gitUpstreamProtocol.ts';
+ import type { GitRepositoryController } from './gitRepositoryController.ts';
+ import type { GitReadController } from './gitReadController.ts';
+ import type { GitLocalController } from './gitLocalController.ts';
+@@ -15,11 +16,12 @@
+   readonly blocked: string | null;
+ }
+ export const GIT_REPOSITORY_PERMISSION_LABELS: Readonly<Record<GitRepositoryPermissionKind, string>> = Object.freeze({
+-  initialize: 'Start local Git tracking', 'branch-create': 'Create a local branch', 'branch-switch': 'Switch local branch',
++  'set-upstream': 'Set this branch’s local upstream', initialize: 'Start local Git tracking', 'branch-create': 'Create a local branch', 'branch-switch': 'Switch local branch',
+   'branch-rename': 'Rename the current local branch', 'fast-forward': 'Update to the cached upstream commit',
+ });
+ export function gitRepositoryPermissionEffect(a: GitRepositoryPermissionAction): string {
+   switch (a.kind) {
++    case 'set-upstream': return `Configure local ${a.remote} for https://github.com/${a.repository}.git and this branch’s upstream. Add only absent approved settings and missing local ref/log parent directories; create no tracking ref or remote branch.${a.identity ? ` If both local identity fields are absent, add ${a.identity.name} <${a.identity.email}>; never replace existing identity.` : ' Preserve existing valid repository-local identity.'} No network request.`;
+     case 'initialize': return 'Create an empty local repository on main, only if the native review confirms this is safe. Project files stay in place; no files are staged or committed.';
+     case 'branch-create': return `Create “${a.name}” at the reviewed current commit. Do not switch branches or change working files.`;
+     case 'branch-switch': return `Switch this clean checkout to local branch “${a.name}”. The existing bounded review must show the tracked-file content changes first.`;
+@@ -86,6 +88,11 @@
+     }
+     return finish(null, { kind, ...base, targetRef: t.localRef, targetOid: t.head }, read.status.documentRevision, operation.operationId);
+   }
++  if (kind === 'set-upstream') {
++    const selected = gitUpstreamAction(r.upstreamDraft, o, references);
++    if (!selected || o.detached) return finish('Enter the local upstream fields above for an attached, committed branch. This does not contact GitHub.');
++    return finish(null, selected, read.status.documentRevision, operation.operationId);
++  }
+   const name = kind === 'branch-create' ? r.branchDraft.name : kind === 'branch-switch' ? r.switchDraft.name : r.renameDraft.name;
+   if (!gitBranchName(name)) return finish(kind === 'branch-switch' ? 'Choose the target in “Switch to an existing local branch” above.' :
+     kind === 'branch-rename' ? 'Enter the new name in “Rename the current local branch” above.' : 'Enter the name in “Create a new local branch” above.');
+diff --git a/desktop/src/service_git_repository_permission.ts b/desktop/src/service_git_repository_permission.ts
+--- a/desktop/src/service_git_repository_permission.ts
++++ b/desktop/src/service_git_repository_permission.ts
+@@ -1,5 +1,6 @@
+ // Closed permission DATA for the existing GitLocal owner. This does not
+ // inspect a repository, mint a review, start Git or establish native finality.
++import { isGitUpstreamAction, sameUpstreamAction, type GitUpstreamAction } from './gitUpstreamProtocol.ts';
+ import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { isGitInitAction, type GitInitAction } from './gitInitProtocol.ts';
+@@ -9,7 +10,7 @@
+ import { isGitFastForwardAction, type GitFastForwardAction } from './gitFastForwardProtocol.ts';
+
+ export const GIT_REPOSITORY_CONSENT = 'agent-local-git-repository-once-v1';
+-export type GitRepositoryPermissionAction = GitInitAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction;
++export type GitRepositoryPermissionAction = GitUpstreamAction | GitInitAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction;
+ export type GitRepositoryPermissionKind = GitRepositoryPermissionAction['kind'];
+ export interface GitRepositoryApproval {
+   readonly projectId: string; readonly expectedDocumentRevision: number; readonly readOperationId: string | null;
+@@ -29,6 +30,7 @@
+
+ // Only call after the bounded descriptor-copy below: no getters are run.
+ function action(value: unknown): GitRepositoryPermissionAction | null {
++  if (isGitUpstreamAction(value)) return Object.freeze({ ...value, identity: value.identity && Object.freeze({ ...value.identity }) });
+   if (isGitInitAction(value)) return Object.freeze({ kind: 'initialize' });
+   if (isGitBranchAction(value) || isGitSwitchAction(value) || isGitRenameAction(value)) return Object.freeze({
+     kind: value.kind, expectedRevision: value.expectedRevision, expectedReferenceRevision: value.expectedReferenceRevision, name: value.name,
+@@ -68,6 +70,7 @@
+   if (a.kind !== b.kind) return false;
+   if (a.kind === 'initialize') return true;
+   if (b.kind === 'initialize' || a.expectedRevision !== b.expectedRevision || a.expectedReferenceRevision !== b.expectedReferenceRevision) return false;
++  if (a.kind === 'set-upstream' || b.kind === 'set-upstream') return a.kind === 'set-upstream' && b.kind === 'set-upstream' && sameUpstreamAction(a, b);
+   return a.kind === 'fast-forward' ? b.kind === 'fast-forward' && a.targetRef === b.targetRef && a.targetOid === b.targetOid :
+     b.kind !== 'fast-forward' && a.name === b.name;
+ }
+@@ -96,7 +99,7 @@
+   readonly witness: readonly unknown[];
+   readonly reason: string | null;
+ }
+-const KINDS: readonly GitRepositoryPermissionKind[] = ['initialize', 'branch-create', 'branch-switch', 'branch-rename', 'fast-forward'];
++const KINDS: readonly GitRepositoryPermissionKind[] = ['initialize', 'branch-create', 'branch-switch', 'branch-rename', 'fast-forward', 'set-upstream'];
+ /** One small choice/projection child of the EXISTING permission request owner.
+  * All Allow/Status/Revoke promises and lost-ACK rules stay in Permission. */
+ export class GitRepositoryPermission extends Permission<GitRepositoryApproval, GitRepositoryAccess> {
+diff --git a/desktop/src-tauri/src/asset_session_git_local.rs b/desktop/src-tauri/src/asset_session_git_local.rs
+--- a/desktop/src-tauri/src/asset_session_git_local.rs
++++ b/desktop/src-tauri/src/asset_session_git_local.rs
+@@ -290,7 +290,7 @@
+         },
+         GitLocalReceipt::Settled {outcome,was_unknown:false}=>{
+             value.stage=read::Phase::Settled;match outcome {
+-                Ok(terminal)=>{value.outcome=Some(terminal.status);value.reason=terminal.reason;value.result=terminal.result;},
++                Ok(terminal)=>{value.outcome=Some(terminal.status);value.reason=terminal.reason;value.result=crate::git_upstream_protocol::public_result(terminal.action,terminal.phase,terminal.result);},
+                 Err(error)=>{let (reason,outcome)=reason(&error);value.reason=Some(reason.into());value.outcome=Some(outcome);},
+             }
+         }
+@@ -483,6 +483,7 @@
+             // publisher reservation: it properly refuses pending publishers.
+             let outcome=(|| {
+                 let kind=state.git_local_review.as_ref().ok_or_else(changed)?.action.kind();
++                if state.git_local_review.as_ref().and_then(|r|r.public.review.upstream_details()).is_some_and(|r|r.unchanged) {return Err(BridgeError::invalid())}
+                 self.git_local_new_gate_for(&state,kind)?;
+                 if state.revision!=args.expected_document_revision {return Err(changed())}
+                 let review=state.git_local_review.as_ref().ok_or_else(changed)?;
+diff --git a/desktop/src-tauri/src/git_fetch_worker.rs b/desktop/src-tauri/src/git_fetch_worker.rs
+--- a/desktop/src-tauri/src/git_fetch_worker.rs
++++ b/desktop/src-tauri/src/git_fetch_worker.rs
+@@ -259,6 +259,7 @@
+             digest,
+             native: Some(native.clone()),
+             initialization: None,
++            upstream_sources: None,
+             switch_sources: None,
+             rename_sources: None,
+             fast_forward_sources: None,
+diff --git a/desktop/src-tauri/src/git_init_sources_macos.rs b/desktop/src-tauri/src/git_init_sources_macos.rs
+--- a/desktop/src-tauri/src/git_init_sources_macos.rs
++++ b/desktop/src-tauri/src/git_init_sources_macos.rs
+@@ -89,7 +89,7 @@
+ }
+
+ impl GitLocalSources {
+-    fn init_names(
++    pub(super) fn init_names(
+         &self,
+         index: usize,
+         stop: &mut dyn FnMut() -> bool,
+diff --git a/desktop/src-tauri/src/git_local_protocol.rs b/desktop/src-tauri/src/git_local_protocol.rs
+--- a/desktop/src-tauri/src/git_local_protocol.rs
++++ b/desktop/src-tauri/src/git_local_protocol.rs
+@@ -2,7 +2,7 @@
+ //! Draft author/message stay private; public projections contain only bounded
+ //! review/intent facts. Child publication and terminal frames never settle the
+ //! original native invocation. No serialized plan is accepted for execution.
+-use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, git_switch_protocol as switch, git_rename_protocol as rename, git_fast_forward_protocol as ff, git_init_protocol as init, git_fetch_protocol as fetch, git_push_protocol as push, protocol::{strict_json, valid_id}};
++use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, git_switch_protocol as switch, git_rename_protocol as rename, git_fast_forward_protocol as ff, git_init_protocol as init, git_fetch_protocol as fetch, git_push_protocol as push, git_upstream_protocol as upstream, protocol::{strict_json, valid_id}};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+ use sha2::{Digest, Sha256};
+@@ -61,7 +61,7 @@
+
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="lowercase")]
+-pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename, #[serde(rename="fast-forward")] FastForward, Fetch, Push, #[serde(rename="push-new-branch")] PushNewBranch, Initialize }
++pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename, #[serde(rename="fast-forward")] FastForward, Fetch, Push, #[serde(rename="push-new-branch")] PushNewBranch, Initialize, #[serde(rename="set-upstream")] SetUpstream }
+ impl Kind { pub(crate) fn is_push(self)->bool { matches!(self,Self::Push|Self::PushNewBranch) } }
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="lowercase")]
+@@ -82,7 +82,7 @@
+ // paths/message/identity nor a fabricated empty whole-index review.
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum Action { Files(FileAction), Branch(branch::Action), Switch(switch::Action), Rename(rename::Action), FastForward(ff::Action), Fetch(fetch::Action), Push(push::Action), Initialize(init::Action) }
++pub(crate) enum Action { Files(FileAction), Branch(branch::Action), Switch(switch::Action), Rename(rename::Action), FastForward(ff::Action), Fetch(fetch::Action), Push(push::Action), Initialize(init::Action), Upstream(upstream::Action) }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct FileAction {
+@@ -99,17 +99,17 @@
+         if matches!(kind, Kind::Stage | Kind::Unstage) && action.valid() { Ok(action) }
+         else { Err(BridgeError::invalid()) }
+     }
+-    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename, Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.kind.local_kind(), Self::Initialize(_)=>Kind::Initialize } }
+-    pub(crate) fn expected_revision(&self) -> Option<&str> { match self { Self::Files(v)=>Some(&v.expected_revision), Self::Branch(v)=>Some(&v.expected_revision), Self::Switch(v)=>Some(&v.expected_revision), Self::FastForward(v)=>Some(&v.expected_revision), Self::Rename(v)=>Some(&v.expected_revision), Self::Fetch(v)=>Some(&v.expected_revision),Self::Push(v)=>Some(&v.expected_revision), Self::Initialize(_)=>None } }
++    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename, Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.kind.local_kind(), Self::Upstream(_)=>Kind::SetUpstream, Self::Initialize(_)=>Kind::Initialize } }
++    pub(crate) fn expected_revision(&self) -> Option<&str> { match self { Self::Files(v)=>Some(&v.expected_revision), Self::Branch(v)=>Some(&v.expected_revision), Self::Switch(v)=>Some(&v.expected_revision), Self::FastForward(v)=>Some(&v.expected_revision), Self::Rename(v)=>Some(&v.expected_revision), Self::Fetch(v)=>Some(&v.expected_revision),Self::Push(v)=>Some(&v.expected_revision), Self::Upstream(v)=>Some(&v.expected_revision), Self::Initialize(_)=>None } }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+-            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(), Self::Initialize(v)=>v.valid(),
++            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(), Self::Upstream(v)=>v.valid(), Self::Initialize(v)=>v.valid(),
+             Self::Files(v)=>read::digest(&v.expected_revision) && match v.kind {
+                 Kind::Commit => v.paths.is_empty()
+                     && v.identity.as_ref().is_some_and(Identity::valid)
+                     && v.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
+                 Kind::Stage|Kind::Unstage => paths(&v.paths) && v.message.is_none() && v.identity.is_none(),
+-                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize => false,
++                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize|Kind::SetUpstream => false,
+             },
+         }
+     }
+@@ -121,13 +121,13 @@
+             Self::Rename(v)=>PublicAction::Rename(v.clone()),
+             Self::Fetch(v)=>PublicAction::Fetch(v.clone()),
+             Self::Push(v)=>PublicAction::Push(v.clone()),
+-            Self::Initialize(v)=>PublicAction::Initialize(v.clone()),
++            Self::Initialize(v)=>PublicAction::Initialize(v.clone()),Self::Upstream(v)=>PublicAction::Upstream(v.clone()),
+         }
+     }
+ }
+ #[derive(Clone, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action), Switch(switch::Action), Rename(rename::Action), FastForward(ff::Action), Fetch(fetch::Action), Push(push::Action), Initialize(init::Action) }
++pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action), Switch(switch::Action), Rename(rename::Action), FastForward(ff::Action), Fetch(fetch::Action), Push(push::Action), Initialize(init::Action), Upstream(upstream::Action) }
+ #[derive(Clone, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase")]
+ pub(crate) struct PublicFileAction { pub(crate) kind:Kind, pub(crate) expected_revision:String, pub(crate) paths:Vec<String> }
+@@ -150,7 +150,7 @@
+     }
+     need(match name {
+         "git_local_prepare" => keys(&body,&["projectId","expectedDocumentRevision","action"])
+-            && if matches!(body["action"]["kind"].as_str(),Some("push"|"push-new-branch")) {keys(&body["action"],push::ACTION_KEYS)} else if body["action"]["kind"]=="fetch" {keys(&body["action"],fetch::ACTION_KEYS)} else if body["action"]["kind"]=="initialize" {keys(&body["action"],&["kind"])} else if body["action"]["kind"]=="fast-forward" {keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","targetRef","targetOid"])} else if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
++            && if body["action"]["kind"]=="set-upstream" {keys(&body["action"],upstream::ACTION_KEYS)} else if matches!(body["action"]["kind"].as_str(),Some("push"|"push-new-branch")) {keys(&body["action"],push::ACTION_KEYS)} else if body["action"]["kind"]=="fetch" {keys(&body["action"],fetch::ACTION_KEYS)} else if body["action"]["kind"]=="initialize" {keys(&body["action"],&["kind"])} else if body["action"]["kind"]=="fast-forward" {keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","targetRef","targetOid"])} else if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
+                 keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","name"])
+             } else { keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]) },
+         "git_local_apply" => keys(&body,&["projectId","expectedDocumentRevision","reviewId"]),
+@@ -171,7 +171,7 @@
+
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum Review { Files(FileReview), Branch(branch::Review), Switch(switch::Review), Rename(rename::Review), FastForward(ff::Review), Fetch(fetch::Review), Push(push::Review), Initialize(init::Review) }
++pub(crate) enum Review { Files(FileReview), Branch(branch::Review), Switch(switch::Review), Rename(rename::Review), FastForward(ff::Review), Fetch(fetch::Review), Push(push::Review), Initialize(init::Review), Upstream(upstream::Review) }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct FileReview {
+@@ -180,13 +180,14 @@
+     pub(crate) expected_index: String, pub(crate) review_digest: String,
+ }
+ impl Review {
+-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Initialize(_)=>Kind::Initialize} }
+-    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
+-    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head), Self::FastForward(v)=>Some(&v.head), Self::Rename(v)=>Some(&v.head),Self::Fetch(v)=>v.head.as_deref(),Self::Push(v)=>Some(&v.head),Self::Initialize(_)=>None} }
+-    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch), Self::FastForward(v)=>Some(&v.branch), Self::Rename(v)=>Some(&v.branch),Self::Fetch(v)=>v.branch.as_deref(),Self::Push(v)=>Some(&v.branch),Self::Initialize(_)=>None} }
+-    pub(crate) fn expected_index(&self) -> Option<&str> { match self {Self::Files(v)=>Some(&v.expected_index),Self::Branch(v)=>Some(&v.expected_index),Self::Switch(v)=>Some(&v.expected_index),Self::FastForward(v)=>Some(&v.expected_index), Self::Rename(v)=>Some(&v.expected_index),Self::Fetch(v)=>Some(&v.expected_index),Self::Push(v)=>Some(&v.expected_index),Self::Initialize(_)=>None} }
+-    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest, Self::Switch(v)=>&v.review_digest, Self::FastForward(v)=>&v.review_digest, Self::Rename(v)=>&v.review_digest,Self::Fetch(v)=>&v.review_digest,Self::Push(v)=>&v.review_digest,Self::Initialize(v)=>&v.review_digest} }
++    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Upstream(_)=>Kind::SetUpstream, Self::Initialize(_)=>Kind::Initialize} }
++    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Upstream(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
++    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head), Self::FastForward(v)=>Some(&v.head), Self::Rename(v)=>Some(&v.head),Self::Fetch(v)=>v.head.as_deref(),Self::Push(v)=>Some(&v.head),Self::Upstream(v)=>Some(&v.head),Self::Initialize(_)=>None} }
++    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch), Self::FastForward(v)=>Some(&v.branch), Self::Rename(v)=>Some(&v.branch),Self::Fetch(v)=>v.branch.as_deref(),Self::Push(v)=>Some(&v.branch),Self::Upstream(v)=>Some(&v.branch),Self::Initialize(_)=>None} }
++    pub(crate) fn expected_index(&self) -> Option<&str> { match self {Self::Files(v)=>Some(&v.expected_index),Self::Branch(v)=>Some(&v.expected_index),Self::Switch(v)=>Some(&v.expected_index),Self::FastForward(v)=>Some(&v.expected_index), Self::Rename(v)=>Some(&v.expected_index),Self::Fetch(v)=>Some(&v.expected_index),Self::Push(v)=>Some(&v.expected_index),Self::Upstream(v)=>Some(&v.expected_index),Self::Initialize(_)=>None} }
++    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest, Self::Switch(v)=>&v.review_digest, Self::FastForward(v)=>&v.review_digest, Self::Rename(v)=>&v.review_digest,Self::Fetch(v)=>&v.review_digest,Self::Push(v)=>&v.review_digest,Self::Upstream(v)=>&v.review_digest,Self::Initialize(v)=>&v.review_digest} }
+     pub(crate) fn file(&self) -> Option<&FileReview> { match self {Self::Files(v)=>Some(v),_=>None} }
++    pub(crate) fn upstream_details(&self)->Option<&upstream::Review> {match self {Self::Upstream(v)=>Some(v),_=>None}}
+     pub(crate) fn init_details(&self) -> Option<&init::Review> {match self {Self::Initialize(v)=>Some(v),_=>None}}
+     pub(crate) fn fetch_details(&self) -> Option<&fetch::Review> {match self {Self::Fetch(v)=>Some(v),_=>None}}
+     pub(crate) fn push_details(&self) -> Option<&push::Review> {match self {Self::Push(v)=>Some(v),_=>None}}
+@@ -196,8 +197,8 @@
+     pub(crate) fn branch_details(&self) -> Option<&branch::Review> { match self {Self::Branch(v)=>Some(v),_=>None} }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+-            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(),Self::Initialize(v)=>v.valid(),
+-            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) && read::digest(&v.expected_revision)
++            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(),Self::Upstream(v)=>v.valid(), Self::Initialize(v)=>v.valid(),
++            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize|Kind::SetUpstream) && read::digest(&v.expected_revision)
+                 && read::digest(&v.expected_index) && read::digest(&v.review_digest)
+                 && paths(&v.paths) && v.whole_index == (v.action == Kind::Commit)
+                 && v.head.as_deref().is_none_or(read::oid) && v.branch.as_deref().is_none_or(read::branch)
+@@ -213,13 +214,14 @@
+             (Self::Push(v),Action::Push(a))=>v.matches(a),
+             (Self::Rename(v),Action::Rename(a))=>v.matches(a),
+             (Self::Initialize(v),Action::Initialize(a))=>v.matches(a),
++            (Self::Upstream(v),Action::Upstream(a))=>v.matches(a),
+             (Self::Files(v),Action::Files(a))=>v.action == a.kind && v.expected_revision == a.expected_revision
+                 && (a.kind == Kind::Commit || v.paths == a.paths),
+             _=>false,
+         }
+     }
+     fn decode(value:&Value) -> Result<Self,BridgeError> {
+-        need(if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::REVIEW_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::REVIEW_KEYS)} else if value["action"] == "initialize" {keys(value,init::REVIEW_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::REVIEW_KEYS)} else if value["action"] == "branch-switch" {
++        need(if value["action"] == "set-upstream" {keys(value,upstream::REVIEW_KEYS)} else if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::REVIEW_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::REVIEW_KEYS)} else if value["action"] == "initialize" {keys(value,init::REVIEW_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::REVIEW_KEYS)} else if value["action"] == "branch-switch" {
+             keys(value,switch::REVIEW_KEYS)
+         } else if value["action"] == "branch-rename" {
+             keys(value,rename::REVIEW_KEYS)
+@@ -231,7 +233,7 @@
+ }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent), Switch(switch::Intent), Rename(rename::Intent), FastForward(ff::Intent), Fetch(fetch::Intent), Push(push::Intent), Initialize(init::Intent) }
++pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent), Switch(switch::Intent), Rename(rename::Intent), FastForward(ff::Intent), Fetch(fetch::Intent), Push(push::Intent), Initialize(init::Intent), Upstream(upstream::Intent) }
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct FileIntent {
+@@ -240,14 +242,15 @@
+     pub(crate) candidate_index: Option<String>, pub(crate) candidate_commit: Option<String>,
+ }
+ impl Intent {
+-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Initialize(_)=>Kind::Initialize} }
+-    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
+-    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref),Self::FastForward(v)=>Some(&v.expected_ref), Self::Rename(v)=>Some(&v.expected_ref),Self::Fetch(v)=>v.expected_ref.as_deref(),Self::Push(v)=>Some(&v.local_ref),Self::Initialize(_)=>None} }
+-    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head),Self::FastForward(v)=>Some(&v.expected_head), Self::Rename(v)=>Some(&v.expected_head),Self::Fetch(v)=>v.expected_head.as_deref(),Self::Push(v)=>Some(&v.new_oid),Self::Initialize(_)=>None} }
+-    pub(crate) fn expected_index(&self) -> Option<&str> { match self {Self::Files(v)=>Some(&v.expected_index),Self::Branch(v)=>Some(&v.expected_index),Self::Switch(v)=>Some(&v.expected_index),Self::FastForward(v)=>Some(&v.expected_index), Self::Rename(v)=>Some(&v.expected_index),Self::Fetch(v)=>Some(&v.expected_index),Self::Push(v)=>Some(&v.expected_index),Self::Initialize(_)=>None} }
+-    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)|Self::Rename(_)|Self::Fetch(_)|Self::Push(_)|Self::Initialize(_)=>None,Self::Switch(v)=>Some(&v.candidate_index),Self::FastForward(v)=>Some(&v.candidate_index)} }
+-    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)|Self::Switch(_)|Self::Rename(_)|Self::FastForward(_)|Self::Fetch(_)|Self::Push(_)|Self::Initialize(_)=>None} }
++    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Upstream(_)=>Kind::SetUpstream, Self::Initialize(_)=>Kind::Initialize} }
++    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Upstream(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
++    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref),Self::FastForward(v)=>Some(&v.expected_ref), Self::Rename(v)=>Some(&v.expected_ref),Self::Fetch(v)=>v.expected_ref.as_deref(),Self::Push(v)=>Some(&v.local_ref),Self::Upstream(v)=>Some(&v.expected_ref),Self::Initialize(_)=>None} }
++    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head),Self::FastForward(v)=>Some(&v.expected_head), Self::Rename(v)=>Some(&v.expected_head),Self::Fetch(v)=>v.expected_head.as_deref(),Self::Push(v)=>Some(&v.new_oid),Self::Upstream(v)=>Some(&v.expected_head),Self::Initialize(_)=>None} }
++    pub(crate) fn expected_index(&self) -> Option<&str> { match self {Self::Files(v)=>Some(&v.expected_index),Self::Branch(v)=>Some(&v.expected_index),Self::Switch(v)=>Some(&v.expected_index),Self::FastForward(v)=>Some(&v.expected_index), Self::Rename(v)=>Some(&v.expected_index),Self::Fetch(v)=>Some(&v.expected_index),Self::Push(v)=>Some(&v.expected_index),Self::Upstream(v)=>Some(&v.expected_index),Self::Initialize(_)=>None} }
++    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)|Self::Rename(_)|Self::Fetch(_)|Self::Push(_)|Self::Upstream(_)|Self::Initialize(_)=>None,Self::Switch(v)=>Some(&v.candidate_index),Self::FastForward(v)=>Some(&v.candidate_index)} }
++    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)|Self::Switch(_)|Self::Rename(_)|Self::FastForward(_)|Self::Fetch(_)|Self::Push(_)|Self::Upstream(_)|Self::Initialize(_)=>None} }
+     pub(crate) fn reference_oid(&self) -> Option<&str> { match self {Self::Files(v) if v.action==Kind::Commit=>v.candidate_commit.as_deref(),Self::Branch(v)=>Some(&v.candidate_ref_oid),Self::FastForward(v)=>Some(&v.target_oid),Self::Fetch(v)=>Some(&v.candidate_ref_oid),_=>None} }
++    pub(crate) fn upstream_details(&self)->Option<&upstream::Intent> {match self {Self::Upstream(v)=>Some(v),_=>None}}
+     pub(crate) fn init_details(&self) -> Option<&init::Intent> {match self {Self::Initialize(v)=>Some(v),_=>None}}
+     pub(crate) fn fetch_details(&self) -> Option<&fetch::Intent> {match self {Self::Fetch(v)=>Some(v),_=>None}}
+     pub(crate) fn push_details(&self) -> Option<&push::Intent> {match self {Self::Push(v)=>Some(v),_=>None}}
+@@ -257,7 +260,7 @@
+     pub(crate) fn branch_details(&self) -> Option<&branch::Intent> { match self {Self::Branch(v)=>Some(v),_=>None} }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+-            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(),Self::Initialize(v)=>v.valid(),
++            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(),Self::Upstream(v)=>v.valid(), Self::Initialize(v)=>v.valid(),
+             Self::Files(v)=>read::digest(&v.expected_revision) && read::digest(&v.expected_index)
+                 && v.expected_head.as_deref().is_none_or(read::oid) && v.expected_ref.as_deref().is_none_or(read::branch)
+                 && (v.expected_head.is_some() || v.expected_ref.is_some()) && match v.action {
+@@ -265,7 +268,7 @@
+                         && v.candidate_commit.as_deref().is_some_and(|oid|read::oid(oid)
+                             && v.expected_head.as_ref().is_none_or(|h|h.len() == oid.len())),
+                     Kind::Stage|Kind::Unstage => v.candidate_commit.is_none() && v.candidate_index.as_deref().is_some_and(read::digest),
+-                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize=>false,
++                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize|Kind::SetUpstream=>false,
+                 },
+         }
+     }
+@@ -278,13 +281,14 @@
+             (Self::Push(v),Review::Push(r))=>v.matches(r),
+             (Self::Rename(v),Review::Rename(r))=>v.matches(r),
+             (Self::Initialize(v),Review::Initialize(r))=>v.matches(r),
++            (Self::Upstream(v),Review::Upstream(r))=>v.matches(r),
+             (Self::Files(v),Review::Files(r))=>v.action == r.action && v.expected_revision == r.expected_revision
+                 && v.expected_ref == r.branch && v.expected_head == r.head && v.expected_index == r.expected_index,
+             _=>false,
+         }
+     }
+     fn decode(value:&Value) -> Result<Self,BridgeError> {
+-        need(if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::INTENT_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::INTENT_KEYS)} else if value["action"] == "initialize" {keys(value,init::INTENT_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::INTENT_KEYS)} else if value["action"] == "branch-switch" {
++        need(if value["action"] == "set-upstream" {keys(value,upstream::INTENT_KEYS)} else if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::INTENT_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::INTENT_KEYS)} else if value["action"] == "initialize" {keys(value,init::INTENT_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::INTENT_KEYS)} else if value["action"] == "branch-switch" {
+             keys(value,switch::INTENT_KEYS)
+         } else if value["action"] == "branch-rename" {
+             keys(value,rename::INTENT_KEYS)
+@@ -298,32 +302,37 @@
+ pub(crate) struct Request {
+     pub(crate) id: String, pub(crate) action: Action, pub(crate) context: Context, pub(crate) clock: Clock,
+     pub(crate) phase: Phase, pub(crate) binding: Option<ApplyBinding>, pub(crate) digest: String,
+-    pub(crate) native: Option<Native>, pub(crate) initialization: Option<init::Native>, pub(crate) switch_sources:Option<switch::Sources>, pub(crate) rename_sources:Option<rename::Sources>, pub(crate) fast_forward_sources:Option<ff::Sources>, pub(crate) fetch_target:Option<fetch_worker::Target>, pub(crate) push_target:Option<push_worker::Target>, bytes: Vec<u8>,
++    pub(crate) native: Option<Native>, pub(crate) initialization: Option<init::Native>, pub(crate) switch_sources:Option<switch::Sources>, pub(crate) rename_sources:Option<rename::Sources>, pub(crate) fast_forward_sources:Option<ff::Sources>, pub(crate) fetch_target:Option<fetch_worker::Target>, pub(crate) push_target:Option<push_worker::Target>, pub(crate) upstream_sources:Option<upstream::Sources>, bytes: Vec<u8>,
+ }
+ impl Request {
+     pub(crate) fn from_original(id: &str, action: &Action, context: &Context, native: &Native,
+         clock: Clock, binding: Option<ApplyBinding>) -> Result<Self,BridgeError> {
+-        Self::from_sources(id,action,context,native,clock,binding,None,None,None)
++        Self::from_sources(id,action,context,native,clock,binding,None,None,None,None)
+     }
+     /// Projection from the SAME retained native Book; never public input or a
+     /// substitute for the Preparing row/current Doc/actual source checks.
+     pub(crate) fn from_switch_original(id:&str,action:&Action,context:&Context,native:&Native,
+         clock:Clock,binding:Option<ApplyBinding>,sources:Option<switch::Sources>)->Result<Self,BridgeError> {
+         need(action.kind()==Kind::BranchSwitch)?;
+-        Self::from_sources(id,action,context,native,clock,binding,sources,None,None)
++        Self::from_sources(id,action,context,native,clock,binding,sources,None,None,None)
+     }
+     pub(crate) fn from_rename_original(id:&str,action:&Action,context:&Context,native:&Native,
+         clock:Clock,binding:Option<ApplyBinding>,sources:Option<rename::Sources>)->Result<Self,BridgeError> {
+         need(action.kind()==Kind::BranchRename)?;
+-        Self::from_sources(id,action,context,native,clock,binding,None,sources,None)
++        Self::from_sources(id,action,context,native,clock,binding,None,sources,None,None)
+     }
+     pub(crate) fn from_fast_forward_original(id:&str,action:&Action,context:&Context,native:&Native,
+         clock:Clock,binding:Option<ApplyBinding>,sources:Option<ff::Sources>)->Result<Self,BridgeError> {
+         need(action.kind()==Kind::FastForward)?;
+-        Self::from_sources(id,action,context,native,clock,binding,None,None,sources)
++        Self::from_sources(id,action,context,native,clock,binding,None,None,sources,None)
++    }
++    pub(crate) fn from_upstream_original(id:&str,action:&Action,context:&Context,native:&Native,
++        clock:Clock,binding:Option<ApplyBinding>,sources:upstream::Sources)->Result<Self,BridgeError> {
++        need(action.kind()==Kind::SetUpstream)?;
++        Self::from_sources(id,action,context,native,clock,binding,None,None,None,Some(sources))
+     }
+     fn from_sources(id:&str,action:&Action,context:&Context,native:&Native,
+-        clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>,rename_sources:Option<rename::Sources>,fast_forward_sources:Option<ff::Sources>)->Result<Self,BridgeError> {
++        clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>,rename_sources:Option<rename::Sources>,fast_forward_sources:Option<ff::Sources>,upstream_sources:Option<upstream::Sources>)->Result<Self,BridgeError> {
+         need(valid_id(id) && action.valid() && valid_id(&context.project_id) && valid_id(&context.revision)
+             && !matches!(action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
+             && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000))?;
+@@ -354,10 +363,14 @@
+             })?;
+             value["fastForward"]=serde_json::to_value(&fast_forward_sources).map_err(|_|BridgeError::protocol())?;
+         } else {need(fast_forward_sources.is_none())?;}
++        if let Action::Upstream(a)=action {
++            need(upstream_sources.as_ref().is_some_and(|v|v.valid(native,a)))?;
++            value["upstream"]=serde_json::to_value(&upstream_sources).map_err(|_|BridgeError::protocol())?;
++        }else {need(upstream_sources.is_none())?;}
+         let mut bytes=serde_json::to_vec(&value).map_err(|_|BridgeError::protocol())?;
+         bytes.push(b'\n'); need(bytes.len() <= REQUEST_LIMIT)?;
+         let digest = hash(&bytes);
+-        Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest,native:Some(native.clone()),initialization:None,switch_sources,rename_sources,fast_forward_sources,fetch_target:None,push_target:None,bytes})
++        Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest,native:Some(native.clone()),initialization:None,switch_sources,rename_sources,fast_forward_sources,fetch_target:None,push_target:None,upstream_sources,bytes})
+     }
+     pub(crate) fn from_init_original(id:&str,action:&Action,context:&Context,native:&init::Native,
+         clock:Clock,binding:Option<ApplyBinding>)->Result<Self,BridgeError> {
+@@ -372,7 +385,7 @@
+             "journalRevision":binding.as_ref().map(|s|s.journal_revision),"context":context,"native":native,"clock":clock});
+         let mut bytes=serde_json::to_vec(&value).map_err(|_|BridgeError::protocol())?;bytes.push(b'\n');need(bytes.len()<=REQUEST_LIMIT)?;
+         Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest:hash(&bytes),
+-            native:None,initialization:Some(native.clone()),switch_sources:None,rename_sources:None,fast_forward_sources:None,fetch_target:None,push_target:None,bytes})
++            native:None,initialization:Some(native.clone()),switch_sources:None,rename_sources:None,fast_forward_sources:None,fetch_target:None,push_target:None,upstream_sources:None,bytes})
+     }
+     fn protocol(&self)->&str {if self.action.kind().is_push() {push_worker::PROTOCOL} else if self.action.kind()==Kind::Fetch {fetch_worker::PROTOCOL} else {PROTOCOL}}
+     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
+@@ -395,9 +408,16 @@
+     /// and rematched Doc/consent. The codec cannot confer that permission.
+     pub(crate) fn ack(&self, candidate:&Candidate, revision:u64) -> Result<Vec<u8>,BridgeError> {
+         let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
+-        need(!matches!(self.action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch) && candidate.request_digest == self.digest && candidate.intent.matches(&binding.review)
++        need(!matches!(self.action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::SetUpstream) && candidate.request_digest == self.digest && candidate.intent.matches(&binding.review)
+             && revision == binding.journal_revision + 1)?;
+         Ok(format!("MRK-GIT-LOCAL-ACK/1 {} {} {}\n",self.digest,candidate.digest,revision).into_bytes())
++    }
++    pub(crate) fn upstream_ack(&self,candidate:&Candidate,revision:u64,directories:&str)->Result<Vec<u8>,BridgeError> {
++        let binding=self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
++        need(self.action.kind()==Kind::SetUpstream && read::digest(directories) && candidate.request_digest==self.digest
++            && candidate.intent.matches(&binding.review) && revision==binding.journal_revision+1)?;
++        let bytes=format!("MRK-GIT-UPSTREAM-ACK/1 {} {} {} {}\n",self.digest,candidate.digest,revision,directories).into_bytes();
++        need(bytes.len()<=READY_LIMIT)?;Ok(bytes)
+     }
+     pub(crate) fn terminal(&self, bytes:&[u8], candidate:Option<&Candidate>) -> Result<Terminal,BridgeError> {
+         if self.action.kind().is_push() {return self.push_terminal(bytes,candidate)}
+@@ -424,7 +444,7 @@
+             if self.phase == Phase::Prepare {
+                 need(candidate.is_none() && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns
+                     && terminal.publication == Publication::NotReported
+-                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) {&["review"]} else {&["review","diff"]}))?;
++                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize|Kind::SetUpstream) {&["review"]} else {&["review","diff"]}))?;
+                 let review = Review::decode(&terminal.result["review"])?;
+                 need(review.matches(&self.action))?;
+                 if let Some(review) = review.file() {
+@@ -439,10 +459,12 @@
+         || self.action.kind()==Kind::BranchSwitch && switch::reason(value)
+         || self.action.kind()==Kind::BranchRename && rename::reason(value)
+         || self.action.kind()==Kind::FastForward && ff::reason(value)
+-        || self.action.kind()==Kind::Initialize && init::reason(value)}
++        || self.action.kind()==Kind::Initialize && init::reason(value)
++        || self.action.kind()==Kind::SetUpstream && upstream::reason(value)}
+     fn validate_applied(&self, terminal:&Terminal, candidate:Option<&Candidate>) -> Result<(),BridgeError> {
+         let r = &terminal.result;
+-        need(keys(r,if self.action.kind()==Kind::FastForward {ff::RESULT_KEYS}
++        need(keys(r,if self.action.kind()==Kind::SetUpstream {upstream::RESULT_KEYS}
++            else if self.action.kind()==Kind::FastForward {ff::RESULT_KEYS}
+             else if self.action.kind()==Kind::BranchSwitch {switch::RESULT_KEYS}
+             else if self.action.kind()==Kind::BranchRename {rename::RESULT_KEYS}
+             else {&["operationId","action","state","settlement","reason","observation","intent"]})
+@@ -455,6 +477,7 @@
+             let intent = Intent::decode(&r["intent"])?;
+             need(candidate.request_digest == self.digest && intent == candidate.intent)?;
+         }
++        if self.action.kind()==Kind::SetUpstream {return upstream::validate_applied(self,terminal,candidate)}
+         if self.action.kind()==Kind::FastForward {return ff::validate_applied(self,terminal,candidate)}
+         if self.action.kind()==Kind::BranchSwitch {return switch::validate_applied(self,terminal,candidate)}
+         if self.action.kind()==Kind::BranchRename {return rename::validate_applied(self,terminal,candidate)}
+@@ -463,7 +486,7 @@
+             need(candidate.is_some() && terminal.publication == match self.action.kind() {
+                 Kind::Commit=>Publication::RefReturned,Kind::BranchCreate=>Publication::BranchRefReturned,
+                 Kind::Stage|Kind::Unstage=>Publication::IndexReturned,
+-                Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize=>return Err(BridgeError::protocol()),
++                Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize|Kind::SetUpstream=>return Err(BridgeError::protocol()),
+             })?;
+         }
+         if state == "succeeded" {
+@@ -483,7 +506,7 @@
+ #[serde(rename_all="kebab-case")]
+ pub(crate) enum Publication { NotReported, IndexReturned, RefReturned, BranchRefReturned,
+     SwitchCheckoutReturned, SwitchLogReturned, SwitchHeadReturned, SwitchIndexReturned,
+-    RenameNewLogReturned, RenameOldLogReturned, RenameRefReturned, RenameHeadLogReturned, RenameHeadReturned, RenameConfigReturned, FfWorktreeReturned, FfIndexReturned, FfRefReturned, FetchReturned, PushReturned, InitReturned }
++    RenameNewLogReturned, RenameOldLogReturned, RenameRefReturned, RenameHeadLogReturned, RenameHeadReturned, RenameConfigReturned, FfWorktreeReturned, FfIndexReturned, FfRefReturned, FetchReturned, PushReturned, InitReturned, UpstreamDirectoriesReturned, UpstreamConfigReturned }
+ #[derive(Clone, Deserialize)]
+ #[serde(rename_all="camelCase",deny_unknown_fields)]
+ pub(crate) struct Terminal {
+diff --git a/desktop/src-tauri/src/git_local_sources_macos.rs b/desktop/src-tauri/src/git_local_sources_macos.rs
+--- a/desktop/src-tauri/src/git_local_sources_macos.rs
++++ b/desktop/src-tauri/src/git_local_sources_macos.rs
+@@ -25,6 +25,8 @@
+ mod fetch_sources;
+ #[path="git_push_sources_macos.rs"]
+ mod push_sources;
++#[path="git_upstream_sources_macos.rs"]
++mod upstream_sources;
+
+ #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+ #[path="git_fetch_observation_sources_macos.rs"]
+@@ -94,6 +96,7 @@
+     initialization:Option<init_sources::State>,
+     fetch:Option<fetch_sources::State>,
+     push:Option<push_sources::State>,
++    upstream:Option<upstream_sources::State>,
+     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+     push_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_push::Control>>,
+     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+@@ -127,7 +130,7 @@
+             git: None,
+             indices: [None; 4],
+             operation_id: None, review: None, reference: None, replacement: None,
+-            post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,push:None,
++            post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,push:None,upstream:None,
+             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+             push_observation:None,
+             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+@@ -162,7 +165,8 @@
+             .checked_add(rename_sources::State::working_bytes()?)?
+             .checked_add(fast_forward_sources::State::working_bytes()?)?
+             .checked_add(fetch_sources::State::working_bytes()?)?
+-            .checked_add(push_sources::State::working_bytes()?)
++            .checked_add(push_sources::State::working_bytes()?)?
++            .checked_add(upstream_sources::State::working_bytes()?)
+     }
+     pub(crate) fn first_failure(&self) -> Option<(Failure, Instant)> {
+         self.acl.as_ref().and_then(SnapshotBook::first_failure)
+@@ -335,6 +339,7 @@
+         Ok(current)
+     }
+     fn snapshot_original(&self, index: usize, maximum: u64, stop: &mut dyn FnMut() -> bool) -> Result<wire::Snapshot, Reason> {
++        if self.upstream_is_old(index) {return self.upstream_snapshot_original(index,maximum,stop)}
+         if self.fetch_is_old(index) {return self.fetch_snapshot_original(index,maximum,stop)}
+         if self.fast_forward_is_old(index) {return self.fast_forward_snapshot_original(index,maximum,stop)}
+         if self.rename_is_old(index) {return self.rename_snapshot_original(index,maximum,stop)}
+@@ -357,6 +362,7 @@
+     pub(crate) fn post_returned(&mut self, publication: Option<&GitLocalPublication>,
+         stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+         if self.finished || self.first.is_some() || self.post_claimed {
++            if self.upstream.is_some() {self.retain_upstream_unknown();return Err(Reason::CleanupUnknown)}
+             if self.fetch_holds_marker() {self.retain_fetch_unknown();return Err(Reason::CleanupUnknown)}
+             if self.fast_forward.is_some() {self.retain_fast_forward_unknown();return Err(Reason::CleanupUnknown)}
+             if self.rename.is_some() {self.retain_rename_unknown();return Err(Reason::CleanupUnknown)}
+@@ -369,6 +375,7 @@
+             if let Some(publication) = publication {
+                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
++                if review.action()==wire::Kind::SetUpstream {self.upstream_returned(publication,stop)?;return self.post_inner(stop)}
+                 if review.action().is_push() {self.push_returned(publication,stop)?;return self.post_inner(stop)}
+                 if review.action()==wire::Kind::Fetch {
+                     self.fetch_returned(publication,stop)?;return self.post_inner(stop)
+@@ -397,7 +404,7 @@
+                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
+                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
+                     },
+-                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch=>return Err(Reason::SourceChanged),
++                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch|wire::Kind::SetUpstream=>return Err(Reason::SourceChanged),
+                 };
+                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
+                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
+@@ -406,6 +413,7 @@
+             }
+             self.post_inner(stop)
+         })();
++        if result.is_err() && self.upstream.is_some() {self.retain_upstream_unknown();return Err(Reason::CleanupUnknown)}
+         if result.is_err() && self.fetch_holds_marker() {self.retain_fetch_unknown();return Err(Reason::CleanupUnknown)}
+         if result.is_err() && self.initialization.is_some() {self.first=Some(Reason::CleanupUnknown);self.close_failed=true;return Err(Reason::CleanupUnknown)}
+         // After a child return, a missing/failed exact switch-source rematch
+@@ -439,7 +447,8 @@
+                 .and_then(|n|fast_forward_sources::State::extra(review).and_then(|s|n.checked_add(s)))
+                 .and_then(|n|n.checked_add(init_sources::State::extra(kind)))
+                 .and_then(|n|fetch_sources::State::extra(kind,review).and_then(|s|n.checked_add(s)))
+-                .and_then(|n|push_sources::State::extra(kind,review).and_then(|s|n.checked_add(s))).ok_or(Reason::Capacity)?;
++                .and_then(|n|push_sources::State::extra(kind,review).and_then(|s|n.checked_add(s)))
++                .and_then(|n|n.checked_add(self.upstream.as_ref().map_or(Some(0),upstream_sources::State::extra)?)).ok_or(Reason::Capacity)?;
+             let capacity = roster_limit([project_parts.len(), parent_parts.len()], extra)?;
+             if capacity > SOURCE_LIMIT
+                 || capacity
+@@ -522,6 +531,7 @@
+             if review.is_some_and(|v|v.action()==wire::Kind::BranchRename) {self.capture_rename(stop)?;}
+             if review.is_some_and(|v|v.action()==wire::Kind::BranchSwitch) {self.capture_switch(project,stop)?;}
+             if review.is_some_and(|v| matches!(v.action(),wire::Kind::Commit|wire::Kind::BranchCreate)) { self.capture_reference(stop)?; }
++            if self.upstream.is_some(){self.capture_upstream(stop)?;}
+             self.post_inner(stop)
+         })();
+         self.remember(result)
+@@ -537,7 +547,11 @@
+             filesystem(fd, stop)?;
+             let held = stat::fstat(fd).map_err(|_| Reason::SourceChanged)?;
+             checkpoint(stop)?;
+-            if self.fetch_is_old(index) {
++            if self.upstream_is_retired_working(index) {
++                self.upstream_retired_identity(index,&held)?;
++            } else if self.upstream_is_old(index) {
++                self.upstream_old_identity(index,&held)?;
++            } else if self.fetch_is_old(index) {
+                 self.fetch_old_identity(index,&held)?;
+             } else if self.fast_forward_is_old(index) {
+                 self.fast_forward_old_identity(index,&held)?;
+@@ -644,7 +658,8 @@
+         self.post_switch(stop)?;
+         self.post_rename(stop)?;
+         self.post_fetch(stop)?;
+-        self.post_push(stop)
++        self.post_push(stop)?;
++        self.post_upstream(stop)
+     }
+     pub(crate) fn post(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+         if self.finished || self.first.is_some() || self.post_claimed {
+@@ -668,6 +683,7 @@
+         if !self.account.call_settled() || self.first == Some(Reason::CleanupUnknown) || self.acl_entered && self.acl.is_none() {
+             return Err(Reason::CleanupUnknown);
+         }
++        if !self.upstream_retirable(){return Err(Reason::CleanupUnknown)}
+         let original_failure=self.first_failure();
+         if self.retire_init(&mut ||expired(original_failure)).is_err() {return Err(Reason::CleanupUnknown)}
+         if let Some(acl) = self.acl.as_mut() {
+@@ -687,6 +703,7 @@
+             && self.account.call_settled()
+             && self.book.settled()
+             && self.init_retired()
++            && self.upstream_retirable()
+             && (!self.acl_entered || self.acl.as_ref().is_some_and(SnapshotBook::settled))
+     }
+ }
+diff --git a/desktop/src-tauri/src/git_local_state.rs b/desktop/src-tauri/src/git_local_state.rs
+--- a/desktop/src-tauri/src/git_local_state.rs
++++ b/desktop/src-tauri/src/git_local_state.rs
+@@ -3,7 +3,7 @@
+ //! IO methods run only in original finite jobs, outside Doc/Edit/Host locks.
+ use crate::{application_service::ProjectBinding, application_state_store::{Cleanup,Durability,Effect,Namespace,NativeUse,
+     PrivateStateDirectory,Revision,Snapshot,StateError},git_local_protocol as wire,protocol::{strict_json,valid_id},
+-    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch,git_switch_protocol as switch,git_rename_protocol as rename,git_fast_forward_protocol as ff,git_init_protocol as init,git_fetch_state as fetch,git_push_state as push};
++    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch,git_switch_protocol as switch,git_rename_protocol as rename,git_fast_forward_protocol as ff,git_init_protocol as init,git_fetch_state as fetch,git_push_state as push,git_upstream_state as upstream};
+ use serde::{Deserialize,Serialize};
+ use std::sync::Arc;
+
+@@ -47,6 +47,8 @@
+     push:Option<push::Journal>,
+     #[serde(default,skip_serializing_if="Option::is_none")]
+     push_new_branch:Option<push::Journal>,
++    #[serde(default,skip_serializing_if="Option::is_none")]
++    upstream:Option<upstream::Journal>,
+ }
+ impl Row {
+     fn push_details(&self)->Option<&push::Journal> {
+@@ -62,7 +64,7 @@
+             review_digest:review.review_digest().into(),expected_revision:review.expected_revision().into(),expected_ref:review.branch().map(str::to_owned),
+             expected_head:review.head().map(str::to_owned),expected_index:review.expected_index().map(str::to_owned),candidate_index:None,candidate_commit:None,
+             phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing),rename:review.rename_details().map(rename::Journal::preparing),fast_forward:review.fast_forward_details().map(ff::Journal::preparing),initialization:review.init_details().map(init::Journal::preparing),fetch:review.fetch_details().map(fetch::Journal::preparing),push:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::Push).map(push::Journal::preparing),
+-            push_new_branch:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::PushNewBranch).map(push::Journal::preparing)};
++            push_new_branch:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::PushNewBranch).map(push::Journal::preparing),upstream:review.upstream_details().map(upstream::Journal::preparing)};
+         row.validate()?;Ok(row)
+     }
+     fn has_candidate(&self)->bool {
+@@ -72,9 +74,11 @@
+             ||self.initialization.as_ref().is_some_and(|i|i.candidate.is_some())
+             ||self.fetch.as_ref().is_some_and(|f|f.candidate.is_some())
+             ||self.push_details().is_some_and(|p|p.candidate.is_some())
++            ||self.upstream.as_ref().is_some_and(|p|p.candidate.is_some())
+     }
+     fn intent(&self)->Option<wire::Intent> {
+-        if let Some(p)=self.push_details() {p.candidate.clone().map(wire::Intent::Push)}
++        if let Some(u)=&self.upstream {u.candidate.clone().map(wire::Intent::Upstream)}
++        else if let Some(p)=self.push_details() {p.candidate.clone().map(wire::Intent::Push)}
+         else if let Some(f)=&self.fetch {f.candidate.clone().map(wire::Intent::Fetch)}
+         else if let Some(i)=&self.initialization {i.candidate.clone().map(wire::Intent::Initialize)}
+         else if let Some(f)=&self.fast_forward {
+@@ -108,8 +112,14 @@
+             && (self.action==wire::Kind::Initialize || self.initialization.is_none())
+             && (self.action==wire::Kind::Fetch || self.fetch.is_none())
+             && (self.action==wire::Kind::Push || self.push.is_none())
++            && (self.action==wire::Kind::SetUpstream || self.upstream.is_none())
+             && (self.action==wire::Kind::PushNewBranch || self.push_new_branch.is_none())
+             && match self.action {
++                wire::Kind::SetUpstream=>self.initialization.is_none()&&self.fetch.is_none()&&self.push.is_none()&&self.push_new_branch.is_none()
++                    &&self.fast_forward.is_none()&&self.branch.is_none()&&self.switch.is_none()&&self.rename.is_none()
++                    &&self.candidate_index.is_none()&&self.candidate_commit.is_none()
++                    &&self.upstream.as_ref().is_some_and(|u|self.expected_index.as_deref().is_some_and(|index|
++                        u.valid(&self.expected_revision,self.expected_head.as_deref(),self.expected_ref.as_deref(),index,&self.review_digest))),
+                 wire::Kind::Push|wire::Kind::PushNewBranch=>self.initialization.is_none() && self.fetch.is_none() && self.fast_forward.is_none() && self.branch.is_none()
+                     && self.switch.is_none() && self.rename.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
+                     && self.push_details().is_some_and(|p|p.reviewed.action.local_kind()==self.action && self.expected_index.as_deref().is_some_and(|index|
+@@ -160,6 +170,11 @@
+                 Some(Completion::RecoveryRequired)=>d.valid(p.candidate.as_ref()),_=>false})))?;
+         need(!self.action.is_push() || self.outcome!=Some(Completion::Succeeded)
+             || self.push_details().is_some_and(|p|p.final_state.as_ref().is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
++        need(self.upstream.as_ref().is_none_or(|u|u.final_state.as_ref().is_none_or(|d|
++            self.phase==Phase::Finished && u.candidate.as_ref().is_some_and(|i|match self.outcome {
++                Some(Completion::Succeeded)=>d.successful(i),Some(Completion::RecoveryRequired)=>d.valid(i),_=>false}))))?;
++        need(self.action!=wire::Kind::SetUpstream || self.outcome!=Some(Completion::Succeeded)
++            ||self.upstream.as_ref().is_some_and(|u|u.candidate.as_ref().is_some_and(|i|u.final_state.as_ref().is_some_and(|d|d.successful(i)))))?;
+         need(match self.phase {
+             Phase::Preparing=> !self.has_candidate() && self.outcome.is_none(),
+             Phase::Candidate=> self.has_candidate() && self.outcome.is_none(),
+@@ -190,6 +205,8 @@
+                 (Some(p),Some(o))=>p.same_original(o),(None,None)=>true,_=>false,
+             } && match (&self.fetch,&original.fetch) {
+                 (Some(f),Some(o))=>f.same_original(o),(None,None)=>true,_=>false,
++            } && match (&self.upstream,&original.upstream) {
++                (Some(u),Some(o))=>u.same_original(o),(None,None)=>true,_=>false,
+             } && match (&self.initialization,&original.initialization) {
+                 (Some(i),Some(o))=>i.same_original(o),(None,None)=>true,_=>false,
+             }
+@@ -198,7 +215,10 @@
+         need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action() && self.expected_revision==intent.expected_revision()
+             && self.expected_ref.as_deref()==intent.expected_ref() && self.expected_head.as_deref()==intent.expected_head()
+             && self.expected_index.as_deref()==intent.expected_index())?;
+-        if let Some(p)=self.push_details_mut() {
++        if let Some(u)=&mut self.upstream {
++            let proposed=intent.upstream_details().ok_or_else(||StateError::from(Error::Conflict))?;
++            need(u.accepts(proposed))?;u.candidate(proposed);
++        } else if let Some(p)=self.push_details_mut() {
+             let proposed=intent.push_details().ok_or_else(||StateError::from(Error::Conflict))?;
+             need(p.accepts(proposed))?;p.candidate=Some(proposed.clone());
+         } else if let Some(f)=&mut self.fetch {
+@@ -217,7 +237,7 @@
+             let i=intent.switch_details().ok_or_else(||StateError::from(Error::Conflict))?;
+             need(s.accepts(i))?;s.candidate(i);self.candidate_index=Some(i.candidate_index.clone());
+         } else {
+-            need(intent.fast_forward_details().is_none() && intent.switch_details().is_none() && intent.rename_details().is_none() && intent.init_details().is_none() && intent.fetch_details().is_none() && intent.push_details().is_none())?;
++            need(intent.fast_forward_details().is_none() && intent.switch_details().is_none() && intent.rename_details().is_none() && intent.init_details().is_none() && intent.fetch_details().is_none() && intent.push_details().is_none() && intent.upstream_details().is_none())?;
+             match (&mut self.branch,intent.branch_details()) {
+                 (Some(b),Some(i))=>{need(b.accepts(i))?;b.candidate_ref_oid=Some(i.candidate_ref_oid.clone());},
+                 (None,None)=>{self.candidate_index=intent.candidate_index().map(str::to_owned);self.candidate_commit=intent.candidate_commit().map(str::to_owned);},
+@@ -238,6 +258,9 @@
+         self.finish_with_push(outcome,details,renamed,forwarded,fetched,None)
+     }
+     fn finish_with_push(&mut self,outcome:Completion,details:Option<&switch::FinalData>,renamed:Option<&rename::FinalData>,forwarded:Option<&ff::FinalData>,fetched:Option<&fetch::FinalData>,pushed:Option<&push::FinalData>)->Result<()> {
++        self.finish_with_upstream(outcome,details,renamed,forwarded,fetched,pushed,None)
++    }
++    fn finish_with_upstream(&mut self,outcome:Completion,details:Option<&switch::FinalData>,renamed:Option<&rename::FinalData>,forwarded:Option<&ff::FinalData>,fetched:Option<&fetch::FinalData>,pushed:Option<&push::FinalData>,upstream:Option<&crate::git_upstream_protocol::FinalData>)->Result<()> {
+         need(self.phase!=Phase::Finished)?;
+         need(details.is_none() || self.action==wire::Kind::BranchSwitch && self.has_candidate()
+             && matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
+@@ -266,6 +289,10 @@
+             && self.push_details().is_some_and(|p|p.final_state.is_none() && pushed.is_some_and(|d|d.valid(p.candidate.as_ref()))))?;
+         need(!self.action.is_push() || outcome!=Completion::Succeeded
+             || self.push_details().is_some_and(|p|pushed.is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
++        need(upstream.is_none() || self.action==wire::Kind::SetUpstream&&matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
++            &&self.upstream.as_ref().is_some_and(|u|u.final_state.is_none()&&u.candidate.as_ref().is_some_and(|i|upstream.is_some_and(|d|d.valid(i)))))?;
++        need(self.action!=wire::Kind::SetUpstream||outcome!=Completion::Succeeded
++            ||self.upstream.as_ref().is_some_and(|u|u.candidate.as_ref().is_some_and(|i|upstream.is_some_and(|d|d.successful(i)))))?;
+         // A persisted candidate makes a cancelled/refused child uncertain with
+         // respect to publication. No negative result is upgraded to unsent.
+         need(!matches!(outcome,Completion::Failed|Completion::Cancelled)||!self.has_candidate())?;
+@@ -285,6 +312,7 @@
+         if let Some(details)=pushed {
+             self.push_details_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
+         }
++        if let Some(d)=upstream {self.upstream.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(d.clone());}
+         self.phase=Phase::Finished;self.outcome=Some(outcome);self.validate()
+     }
+ }
+@@ -308,6 +336,7 @@
+             need(self.schema_version>=7 || row.initialization.is_none() && row.action!=wire::Kind::Initialize)?;
+             need(self.schema_version>=8 || row.push.is_none() && row.action!=wire::Kind::Push)?;
+             need(self.schema_version>=9 || row.push_new_branch.is_none() && row.action!=wire::Kind::PushNewBranch)?;
++            need(self.schema_version>=9 || row.upstream.is_none() && row.action!=wire::Kind::SetUpstream)?;
+             row.validate()?;
+         }
+         let value=serde_json::to_value(self).map_err(|_|StateError::from(Error::InvalidRequest))?;
+@@ -326,7 +355,7 @@
+     }
+     fn reserve(&mut self,row:Row)->Result<()> {
+         need(row.phase==Phase::Preparing)?;
+-        let schema = match row.action {wire::Kind::FastForward=>5,wire::Kind::Fetch=>6,wire::Kind::Initialize=>7,wire::Kind::Push=>8,wire::Kind::PushNewBranch=>9,wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
++        let schema = match row.action {wire::Kind::FastForward=>5,wire::Kind::Fetch=>6,wire::Kind::Initialize=>7,wire::Kind::Push=>8,wire::Kind::PushNewBranch|wire::Kind::SetUpstream=>9,wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
+         if let Some(index)=self.rows.iter().position(|r|r.project_id==row.project_id) {
+             if !self.rows[index].replaceable() {return Err(Error::RecoveryRequired.into());}
+             self.rows[index]=row;
+@@ -429,7 +458,7 @@
+         self.retained(original)?;need(joined.matches(&self.native_use,original))?;
+         let mut state=self.current(expected)?;
+         let row=state.rows.iter_mut().find(|r|r.same_original(&original.preparing)).ok_or_else(||StateError::from(Error::Conflict))?;
+-        row.finish_with_push(joined.completion(),joined.switch_final(),joined.rename_final(),joined.fast_forward_final(),joined.fetch_final(),joined.push_final())?;let row=row.clone();self.publish(expected,&state,row,original.clone())
++        row.finish_with_upstream(joined.completion(),joined.switch_final(),joined.rename_final(),joined.fast_forward_final(),joined.fetch_final(),joined.push_final(),joined.upstream_final())?;let row=row.clone();self.publish(expected,&state,row,original.clone())
+     }
+ }
+
+@@ -466,3 +495,7 @@
+ #[cfg(test)]
+ #[path="git_push_new_branch_state_tests.rs"]
+ mod push_new_branch_tests;
++
++#[cfg(test)]
++#[path="git_upstream_state_tests.rs"]
++mod upstream_tests;
+diff --git a/desktop/src-tauri/src/git_push_worker.rs b/desktop/src-tauri/src/git_push_worker.rs
+--- a/desktop/src-tauri/src/git_push_worker.rs
++++ b/desktop/src-tauri/src/git_push_worker.rs
+@@ -178,6 +178,7 @@
+             digest,
+             native: Some(native.clone()),
+             initialization: None,
++            upstream_sources: None,
+             switch_sources: None,
+             rename_sources: None,
+             fast_forward_sources: None,
+diff --git a/desktop/src-tauri/src/git_switch_supervisor_tests.rs b/desktop/src-tauri/src/git_switch_supervisor_tests.rs
+--- a/desktop/src-tauri/src/git_switch_supervisor_tests.rs
++++ b/desktop/src-tauri/src/git_switch_supervisor_tests.rs
+@@ -5,7 +5,7 @@
+
+ fn witness()->GitLocalPublication {
+     let request=Arc::new(data::request(wire::Phase::Apply));let candidate=Arc::new(data::candidate(&request));
+-    GitLocalPublication {request,candidate,publication:wire::Publication::SwitchIndexReturned,fetch_keep:None,fetch_returned:None,push_returned:None}
++    GitLocalPublication {request,candidate,publication:wire::Publication::SwitchIndexReturned,upstream_returned:None,fetch_keep:None,fetch_returned:None,push_returned:None}
+ }
+
+ #[test]
+diff --git a/desktop/src-tauri/src/installed_cli_git_repository.rs b/desktop/src-tauri/src/installed_cli_git_repository.rs
+--- a/desktop/src-tauri/src/installed_cli_git_repository.rs
++++ b/desktop/src-tauri/src/installed_cli_git_repository.rs
+@@ -128,6 +128,9 @@
+                     review.review_id, review.source_revision, review.review_digest
+                 ));
+                 text.push_str(&preview_text(&review.preview));
++                if matches!(review.preview,repository::Preview::SetUpstream {unchanged:true,..}) {
++                    text.push_str("Already configured; cancel/close this review. No Apply is permitted.\n");
++                }else {
+                 text.push_str(&format!(
+                     "Start once: mrk git-repository-start {} {} {} {} {} --json\n",
+                     q.project_id.as_str(),
+@@ -136,6 +139,7 @@
+                     op,
+                     review.review_id
+                 ));
++                }
+             }
+             text.push_str(if status.history_available {
+                 "History copied this native status; it is not a cleanup receipt.\n"
+@@ -158,6 +162,7 @@
+ }
+ fn selection_text(action: &repository::Action) -> String {
+     match action {
++        repository::Action::SetUpstream {branch,remote,repository,..}=>format!("Set local {branch} upstream to {remote} / {repository}; no network, tracking tip or remote success.\n"),
+         repository::Action::Initialize {}=>"Initialize an empty local repository on main; keep project files, no commit. Absence is checked only by native Prepare.\n".into(),
+         repository::Action::BranchCreate {name,..}=>format!("Create local branch {name}; do not switch.\n"),
+         repository::Action::BranchSwitch {name,..}=>format!("Switch to local branch {name}; native review checks supported tracked-file effects.\n"),
+@@ -167,6 +172,7 @@
+ }
+ fn preview_text(preview: &repository::Preview) -> String {
+     match preview {
++        repository::Preview::SetUpstream {branch,remote,repository,config_changed,missing_directory_count,unchanged,..}=>format!("{branch} -> {remote} / {repository}; config additions: {config_changed}; {missing_directory_count} missing local parent directories; unchanged: {unchanged}.\n"),
+         repository::Preview::Initialize {initial_branch,object_format}=>format!("Empty {object_format} repository on {initial_branch}; no synthetic index or existing-branch observation.\n"),
+         repository::Preview::BranchCreate {head,target_ref,..}=>format!("Create {target_ref} at {head}; keep current checkout.\n"),
+         repository::Preview::BranchSwitch {branch,target_ref,target_oid,changed_path_count,..}=>format!("{branch} -> {target_ref} at {target_oid}; {changed_path_count} tracked content changes.\n"),
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -107,6 +107,8 @@
+ mod version_enrollment_protocol;
+ mod version_reserve_protocol;
+ mod git_local_protocol;
++mod git_upstream_protocol;
++mod git_upstream_state;
+ mod git_branch_protocol;
+ mod git_switch_protocol;
+ mod git_fast_forward_protocol;
+diff --git a/desktop/src-tauri/src/service_git_repository_document.rs b/desktop/src-tauri/src/service_git_repository_document.rs
+--- a/desktop/src-tauri/src/service_git_repository_document.rs
++++ b/desktop/src-tauri/src/service_git_repository_document.rs
+@@ -68,6 +68,10 @@
+     };
+     if !successful_read(value) || value.result["referenceRevision"].as_str() != Some(refs) {
+         return false;
++    }
++    if let repository::Action::SetUpstream {branch,head,..}=action {
++        let actual=if value.action.kind==read::Kind::Observe {&value.result["observation"]}else{&value.result};
++        if actual["head"].as_str()!=Some(head.as_str())||actual["branch"].as_str()!=Some(branch.as_str()){return false}
+     }
+     match value.action.kind {
+         read::Kind::Branches => {
+diff --git a/desktop/src-tauri/src/service_git_repository_native.rs b/desktop/src-tauri/src/service_git_repository_native.rs
+--- a/desktop/src-tauri/src/service_git_repository_native.rs
++++ b/desktop/src-tauri/src/service_git_repository_native.rs
+@@ -9,6 +9,7 @@
+ pub(super) fn action(selected: &repository::Action) -> Result<local::Action, BridgeError> {
+     selected.validate().map_err(public)?;
+     let action = match selected {
++        repository::Action::SetUpstream {..}=>local::Action::Upstream(selected.upstream_action().ok_or_else(BridgeError::invalid)?),
+         repository::Action::Initialize {} => local::Action::Initialize(init::Action {
+             kind: init::Kind::Initialize,
+         }),
+@@ -101,6 +102,9 @@
+     };
+     let actual = action(&selected.action).ok()?;
+     let (reference_revision, preview) = match (original, &actual) {
++        (local::Review::Upstream(v),local::Action::Upstream(a)) if v.matches(a)=>(Some(v.expected_reference_revision.clone()),
++            repository::Preview::SetUpstream {head:v.head.clone(),branch:v.branch.clone(),remote:v.remote.clone(),repository:v.repository.clone(),
++                config_changed:!v.additions.is_empty(),missing_directory_count:u32::try_from(v.missing_directories.len()).ok()?,unchanged:v.unchanged}),
+         (local::Review::Initialize(v), local::Action::Initialize(a)) if v.matches(a) => (
+             None,
+             repository::Preview::Initialize {
+diff --git a/desktop/src-tauri/src/service_git_repository_protocol.rs b/desktop/src-tauri/src/service_git_repository_protocol.rs
+--- a/desktop/src-tauri/src/service_git_repository_protocol.rs
++++ b/desktop/src-tauri/src/service_git_repository_protocol.rs
+@@ -1,4 +1,4 @@
+-//! Five closed, explicitly delegated LOCAL repository actions. These are
++//! Closed, explicitly delegated LOCAL repository actions. These are
+ //! comparison DATA only: no native source, Git command, review or grant can be
+ //! reconstructed from a CLI request. The original GitLocal owner remains the
+ //! only executor; network actions and arbitrary file selections are absent.
+@@ -52,6 +52,15 @@
+ }
+
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct UpstreamIdentity { pub name:String, pub email:String }
++impl UpstreamIdentity {
++    pub(crate) fn native(&self)->crate::git_upstream_protocol::Identity {
++        crate::git_upstream_protocol::Identity{name:self.name.clone(),email:self.email.clone()}
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(
+     tag = "kind",
+     rename_all = "kebab-case",
+@@ -62,6 +71,12 @@
+     // A struct variant makes Serde enforce deny_unknown_fields for this tag.
+     // An internally tagged unit variant silently ignores extra object fields.
+     Initialize {},
++    SetUpstream {
++        expected_revision:String, expected_reference_revision:String, branch:String, head:String,
++        remote:String, repository:String,
++        #[serde(deserialize_with="required_nullable")]
++        identity:Option<UpstreamIdentity>,
++    },
+     BranchCreate {
+         expected_revision: String,
+         expected_reference_revision: String,
+@@ -85,9 +100,17 @@
+     },
+ }
+ impl Action {
++    pub(crate) fn upstream_action(&self)->Option<crate::git_upstream_protocol::Action> {
++        let Self::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=self else{return None};
++        Some(crate::git_upstream_protocol::Action{kind:crate::git_upstream_protocol::Kind::SetUpstream,
++            expected_revision:expected_revision.clone(),expected_reference_revision:expected_reference_revision.clone(),
++            branch:branch.clone(),head:head.clone(),remote:remote.clone(),repository:repository.clone(),
++            identity:identity.as_ref().map(UpstreamIdentity::native)})
++    }
+     pub fn validate(&self) -> Result<(), Error> {
+         let valid = match self {
+             Self::Initialize {} => true,
++            Self::SetUpstream {..}=>self.upstream_action().is_some_and(|v|v.valid()),
+             Self::BranchCreate {
+                 expected_revision,
+                 expected_reference_revision,
+@@ -133,6 +156,11 @@
+         }
+         match self {
+             Self::Initialize {} => Self::Initialize {},
++            Self::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=>Self::SetUpstream {
++                expected_revision:exact(expected_revision),expected_reference_revision:exact(expected_reference_revision),
++                branch:exact(branch),head:exact(head),remote:exact(remote),repository:exact(repository),
++                identity:identity.map(|i|UpstreamIdentity{name:exact(i.name),email:exact(i.email)}),
++            },
+             Self::BranchCreate {
+                 expected_revision,
+                 expected_reference_revision,
+@@ -191,6 +219,7 @@
+                 expected_reference_revision,
+                 ..
+             }
++            | Self::SetUpstream {expected_revision,expected_reference_revision,..}
+             | Self::FastForward {
+                 expected_revision,
+                 expected_reference_revision,
+@@ -205,6 +234,7 @@
+             Self::BranchSwitch { .. } => "branch-switch",
+             Self::BranchRename { .. } => "branch-rename",
+             Self::FastForward { .. } => "fast-forward",
++            Self::SetUpstream {..}=>"set-upstream",
+         }
+     }
+     pub(crate) fn history_action(&self) -> crate::service_protocol::Action {
+@@ -215,6 +245,7 @@
+             Self::BranchSwitch { .. } => H::GitBranchSwitch,
+             Self::BranchRename { .. } => H::GitBranchRename,
+             Self::FastForward { .. } => H::GitFastForward,
++            Self::SetUpstream {..}=>H::GitSetUpstream,
+         }
+     }
+ }
+@@ -349,6 +380,10 @@
+     deny_unknown_fields
+ )]
+ pub enum Preview {
++    SetUpstream {
++        head:String, branch:String, remote:String, repository:String, config_changed:bool,
++        missing_directory_count:u32, unchanged:bool,
++    },
+     Initialize {
+         initial_branch: String,
+         object_format: String,
+@@ -403,6 +438,10 @@
+             return Err(Error::InvalidRequest);
+         }
+         let valid = match &self.preview {
++            Preview::SetUpstream {head,branch:current,remote,repository,config_changed,missing_directory_count,unchanged}=>
++                oid(head)&&head.len()==40&&head.bytes().any(|v|v!=b'0')&&branch(current)
++                &&crate::git_upstream_protocol::alias(remote)&&crate::git_upstream_protocol::repository(repository)
++                &&*missing_directory_count<=64&&*unchanged==(!*config_changed&&*missing_directory_count==0),
+             Preview::Initialize {
+                 initial_branch,
+                 object_format,
+@@ -472,6 +511,8 @@
+             return false;
+         }
+         match (&selected.action, &self.preview) {
++            (Action::SetUpstream {branch,head,remote,repository,..}, Preview::SetUpstream {branch:b,head:h,remote:r,repository:p,..})=>
++                branch==b&&head==h&&remote==r&&repository==p&&selected.action.revisions()==Some((self.source_revision.as_str(),self.reference_revision.as_deref().unwrap_or(""))),
+             (Action::Initialize {}, Preview::Initialize { .. }) => true,
+             (Action::BranchCreate { name, .. }, Preview::BranchCreate { target_ref, .. })
+             | (Action::BranchSwitch { name, .. }, Preview::BranchSwitch { target_ref, .. })
+diff --git a/desktop/src-tauri/src/service_git_repository_protocol_tests.rs b/desktop/src-tauri/src/service_git_repository_protocol_tests.rs
+--- a/desktop/src-tauri/src/service_git_repository_protocol_tests.rs
++++ b/desktop/src-tauri/src/service_git_repository_protocol_tests.rs
+@@ -45,6 +45,10 @@
+         document_revision: 1,
+         registration_generation: 1,
+         preview: match action {
++            Action::SetUpstream { head, branch, remote, repository, .. } => Preview::SetUpstream {
++                head: head.clone(), branch: branch.clone(), remote: remote.clone(), repository: repository.clone(),
++                config_changed: true, missing_directory_count: 2, unchanged: false,
++            },
+             Action::Initialize {} => Preview::Initialize {
+                 initial_branch: "main".into(),
+                 object_format: "sha1".into(),
+diff --git a/desktop/src-tauri/src/service_git_repository_shared.rs b/desktop/src-tauri/src/service_git_repository_shared.rs
+--- a/desktop/src-tauri/src/service_git_repository_shared.rs
++++ b/desktop/src-tauri/src/service_git_repository_shared.rs
+@@ -106,7 +106,13 @@
+ }
+ impl From<crate::service_git_remote_protocol::Review> for Reviewed { fn from(v: crate::service_git_remote_protocol::Review) -> Self { Self::Remote(v) } }
+ impl Reviewed {
+-    pub(crate) fn can_apply(&self) -> bool { match self { Self::Remote(r) => r.can_apply(), _ => true } }
++    pub(crate) fn can_apply(&self) -> bool {
++        match self {
++            Self::Repository(r) => !matches!(r.preview, Preview::SetUpstream { unchanged: true, .. }),
++            Self::Remote(r) => r.can_apply(),
++            _ => true,
++        }
++    }
+     pub(crate) fn id(&self) -> &str {
+         match self {
+             Self::Files(v) => &v.review_id,
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -97,7 +97,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
+-    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
++    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+ }
+
+ /// Future operation-specific adapters may compare this DATA with a genuine
+diff --git a/desktop/src-tauri/src/supervisor_git_fetch.rs b/desktop/src-tauri/src/supervisor_git_fetch.rs
+--- a/desktop/src-tauri/src/supervisor_git_fetch.rs
++++ b/desktop/src-tauri/src/supervisor_git_fetch.rs
+@@ -102,6 +102,7 @@
+             request,
+             candidate,
+             publication: wire::Publication::FetchReturned,
++            upstream_returned: None,
+             fetch_keep: Some(data::keep()),
+             fetch_returned: Some(serde_json::from_value(data::returned()).unwrap()),
+             push_returned: None,
+diff --git a/desktop/src-tauri/src/supervisor_git_local.rs b/desktop/src-tauri/src/supervisor_git_local.rs
+--- a/desktop/src-tauri/src/supervisor_git_local.rs
++++ b/desktop/src-tauri/src/supervisor_git_local.rs
+@@ -41,6 +41,7 @@
+     candidate:Mutex<Option<Arc<wire::Candidate>>>,ack_returned:AtomicBool,control_closed:Mutex<Option<ControlClosed>>,
+     publication:Mutex<Option<GitLocalPublication>>,
+     fetch_keep:Mutex<Option<wire::fetch_worker::Keep>>,
++    upstream_ack:Mutex<Option<String>>,
+     fetch_go_claimed:AtomicBool,
+     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+     pub(super) observation:std::sync::OnceLock<Arc<crate::shell::installed_observation::git_fetch::Control>>,
+@@ -63,8 +64,21 @@
+     request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,publication:wire::Publication,
+     fetch_keep:Option<wire::fetch_worker::Keep>,fetch_returned:Option<wire::fetch_worker::Returned>,
+     push_returned:Option<wire::push_worker::Returned>,
++    upstream_returned:Option<crate::git_upstream_protocol::FinalData>,
+ }
+ impl GitLocalPublication {
++    pub(crate) fn upstream_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_upstream_protocol::Sources)
++        ->Result<(&crate::git_upstream_protocol::Intent,&crate::git_upstream_protocol::FinalData),crate::asset_commands::Reason> {
++        let bad=crate::asset_commands::Reason::SourceChanged;
++        let i=self.candidate.intent.upstream_details().ok_or(bad)?;
++        let d=self.upstream_returned.as_ref().ok_or(bad)?;
++        if self.request.action.kind()!=wire::Kind::SetUpstream || self.request.id!=id || self.request.native.as_ref()!=Some(native)
++            ||self.request.upstream_sources.as_ref()!=Some(sources)||!self.request.binding.as_ref().is_some_and(|b|&b.review==review)
++            ||!self.candidate.intent.matches(review)||!d.valid(i)||self.publication==wire::Publication::NotReported
++            ||crate::git_upstream_protocol::effect(self.publication)!=Some(d.effect_phase.as_str()) {return Err(bad)}
++        Ok((i,d))
++    }
++
+     pub(crate) fn push_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
+         ->Result<(&crate::git_push_protocol::Intent,&wire::push_worker::Returned),crate::asset_commands::Reason> {
+         let bad=crate::asset_commands::Reason::SourceChanged;
+@@ -101,7 +115,7 @@
+
+     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
+         ->Result<&wire::Intent,crate::asset_commands::Reason> {
+-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
++        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch|wire::Kind::SetUpstream) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
+             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
+         Ok(&self.candidate.intent)
+@@ -148,6 +162,7 @@
+     fast_forward_final:Option<crate::git_fast_forward_protocol::FinalData>,
+     fetch_final:Option<crate::git_fetch_state::FinalData>,
+     push_final:Option<crate::git_push_state::FinalData>,
++    upstream_final:Option<crate::git_upstream_protocol::FinalData>,
+ }
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl GitLocalNativeJoined {
+@@ -155,6 +170,7 @@
+         Arc::ptr_eq(&self.native_use,native_use)&&Arc::ptr_eq(&self.original,original)
+     }
+     pub(crate) fn completion(&self)->Completion {self.completion}
++    pub(crate) fn upstream_final(&self)->Option<&crate::git_upstream_protocol::FinalData>{self.upstream_final.as_ref()}
+     pub(crate) fn push_final(&self)->Option<&crate::git_push_state::FinalData> {self.push_final.as_ref()}
+     pub(crate) fn fetch_final(&self)->Option<&crate::git_fetch_state::FinalData> {self.fetch_final.as_ref()}
+     pub(crate) fn rename_final(&self)->Option<&crate::git_rename_protocol::FinalData> {self.rename_final.as_ref()}
+@@ -194,7 +210,7 @@
+             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
+                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
+                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
+-                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
++                fetch_keep:Mutex::new(None),upstream_ack:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
+                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:std::sync::OnceLock::new(),fetch_joined:Arc::new(std::sync::OnceLock::new()),
+                 push_go_claimed:AtomicBool::new(false),
+                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:std::sync::OnceLock::new(),push_joined:Arc::new(std::sync::OnceLock::new()),
+@@ -342,12 +358,15 @@
+             (wire::Phase::Prepare,None,None)|(wire::Phase::Apply,Some(_),Some(_))) {
+             return Err(BridgeError::cleanup_unknown())
+         }
+-        let (snapshot,switch_sources,rename_sources,fast_forward_sources,initialization)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+-            let result=sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
+-                &owner.id,self.action.kind(),review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
++        let (snapshot,switch_sources,rename_sources,fast_forward_sources,initialization,upstream_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++            let mut cut=||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint();
++            let result=if let wire::Action::Upstream(action)=&self.action {
++                sources.inspect_upstream(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),&owner.id,action,review.as_ref(),&mut cut)
++            }else{sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
++                &owner.id,self.action.kind(),review.as_ref(),&mut cut)};
+             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
+             (if self.action.kind()==wire::Kind::Initialize {None}else{Some(sources.native_snapshot().map_err(source_error)?.clone())},
+-                sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned(),sources.init_projection().map_err(source_error)?.cloned())};
++                sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned(),sources.init_projection().map_err(source_error)?.cloned(),sources.upstream_snapshot().map_err(source_error)?) };
+         let binding=match (self.phase,review,preparing) {
+             (wire::Phase::Prepare,None,None)=>None,
+             (wire::Phase::Apply,Some(review),Some(ack))=>Some(wire::ApplyBinding {review,journal_revision:ack.revision.0}),
+@@ -359,6 +378,8 @@
+             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
+         let request=Arc::new(if self.action.kind()==wire::Kind::Initialize {
+             wire::Request::from_init_original(&owner.id,&self.action,&self.context,initialization.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?
++        } else if self.action.kind()==wire::Kind::SetUpstream {
++            wire::Request::from_upstream_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding,upstream_sources.ok_or_else(BridgeError::protocol)?)?
+         } else if self.action.kind().is_push() {
+             wire::Request::from_push_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,
+                 clock_data,binding,self.gate.push_target(&owner.id)?)?
+@@ -388,6 +409,14 @@
+         if self.phase!=wire::Phase::Apply {return Err(BridgeError::protocol())}
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+         {
++            if self.action.kind()==wire::Kind::SetUpstream {
++                self.gate.check_current(&owner.id)?;
++                let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
++                let stop=owner.stop.subscribe();
++                let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++                let result=sources.before_upstream_candidate(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
++                observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
++            }
+             if self.action.kind()==wire::Kind::Initialize {
+                 self.gate.check_current(&owner.id)?;
+                 let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
+@@ -411,6 +440,23 @@
+         }
+         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {let _=owner;Err(BridgeError::unavailable("The original Git writer is unavailable."))}
++    }
++    pub(super) fn after_candidate(&self,owner:&Owner)->Result<(),BridgeError> {
++        if self.action.kind()!=wire::Kind::SetUpstream{return Ok(())}
++        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++        {
++            self.gate.check_current(&owner.id)?;
++            let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
++            let stop=owner.stop.subscribe();
++            let digest={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++                let result=sources.create_upstream_directories(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
++                observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?};
++            self.gate.check_current(&owner.id)?;
++            let mut slot=self.upstream_ack.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++            if slot.is_some(){return Err(BridgeError::cleanup_unknown())}*slot=Some(digest);Ok(())
++        }
++        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
++        {let _=owner;Err(BridgeError::unavailable("The original local Git writer is unavailable."))}
+     }
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+     fn post_before_effect(&self,owner:&Owner)->Result<(),BridgeError> {
+@@ -455,9 +501,10 @@
+             }
+             let mut slot=self.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+             if slot.is_some() {return Err(BridgeError::cleanup_unknown())}
+-            *slot=Some(GitLocalPublication {request:request.clone(),candidate,publication:terminal.publication,
++            *slot=Some(GitLocalPublication {request:request.clone(),candidate:candidate.clone(),publication:terminal.publication,
+                 fetch_keep:self.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone(),
+-                fetch_returned:terminal.fetch_publication.clone(),push_returned:terminal.push_transmission.clone()});
++                fetch_returned:terminal.fetch_publication.clone(),push_returned:terminal.push_transmission.clone(),
++                upstream_returned:if request.action.kind()==wire::Kind::SetUpstream {Some(crate::git_upstream_protocol::final_data(&terminal,candidate.intent.upstream_details().ok_or_else(BridgeError::protocol)?)?)}else{None}});
+         }
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+         if let Some(first)=terminal.first_failure_ns {
+@@ -529,7 +576,10 @@
+         invocation.gate.check_current(&owner.id)?;
+         if owner.failed()||Instant::now()>=owner.endpoint() {return Err(BridgeError::timeout())}
+         let request=invocation.request()?;
+-        if invocation.action.kind().is_push() {
++        if invocation.action.kind()==wire::Kind::SetUpstream {
++            let digest=invocation.upstream_ack.lock().map_err(|_|BridgeError::cleanup_unknown())?;
++            request.upstream_ack(&candidate,ack.revision.0,digest.as_deref().ok_or_else(BridgeError::cleanup_unknown)?)
++        } else if invocation.action.kind().is_push() {
+             request.push_ack(&candidate,ack.revision.0)
+         } else if invocation.action.kind()==wire::Kind::Fetch {
+             let keep=invocation.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+@@ -616,7 +666,10 @@
+                 None=>None,
+             }
+         } else {None};
+-        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final,fetch_final,push_final}))
++        let upstream_final=if invocation.action.kind()==wire::Kind::SetUpstream {
++            invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?.as_ref().and_then(|p|p.upstream_returned.clone())
++        }else{None};
++        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final,fetch_final,push_final,upstream_final}))
+     })();
+     let joined=match joined {Ok(value)=>value,Err(error)=>{owner.fail(error);owner.unknown(inner);return false}};
+     let local=r.git_local.as_mut().expect("same retained facet");local.finalizing=true;
+@@ -684,9 +737,9 @@
+     // are known too. All old actions keep their original order. This body is
+     // already after process/pipe joins; later management/journal/NativeUse
+     // joins are still mandatory, never inferred from a positive publication.
+-    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Fetch) {
++    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Fetch|wire::Kind::SetUpstream) {
+         let closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
+-        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::Fetch {sources.retain_fetch_unknown();} else if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
++        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::SetUpstream {sources.retain_upstream_unknown();} else if local.action.kind()==wire::Kind::Fetch {sources.retain_fetch_unknown();} else if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
+         (sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok(),closed)
+     } else {
+         let closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
+diff --git a/desktop/src-tauri/src/supervisor_git_local_jobs.rs b/desktop/src-tauri/src/supervisor_git_local_jobs.rs
+--- a/desktop/src-tauri/src/supervisor_git_local_jobs.rs
++++ b/desktop/src-tauri/src/supervisor_git_local_jobs.rs
+@@ -120,7 +120,14 @@
+                         if originals.candidate.is_some() {return Err(Failure::JoinUnknown)}
+                         let ack=Arc::new(originals.journal.as_mut().ok_or(Failure::JoinUnknown)?
+                             .candidate(expected,&original,&candidate.intent).map_err(Failure::Store)?);
+-                        originals.candidate=Some(ack.clone());Ok(Value::Ack(ack))
++                        originals.candidate=Some(ack.clone());
++                        // Original durable Candidate is retained first. This SAME
++                        // job performs the closed directory creation before ACK;
++                        // no held Store/Doc lock, ninth job or finality wait.
++                        drop(originals);
++                        worker.git_local.as_ref().ok_or(Failure::JoinUnknown)?
++                            .after_candidate(&worker).map_err(Failure::Bridge)?;
++                        Ok(Value::Ack(ack))
+                     },
+                     Task::Finish {expected,original,joined}=>{
+                         let mut originals=held.lock().map_err(|_|Failure::JoinUnknown)?;
+diff --git a/desktop/src-tauri/src/supervisor_git_push.rs b/desktop/src-tauri/src/supervisor_git_push.rs
+--- a/desktop/src-tauri/src/supervisor_git_push.rs
++++ b/desktop/src-tauri/src/supervisor_git_push.rs
+@@ -104,6 +104,7 @@
+             request,
+             candidate,
+             publication: wire::Publication::PushReturned,
++            upstream_returned: None,
+             fetch_keep: None,
+             fetch_returned: None,
+             push_returned: Some(data::returned()),
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -16,6 +16,8 @@
+ #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
+ #[path = "../src/version_reserve_protocol.rs"] mod version_reserve_protocol;
+ #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
++#[path = "../src/git_upstream_protocol.rs"] mod git_upstream_protocol;
++#[path = "../src/git_upstream_state.rs"] mod git_upstream_state;
+ #[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
+ #[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;
+ #[path = "../src/git_fast_forward_protocol.rs"] mod git_fast_forward_protocol;
+diff --git a/src/mobile_release/_desktop_git_local_control.py b/src/mobile_release/_desktop_git_local_control.py
+--- a/src/mobile_release/_desktop_git_local_control.py
++++ b/src/mobile_release/_desktop_git_local_control.py
+@@ -22,6 +22,7 @@
+         self.initial = self.operation = None
+         self.ready_sent = self.go_returned = False
+         self.candidate_claimed = self.candidate_waiting = self.candidate_returned = False
++        self.upstream_ack = None
+         self.candidate = None
+         self.ack_revision = None
+         self.first_failure_ns = self.cleanup_end_ns = None
+@@ -156,11 +157,18 @@
+         self.candidate = sent
+         try:
+             operation.write_candidate(sent)
+-            revision = wire.acknowledged(self.initial, sent, self._frame(wire.READY_LIMIT))
++            raw = self._frame(wire.READY_LIMIT)
++            is_upstream = type(self.initial.action) is wire.upstream.Action
++            if is_upstream:
++                revision, self.upstream_ack = wire.upstream_acknowledged(self.initial, sent, raw)
++            else:
++                revision = wire.acknowledged(self.initial, sent, raw)
+             self.candidate_waiting = False
+             # The existing input owner polls STOP again after the native CAS
+             # ACK. It remains active, so any extra bytes/EOF refuse publication.
+             self.guard.check()
++            if is_upstream:
++                operation.upstream_state.acknowledge(self.upstream_ack)
+             operation.source_post(hash_files=True)
+             self.ack_revision, self.candidate_returned = revision, True
+         except BaseException:
+diff --git a/src/mobile_release/_desktop_git_local_protocol.py b/src/mobile_release/_desktop_git_local_protocol.py
+--- a/src/mobile_release/_desktop_git_local_protocol.py
++++ b/src/mobile_release/_desktop_git_local_protocol.py
+@@ -14,6 +14,7 @@
+ from . import _desktop_git_read_protocol as source_fields
+ from . import _desktop_git_branches as branch
+ from . import git_fast_forward_worker as ff
++from . import git_repository_upstream_wire as upstream
+ from . import _desktop_git_switch as switch
+ from . import _desktop_git_rename as rename
+ from . import _desktop_git_init as initialize
+@@ -55,6 +56,8 @@
+
+
+ def action(value) -> Action | branch.Action | switch.Action | rename.Action | ff.Action | initialize.Action:
++    if type(value) is dict and value.get("kind") == "set-upstream":
++        return upstream.action(value)
+     if type(value) is dict and value.get("kind") == "initialize":
+         return initialize.action(value)
+     if type(value) is dict and value.get("kind") == "fast-forward":
+@@ -108,6 +111,7 @@
+     rename_sources: rename.Sources | None = None
+     fast_forward_sources: ff.Sources | None = None
+     init_sources: initialize.Sources | None = None
++    upstream_sources: upstream.Sources | None = None
+
+
+ def parse_request(raw: bytes) -> Request:
+@@ -120,8 +124,9 @@
+                      and decoded["action"].get("kind") == "branch-switch")
+         is_rename = (type(decoded) is dict and type(decoded.get("action")) is dict
+                      and decoded["action"].get("kind") == "branch-rename")
++        is_upstream = (type(decoded) is dict and type(decoded.get("action")) is dict and decoded["action"].get("kind") == "set-upstream")
+         keys = ("protocol", "id", "phase", "action", "reviewDigest", "journalRevision", "context", "native", "clock")
+-        row = source_fields._keys(decoded, (*keys, "fastForward") if is_ff else (*keys, "switch") if is_switch else (*keys, "rename") if is_rename else keys)
++        row = source_fields._keys(decoded, (*keys, "upstream") if is_upstream else (*keys, "fastForward") if is_ff else (*keys, "switch") if is_switch else (*keys, "rename") if is_rename else keys)
+         require(row["protocol"] == PROTOCOL and row["phase"] in ("prepare", "apply"))
+         if row["phase"] == "prepare":
+             require(row["reviewDigest"] is None and row["journalRevision"] is None)
+@@ -153,11 +158,13 @@
+         compared = switch.sources(row["switch"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_switch else None
+         renamed = rename.sources(row["rename"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_rename else None
+         forwarded = ff.sources(row["fastForward"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_ff else None
++        upstream_sources = upstream.sources(row["upstream"], root=root, uid=uid, selected=selected) if is_upstream else None
++        require(not is_upstream or files["index"] is not None)
+         require(not (is_ff or is_switch or is_rename) or row["phase"] != "apply" or files["index"] is not None)
+         return Request(source_fields._id(row["id"]), row["phase"], selected,
+             row["reviewDigest"], row["journalRevision"], source_fields._id(context["projectId"]),
+             source_fields._integer(context["generation"], 0, (1 << 32) - 1), source_fields._id(context["revision"]),
+-            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared, renamed, forwarded, initialized)
++            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared, renamed, forwarded, initialized, upstream_sources)
+     except (source_fields.ProtocolError, core.GitError, UnicodeError, ValueError, TypeError, OverflowError):
+         raise ProtocolError(_ERROR) from None
+
+@@ -180,6 +187,8 @@
+
+
+ def matches_review(request: Request, review: local.LocalReview | branch.BranchReview) -> None:
++    if type(request) is Request and type(request.action) is upstream.Action:
++        return upstream.matches_review(request, review)
+     if type(request) is Request and type(request.action) is initialize.Action:
+         return initialize.matches_review(request, review)
+     if type(request) is Request and type(request.action) is ff.Action:
+@@ -210,6 +219,8 @@
+
+ def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
+               intent: core.PublicationIntent | branch.BranchIntent) -> Candidate:
++    if type(request) is Request and type(request.action) is upstream.Action:
++        return upstream.candidate(request, review, intent)
+     if type(request) is Request and type(request.action) is initialize.Action:
+         return initialize.candidate(request, review, intent)
+     if type(request) is Request and type(request.action) is ff.Action:
+@@ -240,7 +251,7 @@
+ def acknowledged(request: Request, sent: Candidate, raw: bytes) -> int:
+     """Exact ACK syntax. The original input's consumed latch is indispensable."""
+     require(type(request) is Request and type(sent) is Candidate and sent.request is request
+-            and request.phase == "apply" and type(raw) is bytes and len(raw) <= READY_LIMIT)
++            and type(request.action) is not upstream.Action and request.phase == "apply" and type(raw) is bytes and len(raw) <= READY_LIMIT)
+     prefix = b"MRK-GIT-LOCAL-ACK/1 " + request.digest.encode("ascii") + b" " + sent.digest.encode("ascii") + b" "
+     require(raw.startswith(prefix))
+     number = raw[len(prefix):]
+@@ -250,21 +261,34 @@
+     return revision
+
+
++def upstream_acknowledged(request: Request, sent: Candidate, raw: bytes) -> tuple[int, str]:
++    require(type(request) is Request and type(request.action) is upstream.Action and type(sent) is Candidate
++            and sent.request is request and request.phase == "apply" and type(raw) is bytes and len(raw) <= READY_LIMIT)
++    prefix = b"MRK-GIT-UPSTREAM-ACK/1 " + request.digest.encode("ascii") + b" " + sent.digest.encode("ascii") + b" "
++    require(raw.startswith(prefix))
++    matched = re.fullmatch(rb"([1-9][0-9]{0,19}) ([a-f0-9]{64})\n", raw[len(prefix):])
++    require(matched is not None)
++    revision = int(matched[1])
++    require(request.journal_revision is not None and revision == request.journal_revision + 1 and revision < 1 << 64)
++    return revision, matched[2].decode("ascii")
++
++
+ def terminal(request: Request, status: str, *, reason: str | None,
+              review: local.LocalReview | branch.BranchReview | None = None,
+              diff: core.Diff | None = None, result: core.MutationResult | None = None,
+              publication: str = "not-reported", progress: switch.Progress | None = None,
+              first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
++    is_upstream = type(request) is Request and type(request.action) is upstream.Action
+     is_ff = type(request) is Request and type(request.action) is ff.Action
+     is_init = type(request) is Request and type(request.action) is initialize.Action
+     is_switch = type(request) is Request and type(request.action) is switch.Action
+     is_rename = type(request) is Request and type(request.action) is rename.Action
+     is_branch = type(request) is Request and type(request.action) is branch.Action
+     require(type(request) is Request and status in STATUSES
+-            and (reason is None or (initialize.valid_reason(reason) if is_init else ff.valid_reason(reason) if is_ff else rename.valid_reason(reason) if is_rename else switch.valid_reason(reason) if is_switch else
++            and (reason is None or (upstream.valid_reason(reason) if is_upstream else initialize.valid_reason(reason) if is_init else ff.valid_reason(reason) if is_ff else rename.valid_reason(reason) if is_rename else switch.valid_reason(reason) if is_switch else
+                                   branch.valid_reason(reason) if is_branch else reason in core._REASONS))
+-            and (is_ff or is_switch or is_rename or progress is None)
+-            and publication in (("not-reported", "init-returned") if is_init else ff.PUBLICATIONS if is_ff else rename.PUBLICATIONS if is_rename else switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
++            and (is_upstream or is_ff or is_switch or is_rename or progress is None)
++            and publication in (upstream.PUBLICATIONS if is_upstream else ("not-reported", "init-returned") if is_init else ff.PUBLICATIONS if is_ff else rename.PUBLICATIONS if is_rename else switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
+                                 ("not-reported", "index-returned", "ref-returned")))
+     try:
+         source_fields._integer(cleanup_end_ns, 1, request.hard_end_ns)
+@@ -274,7 +298,10 @@
+     except source_fields.ProtocolError:
+         raise ProtocolError(_ERROR) from None
+     data = None
+-    if is_init:
++    if is_upstream:
++        data = upstream.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
++            publication=publication, progress=progress, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
++    elif is_init:
+         data = initialize.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
+             publication=publication, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
+     elif is_ff:
+diff --git a/src/mobile_release/desktop_git_local.py b/src/mobile_release/desktop_git_local.py
+--- a/src/mobile_release/desktop_git_local.py
++++ b/src/mobile_release/desktop_git_local.py
+@@ -18,6 +18,7 @@
+ from . import _desktop_git_local_protocol as wire
+ from . import _desktop_git_branches as branch
+ from . import git_fast_forward_worker as ff
++from . import git_repository_upstream_wire as upstream
+ from . import _desktop_git_switch as switch
+ from . import _desktop_git_rename as rename
+ from . import _desktop_git_init as initialize
+@@ -70,6 +71,10 @@
+         if type(request.action) is initialize.Action:
+             from ._desktop_git_init_sources import State
+             self.init_state = State(self)
++        self.upstream_state = None
++        if type(request.action) is upstream.Action:
++            from .git_repository_upstream_sources import State
++            self.upstream_state = State(self)
+         source.bind_operation(self)
+
+     def _publication(self):
+@@ -115,6 +120,8 @@
+         GitReadOperation._check(self, successor, True)
+
+     def _check(self, original: _Original, hash_file: bool) -> None:
++        if self.upstream_state is not None:
++            return self.upstream_state.check(original, hash_file)
+         if self.init_state is not None:
+             return self.init_state.check(original, hash_file)
+         if self.rename_state is not None:
+@@ -154,6 +161,8 @@
+         self.checkpoint()
+
+     def source_post(self, *, hash_files: bool) -> None:
++        if self.upstream_state is not None:
++            return self.upstream_state.post(hash_files=hash_files)
+         if self.init_state is not None:
+             return self.init_state.post(hash_files=hash_files)
+         if self.rename_state is not None:
+@@ -201,7 +210,8 @@
+         else:
+             sessions = self.repository._active_sessions
+             wire.require(len(sessions) == 1
+-                         and (ff.local_session(self, sessions[0]) if type(self.request.action) is ff.Action else
++                         and (upstream.local_session(self, sessions[0]) if type(self.request.action) is upstream.Action else
++                              ff.local_session(self, sessions[0]) if type(self.request.action) is ff.Action else
+                               rename.local_session(self, sessions[0]) if type(self.request.action) is rename.Action else
+                               switch.local_session(self, sessions[0]) if type(self.request.action) is switch.Action else
+                               branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
+@@ -215,7 +225,7 @@
+             selected_index = environ.get("GIT_INDEX_FILE")
+             index = None if selected_index in (None, str(self.request.root / ".git/index")) else Path(selected_index)
+             plan = self.repository._active_plan
+-            identity = (ff.command_identity(self, session, args) if type(self.request.action) is ff.Action else
++            identity = (None if type(self.request.action) is upstream.Action else ff.command_identity(self, session, args) if type(self.request.action) is ff.Action else
+                         rename.command_identity(self, session, args) if type(self.request.action) is rename.Action else
+                         switch.command_identity(self, session, args) if type(self.request.action) is switch.Action else
+                         plan._identity if args and args[0] == "commit-tree" and plan is not None else None)
+@@ -231,6 +241,8 @@
+             verdict = self.guard.lifetime_ledger.verdict()
+             wire.require(pending.claimed and verdict.cleanup_complete and verdict.contained
+                          and verdict.commands == self.calls)
++            if type(self.request.action) is upstream.Action:
++                upstream.returned_command(self, session, args, result)
+             if type(self.request.action) is ff.Action:
+                 ff.returned_command(self, session, args, result)
+             if type(self.request.action) is rename.Action:
+@@ -280,6 +292,8 @@
+                 initialize.prepare_or_apply(self)
+             elif type(action) is ff.Action:
+                 ff.prepare_or_apply(self)
++            elif type(action) is upstream.Action:
++                upstream.prepare_or_apply(self)
+             elif type(action) is rename.Action:
+                 rename.prepare_or_apply(self)
+             elif type(action) is switch.Action:
+@@ -319,6 +333,8 @@
+             raise
+
+     def publication(self) -> str:
++        if self.upstream_state is not None:
++            return self.upstream_state.publication()
+         if self.init_state is not None:
+             return self.init_state.publication()
+         if self.fast_forward_state is not None:
+@@ -417,6 +433,8 @@
+                 values = {"review": operation.review, "diff": operation.diff}
+             else:
+                 values = {"result": operation.result, "publication": operation.publication()}
++                if operation.upstream_state is not None:
++                    values["progress"] = operation.upstream_state.progress
+                 if operation.fast_forward_state is not None:
+                     values["progress"] = operation.fast_forward_state.progress
+                 if operation.switch_state is not None:

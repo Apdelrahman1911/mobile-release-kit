@@ -1,0 +1,473 @@
+diff --git a/desktop/src/androidBuild.ts b/desktop/src/androidBuild.ts
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -734,6 +734,17 @@
+       && op.kind === attempt.kind && op.sourceGeneration === attempt.binding.sourceGeneration
+       && sameAndroidBuildData(op.context, attempt.binding.context)
+       && (!attempt.identity || sameAndroidToolRegistrationIdentity(attempt.identity, op));
++  }
++  // Presentation only. A retained failure from another original/context may be
++  // described, but must not tell the user to change the current tool folders.
++  canExplainCurrentSourceInspection(): boolean {
++    const attempt = this.registrationAttempt, status = this.state.toolRegistration;
++    return !!attempt && !!status && attempt.kind === 'inspection' && attempt.sent && attempt.replySettled && attempt.settled
++      && this.state.mode === 'native' && !this.state.nativeBlocked && !this.state.integrityFailed && !this.state.generationLost
++      && this.state.registrationListening && !this.state.registrationIssue && !this.state.registrationUnconfirmed
++      && this.state.registrationPending === null && !this.state.registrationCancelPending && !this.state.registrationCancelClaimed
++      && status.phase === 'refused' && status.reason === 'source-refused' && status.report?.protectedCopy === 'not-created'
++      && this.registrationCandidate(attempt, status) && this.registrationMatches(attempt);
+   }
+   private registrationProgress(before: AndroidToolRegistrationStatus, after: AndroidToolRegistrationStatus): boolean {
+     if (!sameAndroidBuildData(before.operation, after.operation)) return false;
+diff --git a/desktop/src/androidToolRegistration.ts b/desktop/src/androidToolRegistration.ts
+--- a/desktop/src/androidToolRegistration.ts
++++ b/desktop/src/androidToolRegistration.ts
+@@ -44,7 +44,8 @@
+   complete: boolean; contentFiles: number; contentAliases: number;
+ }
+ export type AndroidToolRegistrationProblem = 'binding' | 'bounds' | 'supplier-unavailable' | 'inventory' | 'ownership' |
+-  'collision' | 'native' | 'stopped' | 'unknown' | 'transfer' | 'persist' | 'admission' | 'unavailable';
++  'collision' | 'native' | 'stopped' | 'unknown' | 'transfer' | 'persist' | 'admission' | 'unavailable' |
++  'jdk-source' | 'sdk-source' | 'gradle-source' | 'app-support-source';
+ export interface AndroidToolRegistrationProblems {
+   recorded: number; shown: number; omitted: number; first: AndroidToolRegistrationProblem | null;
+   items: AndroidToolRegistrationProblem[];
+@@ -125,7 +126,8 @@
+   'review-expired', 'stale-review', 'timed-out', 'document-lost', 'shutdown', 'busy', 'input-limit', 'result-limit', 'protocol-error',
+   'registration-refused', 'cleanup-unknown'] as const;
+ const problems = ['binding', 'bounds', 'supplier-unavailable', 'inventory', 'ownership', 'collision', 'native', 'stopped', 'unknown',
+-  'transfer', 'persist', 'admission', 'unavailable'] as const;
++  'transfer', 'persist', 'admission', 'unavailable', 'jdk-source', 'sdk-source', 'gradle-source', 'app-support-source'] as const;
++const sourceInspectionProblems = ['jdk-source', 'sdk-source', 'gradle-source', 'app-support-source'] as const;
+ const oneOf = <T extends string>(value: unknown, values: readonly T[]): value is T =>
+   typeof value === 'string' && values.includes(value as T);
+ const integer = (value: unknown, maximum: number, minimum = 0): value is number =>
+@@ -264,6 +266,9 @@
+         if (!['complete', 'refused', 'cancelled'].includes(data.phase)) return null;
+         report = reportData(data.report, original.kind);
+         if (!report) return null;
++        if (report.problems.items.some((problem) => (sourceInspectionProblems as readonly string[]).includes(problem))
++            && (original.kind !== 'inspection' || data.phase !== 'refused' || data.reason !== 'source-refused'
++              || report.problems.recorded !== 1)) return null;
+       }
+       if (data.phase === 'complete' && (!report || report.protectedCopy !== 'published' || !sourceData(report.sources, true)
+           || report.accounting?.complete !== true || report.problems.recorded !== 0)) return null;
+diff --git a/desktop/src/components/AndroidBuild.tsx b/desktop/src/components/AndroidBuild.tsx
+--- a/desktop/src/components/AndroidBuild.tsx
++++ b/desktop/src/components/AndroidBuild.tsx
+@@ -13,6 +13,7 @@
+   sameAndroidToolRegistrationIdentity, androidToolServiceActive, sameAndroidToolServiceIdentity } from '../androidToolRegistration.ts';
+ import type { AndroidToolRegistrationProblem, AndroidToolRegistrationStatus, AndroidToolServiceStatus,
+   AndroidToolServiceState, AndroidToolServiceOutcome } from '../androidToolRegistration.ts';
++import { sourceInspectionContinuation, sourceInspectionProblemText } from '../androidToolSourceDiagnostics.ts';
+
+ const phases: Record<AndroidBuildPhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting build',
+   running: 'Build running', stopping: 'Stopping · waiting for cleanup', terminal: 'Build request finished', unknown: 'Cleanup needs attention' };
+@@ -329,6 +330,7 @@
+   unknown: 'Original cleanup is unconfirmed',
+ };
+ const registrationProblems: Record<AndroidToolRegistrationProblem, string> = {
++  ...sourceInspectionProblemText,
+   binding: 'Original input binding changed', bounds: 'A fixed input or result limit was reached',
+   'supplier-unavailable': 'Official supplier correspondence is unavailable', inventory: 'Content inventory was refused',
+   ownership: 'Required file ownership was not established', collision: 'A protected destination already exists',
+@@ -352,6 +354,7 @@
+   const status = state.toolRegistration, consent = state.registrationConsent, review = status?.review;
+   if (status?.availability === 'unsupported-platform') return null;
+   const inspectReason = controller.inspectToolSourcesReason(), registerReason = controller.registerToolSourcesReason();
++  const explainSource = controller.canExplainCurrentSourceInspection();
+   const report = state.mode === 'native' && !state.integrityFailed && !state.nativeBlocked
+     && status && ['complete', 'refused', 'cancelled'].includes(status.phase) ? status.report : null;
+   return <section className="session-review" aria-label="Inspect and register Android tools">
+@@ -393,7 +396,10 @@
+       {report.sources.length > 0 && <ul>{report.sources.map((source) => <li key={source.role}>{androidToolSourceHelp[source.role].label}: {source.version ?? 'version not established'} · {source.logicalBytes} observed logical bytes · {source.files} files · {source.aliases} aliases · {source.complete ? 'complete role observation' : 'partial observed subtotal; omitted input is not zero'} · {source.compatibility}.</li>)}</ul>}
+       {report.accounting && <p>Helper observations: {report.accounting.writtenBytes} written bytes · {report.accounting.observedLogicalBytes} logical bytes · {report.accounting.observedAllocatedBytes} allocated bytes · {report.accounting.contentFiles} content files · {report.accounting.contentAliases} aliases. {report.accounting.complete ? 'The bounded accounting observation is complete for this original.' : 'Accounting is partial; it is not a census of all retained files or disk usage.'}</p>}
+       <p>{report.problems.recorded} recorded problems · {report.problems.shown} shown · {report.problems.omitted} omitted. This is a bounded recorded prefix, not a census of all possible errors.</p>
+-      {report.problems.items.length > 0 && <ol>{report.problems.items.map((problem, index) => <li key={index}>{registrationProblems[problem]}</li>)}</ol>}
++      {report.problems.items.length > 0 && <ol>{report.problems.items.map((problem, index) => {
++        const continuation = sourceInspectionContinuation(problem, explainSource);
++        return <li key={index}>{registrationProblems[problem]}{continuation && <p>{continuation}</p>}</li>;
++      })}</ol>}
+       {report.protectedCopy === 'published' && <p>After settlement, explicitly Refresh tool list, Recover the copy for full verification, then Choose it. Nothing is auto-recovered, selected or built.</p>}
+       <p>Cancel does not undo a protected copy. Retained partial output is neither build-ready nor permission to remove shared directories or caches.</p>
+     </section>}
+diff --git a/desktop/src-tauri/src/android_registration_app_protocol.rs b/desktop/src-tauri/src/android_registration_app_protocol.rs
+--- a/desktop/src-tauri/src/android_registration_app_protocol.rs
++++ b/desktop/src-tauri/src/android_registration_app_protocol.rs
+@@ -8,6 +8,10 @@
+     android_build_protocol::{self as build, Availability, Prepare},
+     android_tool_sources::Role, edit_protocol::token, error::BridgeError,
+ };
++
++#[path = "android_tool_source_diagnostics.rs"]
++mod source_diagnostics;
++pub(crate) use source_diagnostics::{InspectionDiagnostic, InspectionStage};
+
+ pub(crate) const EVENT: &str = "android-tool-registration-state-changed";
+ pub(crate) const CONSENT: &str = "android-tool-protected-copy-v1";
+@@ -92,6 +96,7 @@
+ pub(crate) enum Problem {
+     Binding, Bounds, SupplierUnavailable, Inventory, Ownership, Collision,
+     Native, Stopped, Unknown, Transfer, Persist, Admission, Unavailable,
++    JdkSource, SdkSource, GradleSource, AppSupportSource,
+ }
+ /// A prefix of the recorded bounded errors, not a census of all possible errors.
+ #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+@@ -422,6 +427,9 @@
+         } else if self.review.is_some() { return false; }
+         if let Some(report) = &self.report {
+             if !report.valid(operation.kind) { return false; }
++            if report.problems.items.iter().any(|problem| problem.is_source_inspection())
++                && (operation.kind != Kind::Inspection || self.phase != Phase::Refused || self.reason != Reason::SourceRefused
++                    || report.problems.recorded != 1) { return false; }
+         }
+         if self.phase == Phase::Complete {
+             let Some(report) = &self.report else { return false; };
+@@ -615,6 +623,22 @@
+         assert!(!partial.valid());
+     }
+     #[test]
++    fn source_stage_problem_is_only_one_refused_inspection_observation() {
++        let mut status=review_status();status.review=None;status.phase=Phase::Refused;status.reason=Reason::SourceRefused;
++        status.report=Some(Report{sources:Vec::new(),protected_copy:ProtectedCopy::NotCreated,accounting:None,
++            problems:Problems{recorded:1,shown:1,omitted:0,first:Some(Problem::SdkSource),items:vec![Problem::SdkSource]}});
++        assert!(status.valid());
++        for reason in [Reason::Cancelled,Reason::ContextChanged,Reason::SourceChanged,Reason::TimedOut,Reason::CleanupUnknown] {
++            let mut changed=status.clone();changed.reason=reason;assert!(!changed.valid());
++        }
++        let mut copy=status.clone();copy.operation.as_mut().unwrap().kind=Kind::Registration;assert!(!copy.valid());
++        let mut repeated=status.clone();let problems=&mut repeated.report.as_mut().unwrap().problems;
++        problems.items.push(Problem::SdkSource);problems.recorded=2;problems.shown=2;assert!(!repeated.valid());
++        let mut original=status;let problems=&mut original.report.as_mut().unwrap().problems;
++        problems.first=Some(Problem::Inventory);problems.items=vec![Problem::Inventory];
++        assert!(original.valid()); // Existing generic reports retain their old shape.
++    }
++    #[test]
+     fn output_accounting_is_exact_u64_data_and_errors_are_only_the_recorded_prefix() {
+         let mut counts = Accounting { written_bytes: u64::MAX.to_string(), observed_logical_bytes: "0".into(),
+             observed_allocated_bytes: "9007199254740993".into(), complete: false, content_files: 1, content_aliases: 0 };
+diff --git a/desktop/src-tauri/src/android_registration_source_macos.rs b/desktop/src-tauri/src/android_registration_source_macos.rs
+--- a/desktop/src-tauri/src/android_registration_source_macos.rs
++++ b/desktop/src-tauri/src/android_registration_source_macos.rs
+@@ -183,6 +183,7 @@
+     account: Option<u32>, begun: bool, settled: bool, unknown: bool, reproof: bool, streamed: bool,
+     first: Option<(AdmissionFailure, Instant)>, audit: watch::Receiver<Instant>,
+     gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
++    inspection_diagnostic: app::InspectionDiagnostic,
+ }
+ impl SourceSlots {
+     #[cfg(test)]
+@@ -199,7 +200,8 @@
+             closure: None, recipe: None, optional_sdk_metadata: [None, None], sdk_metadata_parents: [None; 2],
+             proposal: None, instance: None, support: FixedSupportSlots::new_registered(gate.clone()),
+             frame: None, frame_entered: false, frame_settled: false, live: 0, read_bytes: 0, account: None,
+-            begun: false, settled: false, unknown: false, reproof: false, streamed: false, first: None, audit, gate }
++            begun: false, settled: false, unknown: false, reproof: false, streamed: false, first: None, audit, gate,
++            inspection_diagnostic: app::InspectionDiagnostic::default() }
+     }
+     /// One real source phase, not a new pool. The caller adds previous Review,
+     /// client/control/task/status/request storage under its same64MiB cap.
+@@ -478,6 +480,8 @@
+         let mut identities: [Vec<Identity>; 3] = std::array::from_fn(|_| Vec::new());
+         let mut jdk_home = None; let mut layout = None;
+         for (role, root) in roots.iter().enumerate() {
++            self.inspection_diagnostic.enter(Some([app::InspectionStage::Jdk, app::InspectionStage::Sdk,
++                app::InspectionStage::Gradle][role]));
+             let chain = self.chain(root, end, stop)?;
+             let picked = *chain.last().ok_or(AdmissionFailure::Unknown)?;
+             let mut observed = vec_with(chain.len() + 4)?;
+@@ -501,6 +505,7 @@
+                 } else { return Err(AdmissionFailure::Inventory); }
+             } else { self.roots[role] = Some(picked); }
+         }
++        self.inspection_diagnostic.enter(Some(app::InspectionStage::Jdk));
+         let release = self.child(jdk_home.ok_or(AdmissionFailure::Inventory)?, "release", false, end, stop)?;
+         let size = u64::try_from(self.identity(release)?.size).map_err(native_error)?;
+         if size == 0 || size > BLOCK as u64 { return Err(AdmissionFailure::Bounds); }
+@@ -535,7 +540,20 @@
+             self.check_remaining(end, stop)
+         })();
+         if let Err(failure) = result { self.note(failure, Instant::now(), publish); }
++        // Freeze before cleanup, using the actual returned source error and
++        // original wire reason/F. source_first() deliberately normalizes even
++        // SourceRefused to Stopped for WORK; that is not diagnostic provenance.
++        // Identity drift, STOP, bounds and uncertain owners get no tool advice.
++        let first = if matches!(result, Err(AdmissionFailure::Inventory | AdmissionFailure::Ownership | AdmissionFailure::Native)) {
++            self.gate.as_ref().and_then(|gate| gate.first())
++        } else { None };
++        self.inspection_diagnostic.capture(first);
+         result
++    }
++    pub(crate) fn inspection_problem(&self, first: Option<(app::Reason, Instant)>) -> Option<app::Problem> {
++        // Source-worker DATA only; the caller still owns both original joins.
++        if !self.settled() || self.reproof || self.streamed { return None; }
++        self.inspection_diagnostic.problem(first)
+     }
+     pub(crate) fn reprove_once(&mut self, roots: &[RegisteredRoot; 3], reviewed: &SourceReview,
+         end: Instant, stop: &watch::Receiver<bool>, publish: &mut Publish<'_>) -> Result<()> {
+@@ -565,6 +583,7 @@
+         result
+     }
+     fn observe(&mut self, recipe: &Recipe, mut roots: [Vec<Identity>; 3], end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
++        self.inspection_diagnostic.enter(None);
+         let roster = recipe.source_roster();
+         optional_sdk_metadata_roster(roster)?;
+         if roster.members.is_empty() || roster.members.len() > policy::ENTRY_LIMIT
+@@ -575,6 +594,10 @@
+         self.observed = vec_with(roster.members.len())?;
+         for _ in roster.members { self.observed.push(None); }
+         for tree in roster.trees {
++            self.inspection_diagnostic.enter(match tree.group {
++                SourceGroup::Jdk => Some(app::InspectionStage::Jdk), SourceGroup::Sdk => Some(app::InspectionStage::Sdk),
++                SourceGroup::Gradle => Some(app::InspectionStage::Gradle), SourceGroup::FixedSupport => None,
++            });
+             let role = group_index(tree.group).ok_or(AdmissionFailure::Inventory)?;
+             let root = self.roots[role].ok_or(AdmissionFailure::Unknown)?;
+             let mut parent = root; let mut prefix = String::new();
+@@ -595,6 +618,7 @@
+             self.walk(parent, tree.group, tree.prefix, roster, 0, end, stop)?;
+             if parent != root && !self.originals[parent].retained { self.close_checked(parent, end, stop)?; }
+         }
++        self.inspection_diagnostic.enter(None);
+         if self.observed.iter().any(Option::is_none) { return Err(AdmissionFailure::Inventory); }
+         let sdk_metadata_parents = self.frozen_sdk_metadata_parents()?;
+         let mut members = vec_with(self.observed.len())?; let mut counts = [Count::default(); 3];
+@@ -621,7 +645,9 @@
+             count.bytes = count.bytes.checked_add(metadata.file.size).ok_or(AdmissionFailure::Bounds)?;
+         }
+         let support_end=end.min(*self.audit.borrow());
++        self.inspection_diagnostic.enter(Some(app::InspectionStage::AppSupport));
+         self.support.inspect_once(recipe, support_end, stop)?;
++        self.inspection_diagnostic.enter(None); // Native OS providers are not the app's support-tool files.
+         let (provider_roots, provider) = self.provider(end, stop)?;
+         let picked = counts.iter().try_fold((0u64, 0u32, 0u32, 0u32), |(b, f, e, a), c|
+             Some((b.checked_add(c.bytes)?, f.checked_add(c.files)?, e.checked_add(c.entries)?, a.checked_add(c.aliases)?)))
+diff --git a/desktop/src-tauri/src/saved_command_android_registration.rs b/desktop/src-tauri/src/saved_command_android_registration.rs
+--- a/desktop/src-tauri/src/saved_command_android_registration.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration.rs
+@@ -799,8 +799,17 @@
+ }
+ struct SourceReturn {
+     known:bool,entered:bool,first:Option<(wire::Reason,Instant)>,retained_bytes:Option<usize>,
++    diagnostic:Option<wire::Problem>,
+     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+     review:Option<AndroidRegistrationSourceReview>,
++}
++impl SourceReturn {
++    // DATA comparison only, called after the existing coordinator/source joins.
++    fn inspection_problem(&self, first:Option<(wire::Reason,Instant)>)->Option<wire::Problem>{
++        if !self.known || !self.entered || self.first!=first
++            || !first.is_some_and(|(reason,_)|reason==wire::Reason::SourceRefused){return None;}
++        self.diagnostic.filter(|problem|problem.is_source_inspection())
++    }
+ }
+ struct Reservation {whole:usize,source:usize}
+ struct Operation {
+@@ -1081,7 +1090,7 @@
+         Ok(sources)=>sources,
+         Err(_)=>{
+             original.control.mark_unknown(Instant::now());
+-            return SourceReturn{known:false,entered:false,first:original.control.failure(),retained_bytes:None,review:None};
++            return SourceReturn{known:false,entered:false,first:original.control.failure(),retained_bytes:None,diagnostic:None,review:None};
+         },
+     };
+     let now=Instant::now();original.control.advance(now);
+@@ -1126,7 +1135,11 @@
+         source_bytes.is_none_or(|bytes|bytes>reservation.source)){
+         original.control.mark_unknown(Instant::now());
+     }
+-    SourceReturn{known,entered,first:original.control.failure(),retained_bytes,review}
++    let first=original.control.failure();
++    let diagnostic=if known && entered && !original.control.unknown.load(Ordering::SeqCst){
++        sources.inspection_problem(first)
++    }else{None};
++    SourceReturn{known,entered,first,retained_bytes,diagnostic,review}
+ }
+ fn poll_source(original:&Operation,slot:&mut Option<JoinHandle<SourceReturn>>,
+     context:&mut TaskContext<'_>,at:Instant)->Poll<bool>{
+@@ -1337,6 +1350,7 @@
+             }else{
+                 let reason=failure.map_or_else(||prerequisite_reason(setup),|(reason,_)|reason);
+                 let problem=match reason{
++                    wire::Reason::SourceRefused=>source.inspection_problem(failure).unwrap_or(wire::Problem::Inventory),
+                     wire::Reason::SupplierUnavailable=>wire::Problem::SupplierUnavailable,
+                     wire::Reason::InputLimit|wire::Reason::ResultLimit=>wire::Problem::Bounds,
+                     wire::Reason::Cancelled|wire::Reason::TimedOut=>wire::Problem::Stopped,
+@@ -1871,6 +1885,49 @@
+     use super::*;
+
+     #[test]
++    fn source_return_diagnostic_requires_closed_prefix_and_exact_first_failure_data() {
++        // DATA-only checks of the same SourceReturn consumed by finalization;
++        // true fields here are not a native source/coordinator join fixture.
++        let at=Instant::now();let first=Some((wire::Reason::SourceRefused,at));
++        let mut returned=SourceReturn{known:true,entered:true,first,retained_bytes:Some(0),diagnostic:Some(wire::Problem::JdkSource),
++            #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
++            review:None};
++        assert_eq!(returned.inspection_problem(first),Some(wire::Problem::JdkSource));
++        returned.known=false;assert_eq!(returned.inspection_problem(first),None);returned.known=true;
++        returned.entered=false;assert_eq!(returned.inspection_problem(first),None);returned.entered=true;
++        for changed in [None,Some((wire::Reason::Cancelled,at)),Some((wire::Reason::ContextChanged,at)),
++            Some((wire::Reason::CleanupUnknown,at)),Some((wire::Reason::SourceRefused,at+std::time::Duration::from_nanos(1)))] {
++            assert_eq!(returned.inspection_problem(changed),None);
++        }
++        returned.diagnostic=Some(wire::Problem::Inventory);assert_eq!(returned.inspection_problem(first),None);
++    }
++
++    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
++    #[test]
++    fn source_diagnostic_keeps_original_refusal_when_work_gate_normalizes_stop() {
++        // SAME original ControlSlot/WorkGate, no native source or join fixture.
++        let at=Instant::now();
++        let (_slot,control,_cohort,gate)=control_at(at);
++        gate.source_note(AdmissionFailure::Native,at);
++        assert_eq!(gate.source_first(),Some((AdmissionFailure::Stopped,at)));
++        assert_eq!(control.failure(),Some((wire::Reason::SourceRefused,at)));
++        let mut diagnostic=wire::InspectionDiagnostic::default();
++        diagnostic.enter(Some(wire::InspectionStage::AppSupport));
++        diagnostic.capture(gate.first());
++        assert_eq!(diagnostic.problem(control.failure()),Some(wire::Problem::AppSupportSource));
++
++        let (_slot,control,_cohort,gate)=control_at(at);
++        gate.note(wire::Reason::Cancelled,at);
++        gate.source_note(AdmissionFailure::Native,at+std::time::Duration::from_nanos(1));
++        assert_eq!(gate.source_first(),Some((AdmissionFailure::Stopped,at)));
++        let mut diagnostic=wire::InspectionDiagnostic::default();
++        diagnostic.enter(Some(wire::InspectionStage::AppSupport));
++        diagnostic.capture(gate.first());
++        assert_eq!(control.failure(),Some((wire::Reason::Cancelled,at)));
++        assert_eq!(diagnostic.problem(control.failure()),None);
++    }
++
++    #[test]
+     fn tool_acquisition_allows_counted_history_but_not_partial_or_unsettled_state() {
+         // Closed state/heap DATA, no native copy, selection or permit.
+         let mut registration=Registration::default();
+diff --git a/desktop/src-tauri/src/saved_command_android_registration_client.rs b/desktop/src-tauri/src/saved_command_android_registration_client.rs
+--- a/desktop/src-tauri/src/saved_command_android_registration_client.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration_client.rs
+@@ -381,7 +381,7 @@
+     let mut sources = match original.sources.lock() {
+         Ok(sources) => sources, Err(_) => {
+             client.fail(&original, wire::Reason::CleanupUnknown);
+-            return SourceReturn { known: false, entered: false, first: original.control.failure(), retained_bytes: None, review: None };
++            return SourceReturn { known: false, entered: false, first: original.control.failure(), retained_bytes: None, diagnostic: None, review: None };
+         }
+     };
+     let permit = receive(&mut input.reproof, &original, false);
+@@ -426,7 +426,7 @@
+         retained_bytes.is_none_or(|bytes| bytes > reservation.source)) {
+         client.fail(&original, wire::Reason::CleanupUnknown);
+     }
+-    SourceReturn { known, entered, first: original.control.failure(), retained_bytes, review: None }
++    SourceReturn { known, entered, first: original.control.failure(), retained_bytes, diagnostic: None, review: None }
+ }
+
+ fn failure_reason(failure: native::Failure) -> wire::Reason {
+@@ -1234,7 +1234,7 @@
+             let (release, enter) = oneshot::channel();
+             let mut source = Some(tokio::spawn(async move {
+                 enter.await.unwrap();
+-                SourceReturn { known: true, entered: true, first: None, retained_bytes: Some(0), review: None }
++                SourceReturn { known: true, entered: true, first: None, retained_bytes: Some(0), diagnostic: None, review: None }
+             }));
+             let waker = Waker::from(Arc::new(FinalWake(Weak::new())));
+             let mut cx = TaskContext::from_waker(&waker);
+diff --git a/desktop/tests/android-build-controller.test.mjs b/desktop/tests/android-build-controller.test.mjs
+--- a/desktop/tests/android-build-controller.test.mjs
++++ b/desktop/tests/android-build-controller.test.mjs
+@@ -13,6 +13,7 @@
+   ANDROID_BUILD_SCOPE, ANDROID_BUILD_TOOLCHAIN_PROFILE } from '../src/androidBuildProtocol.ts';
+ import { ANDROID_TOOL_SERVICE_CONSENT, ANDROID_TOOL_REGISTRATION_CONSENT, parseAndroidToolRegistrationStatus } from '../src/androidToolRegistration.ts';
+ import { parseAndroidToolchainCatalogStatus } from '../src/androidToolchainCatalogProtocol.ts';
++import { sourceInspectionContinuation, sourceInspectionProblemText } from '../src/androidToolSourceDiagnostics.ts';
+
+ const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
+ const CONFIG = { bytes: 512, sha256: 'd'.repeat(64) }, NEW_CONFIG = { bytes: 524, sha256: 'e'.repeat(64) };
+@@ -1081,6 +1082,86 @@
+ const discardedSourceReview = review => ({ ...review, statusRevision: review.statusRevision + 1,
+   phase: 'cancelled', reason: 'cancelled', review: null });
+
++function sourceRefusal(inspect, problem = 'sdk-source') {
++  return { ...sourceReview(inspect), phase: 'refused', reason: 'source-refused', review: null,
++    report: { sources: [], protectedCopy: 'not-created', accounting: null,
++      problems: { recorded: 1, shown: 1, omitted: 0, first: problem, items: [problem] } } };
++}
++
++test('source inspection diagnostics use closed failure stages, never missing or compatibility claims', async (t) => {
++  const h = toolSetupHarness(t); await h.ready;
++  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
++  for (const problem of ['jdk-source', 'sdk-source', 'gradle-source', 'app-support-source']) {
++    const refused = sourceRefusal(inspect, problem);
++    assert.ok(parseAndroidToolRegistrationStatus(refused));
++    assert.match(sourceInspectionProblemText[problem], /source check stopped/);
++    assert.ok(sourceInspectionContinuation(problem, true));
++    assert.equal(sourceInspectionContinuation(problem, false), null);
++    for (const reason of ['cancelled', 'source-changed', 'context-changed', 'timed-out', 'cleanup-unknown'])
++      assert.equal(parseAndroidToolRegistrationStatus({ ...refused, reason }), null);
++    const copy = clone(refused); copy.operation.kind = 'registration';
++    assert.equal(parseAndroidToolRegistrationStatus(copy), null);
++    const extra = clone(refused); extra.report.missing = true;
++    assert.equal(parseAndroidToolRegistrationStatus(extra), null);
++    const duplicate = clone(refused); duplicate.report.problems.recorded = duplicate.report.problems.shown = 2;
++    duplicate.report.problems.items.push(problem); assert.equal(parseAndroidToolRegistrationStatus(duplicate), null);
++  }
++  assert.equal(sourceInspectionContinuation('inventory', true), null);
++  assert.equal(sourceInspectionContinuation('unknown', true), null);
++  assert.match(sourceInspectionContinuation('jdk-source', true), /Do not change global Java settings/);
++  assert.match(sourceInspectionContinuation('sdk-source', true), /If a required package is missing/);
++  assert.match(sourceInspectionContinuation('gradle-source', true), /Do not run a project wrapper/);
++  assert.match(sourceInspectionContinuation('app-support-source', true), /Do not replace your JDK, SDK or Gradle/);
++  assert.ok(parseAndroidToolRegistrationStatus(sourceRefusal(inspect, 'inventory')));
++  h.replyRegistration(inspect, sourceRefusal(inspect)); await inspecting;
++  assert.equal(h.registrationCalls.length, 1); assert.equal(h.calls.length, 0);
++});
++
++test('source inspection diagnostics wait for the same invoke and retire on equal-byte snapshot replacement', async (t) => {
++  const h = toolSetupHarness(t); await h.ready;
++  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0], refused = sourceRefusal(inspect);
++  h.emitRegistration(refused);
++  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
++  h.replyRegistration(inspect, refused); await inspecting;
++  assert.equal(h.controller.canExplainCurrentSourceInspection(), true);
++  assert.match(sourceInspectionContinuation(refused.report.problems.first, true), /SDK root/);
++  assert.equal(h.state.registrationConsent, null); assert.equal(h.state.consent, null);
++  h.replace({ ...h.project, snapshot: clone(h.project.snapshot) });
++  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
++  assert.equal(h.registrationCalls.length, 1); assert.equal(h.calls.length, 0);
++  assert.equal(h.controller.canCheckToolRegistration(), true);
++});
++
++test('source inspection diagnostics keep original cancel and status without suggesting a repair', async (t) => {
++  const h = toolSetupHarness(t); await h.ready;
++  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
++  const refused = { ...sourceRefusal(inspect), statusRevision: 2 };
++  h.emitRegistration({ ...refused, statusRevision: 1, availability: 'busy', phase: 'inspecting', reason: 'none', report: null });
++  assert.equal(h.controller.cancelToolRegistration(), true);
++  const cancel = h.registrationCalls[1]; assert.equal(cancel.kind, 'cancel');
++  h.emitRegistration(refused);
++  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
++  h.replyRegistration(inspect, refused); await inspecting;
++  assert.equal(h.state.registrationCancelPending, true);
++  h.replyRegistration(cancel, refused); await flush();
++  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
++  assert.equal(h.controller.canCheckToolRegistration(), true);
++  assert.equal(h.state.toolRegistration.operation.operationId, OP);
++  assert.equal(h.registrationCalls.length, 2); assert.equal(h.calls.length, 0);
++});
++
++test('source inspection diagnostics never use a previous project or API as current guidance', async (t) => {
++  for (const retire of [h => h.dispatch({ type: 'select', project: { id: 'p2', name: 'Other', path: '/inert/other' } }),
++    h => h.controller.beginConnection()]) {
++    const h = toolSetupHarness(t); await h.ready;
++    const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
++    h.replyRegistration(inspect, sourceRefusal(inspect, 'jdk-source')); await inspecting;
++    assert.equal(h.controller.canExplainCurrentSourceInspection(), true);
++    retire(h); assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
++    assert.equal(h.registrationCalls.length, 1); assert.equal(h.calls.length, 0);
++  }
++});
++
+ test('tool setup view is passive and cannot prepare or approve an Android build', async (t) => {
+   const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false);
+   assert.match(h.controller.inspectToolSourcesReason(), /Open Set up build tools/);

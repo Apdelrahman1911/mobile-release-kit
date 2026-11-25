@@ -1,0 +1,28 @@
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -101,6 +101,8 @@
+ pub mod error;
+ pub mod protocol;
+ mod service_protocol;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++mod version_allocation_state_native;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod application_state_store;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+diff --git a/desktop/src-tauri/src/protocol.rs b/desktop/src-tauri/src/protocol.rs
+--- a/desktop/src-tauri/src/protocol.rs
++++ b/desktop/src-tauri/src/protocol.rs
+@@ -177,3 +177,12 @@
++// Fixed native VersionAllocations state only. No renderer namespace/decoder
++// selection and no widening of the ordinary passive protocol's limits.
++pub(crate) fn strict_version_allocation_state_json(bytes: &[u8]) -> Result<Value, BridgeError> {
++    if bytes.len() > 1024 * 1024 {
++        return Err(BridgeError::protocol());
++    }
++    strict_json_with_limits(bytes, 50_000, 20)
++}
++
+ // Signed Mac inventory DATA only. Seven nodes/runtime row and nine/install
+ // row, including keys: 16,384 rows fit these fixed bounds. No renderer caller.
+ pub(crate) fn strict_macos_runtime_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {

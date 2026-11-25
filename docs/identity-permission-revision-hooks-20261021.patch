@@ -1,0 +1,626 @@
+diff --git a/desktop/src-tauri/src/asset_session_agent_identity.rs b/desktop/src-tauri/src/asset_session_agent_identity.rs
+index 66e7deac..69b2a7c7 100644
+--- a/desktop/src-tauri/src/asset_session_agent_identity.rs
++++ b/desktop/src-tauri/src/asset_session_agent_identity.rs
+@@ -19,6 +19,28 @@ pub(crate) mod actions;
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct PermitRequest {
+     pub(crate) project_id: String,
++    pub(crate) expected_permission_revision: String,
++}
++/// Only the genuine MAIN Check exposes this ordering stamp. The shared
++/// service/CLI and the other three-field GUI replies remain unchanged.
++#[derive(serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct PermissionCheck {
++    #[serde(flatten)]
++    status: requests::GuiStatus,
++    #[serde(serialize_with = "serialize_permission_revision")]
++    permission_revision: u64,
++}
++fn serialize_permission_revision<S: serde::Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
++    serializer.collect_str(value)
++}
++fn permission_revision(text: &str) -> Result<u64, BridgeError> {
++    if text.is_empty() || text.len() > 20 || !text.bytes().all(|c| c.is_ascii_digit())
++        || text.len() > 1 && text.starts_with('0')
++    {
++        return Err(BridgeError::invalid());
++    }
++    text.parse().map_err(|_| BridgeError::invalid())
+ }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -95,6 +117,19 @@ fn empty_status() -> requests::GuiStatus {
+ }
+ 
+ impl DocumentBinding {
++    fn consume_agent_allow_epoch(
++        &self,
++        _original_guard: &DocumentState,
++        expected: u64,
++    ) -> Result<u64, BridgeError> {
++        // MAX is terminal: a saturated Revoke must never leave a usable
++        // in-flight Allow at that same value. A refused attempt is not reset.
++        let next = expected.checked_add(1).filter(|next| *next < u64::MAX)
++            .ok_or_else(|| public(Error::StateUnknown))?;
++        self.inner.agent_identity_revoke_epoch
++            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
++            .map(|_| next).map_err(|_| public(Error::AccessDenied))
++    }
+     fn agent_allow_epoch(
+         &self,
+         _original_guard: &DocumentState,
+@@ -146,8 +181,15 @@ impl DocumentBinding {
+             return Err(BridgeError::invalid());
+         }
+         let state = self.lock();
+-        self.passive_query_gate_locked(&state, &self.inner.bridge)?;
+-        let native = self.service_project_locked(&state, project)?;
++        self.agent_context_locked(&state, project)
++    }
++    fn agent_context_locked(
++        &self,
++        state: &DocumentState,
++        project: &str,
++    ) -> Result<(NativeProject, SavedEditStamp, u64), BridgeError> {
++        self.passive_query_gate_locked(state, &self.inner.bridge)?;
++        let native = self.service_project_locked(state, project)?;
+         let edit = self
+             .inner
+             .bridge
+@@ -165,13 +207,13 @@ impl DocumentBinding {
+     pub(crate) fn agent_identity_status(
+         &self,
+         window: &str,
+-    ) -> Result<requests::GuiStatus, BridgeError> {
++    ) -> Result<PermissionCheck, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+         let state = self.lock();
+         self.service_document_gate(&state)?;
+-        match self.inner.agent_identity_service.get() {
++        let status = match self.inner.agent_identity_service.get() {
+             None => Ok(empty_status()),
+             Some(original) => original
+                 .upgrade()
+@@ -179,14 +221,29 @@ impl DocumentBinding {
+                 .identity_requests()
+                 .gui_status()
+                 .map_err(public),
+-        }
++        }?;
++        Ok(PermissionCheck {
++            status,
++            permission_revision: self.inner.agent_identity_revoke_epoch.load(Ordering::Acquire),
++        })
+     }
+     pub(crate) fn allow_agent_identity(
+         &self,
+         window: &str,
+         args: PermitRequest,
+     ) -> Result<requests::GuiStatus, BridgeError> {
+-        let (original, stamp, epoch) = self.agent_context(window, &args.project_id)?;
++        if window != MAIN || !crate::protocol::valid_id(&args.project_id) {
++            return Err(BridgeError::invalid());
++        }
++        let expected = permission_revision(&args.expected_permission_revision)?;
++        let (original, stamp, epoch) = {
++            let state = self.lock();
++            // Consume the original returned MAIN Check before any startup,
++            // project or off-Doc Host work; never capture a fresh arrival epoch.
++            let epoch = self.consume_agent_allow_epoch(&state, expected)?;
++            let (original, stamp, _) = self.agent_context_locked(&state, &args.project_id)?;
++            (original, stamp, epoch)
++        };
+         // Both may acquire original Host/Service locks and inspect durable
+         // saved state. They are deliberately OUTSIDE Document/Edit guards.
+         let service = self
+@@ -469,7 +526,8 @@ mod tests {
+             .allow_agent_identity(
+                 "main",
+                 PermitRequest {
+-                    project_id: "project-1".into()
++                    project_id: "project-1".into(),
++                    expected_permission_revision: "0".into(),
+                 }
+             )
+             .is_err());
+@@ -519,4 +577,88 @@ mod tests {
+             captured + 1
+         );
+     }
++
++    #[test]
++    fn main_check_revision_is_closed_decimal_and_other_reply_bytes_stay_unchanged() {
++        for text in ["0", "1", "9007199254740993", "18446744073709551615"] {
++            assert_eq!(permission_revision(text).unwrap().to_string(), text);
++        }
++        for text in ["", "00", "01", "-0", "+1", " 1", "1\n", "1\r", "1\u{2028}",
++            "18446744073709551616", "100000000000000000000"]
++        {
++            assert!(permission_revision(text).is_err());
++        }
++        for raw in [
++            r#"{"projectId":"project-1"}"#,
++            r#"{"projectId":"project-1","expectedPermissionRevision":0}"#,
++            r#"{"projectId":"project-1","expectedPermissionRevision":null}"#,
++            r#"{"projectId":"project-1","expectedPermissionRevision":"0","expectedPermissionRevision":"1"}"#,
++            r#"{"projectId":"project-1","expectedPermissionRevision":"0","window":"main"}"#,
++        ] {
++            assert!(decode::<PermitRequest>(raw.as_bytes()).is_err());
++        }
++        let request: PermitRequest = decode(br#"{"projectId":"project-1","expectedPermissionRevision":"9007199254740993"}"#).unwrap();
++        assert_eq!(permission_revision(&request.expected_permission_revision).unwrap(), 9_007_199_254_740_993);
++        let base = serde_json::to_value(empty_status()).unwrap();
++        let check = serde_json::to_value(PermissionCheck { status: empty_status(), permission_revision: u64::MAX }).unwrap();
++        assert_eq!(base.as_object().unwrap().len(), 3);
++        assert_eq!(check.as_object().unwrap().len(), 4);
++        assert_eq!(check["permissionRevision"], "18446744073709551615");
++        for field in ["lease", "pending", "requests"] { assert_eq!(check[field], base[field]); }
++        assert!(serde_json::to_vec(&check).unwrap().len() < 64 * 1024);
++    }
++
++    #[test]
++    fn delayed_first_allow_uses_old_checked_revision_after_actual_revoke() {
++        let bridge = Arc::new(DesktopBridge::new(std::path::PathBuf::from("/unopened-identity-arrival-fixture")));
++        let document = DocumentBinding::new(bridge.clone());
++        // No native window/root/Check is fabricated on this unbound fixture.
++        // Exercise the actual late-Allow refusal before those gates or Host IO.
++        assert!(document.agent_identity_status(MAIN).is_err());
++        assert!(!document.revoke_agent_identity(MAIN).unwrap().lease.enabled);
++        assert_eq!(document.allow_agent_identity(MAIN, PermitRequest {
++            project_id: "project-1".into(), expected_permission_revision: "0".into(),
++        }).err().unwrap(), public(Error::AccessDenied));
++        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 1);
++        assert!(document.inner.agent_identity_service.get().is_none());
++        assert!(!bridge.application_service.status().unwrap().enabled);
++    }
++
++    #[test]
++    fn startup_refusal_consumes_only_initial_allow_and_cannot_replay() {
++        let bridge = Arc::new(DesktopBridge::new(std::path::PathBuf::from("/unopened-identity-consume-fixture")));
++        let document = DocumentBinding::new(bridge.clone());
++        let input = || PermitRequest { project_id: "project-1".into(), expected_permission_revision: "0".into() };
++        assert!(document.allow_agent_identity("not-main", input()).is_err());
++        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 0);
++        assert!(document.allow_agent_identity(MAIN, input()).is_err());
++        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 1);
++        assert_eq!(document.allow_agent_identity(MAIN, input()).err().unwrap(), public(Error::AccessDenied));
++        assert!(document.agent_context(MAIN, "project-1").is_err());
++        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 1,
++            "ordinary Review context does not consume a proposal-permission revision");
++        assert!(document.inner.agent_identity_service.get().is_none());
++        assert!(!bridge.application_service.status().unwrap().enabled);
++    }
++
++    #[test]
++    fn permission_exhaustion_never_rebases_or_skips_original_revoke() {
++        let document = DocumentBinding::new(Arc::new(DesktopBridge::new(std::path::PathBuf::from("/unopened-identity-exhaustion-fixture"))));
++        {
++            let state = document.lock();
++            document.inner.agent_identity_revoke_epoch.store(u64::MAX - 2, Ordering::Release);
++            assert_eq!(document.consume_agent_allow_epoch(&state, u64::MAX - 2).unwrap(), u64::MAX - 1);
++            assert!(document.consume_agent_allow_epoch(&state, u64::MAX - 2).is_err());
++            assert!(document.consume_agent_allow_epoch(&state, u64::MAX - 1).is_err());
++            assert!(document.consume_agent_allow_epoch(&state, u64::MAX).is_err());
++            assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), u64::MAX - 1);
++        }
++        assert!(!document.revoke_agent_identity(MAIN).unwrap().lease.enabled);
++        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), u64::MAX);
++        assert_eq!(document.revoke_agent_identity(MAIN).err().unwrap(), public(Error::StateUnknown));
++        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), u64::MAX);
++        assert!(document.inner.agent_identity_service.get().is_none());
++        // The real method's unconditional original Edit STOP is unchanged;
++        // this fixture does not invent an active owner or settlement receipt.
++    }
+ }
+diff --git a/desktop/src/projectIdentityNative.ts b/desktop/src/projectIdentityNative.ts
+index 457571e0..3d4ea4e4 100644
+--- a/desktop/src/projectIdentityNative.ts
++++ b/desktop/src/projectIdentityNative.ts
+@@ -99,15 +99,18 @@ export interface AgentIdentityGuiStatus {
+   lease: { enabled: boolean; remainingMs: number; projectId: string | null };
+   pending: AgentIdentityProposal | null; requests: readonly AgentIntentObservation[];
+ }
++export interface AgentIdentityCheck extends AgentIdentityGuiStatus { readonly permissionRevision: string }
+ export interface AgentIdentityApi {
+   readonly mode: 'native';
+-  status(): Promise<unknown>; allow(projectId: string): Promise<unknown>; revoke(): Promise<unknown>;
++  status(): Promise<unknown>; allow(projectId: string, expectedPermissionRevision: string): Promise<unknown>; revoke(): Promise<unknown>;
+   decline(intentId: string): Promise<unknown>; review(intentId: string): Promise<unknown>;
+   prepare(args: { intentId: string; sessionId: string; revision: string; acknowledgeNewApplication: boolean }): Promise<unknown>;
+   apply(args: { intentId: string; sessionId: string; revision: string; planToken: string; reviewed: boolean }): Promise<unknown>;
+ }
+ const agentToken = (v: unknown): v is string => token(v) && v !== '0'.repeat(32);
+ const runtimeProject = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v);
++export const agentIdentityPermissionRevisionFits = (v: unknown): v is string => typeof v === 'string' &&
++  /^(0|[1-9][0-9]{0,19})$(?![\s\S])/.test(v) && (v.length < 20 || v <= '18446744073709551615');
+ function agentProposal(value: unknown): AgentIdentityProposal | null {
+   if (!keys(value, ['runtimeId', 'request']) || !runtimeProject(value.runtimeId) ||
+       !keys(value.request, ['serviceInstance', 'intentId', 'projectId', 'expectedObservationRevision', 'change'])) return null;
+@@ -137,6 +140,12 @@ function agentObservation(value: unknown): value is AgentIntentObservation {
+ export function parseAgentIdentityGuiStatus(input: unknown): AgentIdentityGuiStatus | null {
+   try {
+     const v = copyBoundedComparisonData(input, 64 * 1024, 4096);
++    return agentGuiStatusData(v);
++  } catch { return null; }
++}
++// Called only after the original bounded descriptor-safe copy, including the
++// MAIN wrapper below. Do not duplicate the retained proposal/status graph.
++function agentGuiStatusData(v: unknown): AgentIdentityGuiStatus | null {
+     if (!keys(v, ['lease', 'pending', 'requests']) || !keys(v.lease, ['enabled', 'remainingMs', 'projectId']) ||
+         typeof v.lease.enabled !== 'boolean' || typeof v.lease.remainingMs !== 'number' || !Number.isSafeInteger(v.lease.remainingMs) ||
+         v.lease.remainingMs < 0 || v.lease.remainingMs > 900_000 ||
+@@ -150,6 +159,13 @@ export function parseAgentIdentityGuiStatus(input: unknown): AgentIdentityGuiSta
+     v.requests.forEach(Object.freeze); Object.freeze(v.requests);
+     const lease = Object.freeze({ enabled: v.lease.enabled, remainingMs: v.lease.remainingMs, projectId: v.lease.projectId });
+     return Object.freeze({ lease, pending, requests: v.requests });
++}
++export function parseAgentIdentityCheck(input: unknown): AgentIdentityCheck | null {
++  try {
++    const v = copyBoundedComparisonData(input, 64 * 1024, 4096);
++    if (!keys(v, ['lease', 'pending', 'requests', 'permissionRevision']) || !agentIdentityPermissionRevisionFits(v.permissionRevision)) return null;
++    const status = agentGuiStatusData({ lease: v.lease, pending: v.pending, requests: v.requests });
++    return status ? Object.freeze({ ...status, permissionRevision: v.permissionRevision }) : null;
+   } catch { return null; }
+ }
+ export function encodeAgentIdentityRequest(command: AgentIdentityCommand, input: unknown): Uint8Array | null {
+@@ -157,7 +173,8 @@ export function encodeAgentIdentityRequest(command: AgentIdentityCommand, input:
+     const v = copyBoundedComparisonData(input, 4096, 128);
+     let valid = false;
+     if (command === 'agent_identity_status' || command === 'revoke_agent_identity') valid = keys(v, []);
+-    if (command === 'allow_agent_identity') valid = keys(v, ['projectId']) && runtimeProject(v.projectId);
++    if (command === 'allow_agent_identity') valid = keys(v, ['projectId', 'expectedPermissionRevision']) &&
++      runtimeProject(v.projectId) && agentIdentityPermissionRevisionFits(v.expectedPermissionRevision);
+     if (command === 'decline_agent_identity' || command === 'review_agent_identity') valid = keys(v, ['intentId']) && agentToken(v.intentId);
+     if (command === 'prepare_agent_identity') valid = keys(v, ['intentId', 'sessionId', 'revision', 'acknowledgeNewApplication']) &&
+       agentToken(v.intentId) && agentToken(v.sessionId) && agentToken(v.revision) && typeof v.acknowledgeNewApplication === 'boolean';
+@@ -177,7 +194,7 @@ export function createAgentIdentityApi(mode: string,
+     return invoke(command, body);
+   };
+   return Object.freeze({ mode: 'native' as const, status: () => call('agent_identity_status', {}),
+-    allow: (projectId: string) => call('allow_agent_identity', { projectId }), revoke: () => call('revoke_agent_identity', {}),
++    allow: (projectId: string, expectedPermissionRevision: string) => call('allow_agent_identity', { projectId, expectedPermissionRevision }), revoke: () => call('revoke_agent_identity', {}),
+     decline: (intentId: string) => call('decline_agent_identity', { intentId }), review: (intentId: string) => call('review_agent_identity', { intentId }),
+     prepare: (args: Parameters<AgentIdentityApi['prepare']>[0]) => call('prepare_agent_identity', args),
+     apply: (args: Parameters<AgentIdentityApi['apply']>[0]) => call('apply_agent_identity', args) });
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+index e8bf050e..39597084 100644
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -99,11 +99,14 @@ import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx'
+ import { VersionReserveController } from './versionReserveController.ts';
+ import { versionReserveProjectIssue } from './versionReserve.ts';
+ import { VersionReservePanel } from './components/VersionReservePanel.tsx';
+-import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
++import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus, parseAgentIdentityCheck } from './projectIdentityNative.ts';
++import { emptyIdentityPermission, observedIdentityPermission, acknowledgeIdentityPermission, consumeIdentityPermission,
++  identityPermissionChecked, identityPermissionAcknowledged } from './agentIdentityPermission.ts';
++import type { IdentityPermission, IdentityPermissionContext } from './agentIdentityPermission.ts';
+ import { AgentIdentityActionController } from './agentIdentityActions.ts';
+ import type { AgentIdentityActionView } from './agentIdentityActions.ts';
+ import { AgentIdentityAction } from './components/AgentIdentityAction.tsx';
+-import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus } from './projectIdentityNative.ts';
++import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus, AgentIdentityApi } from './projectIdentityNative.ts';
+ import { ProjectIdentityController } from './projectIdentityController.ts';
+ import type { ProjectIdentityUiState } from './projectIdentityController.ts';
+ import { parseIdentityContext } from './projectIdentity.ts';
+@@ -199,6 +202,8 @@ import { GitHub } from './pages/GitHub.tsx';
+ 
+ interface IdentityInput { platform: 'android' | 'ios'; target: string }
+ interface IdentityBinding { service: object; native: ProjectIdentityNativeController; ui: ProjectIdentityController; rebindFailed: boolean; proposal: AgentIdentityProposal | null; proposalSeeded: boolean; actions: AgentIdentityActionController | null }
++interface IdentityPermissionOrigin { service: object; api: AgentIdentityApi }
++interface IdentityPermissionWork { promise: Promise<unknown> | null; superseded: boolean; origin: IdentityPermissionOrigin }
+ const emptyIdentitySubscribe = () => () => {};
+ const emptyIdentitySnapshot = () => null;
+ 
+@@ -344,7 +349,10 @@ export function App() {
+   const [agentObserved, setAgentObserved] = useState<{ service: object; value: AgentIdentityGuiStatus } | null>(null);
+   const [agentMessage, setAgentMessage] = useState<{ service: object; text: string } | null>(null);
+   const [agentRequestPending, setAgentRequestPending] = useState(false);
+-  const agentRequestWork = useRef<{ normal: { promise: Promise<unknown> | null; superseded: boolean } | null; revoke: { promise: Promise<unknown> | null; superseded: boolean } | null; epoch: number }>({ normal: null, revoke: null, epoch: 0 });
++  const [agentProposalAcknowledged, setAgentProposalAcknowledged] = useState(false);
++  const agentRequestWork = useRef<{ normal: IdentityPermissionWork | null; revoke: IdentityPermissionWork | null; epoch: number;
++    original: IdentityPermissionOrigin | null; permission: IdentityPermission; uncertain: boolean }>(
++    { normal: null, revoke: null, epoch: 0, original: null, permission: emptyIdentityPermission, uncertain: false });
+   const identityInputs = useRef(new Map<string, IdentityInput>());
+   const identityTexts = useRef(new Map<string, string>());
+   const [, updateIdentityInputs] = useState(0);
+@@ -354,6 +362,8 @@ export function App() {
+     ? 'The original app ID connection could not be closed reliably. Other tasks remain paused; keep the app open and preserve its project files.'
+     : identityRef.current?.actions?.pendingReason() ?? identityRef.current?.native.ownerReason() ?? null, []);
+   const retireIdentity = useCallback(() => {
++    agentRequestWork.current.permission = emptyIdentityPermission;
++    setAgentProposalAcknowledged(false);
+     versionEnrollmentRef.current?.beforeContextIntent();
+     versionReserveRef.current?.beforeContextIntent();
+     repositoryCreateRef.current?.beforeWorkspaceAction();
+@@ -1291,39 +1301,102 @@ export function App() {
+     const change = binding.proposal.request.change;
+     if (binding.ui.setIntent(change.identityIntent) && change.identityIntent === 'new-application') binding.ui.setDesiredIdentity(change.desiredIdentity);
+   }, [identityBinding, identityUi]);
++  const agentPermissionContext = useCallback((): IdentityPermissionContext => {
++    const service = pathService.current;
++    return { service, api: service.api?.mode === 'native' ? service.api.agentIdentity ?? null : null,
++      projectId: workspaceRef.current.selectedId, epoch: identityEpoch.current };
++  }, []);
++  const agentPermissionBlocked = useCallback(() => !workspaceRef.current.selectedId || !!(playCleanupBusy() || actionsRetryBusy() ||
++    pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy()),
++    [playCleanupBusy, actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
++  const acknowledgeAgentProposals = useCallback((value: boolean) => {
++    const book = agentRequestWork.current, context = agentPermissionContext();
++    const usable = !book.normal && !book.revoke && !book.uncertain && !agentPermissionBlocked() &&
++      (!book.original || book.original.api === context.api && book.original.service === context.service);
++    book.permission = acknowledgeIdentityPermission(book.permission, value && usable, context);
++    setAgentProposalAcknowledged(identityPermissionAcknowledged(book.permission, context));
++  }, [agentPermissionContext, agentPermissionBlocked]);
+   const agentRequestAction = useCallback(async (action: 'status' | 'allow' | 'revoke' | 'decline', intentId?: string) => {
+     // The existing retained native service keeps Revoke usable during a failed
+     // reconnect. New Allow/status never borrows that old service binding.
+-    const service = action === 'revoke' ? cliService.current : pathService.current;
+-    const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
+     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
+-    const project = workspaceRef.current.selectedId;
+-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || playCleanupBusy() || actionsRetryBusy() || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
++    const fallback = action === 'revoke' ? cliService.current : pathService.current;
++    // An unrelated Check on a replacement service cannot steal the old
++    // permission's STOP target. First Allow already latches its original here.
++    const retained = action === 'revoke' ? book.original ?? book.normal?.origin : null;
++    const service = retained?.service ?? fallback;
++    const port = retained?.api ?? (fallback.api?.mode === 'native' ? fallback.api.agentIdentity : null);
++    const context = agentPermissionContext(), project = context.projectId;
++    if (!port || book[slot] || action !== 'revoke' && book.revoke) return;
++    if (action === 'allow' && (agentPermissionBlocked() || book.uncertain ||
++        book.original !== null && (book.original.api !== port || book.original.service !== service) ||
++        !identityPermissionAcknowledged(book.permission, context))) {
++      book.permission = emptyIdentityPermission; setAgentProposalAcknowledged(false);
++      setAgentMessage({ service, text: 'Check request permission, then confirm this project. Revoke any uncertain original permission first.' }); return;
++    }
+     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
++    const expected = action === 'allow' ? consumeIdentityPermission(book.permission, context).expectedPermissionRevision : null;
++    if (action === 'allow' && expected === null) return;
++    book.permission = emptyIdentityPermission;
+     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
+     // Bound normal+revoke slots; revoke remains available during first Allow.
+     // Original promise completion is not a project operation/finality receipt.
+-    const work = { promise: null as Promise<unknown> | null, superseded: false };
++    const origin = { service, api: port };
++    const work: IdentityPermissionWork = { promise: null, superseded: false, origin };
++    const allow = port.allow, revoke = port.revoke, decline = port.decline, status = port.status;
++    const stillCurrent = () => {
++      const current = agentPermissionContext();
++      return current.service === service && current.api === port && current.projectId === project && current.epoch === context.epoch;
++    };
++    if (action === 'allow') book.original = origin;
+     // Stop stays usable even if the display epoch saturates. Its original
+     // native revoke still runs; no late normal result may overwrite it.
+     if (action === 'revoke' && book.normal) book.normal.superseded = true;
+     book[slot] = work; // Latch BEFORE a native invocation or reentrant listener.
+-    setAgentRequestPending(true); setAgentMessage(null);
++    setAgentProposalAcknowledged(false); setAgentRequestPending(true); setAgentMessage(null);
+     try {
+-      work.promise = action === 'allow' ? port.allow(project!) : action === 'revoke' ? port.revoke() : action === 'decline' ? port.decline(intentId!) : port.status();
++      // Keep the existing two slots. Reentrant Stop or selection/owner changes
++      // can happen after publication but may not dispatch behind that Stop.
++      if (book[slot] !== work || work.superseded || book.epoch !== epoch || action !== 'revoke' &&
++          (book.revoke !== null || !stillCurrent()) || action === 'allow' && agentPermissionBlocked()) return;
++      work.promise = action === 'allow' ? allow.call(port, project!, expected!) : action === 'revoke' ? revoke.call(port) :
++        action === 'decline' ? decline.call(port, intentId!) : status.call(port);
+       const value = await work.promise;
+-      if (work.superseded || (action === 'revoke' ? cliService.current : pathService.current) !== service || book.epoch !== epoch) return;
+-      const parsed = parseAgentIdentityGuiStatus(value);
++      if (work.superseded || book[slot] !== work || book.epoch !== epoch) return;
++      if (action !== 'revoke' && !stillCurrent()) {
++        if (action === 'allow') { book.uncertain = true; setAgentMessage({ service, text: 'Selection changed while permission was pending. Revoke the original permission before allowing again.' }); }
++        return;
++      }
++      const checked = action === 'status' ? parseAgentIdentityCheck(value) : null;
++      const parsed = action === 'status' ? checked : parseAgentIdentityGuiStatus(value);
+       if (!parsed) throw new Error('unconfirmed');
++      if (work.superseded || book[slot] !== work || book.epoch !== epoch) return;
++      if (action !== 'revoke' && !stillCurrent()) {
++        if (action === 'allow') { book.uncertain = true; setAgentMessage({ service, text: 'Selection changed while permission was pending. Revoke the original permission before allowing again.' }); }
++        return;
++      }
++      if (action === 'revoke') {
++        if (parsed.lease.enabled) throw new Error('unconfirmed revoke');
++        book.original = null; book.uncertain = false;
++      } else if (action === 'status') {
++        if (parsed.lease.enabled && book.original === null) book.original = origin;
++        if (checked && !book.uncertain && (!book.original || book.original.api === port && book.original.service === service)) {
++          book.permission = observedIdentityPermission(context, checked.permissionRevision);
++        }
++      }
+       setAgentObserved({ service, value: parsed });
+-      setAgentMessage(action === 'allow' ? { service, text: 'Identity proposals are allowed for 15 minutes. Each still needs your separate native source review and exact-change approval.' } : null);
++      setAgentMessage(book.uncertain ? { service, text: 'Permission remains uncertain. Revoke the original permission before a fresh Check and confirmation.' } :
++        action === 'allow' && parsed.lease.enabled ? { service, text: 'Identity proposals were observed allowed for up to 15 minutes. Each still needs separate native source review and exact-change approval.' } : null);
+     } catch {
+-      if (!work.superseded && (action === 'revoke' ? cliService.current : pathService.current) === service && book.epoch === epoch) setAgentMessage({ service, text: 'The request permission/status could not be confirmed. Check again or revoke; do not replay an edit.' });
++      if (!work.superseded && book[slot] === work && book.epoch === epoch) {
++        if (action === 'allow' || action === 'revoke') { book.uncertain = true; book.original = origin; }
++        setAgentMessage({ service, text: 'The request permission/status could not be confirmed. Check again or revoke the original; do not replay an edit.' });
++      }
+     } finally {
+       if (book[slot] === work) book[slot] = null;
+       setAgentRequestPending(book.normal !== null || book.revoke !== null);
+     }
+-  }, [playCleanupBusy, actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
++  }, [agentPermissionContext, agentPermissionBlocked]);
+   identityInvalidation.current = (projectId) => {
+     snapshotIntentBatch(projectId);
+     dispatch({ type: 'project-identity-intent', projectId });
+@@ -2458,7 +2531,12 @@ export function App() {
+               <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. Proposal permission alone cannot Apply. Read the saved source and acknowledge a new app when applicable, then continue here or explicitly delegate that exact change once to the agent.</p>
+               <p>Current observation: {agentRequests ? agentRequests.lease.enabled ? 'request permission was observed enabled' : 'request permission was observed disabled' : 'not checked'}. Status is not an approval or completed edit.</p>
+               {agentRequestMessage && <p role="status" className="review-caution">{agentRequestMessage}</p>}
+-              <div className="button-row"><button type="button" className="button secondary" disabled={!session || !pathService.current.api?.agentIdentity || agentRequestPending || identityBusy() !== null}
++              <label><input type="checkbox" checked={agentProposalAcknowledged}
++                disabled={agentRequestPending || agentRequestWork.current.uncertain || agentPermissionBlocked() ||
++                  !identityPermissionChecked(agentRequestWork.current.permission, agentPermissionContext())}
++                onChange={(event) => acknowledgeAgentProposals(event.target.checked)} /> After checking, allow proposals for this selected project. This does not approve an edit.</label>
++              <div className="button-row"><button type="button" className="button secondary" disabled={!session || !pathService.current.api?.agentIdentity || agentRequestPending || agentPermissionBlocked() ||
++                agentRequestWork.current.uncertain || !agentProposalAcknowledged || !identityPermissionAcknowledged(agentRequestWork.current.permission, agentPermissionContext())}
+                 onClick={() => void agentRequestAction('allow')}>Allow identity proposals · 15 minutes</button>
+                 <button type="button" className="button secondary" disabled={agentRequestWork.current.revoke !== null}
+                   onClick={() => void agentRequestAction('revoke')}>Revoke proposals and request original stop</button>
+diff --git a/desktop/tests/agent-identity-requests.test.mjs b/desktop/tests/agent-identity-requests.test.mjs
+index 47333500..d520c89a 100644
+--- a/desktop/tests/agent-identity-requests.test.mjs
++++ b/desktop/tests/agent-identity-requests.test.mjs
+@@ -3,7 +3,9 @@
+ import assert from 'node:assert/strict';
+ import test from 'node:test';
+ import { bindAgentIdentityApi, createAgentIdentityApi, encodeAgentIdentityRequest,
+-  parseAgentIdentityGuiStatus, createProjectIdentityApi, ProjectIdentityNativeController } from '../src/projectIdentityNative.ts';
++  parseAgentIdentityGuiStatus, parseAgentIdentityCheck, createProjectIdentityApi, ProjectIdentityNativeController } from '../src/projectIdentityNative.ts';
++import { emptyIdentityPermission, observedIdentityPermission, acknowledgeIdentityPermission, consumeIdentityPermission,
++  identityPermissionChecked, identityPermissionAcknowledged } from '../src/agentIdentityPermission.ts';
+ import { ProjectIdentityController } from '../src/projectIdentityController.ts';
+ import { IDENTITY_NEW_WARNING } from '../src/projectIdentity.ts';
+ 
+@@ -38,7 +40,7 @@ function ports(hook) {
+ test('seven closed native commands queue/review DATA; no preview or generic-command fallback', () => {
+   const p = ports();
+   assert.equal(p.calls.length, 0);
+-  const operations = [p.agent.status(), p.agent.allow('project-1'), p.agent.revoke(), p.agent.decline(INTENT),
++  const operations = [p.agent.status(), p.agent.allow('project-1', '0'), p.agent.revoke(), p.agent.decline(INTENT),
+     p.agent.review(INTENT), p.agent.prepare({ intentId: INTENT, sessionId: SID, revision: REV, acknowledgeNewApplication: true }),
+     p.agent.apply({ intentId: INTENT, sessionId: SID, revision: REV, planToken: PLAN, reviewed: true })];
+   assert.deepEqual(p.calls.map((v) => v.command), ['agent_identity_status', 'allow_agent_identity', 'revoke_agent_identity',
+@@ -50,8 +52,9 @@ test('seven closed native commands queue/review DATA; no preview or generic-comm
+ 
+ test('closed RAW inputs reject caller roots, continuity, secrets, duplicate authority and implicit acknowledgements', () => {
+   for (const [command, value] of [
+-    ['allow_agent_identity', { projectId: 'project-1', root: '/not-authority' }],
+-    ['allow_agent_identity', { projectId: '/project-1' }],
++    ['allow_agent_identity', { projectId: 'project-1', expectedPermissionRevision: '0', root: '/not-authority' }],
++    ['allow_agent_identity', { projectId: '/project-1', expectedPermissionRevision: '0' }],
++    ['allow_agent_identity', { projectId: 'project-1' }],
+     ['review_agent_identity', { intentId: INTENT, window: 'main' }],
+     ['review_agent_identity', { intentId: '0'.repeat(32) }],
+     ['prepare_agent_identity', { intentId: INTENT, sessionId: SID, revision: REV }],
+@@ -93,6 +96,91 @@ test('GUI observations are bounded immutable DATA, never native settlement or a
+   assert.equal(Object.hasOwn(observed.requests[0], 'settled'), false);
+ });
+ 
++test('only MAIN Check carries a closed full-u64 revision; old response and CLI-shaped data cannot supply it', () => {
++  const plain = gui();
++  assert.ok(parseAgentIdentityGuiStatus(plain));
++  assert.equal(parseAgentIdentityCheck(plain), null);
++  for (const revision of ['0', '1', '9007199254740993', '18446744073709551615']) {
++    const check = { ...gui(), permissionRevision: revision };
++    assert.equal(parseAgentIdentityCheck(check)?.permissionRevision, revision);
++    assert.equal(parseAgentIdentityGuiStatus(check), null, 'the old body parser is not relaxed');
++    const bytes = encodeAgentIdentityRequest('allow_agent_identity', { projectId: 'project-1', expectedPermissionRevision: revision });
++    assert.ok(bytes);
++    assert.equal(JSON.parse(new TextDecoder().decode(bytes)).expectedPermissionRevision, revision);
++  }
++  for (const revision of [null, 0, -0, 9007199254740992, '', '00', '01', '-1', '+1', ' 1', '1\n', '1\r', '1\u2028', '18446744073709551616']) {
++    assert.equal(parseAgentIdentityCheck({ ...gui(), permissionRevision: revision }), null);
++    assert.equal(encodeAgentIdentityRequest('allow_agent_identity', { projectId: 'project-1', expectedPermissionRevision: revision }), null);
++  }
++  assert.equal(parseAgentIdentityCheck({ ...gui(), permissionRevision: '0', authority: true }), null);
++  let reads = 0;
++  const getter = { ...gui(), get permissionRevision() { reads++; return '0'; } };
++  assert.equal(parseAgentIdentityCheck(getter), null);
++  assert.equal(reads, 0);
++});
++
++test('same pure Check witness requires new ACK and consumption keeps the original decimal revision', async () => {
++  const p = ports(), context = { service: {}, api: p.agent, projectId: 'project-1', epoch: 1 };
++  let permission = emptyIdentityPermission;
++  permission = acknowledgeIdentityPermission(permission, true, context);
++  assert.equal(identityPermissionAcknowledged(permission, context), false);
++  assert.equal(consumeIdentityPermission(permission, context).expectedPermissionRevision, null);
++  assert.equal(p.calls.length, 0, 'witness logic cannot invoke anything');
++  const original = p.agent.status();
++  assert.equal(original, p.calls[0].promise);
++  assert.equal(identityPermissionChecked(permission, context), false, 'an entered Check has not returned');
++  p.calls[0].resolve({ ...gui(), permissionRevision: '9007199254740993' });
++  const returned = parseAgentIdentityCheck(await original); assert.ok(returned);
++  permission = observedIdentityPermission(context, returned.permissionRevision);
++  assert.equal(identityPermissionAcknowledged(permission, context), false);
++  permission = acknowledgeIdentityPermission(permission, true, context);
++  const consumed = consumeIdentityPermission(permission, context);
++  permission = consumed.permission;
++  assert.equal(consumed.expectedPermissionRevision, '9007199254740993');
++  assert.equal(consumeIdentityPermission(permission, context).expectedPermissionRevision, null);
++  const allow = p.agent.allow(context.projectId, consumed.expectedPermissionRevision);
++  assert.equal(allow, p.calls[1].promise);
++  assert.deepEqual(p.calls[1].args, { projectId: 'project-1', expectedPermissionRevision: '9007199254740993' });
++  p.calls[1].resolve(gui()); await allow;
++  assert.equal(identityPermissionChecked(permission, context), false, 'Allow DATA does not recreate a Check witness');
++});
++
++test('later equal-revision Check drops ACK; old ACK cannot authorize a replacement witness', () => {
++  const p = ports(), context = { service: {}, api: p.agent, projectId: 'project-1', epoch: 1 };
++  const first = acknowledgeIdentityPermission(observedIdentityPermission(context, '3'), true, context);
++  assert.equal(identityPermissionAcknowledged(first, context), true);
++  const next = observedIdentityPermission(context, '3');
++  assert.equal(identityPermissionAcknowledged(next, context), false);
++  assert.equal(consumeIdentityPermission({ checked: next.checked, acknowledged: first.acknowledged }, context).expectedPermissionRevision, null);
++  assert.equal(consumeIdentityPermission(acknowledgeIdentityPermission(next, true, context), context).expectedPermissionRevision, '3');
++  assert.equal(consumeIdentityPermission(emptyIdentityPermission, context).expectedPermissionRevision, null, 'Revoke/lost/malformed results keep the explicit empty witness');
++  assert.equal(p.calls.length, 0);
++});
++
++test('witness is bound to original service, API, project and context epoch including ABA; exhausted data cannot arm', () => {
++  const p = ports(), context = { service: {}, api: p.agent, projectId: 'project-1', epoch: 7 };
++  const permission = acknowledgeIdentityPermission(observedIdentityPermission(context, '0'), true, context);
++  for (const changed of [
++    { ...context, service: {} }, { ...context, api: ports().agent }, { ...context, api: null },
++    { ...context, projectId: 'project-2' }, { ...context, projectId: null }, { ...context, epoch: 8 },
++    { ...context, epoch: Number.MAX_SAFE_INTEGER },
++  ]) {
++    assert.equal(identityPermissionChecked(permission, changed), false);
++    assert.equal(consumeIdentityPermission(permission, changed).expectedPermissionRevision, null);
++  }
++  assert.equal(consumeIdentityPermission(permission, { ...context, epoch: 9 }).expectedPermissionRevision, null,
++    'returning to the same project/API after context invalidation is not the old intent');
++  for (const revision of ['18446744073709551614', '18446744073709551615']) {
++    assert.ok(parseAgentIdentityCheck({ ...gui(), permissionRevision: revision }), 'bounded exhausted DATA is still displayable');
++    assert.equal(identityPermissionChecked(observedIdentityPermission(context, revision), context), false);
++  }
++  const captured = observedIdentityPermission(context, '5');
++  context.projectId = 'project-2';
++  assert.equal(captured.checked.context.projectId, 'project-1');
++  assert.ok(Object.isFrozen(captured.checked.context));
++  assert.equal(p.calls.length, 0);
++});
++
+ test('binding sends nothing until explicit original Open, rejects changed selection and cannot replay lost Open ACK', async () => {
+   const p = ports(), binding = p.bound(); assert.ok(binding); assert.equal(p.calls.length, 0);
+   assert.throws(() => binding.open({ ...opened(), projectId: 'project-2' }));
+diff --git a/desktop/tests/catalog.test.mjs b/desktop/tests/catalog.test.mjs
+index f770eefe..dd70379f 100644
+--- a/desktop/tests/catalog.test.mjs
++++ b/desktop/tests/catalog.test.mjs
+@@ -380,7 +380,7 @@ test('ten reviewed identity and upload-key controls have exact local-main ACL gr
+   assert.ok(agent); assert.equal(emitted.length, 0);
+   const [intentId, sessionId, revision, planToken] = ['a', 'b', 'c', 'd'].map((c) => c.repeat(32));
+   for (const action of [
+-    () => agent.status(), () => agent.allow('project-1'), () => agent.revoke(),
++    () => agent.status(), () => agent.allow('project-1', '0'), () => agent.revoke(),
+     () => agent.decline(intentId), () => agent.review(intentId),
+     () => agent.prepare({ intentId, sessionId, revision, acknowledgeNewApplication: true }),
+     () => agent.apply({ intentId, sessionId, revision, planToken, reviewed: true }),
+@@ -394,10 +394,13 @@ test('ten reviewed identity and upload-key controls have exact local-main ACL gr
+     'upload_key_status', 'upload_key_prepare', 'upload_key_create',
+   ]);
+   assert.ok(emitted.slice(0, 7).every(({ args }) => args instanceof Uint8Array));
+-  const permitted = capability.permissions.filter((p) => typeof p === 'string'
+-    && (p.includes('agent-identity') || p.startsWith('allow-upload-key-')));
++  // This case invokes these ten controls, not the later identity-action or
++  // upload-key recovery controls covered by their own contracts.
++  const emittedGrants = new Set(emitted.map(({ command }) => 'allow-' + command.replaceAll('_', '-')));
++  assert.equal(emittedGrants.size, 10);
++  const permitted = capability.permissions.filter((p) => emittedGrants.has(p));
+   assert.equal(permitted.length, 10);
+-  assert.deepEqual(new Set(permitted), new Set(emitted.map(({ command }) => 'allow-' + command.replaceAll('_', '-'))));
++  assert.deepEqual(new Set(permitted), emittedGrants);
+   assert.deepEqual(capability.windows, ['main']); assert.equal(capability.local, true);
+   assert.equal(Object.hasOwn(capability, 'remote'), false);
+   assert.equal(Object.hasOwn(capability, 'webviews'), false);

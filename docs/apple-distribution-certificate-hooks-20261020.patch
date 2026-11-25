@@ -1,0 +1,52 @@
+diff --git a/desktop/src-tauri/src/macos_store_runtime.rs b/desktop/src-tauri/src/macos_store_runtime.rs
+--- a/desktop/src-tauri/src/macos_store_runtime.rs
++++ b/desktop/src-tauri/src/macos_store_runtime.rs
+@@ -16,6 +16,7 @@
+     "store/tooling/fastlane/apple_provisioning_profile_read.rb",
+     "store/tooling/fastlane/apple_distribution_key.rb",
+     "store/tooling/fastlane/apple_distribution_key_verify.rb",
++    "store/tooling/fastlane/apple_provisioning_certificate_issuance.rb",
+     "store/tooling/fastlane/apple_store_versions.rb",
+     "store/licenses/Ruby-COPYING", "store/licenses/Ruby-BSDL", "store/licenses/Ruby-LEGAL",
+     "store/licenses/OpenSSL-LICENSE.txt", "store/licenses/LibYAML-License",
+diff --git a/fastlane/apple_provisioning_bundle_read.rb b/fastlane/apple_provisioning_bundle_read.rb
+--- a/fastlane/apple_provisioning_bundle_read.rb
++++ b/fastlane/apple_provisioning_bundle_read.rb
+@@ -27,6 +27,7 @@
+     def self.supported_input?(input)
+       input.instance_of?(Input) ||
+         (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input)) ||
++        (defined?(AppleCertificateIssuance::Input) && input.instance_of?(AppleCertificateIssuance::Input)) ||
+         (defined?(AppleStoreVersions::Input) && input.instance_of?(AppleStoreVersions::Input))
+     end
+
+@@ -120,6 +121,7 @@
+         @request = AppleProvisioning::Request.new(input.request)
+         kind = if input.instance_of?(Input) then "list_bundle_ids"
+                elsif defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input) then "list_profiles"
++               elsif defined?(AppleCertificateIssuance::Input) && input.instance_of?(AppleCertificateIssuance::Input) then input.step
+                else "current_app_before"
+                end
+         AppleBundleRead.require!(@request.kind == kind)
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -47,6 +47,7 @@
+   "fastlane/apple_provisioning_profile_read.rb",
+   "fastlane/apple_distribution_key.rb",
+   "fastlane/apple_distribution_key_verify.rb",
++  "fastlane/apple_provisioning_certificate_issuance.rb",
+   "fastlane/apple_production.rb",
+   "fastlane/apple_asset_upload.rb",
+   "fastlane/apple_create_retry.rb",
+diff --git a/src/mobile_release/tooling.py b/src/mobile_release/tooling.py
+--- a/src/mobile_release/tooling.py
++++ b/src/mobile_release/tooling.py
+@@ -22,6 +22,7 @@
+     "fastlane/apple_provisioning_profile_read.rb",
+     "fastlane/apple_distribution_key.rb",
+     "fastlane/apple_distribution_key_verify.rb",
++    "fastlane/apple_provisioning_certificate_issuance.rb",
+     "fastlane/apple_store_versions.rb",
+     "fastlane/apple_production.rb",
+     "fastlane/apple_asset_upload.rb",

@@ -1,0 +1,327 @@
+// Inert bridge observations: no Keychain, native processes, filesystem or Stores.
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { LocalReleaseHistoryController, localHistoryRequest, localHistoryOwnerReason } from '../src/localReleaseHistory.ts';
+import { parseLocalHistoryStatus, encodeLocalHistoryRequest, LOCAL_HISTORY_CONSENT } from '../src/localReleaseHistoryProtocol.ts';
+import { createNativeApi } from '../src/bridge.ts';
+const A='a'.repeat(32),B='b'.repeat(32),UUID='12345678-1234-4234-8234-123456789abc';
+const copy=v=>structuredClone(v);
+const status=(revision=0,operation=null)=>({schemaVersion:1,statusRevision:revision,availability:'available',operation});
+const op=request=>({operationId:A,ownerGeneration:B,context:copy(request),phase:'awaiting-consent',intentUsable:true,outcome:null,reason:'none',result:null});
+const terminal=o=>({...o,phase:'terminal',intentUsable:false,outcome:'cancelled',reason:'cancelled'});
+async function fixture(){let projectId='p1',now=100,listener,latest=status(),cancel=0,start=0,prepareGate=null,other=null;
+ const controller=new LocalReleaseHistoryController({projectId:()=>projectId,otherOperationReason:()=>other,now:()=>now});
+ const api={mode:'native',subscribeLocalReleaseHistory:async f=>{listener=f;return()=>{};},localReleaseHistoryStatus:async()=>latest,
+ prepareLocalReleaseHistory:async request=>{if(prepareGate)await prepareGate;latest=status(latest.statusRevision+1,op(request));return copy(latest);},
+ startLocalReleaseHistory:async request=>{start++;assert.equal(request.consentVersion,LOCAL_HISTORY_CONSENT);latest=status(latest.statusRevision+1,{...latest.operation,phase:'running',intentUsable:false});return copy(latest);},
+ cancelLocalReleaseHistory:async(a,b)=>{assert.equal(a,A);assert.equal(b,B);cancel++;latest=status(latest.statusRevision+1,terminal(latest.operation));return copy(latest);}};
+ await controller.connect(api);controller.syncProject();
+ return{controller,api,counts:()=>({start,cancel}),project:id=>{projectId=id;controller.syncProject();},time:v=>now=v,busy:v=>other=v,defer:()=>{let release;prepareGate=new Promise(r=>release=r);return release;},emit:v=>{latest=v;listener(copy(v));},latest:()=>copy(latest)};
+}
+test('exact local request, finite history, and raw IPC reject private or contradictory output',async()=>{
+ const request=localHistoryRequest('p1','enroll');assert.deepEqual(copy(request),{projectId:'p1',executionMode:'local',action:'enroll'});
+ assert.equal(localHistoryRequest(null,'verify'),null);
+ assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{...request,executionMode:'github'}),null);
+ assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{...request,key:'private'}),null);
+ let getter=0;const unsafe={};Object.defineProperty(unsafe,'operationId',{enumerable:true,get(){getter++;return A;}});assert.equal(encodeLocalHistoryRequest('cancel_local_release_history',unsafe),null);assert.equal(getter,0);
+ const complete={...op(request),phase:'terminal',intentUsable:false,outcome:'complete',result:{schemaVersion:1,scope:'local-release-history',enrolled:true,headSequence:2,history:[{operationId:UUID,phase:'prepared',recoveryRequired:true}],limitations:['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary']}};
+ assert.ok(parseLocalHistoryStatus(status(1,complete)));
+ for(const mutate of [r=>r.history[0].recoveryRequired=false,r=>r.history.push(copy(r.history[0])),r=>r.headSequence=514,r=>r.headSequence=1,r=>r.history[0].operationId=UUID.toUpperCase(),r=>r.history[0].path='/private',r=>r.limitations.pop(),r=>r.enrolled=false]){const bad=copy(complete);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);}
+ const contradictory=copy(complete);contradictory.reason='protocol-error';assert.equal(parseLocalHistoryStatus(status(1,contradictory)),null);
+ const calls=[];const api=createNativeApi('native',async(command,body)=>{calls.push([command,body]);return status();},async()=>()=>{});
+ await api.prepareLocalReleaseHistory(request);assert.equal(calls[0][0],'prepare_local_release_history');assert.ok(calls[0][1] instanceof Uint8Array);assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0][1])),copy(request));
+ const preview=createNativeApi('preview',async()=>{assert.fail('preview cannot call native');});await assert.rejects(()=>preview.prepareLocalReleaseHistory(request));
+});
+test('enroll and verify are separate one-use consent; project change stops original',async()=>{
+ const h=await fixture();try{h.emit(status(1,terminal({...op(localHistoryRequest('earlier-project','verify')),operationId:'c'.repeat(32)})));assert.equal(h.controller.getSnapshot().historical,true);assert.equal(h.controller.prepareReason(),null);h.controller.setAction('enroll');await h.controller.prepare();assert.equal(h.latest().operation.context.action,'enroll');h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(h.counts().start,1);h.project('p2');await Promise.resolve();assert.equal(h.counts().cancel,1);assert.equal(h.controller.getSnapshot().historical,true);}finally{h.controller.dispose();}
+});
+test('late prepare after project change, explicit cancel, or navigation cannot create new consent',async()=>{
+ for(const retire of [h=>h.project('p2'),h=>h.controller.cancel(),h=>h.controller.setVisible(false)]){
+  const h=await fixture();try{const release=h.defer();const pending=h.controller.prepare();retire(h);release();await pending;await Promise.resolve();assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.equal(h.controller.getSnapshot().consentUntil,null);}finally{h.controller.dispose();}
+ }
+});
+test('expired consent, pending selection and another owner prevent Start',async()=>{
+ for(const change of [h=>h.time(60101),h=>h.controller.setSelectionPending(true),h=>h.busy('Other original operation')]){
+  const h=await fixture();try{await h.controller.prepare();h.controller.acknowledge(true);change(h);await h.controller.start();assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);}finally{h.controller.dispose();}
+ }
+});
+test('unknown cleanup and conflicting revisions remain blocking after refresh',async()=>{
+ for(const conflict of [false,true]){
+  const h=await fixture();try{await h.controller.prepare();const old=h.latest();h.emit(status(old.statusRevision+(conflict?0:1),{...old.operation,phase:'unknown',intentUsable:false,outcome:'unknown',reason:'cleanup-unknown',result:null}));await h.controller.checkStatus();assert.ok(localHistoryOwnerReason(h.controller.getSnapshot()));assert.equal(h.controller.getSnapshot().blocked,true);h.controller.acknowledge(true);await h.controller.start();assert.equal(h.counts().start,0);}finally{h.controller.dispose();}
+ }
+});
+test('failed cancellation retains original and only explicit retry sends another cancellation',async()=>{
+ const h=await fixture();try{await h.controller.prepare();let reject,calls=0;const original=h.api.cancelLocalReleaseHistory;
+ h.api.cancelLocalReleaseHistory=(a,b)=>{assert.equal(a,A);assert.equal(b,B);calls++;return calls===1?new Promise((_,r)=>reject=r):original(a,b);};
+ const pending=h.controller.cancel();await h.controller.cancel();assert.equal(calls,1);reject(new Error('inert failure'));await pending;await Promise.resolve();
+ h.controller.invalidate();await h.controller.checkStatus();assert.equal(calls,1);assert.ok(localHistoryOwnerReason(h.controller.getSnapshot()));
+ await h.controller.cancel();assert.equal(calls,2);assert.equal(h.controller.getSnapshot().status.operation.phase,'terminal');assert.equal(h.controller.getSnapshot().blocked,true);
+ }finally{h.controller.dispose();}
+});
+
+const candidate=()=>({operationId:UUID,candidateSha256:'a'.repeat(64),sourceCommit:'b'.repeat(40),sourceTree:'c'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:12},files:[{fileName:'app-release.aab',bytes:1073741824,sha256:'d'.repeat(64)},{fileName:'store-metadata.zip',bytes:536870912,sha256:'e'.repeat(64)},{fileName:'validation-report.json',bytes:65536,sha256:'f'.repeat(64)}],observation:'current-bundle-only',priorCreateFinality:'not-established'});
+function inputHistory(request,phase='inputs-ready'){
+ return {...op(request),operationId:'c'.repeat(32),phase:'terminal',intentUsable:false,outcome:'complete',result:{schemaVersion:1,scope:'local-release-history',enrolled:true,headSequence:3,history:[{operationId:UUID,phase,recoveryRequired:phase!=='settled-failure'}],limitations:['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'],...(request.action==='review-inputs'||request.action==='abandon-inputs'?{candidateInputs:phase==='inputs-ready'?candidate():null}:{})}};
+}
+test('candidate history uses exact action grammar and current-bundle-only result, never ordinary verification authority',()=>{
+ const request=localHistoryRequest('p1','review-inputs',UUID);
+ assert.equal(localHistoryRequest('p1','review-inputs'),null);
+ assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{projectId:'p1',executionMode:'local',action:'verify',candidateOperationId:UUID}),null);
+ assert.equal(localHistoryRequest('p1','review-inputs',UUID.replace('4234','1234')),null);
+ const complete=inputHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
+ for(const mutate of [r=>r.candidateInputs.applicationId='_bad.app',r=>r.candidateInputs.applicationId='dev._bad',r=>r.candidateInputs.priorCreateFinality='complete',r=>r.candidateInputs.operationId='99999999-1234-4234-8234-123456789abc',r=>r.candidateInputs.files.reverse(),r=>r.candidateInputs.files[0].bytes++,r=>r.candidateInputs.sourceCommit='not-a-commit',r=>r.candidateInputs.files[0].path='/tmp/private',r=>r.candidateInputs=null,r=>r.history[0].phase='prepared']){
+  const bad=copy(complete);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ const old=inputHistory(localHistoryRequest('p1','verify'));old.result.candidateInputs=candidate();assert.equal(parseLocalHistoryStatus(status(1,old)),null);
+ for(const phase of ['inputs-pending','settled-failure'])assert.ok(parseLocalHistoryStatus(status(1,inputHistory(request,phase))));
+ const abandon=localHistoryRequest('p1','abandon-inputs',UUID);
+ assert.ok(parseLocalHistoryStatus(status(1,inputHistory(abandon,'settled-failure'))));
+ assert.equal(parseLocalHistoryStatus(status(1,inputHistory(abandon,'inputs-pending'))),null);
+});
+test('candidate review and abandonment bind consent to the selected original and preserve ordinary history behavior',async()=>{
+ for(const action of ['review-inputs','abandon-inputs']){
+  const h=await fixture();try{
+   h.emit(status(1,inputHistory(localHistoryRequest('p1','verify'))));
+   assert.equal(h.controller.selectCandidate(action,UUID),true);await h.controller.prepare();
+   assert.equal(h.latest().operation.context.candidateOperationId,UUID);
+   let called=0;h.api.startLocalReleaseHistory=async request=>{called++;assert.equal(request.consentVersion,'local-android-candidate-inputs-v1');return status(3,{...h.latest().operation,phase:'running',intentUsable:false});};
+   h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(called,1);
+  }finally{h.controller.dispose();}
+ }
+});
+test('candidate selection cannot follow an older project or prepared intent into another action',async()=>{
+ const h=await fixture();try{
+  h.emit(status(1,inputHistory(localHistoryRequest('earlier','verify'))));assert.equal(h.controller.selectCandidate('review-inputs',UUID),false);
+  h.emit(status(2,inputHistory(localHistoryRequest('p1','verify'))));assert.equal(h.controller.selectCandidate('review-inputs','99999999-1234-4234-8234-123456789abc'),false);
+  assert.equal(h.controller.selectCandidate('review-inputs',UUID),true);await h.controller.prepare();h.controller.acknowledge(true);
+  h.controller.setSelectionPending(true);h.project('p2');h.controller.setSelectionPending(false);await h.controller.start();
+  assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.deepEqual(copy(h.controller.getSnapshot().request),{projectId:'p2',executionMode:'local',action:'verify'});
+ }finally{h.controller.dispose();}
+});
+
+test('abandonment requires the latest history operation, unlike read-only review',async()=>{
+ const h=await fixture();try{
+  const earlier=inputHistory(localHistoryRequest('p1','verify'));
+  const later='99999999-1234-4234-8234-123456789abc';
+  earlier.result.headSequence=4;earlier.result.history.push({operationId:later,phase:'inputs-pending',recoveryRequired:true});
+  h.emit(status(1,earlier));assert.equal(h.controller.selectCandidate('abandon-inputs',UUID),false);
+  assert.equal(h.controller.selectCandidate('review-inputs',UUID),true);
+  const result=inputHistory(localHistoryRequest('p1','abandon-inputs',UUID),'settled-failure');
+  result.result.headSequence=4;result.result.history.push({operationId:later,phase:'inputs-pending',recoveryRequired:true});
+  assert.equal(parseLocalHistoryStatus(status(2,result)),null);
+ }finally{h.controller.dispose();}
+});
+
+const prepared=()=>({operationId:UUID,candidateSha256:'a'.repeat(64),intentSha256:'b'.repeat(64),storePreconditionSha256:'c'.repeat(64),sourceCommit:'d'.repeat(40),sourceTree:'e'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:12},destination:{channel:'internal',releaseStatus:'completed'},observedAt:'2026-10-16T12:34:56Z',limitations:['non-publishing','prepare-not-execute','temporary-edit-may-expire','current-bundle-not-historical-finality','saved-inputs-not-atomic'],observation:'current-prepared-files-only',priorPrepareFinality:'not-established'});
+function preparedHistory(request){const result=inputHistory(request,'prepared');result.result.headSequence=5;if(request.action==='review-prepared')result.result.preparedIntent=prepared();return result;}
+test('prepared review has exact current-files-only grammar and cannot impersonate Prepare or another operation',()=>{
+ const request=localHistoryRequest('p1','review-prepared',UUID);
+ assert.deepEqual(copy(request),{projectId:'p1',executionMode:'local',action:'review-prepared',candidateOperationId:UUID});
+ assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
+ assert.equal(localHistoryRequest('p1','review-prepared'),null);
+ const complete=preparedHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
+ for(const mutate of [r=>r.headSequence=4,r=>r.history[0].phase='prepare-pending',r=>r.history[0].phase='execute-pending',r=>r.preparedIntent=null,r=>delete r.preparedIntent,r=>r.candidateInputs=null,r=>r.preparedIntent.operationId='99999999-1234-4234-8234-123456789abc',r=>r.preparedIntent.candidateSha256='bad',r=>r.preparedIntent.sourceTree='f'.repeat(64),r=>r.preparedIntent.version.build=0,r=>r.preparedIntent.version.name='bad name',r=>r.preparedIntent.destination.channel='production',r=>r.preparedIntent.destination.releaseStatus='draft',r=>r.preparedIntent.observedAt='2026-02-30T12:34:56Z',r=>r.preparedIntent.priorPrepareFinality='complete',r=>r.preparedIntent.observation='current-bundle-only',r=>r.preparedIntent.limitations.pop(),r=>r.preparedIntent.path='/private/account',r=>r.preparedIntent.applicationId='dev._bad']){
+  const bad=copy(complete);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ let getter=0;const unsafe=copy(complete);Object.defineProperty(unsafe.result.preparedIntent,'intentSha256',{enumerable:true,get(){getter++;return 'b'.repeat(64);}});assert.equal(parseLocalHistoryStatus(status(1,unsafe)),null);assert.equal(getter,0);
+ for(const action of ['verify','review-inputs','abandon-inputs']){const bad=copy(complete);bad.context=localHistoryRequest('p1',action,UUID);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);}
+});
+test('prepared rows alone select read-only review and use original candidate consent once, including earlier same-project operations',async()=>{
+ const h=await fixture();try{
+  for(const [index,phase] of ['inputs-ready','prepare-pending','execute-pending','settled-failure'].entries()){
+   const value=preparedHistory(localHistoryRequest('p1','verify'));value.result.history[0]={operationId:UUID,phase,recoveryRequired:phase!=='settled-failure'};h.emit(status(index+1,value));assert.equal(h.controller.selectCandidate('review-prepared',UUID),false);
+  }
+  const ready=preparedHistory(localHistoryRequest('p1','verify'));ready.result.headSequence=6;ready.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});h.emit(status(5,ready));
+  assert.equal(h.controller.selectCandidate('abandon-inputs',UUID),false);assert.equal(h.controller.selectCandidate('review-inputs',UUID),false);assert.equal(h.controller.selectCandidate('review-prepared',UUID),true);
+  await h.controller.prepare();let calls=0,finish;const returned=new Promise(resolve=>{finish=resolve;});
+  h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-android-candidate-inputs-v1');assert.deepEqual([request.operationId,request.ownerGeneration],[A,B]);return returned;};
+  h.controller.acknowledge(true);const pending=h.controller.start();
+  h.emit(status(7,{...h.latest().operation,phase:'running',intentUsable:false}));
+  await h.controller.start();assert.equal(calls,1);assert.equal(h.counts().cancel,0);assert.equal(h.controller.getSnapshot().status.operation.phase,'running');assert.equal(h.controller.getSnapshot().historical,false);
+  finish(status(8,{...preparedHistory(h.latest().operation.context),operationId:A}));await pending;await h.controller.start();
+  assert.equal(calls,1);assert.equal(h.counts().cancel,0);assert.equal(h.controller.getSnapshot().historical,false);assert.equal(h.controller.getSnapshot().status.operation.result.preparedIntent.priorPrepareFinality,'not-established');
+ }finally{h.controller.dispose();}
+});
+test('prepared review rejects stale project selection and retires pending consent before any Start',async()=>{
+ for(const change of [h=>h.project('p2'),h=>h.controller.setSelectionPending(true),h=>h.controller.setVisible(false)]){
+  const h=await fixture();try{
+   h.emit(status(1,preparedHistory(localHistoryRequest('earlier','verify'))));assert.equal(h.controller.selectCandidate('review-prepared',UUID),false);
+   h.emit(status(2,preparedHistory(localHistoryRequest('p1','verify'))));assert.equal(h.controller.selectCandidate('review-prepared',UUID),true);
+   await h.controller.prepare();h.controller.acknowledge(true);change(h);await h.controller.start();assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.equal(h.controller.getSnapshot().historical,true);
+  }finally{h.controller.dispose();}
+ }
+});
+
+const execution=()=>{const value=prepared();delete value.storePreconditionSha256;delete value.priorPrepareFinality;
+ return {...value,receiptSha256:'f'.repeat(64),authorizationId:'99999999-1234-4234-8234-123456789abc',result:'accepted',
+  limitations:['internal-testing-only','not-public-release','prior-prepare-finality-not-established','saved-inputs-not-atomic'],
+  observation:'current-execution-files-only',priorExecutionFinality:'not-established'};};
+function executionHistory(request){const value=inputHistory(request,'settled-success');value.result.headSequence=7;value.result.history[0].recoveryRequired=false;if(request.action==='review-execution')value.result.executionReceipt=execution();return value;}
+test('execution review admits only exact15 current-file fields and settled selected history, not Execute finality',()=>{
+ const request=localHistoryRequest('p1','review-execution',UUID);assert.ok(request);assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
+ assert.equal(localHistoryRequest('p1','review-execution'),null);
+ const complete=executionHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));assert.equal(Object.keys(complete.result.executionReceipt).length,15);
+ for(const key of Object.keys(complete.result.executionReceipt)){const bad=copy(complete);delete bad.result.executionReceipt[key];assert.equal(parseLocalHistoryStatus(status(1,bad)),null,key);}
+ for(const mutate of [r=>r.headSequence=6,r=>r.executionReceipt=null,r=>delete r.executionReceipt,r=>r.candidateInputs=null,r=>r.preparedIntent=prepared(),
+  r=>r.executionReceipt.receiptSha256='f'.repeat(63),r=>r.executionReceipt.authorizationId=UUID.toUpperCase(),r=>r.executionReceipt.operationId='99999999-1234-4234-8234-123456789abc',
+  r=>r.executionReceipt.result='pending',r=>r.executionReceipt.priorExecutionFinality='complete',r=>r.executionReceipt.observation='current-store-state',
+  r=>r.executionReceipt.destination.channel='production',r=>r.executionReceipt.observedAt='2026-02-30T12:34:56Z',r=>r.executionReceipt.version.build=2100000001,
+  r=>r.executionReceipt.limitations.reverse(),r=>r.executionReceipt.path='/private',r=>r.history[0].phase='execute-pending',r=>r.history[0].recoveryRequired=true]){
+  const bad=copy(complete);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ for(const action of ['enroll','verify','review-inputs','abandon-inputs','review-prepared']){
+  const bad=copy(complete);bad.context=localHistoryRequest('p1',action,UUID);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ let getter=0;const unsafe=copy(complete);Object.defineProperty(unsafe.result.executionReceipt,'receiptSha256',{enumerable:true,get(){getter++;return'f'.repeat(64);}});assert.equal(parseLocalHistoryStatus(status(1,unsafe)),null);assert.equal(getter,0);
+});
+test('execution review selects completed current-project rows and uses existing original candidate consent once',async()=>{
+ const h=await fixture();try{
+  for(const [index,phase] of ['inputs-ready','prepared','execute-pending','settled-failure','reconciliation-required'].entries()){
+   const value=executionHistory(localHistoryRequest('p1','verify'));value.result.history[0]={operationId:UUID,phase,recoveryRequired:!phase.startsWith('settled-')};h.emit(status(index+1,value));assert.equal(h.controller.selectCandidate('review-execution',UUID),false);
+  }
+  const ready=executionHistory(localHistoryRequest('p1','verify'));ready.result.headSequence=8;ready.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});h.emit(status(6,ready));
+  assert.equal(h.controller.selectCandidate('review-prepared',UUID),false);assert.equal(h.controller.selectCandidate('abandon-inputs',UUID),false);
+  assert.equal(h.controller.selectCandidate('review-execution',UUID),true);await h.controller.prepare();let calls=0;
+  h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-android-candidate-inputs-v1');assert.deepEqual([request.operationId,request.ownerGeneration],[A,B]);return status(8,{...h.latest().operation,phase:'running',intentUsable:false});};
+  h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);assert.equal(h.counts().cancel,0);
+  const result=executionHistory(h.latest().operation.context);result.operationId=A;h.emit(status(9,result));
+  assert.equal(h.controller.getSnapshot().status.operation.result.executionReceipt.priorExecutionFinality,'not-established');assert.equal(h.controller.getSnapshot().historical,false);
+ }finally{h.controller.dispose();}
+});
+test('execution review cannot follow old rows or pending-picker context into fresh consent',async()=>{
+ for(const change of [h=>h.project('p2'),h=>h.controller.setSelectionPending(true),h=>h.controller.setAction('verify')]){
+  const h=await fixture();try{
+   h.emit(status(1,executionHistory(localHistoryRequest('earlier','verify'))));assert.equal(h.controller.selectCandidate('review-execution',UUID),false);
+   h.emit(status(2,executionHistory(localHistoryRequest('p1','verify'))));assert.equal(h.controller.selectCandidate('review-execution','99999999-1234-4234-8234-123456789abc'),false);
+   assert.equal(h.controller.selectCandidate('review-execution',UUID),true);await h.controller.prepare();h.controller.acknowledge(true);change(h);await h.controller.start();
+   assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.equal(h.controller.getSnapshot().historical,true);assert.equal(h.controller.getSnapshot().consentUntil,null);
+  }finally{h.controller.dispose();}
+ }
+});
+
+import { reconciliationReceiptSummary } from '../src/localStoreReconcileProtocol.ts';
+const recovery=()=>({...execution(),result:'reconciled',observation:'current-recovery-files-only',
+ limitations:['non-publishing','not-retry-permission','old-evidence-preserved','saved-inputs-not-atomic']});
+function recoveryHistory(request){
+ const value=inputHistory(request,'target-reconciled');value.result.headSequence=7;value.result.history[0].recoveryRequired=false;
+ if(request.action==='review-recovery')value.result.reconciliationReceipt=recovery();return value;
+}
+test('recovery History retains exact offline receipt without minting a fresh target observation or prior finality',()=>{
+ const request=localHistoryRequest('p1','review-recovery',UUID);assert.ok(request);assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
+ assert.equal(localHistoryRequest('p1','review-recovery'),null);
+ const good=recoveryHistory(request);assert.ok(parseLocalHistoryStatus(status(1,good)));
+ assert.equal(reconciliationReceiptSummary(good.result.reconciliationReceipt,UUID),false);
+ const live={...recovery(),observation:'current-internal-target-only'};assert.ok(reconciliationReceiptSummary(live,UUID));
+ for(const mutate of [r=>r.headSequence=6,r=>r.history[0].phase='settled-success',r=>r.history[0].recoveryRequired=true,
+  r=>r.reconciliationReceipt=null,r=>r.reconciliationReceipt=live,r=>r.reconciliationReceipt.priorExecutionFinality='complete',
+  r=>r.reconciliationReceipt.result='accepted',r=>r.reconciliationReceipt.operationId='99999999-1234-4234-8234-123456789abc',
+  r=>r.reconciliationReceipt.path='/private/key',r=>r.reconciliationReceipt.authorizationId=A,
+  r=>r.reconciliationReceipt.destination.channel='production',r=>r.reconciliationReceipt.limitations.pop(),
+  r=>r.reconciliationReceipt.observedAt='2026-02-30T12:34:56Z',r=>r.executionReceipt=execution(),r=>r.preparedIntent=prepared()]){
+  const bad=copy(good);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ for(const action of ['verify','review-inputs','review-execution','review-reconcile']){
+  const bad=copy(good);bad.context=localHistoryRequest('p1',action,UUID);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+});
+test('earlier recovery checkpoint review is separate from another release and starts only under its original candidate consent',async()=>{
+ const h=await fixture();try{
+  const ready=recoveryHistory(localHistoryRequest('p1','verify'));ready.result.headSequence=8;
+  ready.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});h.emit(status(1,ready));
+  for(const action of ['review-execution','review-reconcile','abandon-inputs'])assert.equal(h.controller.selectCandidate(action,UUID),false);
+  assert.equal(h.controller.selectCandidate('review-recovery',UUID),true);await h.controller.prepare();let calls=0;
+  h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-android-candidate-inputs-v1');
+   return status(3,{...h.latest().operation,phase:'running',intentUsable:false});};
+  h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);assert.equal(h.counts().cancel,0);
+  const value=recoveryHistory(h.latest().operation.context);value.operationId=A;value.result.headSequence=8;value.result.history=ready.result.history;
+  h.emit(status(4,value));assert.equal(h.controller.getSnapshot().historical,false);
+  assert.equal(h.controller.getSnapshot().status.operation.result.reconciliationReceipt.observation,'current-recovery-files-only');
+ }finally{h.controller.dispose();}
+});
+test('recovery selection refuses foreign history and retires delayed Prepare on Cancel or project change',async()=>{
+ for(const retire of [h=>h.controller.cancel(),h=>h.project('p2')]){
+  const h=await fixture();try{
+   h.emit(status(1,recoveryHistory(localHistoryRequest('earlier','verify'))));assert.equal(h.controller.selectCandidate('review-recovery',UUID),false);
+   h.emit(status(2,recoveryHistory(localHistoryRequest('p1','verify'))));assert.equal(h.controller.selectCandidate('review-recovery',UUID),true);
+   const release=h.defer(),pending=h.controller.prepare();retire(h);release();await pending;await Promise.resolve();
+   assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.equal(h.controller.getSnapshot().consentUntil,null);
+  }finally{h.controller.dispose();}
+ }
+});
+
+const iosInputs=()=>{const {applicationId,...value}=candidate();return {...value,bundleId:'org.example.ios-app',
+ files:[{fileName:'export/App.ipa',bytes:4096,sha256:'d'.repeat(64)},...value.files.slice(1)],
+ archive:{directory:'archive.xcarchive',entries:7,bytes:8000,sha256:'e'.repeat(64)}};};
+function iosHistory(request,phase='inputs-ready'){const v=inputHistory(request,phase);if(v.result.candidateInputs)v.result.candidateInputs=iosInputs();return v;}
+test('iOS input History has explicit platform, distinct consent and closed archive summary without Play authority',()=>{
+ const request=localHistoryRequest('p1','review-inputs',UUID,'ios');assert.equal(request.platform,'ios');
+ assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
+ for(const action of ['enroll','verify','review-recovery'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+ for(const platform of [null,'android','macos'])assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{...request,platform}),null);
+ const complete=iosHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
+ const foreign=copy(complete);delete foreign.context.platform;assert.equal(parseLocalHistoryStatus(status(1,foreign)),null);
+ const mixed=copy(complete);mixed.result.candidateInputs=candidate();assert.equal(parseLocalHistoryStatus(status(1,mixed)),null);
+ for(const mutate of [v=>v.archive.directory='../archive.xcarchive',v=>v.archive.entries=100001,v=>v.archive.bytes=8589934593,
+  v=>v.files[0].fileName='export/nested/App.ipa',v=>v.files[0].bytes=4294967297,v=>v.files.reverse(),v=>v.bundleId='org..invalid',
+  v=>v.version.build=2100000001,v=>v.operationId='99999999-1234-4234-8234-123456789abc',v=>v.priorCreateFinality='established']){
+  const bad=copy(complete);mutate(bad.result.candidateInputs);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ let getters=0;const unsafe=copy(complete);Object.defineProperty(unsafe.result.candidateInputs.archive,'sha256',{enumerable:true,get(){getters++;return'e'.repeat(64);}});
+ assert.equal(parseLocalHistoryStatus(status(1,unsafe)),null);assert.equal(getters,0);
+ for(const phase of ['inputs-pending','settled-failure'])assert.ok(parseLocalHistoryStatus(status(1,iosHistory(request,phase))));
+ const abandon=localHistoryRequest('p1','abandon-inputs',UUID,'ios');assert.ok(parseLocalHistoryStatus(status(1,iosHistory(abandon,'settled-failure'))));
+ assert.equal(parseLocalHistoryStatus(status(1,iosHistory(abandon,'inputs-ready'))),null);
+});
+test('iOS History selector keeps original one-use consent and refuses changes during running or unknown owner',async()=>{
+ for(const action of ['review-inputs','abandon-inputs']){
+  const h=await fixture();try{
+   h.emit(status(1,inputHistory(localHistoryRequest('p1','verify'))));
+   assert.equal(h.controller.setInputPlatform('ios'),true);assert.equal(h.controller.getSnapshot().historical,false);
+   assert.equal(h.controller.selectCandidate(action,UUID),true);await h.controller.prepare();
+   assert.equal(h.latest().operation.context.platform,'ios');let calls=0;
+   h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-ios-candidate-inputs-v1');return status(3,{...h.latest().operation,phase:'running',intentUsable:false});};
+   h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);
+   assert.equal(h.controller.setInputPlatform('android'),false);assert.equal(h.counts().cancel,0);
+   h.emit(status(4,{...h.latest().operation,phase:'unknown',outcome:'unknown',reason:'cleanup-unknown',intentUsable:false,result:null}));
+   assert.equal(h.controller.setInputPlatform('android'),false);assert.ok(localHistoryOwnerReason(h.controller.getSnapshot()));
+  }finally{h.controller.dispose();}
+ }
+});
+test('platform changes retire late candidate review and project changes reset the explicit selection',async()=>{
+ const h=await fixture();try{
+  h.emit(status(1,inputHistory(localHistoryRequest('p1','verify'))));h.controller.setInputPlatform('ios');
+  assert.equal(h.controller.selectCandidate('review-inputs',UUID),true);
+  const release=h.defer(),pending=h.controller.prepare();assert.equal(h.controller.setInputPlatform('android'),true);release();await pending;await Promise.resolve();
+  assert.equal(h.controller.getSnapshot().consentUntil,null);assert.equal(h.counts().cancel,1);assert.equal(h.counts().start,0);
+  assert.equal(h.controller.getSnapshot().request.platform,undefined);
+ }finally{h.controller.dispose();}
+ const h2=await fixture();try{h2.controller.setInputPlatform('ios');h2.project('p2');assert.equal(h2.controller.getSnapshot().inputPlatform,'android');assert.equal(h2.controller.getSnapshot().request.action,'verify');}finally{h2.controller.dispose();}
+});
+
+function iosPreparedHistory(request){const v=preparedHistory(request),s=v.result.preparedIntent;if(s){delete s.applicationId;s.bundleId='org.example.ios-app';s.appStoreAppId='0012345';s.destination={channel:'testflight-internal'};s.limitations[2]='current-asc-snapshot-may-change';}return v;}
+test('iOS prepared History14 is current-files-only and excludes Android or hybrid wrappers',()=>{
+ const request=localHistoryRequest('p1','review-prepared',UUID,'ios');assert.ok(request);const good=iosPreparedHistory(request);assert.ok(parseLocalHistoryStatus(status(1,good)));
+ for(const change of [v=>delete v.context.platform,v=>v.context.action='review-reconcile',v=>v.result.headSequence=4,v=>v.result.history[0].phase='execute-pending',v=>v.result.preparedIntent=prepared(),v=>v.result.preparedIntent.applicationId='org.example.app',v=>v.result.preparedIntent.appStoreAppId='123x',v=>v.result.preparedIntent.priorPrepareFinality='complete',v=>v.result.preparedIntent.observation='current-bundle-only',v=>v.result.preparedIntent.limitations[2]='temporary-edit-may-expire',v=>v.result.preparedIntent.destination.channel='internal',v=>v.result.preparedIntent.path='/private/secret']){
+  const bad=copy(good);change(bad);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ const earlier=copy(good);earlier.result.headSequence=6;earlier.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});assert.ok(parseLocalHistoryStatus(status(1,earlier)));
+ for(const action of ['review-recovery','enroll','verify'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+});
+test('iOS prepared History selection uses original iOS consent once and platform changes retire pending consent',async()=>{
+ const h=await fixture();try{
+  h.emit(status(1,preparedHistory(localHistoryRequest('p1','verify'))));h.controller.setInputPlatform('ios');assert.equal(h.controller.selectCandidate('review-prepared',UUID),true);await h.controller.prepare();assert.equal(h.latest().operation.context.platform,'ios');let calls=0;
+  h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-ios-candidate-inputs-v1');return status(3,{...iosPreparedHistory(h.latest().operation.context),operationId:A});};
+  h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);assert.equal(h.controller.getSnapshot().status.operation.result.preparedIntent.appStoreAppId,'0012345');assert.equal(h.controller.getSnapshot().historical,false);
+ }finally{h.controller.dispose();}
+ const late=await fixture();try{
+  late.emit(status(1,preparedHistory(localHistoryRequest('p1','verify'))));late.controller.setInputPlatform('ios');assert.equal(late.controller.selectCandidate('review-prepared',UUID),true);const release=late.defer(),pending=late.controller.prepare();assert.equal(late.controller.setInputPlatform('android'),true);release();await pending;await Promise.resolve();assert.equal(late.counts().cancel,1);assert.equal(late.counts().start,0);assert.equal(late.controller.getSnapshot().consentUntil,null);
+ }finally{late.controller.dispose();}
+});
+
+test('iOS execution History16 binds closed TestFlight receipt but never grants Apple recovery',async()=>{
+ const request=localHistoryRequest('p1','review-execution',UUID,'ios');assert.ok(request);
+ const good=executionHistory(request),receipt=good.result.executionReceipt;delete receipt.applicationId;receipt.bundleId='org.example.ios-app';receipt.appStoreAppId='0012345';receipt.destination={channel:'testflight-internal'};
+ assert.equal(Object.keys(receipt).length,16);assert.ok(parseLocalHistoryStatus(status(1,good)));
+ for(const mutate of [v=>delete v.context.platform,v=>v.context.action='review-recovery',v=>v.result.executionReceipt.appStoreAppId='x',v=>v.result.executionReceipt.observation='current-store-state',v=>v.result.executionReceipt.priorExecutionFinality='complete',v=>v.result.executionReceipt.destination.channel='internal',v=>v.result.executionReceipt.applicationId='org.example.app',v=>v.result.history[0].phase='execute-pending']){const bad=copy(good);mutate(bad);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);}
+ const h=await fixture();try{h.emit(status(1,executionHistory(localHistoryRequest('p1','verify'))));h.controller.setInputPlatform('ios');assert.equal(h.controller.selectCandidate('review-execution',UUID),true);assert.equal(h.controller.getSnapshot().request.platform,'ios');await h.controller.prepare();h.controller.acknowledge(true);h.controller.setInputPlatform('android');await h.controller.start();assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);}finally{h.controller.dispose();}
+});

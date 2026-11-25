@@ -468,11 +468,12 @@ class BeforeActiveFailureTests(unittest.TestCase):
             for builds in (False, True):
                 for kind in ("group", "resource"):
                     with self.subTest(mode=mode, builds=builds, kind=kind), ExitStack() as stack:
-                        def fail_doctor(config, platforms, *, execution_source=None, cancellation=None):
+                        def fail_doctor(config, platforms, *, scope, execution_source=None, cancellation=None):
                             invocation = build_inputs._ENV_OWNER  # Passive observation, never authority manufacture.
                             self.assertIs(type(invocation), build_inputs.InvocationCustody)
                             self.assertIs(config, self.ios)
                             self.assertEqual(platforms, ("ios",))
+                            self.assertEqual(scope, "release")
                             self.assertIs(cancellation, invocation.cancellation)
                             self.assertEqual(invocation.root, config.root)
                             self.assertTrue(invocation.active and invocation.reserved)

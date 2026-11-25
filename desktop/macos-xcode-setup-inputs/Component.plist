@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><array><dict>
+  <key>RootRelativeBundlePath</key><string>MobileReleaseKitXcodeSetup.bundle</string>
+  <key>BundleIsRelocatable</key><false/>
+  <key>BundleIsVersionChecked</key><false/>
+  <key>BundleHasStrictIdentifier</key><true/>
+  <key>BundleOverwriteAction</key><string>upgrade</string>
+  <key>BundlePostInstallScriptPath</key><string>setup/postinstall</string>
+  <key>BundleInstallScriptTimeout</key><integer>3800</integer>
+</dict></array></plist>

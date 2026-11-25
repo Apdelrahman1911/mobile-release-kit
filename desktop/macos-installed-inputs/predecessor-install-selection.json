@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "aarch64-apple-darwin": {
+      "source": "bf9d397bde641aae4b4cd205f3c962e899557650",
+      "tree": "f3d2f9117d1f29e080c5138fa9675426fb79e247",
+      "target": "aarch64-apple-darwin",
+      "runId": "39179866174",
+      "runAttempt": "1",
+      "jobId": "117839680459",
+      "artifactId": "12157830080",
+      "artifactBytes": 110520583,
+      "artifactSha256": "4216ed3bdaed64fc3cd94f84571ecdecd4d854dee0314c48ac3a52f5f444a5a7"
+    }
+  }
+}

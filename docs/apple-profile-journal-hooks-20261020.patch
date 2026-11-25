@@ -1,0 +1,297 @@
+--- a/desktop/src-tauri/src/apple_provisioning_journal.rs
++++ b/desktop/src-tauri/src/apple_provisioning_journal.rs
+@@ -24,7 +24,13 @@
+     AccountRef, Action, AttemptReason, AttemptRecord, AttemptStatus, AttemptUpdate,
+     BundleRegistrationIntent, BundleTarget, JournalRow, NativeProvenance, NativeSettlement,
+     ProvisioningContext, RegisteredRootData, ATTEMPT_LIMIT, ROWS, ROW_LIMIT, STATE_LIMIT,
++    ProfileAction, ProfileTarget, ProfileBundle, ProfileCertificate, ProfileSelection, ProfileSetupIntent,
++    ProfileCreateAction, ProfileAttemptRecord, ProfileProvider, ProfileDownload, ProfileSaveState,
++    ProfileUpdate, ProfileSetupRow, PROFILE_PROTOCOL, PROFILE_BYTES,
+ };
++#[path = "apple_provisioning_profile_journal.rs"]
++mod profile;
++pub(crate) use profile::{ProfileOriginalReservation, ProfileJournalAck};
+ type Result<T> = std::result::Result<T, StateError>;
+
+ fn unknown() -> StateError {
+@@ -42,6 +48,8 @@
+     schema_version: u32,
+     protocol: String,
+     rows: Vec<JournalRow>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    profile_rows: Option<Vec<ProfileSetupRow>>,
+ }
+ impl State {
+     fn empty() -> Self {
+@@ -49,10 +57,26 @@
+             schema_version: 1,
+             protocol: PROTOCOL.into(),
+             rows: Vec::new(),
+-        }
++            profile_rows: None,
++        }
++    }
++    fn row_count(&self) -> usize {
++        self.rows.len().saturating_add(self.profile_rows.as_ref().map_or(0,Vec::len))
++    }
++    fn contains_operation(&self, operation: &str) -> bool {
++        self.rows.iter().any(|row| row.intent.context.operation_id == operation)
++            || self.profile_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
++    }
++    fn unresolved(&self, account: &AccountRef) -> bool {
++        self.rows.iter().any(|row| &row.intent.context.account_ref == account && row.unresolved())
++            || self.profile_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+     }
+     fn validate(&self) -> Result<()> {
+-        need(self.schema_version == 1 && self.protocol == PROTOCOL && self.rows.len() <= ROWS)?;
++        need(self.row_count() <= ROWS && match self.schema_version {
++            1 => self.protocol == PROTOCOL && self.profile_rows.is_none(),
++            2 => self.protocol == PROFILE_PROTOCOL && self.profile_rows.is_some(),
++            _ => false,
++        })?;
+         let mut operations = BTreeSet::new();
+         let mut pending_accounts = BTreeSet::new();
+         for row in &self.rows {
+@@ -62,6 +86,13 @@
+                 need(pending_accounts.insert(&row.intent.context.account_ref))?;
+             }
+         }
++        for row in self.profile_rows.iter().flatten() {
++            row.validate()?;
++            need(operations.insert(row.intent.provenance.operation_id.as_str()))?;
++            if row.unresolved() { need(pending_accounts.insert(&row.intent.context.account_ref))?; }
++        }
++        need(self.profile_rows.as_ref().is_none_or(|rows| rows.windows(2)
++            .all(|pair| profile_key(&pair[0]) < profile_key(&pair[1]))))?;
+         need(
+             self.rows
+                 .windows(2)
+@@ -88,7 +119,7 @@
+                 .map_err(|_| StateError::from(Error::InvalidRequest))?;
+             let state: Self = serde_json::from_value(value)
+                 .map_err(|_| StateError::from(Error::InvalidRequest))?;
+-            need(!state.rows.is_empty() && state.bytes()? == snapshot.bytes)?;
++            need(state.row_count() > 0 && state.bytes()? == snapshot.bytes)?;
+             Ok(state)
+         })();
+         result.map_err(|_: StateError| Error::RecoveryRequired.into())
+@@ -99,6 +130,10 @@
+         &row.intent.context.account_ref,
+         row.intent.provenance.operation_id.as_str(),
+     )
++}
++
++fn profile_key(row: &ProfileSetupRow) -> (&AccountRef, &str) {
++    (&row.intent.context.account_ref,row.intent.provenance.operation_id.as_str())
+ }
+
+ /// Original private reservation, retained in this port BEFORE the first CAS.
+@@ -126,6 +161,7 @@
+     pub(crate) revision: Revision,
+     pub(crate) account: AccountRef,
+     pub(crate) rows: Vec<JournalRow>,
++    pub(crate) profile_rows: Vec<ProfileSetupRow>,
+ }
+
+ pub(crate) struct AppleProvisioningJournal {
+@@ -133,6 +169,7 @@
+     native_use: Arc<NativeUse>,
+     failure: Option<StateError>,
+     original: Option<Arc<OriginalReservation>>,
++    profile_original: Option<Arc<ProfileOriginalReservation>>,
+     #[cfg(test)]
+     lose_next_ack: bool,
+ }
+@@ -146,6 +183,7 @@
+             native_use,
+             failure: None,
+             original: None,
++            profile_original: None,
+             #[cfg(test)]
+             lose_next_ack: false,
+         }
+@@ -256,6 +294,8 @@
+         Ok(AccountSnapshot {
+             revision,
+             account: account.clone(),
++            profile_rows: state.profile_rows.into_iter().flatten()
++                .filter(|row| &row.intent.context.account_ref == account).collect(),
+             rows: state
+                 .rows
+                 .into_iter()
+@@ -273,7 +313,7 @@
+         armed: AttemptUpdate,
+     ) -> Result<JournalAck> {
+         self.healthy()?;
+-        if self.original.is_some() {
++        if self.original.is_some() || self.profile_original.is_some() {
+             return Err(Error::Conflict.into());
+         }
+         intent.validate()?;
+@@ -282,19 +322,13 @@
+         if revision != expected {
+             return Err(Error::Conflict.into());
+         }
+-        if state
+-            .rows
+-            .iter()
+-            .any(|row| row.intent.provenance.operation_id == intent.provenance.operation_id)
+-        {
+-            return Err(Error::Conflict.into());
+-        }
+-        if state.rows.iter().any(|row| {
+-            row.intent.context.account_ref == intent.context.account_ref && row.unresolved()
+-        }) {
++        if state.contains_operation(intent.provenance.operation_id.as_str()) {
++            return Err(Error::Conflict.into());
++        }
++        if state.unresolved(&intent.context.account_ref) {
+             return Err(Error::RecoveryRequired.into());
+         }
+-        if state.rows.len() >= ROWS {
++        if state.row_count() >= ROWS {
+             return Err(Error::Busy.into());
+         }
+         let row = JournalRow {
+--- a/desktop/src-tauri/src/apple_provisioning_journal_data.rs
++++ b/desktop/src-tauri/src/apple_provisioning_journal_data.rs
+@@ -31,6 +31,12 @@
+         Err(Error::InvalidRequest.into())
+     }
+ }
++#[path = "apple_provisioning_profile_journal_data.rs"]
++pub(super) mod profile;
++pub(crate) use profile::{ProfileAction, ProfileTarget, ProfileBundle, ProfileCertificate, ProfileSelection,
++    ProfileSetupIntent, ProfileCreateAction, ProfileAttemptRecord, ProfileProvider, ProfileDownload,
++    ProfileSaveState, ProfileUpdate, ProfileSetupRow, PROFILE_PROTOCOL, PROFILE_BYTES};
++
+ fn identifier(value: &str) -> bool {
+     !value.is_empty()
+         && value.len() <= 128
+@@ -417,11 +423,14 @@
+ }
+ impl AttemptRecord {
+     fn validate(&self, intent: &BundleRegistrationIntent) -> Result<()> {
++        self.validate_fields(&intent.context, &intent.plan_sha256)
++    }
++    fn validate_fields(&self, context: &ProvisioningContext, plan_sha256: &str) -> Result<()> {
+         use AttemptReason as R;
+         use AttemptStatus as S;
+         need(
+-            self.context == intent.context
+-                && self.plan_sha256 == intent.plan_sha256
++            &self.context == context
++                && self.plan_sha256 == plan_sha256
+                 && self
+                     .response_resource_id
+                     .as_ref()
+@@ -546,7 +555,10 @@
+         )
+     }
+     pub(super) fn follows(&self, previous: &Self, intent: &BundleRegistrationIntent) -> Result<()> {
+-        self.record.validate(intent)?;
++        self.follows_fields(previous, &intent.context, &intent.plan_sha256)
++    }
++    fn follows_fields(&self, previous: &Self, context: &ProvisioningContext, plan_sha256: &str) -> Result<()> {
++        self.record.validate_fields(context, plan_sha256)?;
+         let old = &previous.record;
+         let next = &self.record;
+         need(
+--- a/desktop/src-tauri/src/apple_provisioning_protocol.rs
++++ b/desktop/src-tauri/src/apple_provisioning_protocol.rs
+@@ -417,7 +417,7 @@
+             && credential_config == &context.saved_config
+             && scope.matches(context, operation, generation, root)
+             && account.account == scope.provisioning.account_ref
+-            && account.rows.len() <= ROWS
++            && account.rows.len().saturating_add(account.profile_rows.len()) <= ROWS
+             // Reserve, up to two attempt writes, then final native CAS. Do not
+             // arm a provider write if this fixed whole path can overflow.
+             && account.revision.0 <= u64::MAX - 4
+@@ -427,6 +427,10 @@
+     )?;
+     let mut seen = std::collections::BTreeSet::new();
+     need(account.rows.iter().all(|row| {
++        row.intent.context.account_ref == account.account
++            && seen.insert(row.intent.context.operation_id.as_str())
++    }))?;
++    need(account.profile_rows.iter().all(|row| {
+         row.intent.context.account_ref == account.account
+             && seen.insert(row.intent.context.operation_id.as_str())
+     }))?;
+@@ -443,10 +447,17 @@
+     } else {
+         need(prior.is_none())?;
+     }
+-    let pending: Vec<_> = account.rows.iter().map(|row| json!({
++    let mut pending: Vec<_> = account.rows.iter().map(|row| json!({
+         "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
+         "action":row.attempt.record.action,"status":row.attempt.record.status,"nativeSettlement":row.native_settlement,
+     })).collect();
++    // Coarse closed fence only: never expose profile/private references or
++    // mistake local-save unknown for a terminal provider disposition.
++    pending.extend(account.profile_rows.iter().map(|row| json!({
++        "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
++        "action":"profile_setup","status":if row.unresolved(){"unknown"}else{"succeeded"},
++        "nativeSettlement":row.native_settlement,
++    })));
+     let identity = root
+         .identity
+         .posix()
+--- a/desktop/src-tauri/src/apple_provisioning_recovery_selection.rs
++++ b/desktop/src-tauri/src/apple_provisioning_recovery_selection.rs
+@@ -59,7 +59,8 @@
+     account: &AccountSnapshot,
+     scope: &ScopeData,
+ ) -> Result<RecoveryHistory, BridgeError> {
+-    need(account.account == scope.provisioning.account_ref && account.rows.len() <= ROWS)?;
++    need(account.account == scope.provisioning.account_ref
++        && account.rows.len().saturating_add(account.profile_rows.len()) <= ROWS)?;
+     let mut seen = BTreeSet::new();
+     let mut attempts = Vec::with_capacity(account.rows.len());
+     let mut hidden_unresolved = 0;
+@@ -93,6 +94,11 @@
+             native_settlement: row.native_settlement,
+             cancellation_requested: row.attempt.record.cancel_requested,
+         });
++    }
++    for row in &account.profile_rows {
++        need(row.intent.context.account_ref == account.account
++            && seen.insert(row.intent.context.operation_id.clone()))?;
++        if row.unresolved() { hidden_unresolved += 1; }
+     }
+     // Deterministic display only, not an automatic selection or latest-result
+     // authority. Canonical UTC timestamps retain their original precision.
+@@ -158,6 +164,7 @@
+                 revision: Revision(7),
+                 account,
+                 rows: vec![row],
++                profile_rows: Vec::new(),
+             },
+             scope,
+         )
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -65,6 +65,9 @@
+ pub(crate) use store::document_backing_bytes as store_document_backing_bytes;
+ #[path = "saved_command_apple_provisioning.rs"]
+ mod apple_provisioning;
++#[path = "saved_command_apple_signing.rs"]
++mod apple_signing;
++pub(crate) use apple_signing::AppleProfileNativeJoined;
+ pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
+ pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
+ pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;
+--- a/src/mobile_release/_desktop_apple_provisioning_protocol.py
++++ b/src/mobile_release/_desktop_apple_provisioning_protocol.py
+@@ -133,7 +133,9 @@
+     for row in value:
+         row = _keys(row, {"accountRef", "operationId", "action", "status", "nativeSettlement"})
+         require(row["accountRef"] == account and token(row["operationId"]) and row["operationId"] not in seen
+-                and row["action"] == "register_bundle_id" and row["status"] in ATTEMPT_STATUSES)
++                and row["action"] in {"register_bundle_id", "profile_setup"} and row["status"] in ATTEMPT_STATUSES)
++        if row["action"] == "profile_setup":
++            require(row["status"] in {"unknown", "succeeded"})  # Native coarse cross-family fence only.
+         seen.add(row["operationId"])
+         result.append(PendingMutation(row["accountRef"], row["operationId"], row["action"], row["status"], row["nativeSettlement"]))
+     return tuple(result)

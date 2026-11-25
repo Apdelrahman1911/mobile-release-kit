@@ -1,0 +1,2218 @@
+name: Mac native components
+
+on:
+  push:
+    branches: [verify/desktop-macos-components]
+    paths:
+      - desktop/native/macos-applications-launcher/**
+      - desktop/src-tauri/tauri.conf.json
+      - desktop/src-tauri/icons/icon.png
+      - desktop/src-tauri/src/macos_applications*.rs
+      - desktop/src-tauri/src/bin/macos_install.rs
+      - desktop/src-tauri/src/macos_install*.rs
+      - desktop/src-tauri/src/macos_noop_recovery_native.rs
+      - desktop/src-tauri/src/macos_restore_recovery_native.rs
+      - desktop/src-tauri/Cargo.toml
+      - desktop/src-tauri/Cargo.lock
+      - desktop/src-tauri/build.rs
+      - desktop/native/macos-installed-native/**
+      - .github/workflows/desktop-macos-components.yml
+  pull_request:
+    paths:
+      - desktop/native/macos-applications-launcher/**
+      - desktop/src-tauri/tauri.conf.json
+      - desktop/src-tauri/icons/icon.png
+      - desktop/src-tauri/src/macos_applications*.rs
+      - desktop/src-tauri/src/bin/macos_install.rs
+      - desktop/src-tauri/src/macos_install*.rs
+      - desktop/src-tauri/src/macos_noop_recovery_native.rs
+      - desktop/src-tauri/src/macos_restore_recovery_native.rs
+      - desktop/src-tauri/Cargo.toml
+      - desktop/src-tauri/Cargo.lock
+      - desktop/src-tauri/build.rs
+      - desktop/native/macos-installed-native/**
+      - .github/workflows/desktop-macos-components.yml
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Check only the selected native component
+        type: choice
+        default: all
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-compile, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, image-detach, image-installer-detach, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-runtime-retain, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+      architecture:
+        description: Architecture for installer-compile/image-detach/image-installer-detach/app-typecheck/app-observer-compile/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
+        type: choice
+        default: both
+        options: [both, arm64, x86_64]
+      apple_key_component:
+        description: Also run the local Apple key/P12 vault components with app-typecheck and arm64
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-native-component-${{ github.ref }}-${{ inputs.component || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  store-runtime-retain:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-store-retention' && inputs.component == 'store-runtime-retain' && inputs.architecture == 'arm64' && !inputs.apple_key_component
+    name: Retain signed Store runtime (arm64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Copy only the verified original signed ZIP without rebuilding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_store_component.py retain-selected \
+            "$RUNNER_TEMP/mrk-retained-store" --target aarch64-apple-darwin
+      - name: Retain the same signed bytes in one normal artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: store-signed-retained-aarch64-apple-darwin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-retained-store/store-original.zip
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+
+  image-detach:
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'image-detach' || inputs.component == 'image-installer-detach')
+    name: ${{ inputs.component == 'image-installer-detach' && 'Observe disk image detach after a harmless Installer package' || 'Observe a real busy disk image and clean detach without signing' }}
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Require the disposable nonroot ARM host
+        shell: bash
+        env:
+          REQUESTED_ARCHITECTURE: ${{ inputs.architecture }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$REQUESTED_ARCHITECTURE" == arm64 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Run only the selected harmless image case
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          IMAGE_COMPONENT: ${{ inputs.component }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          case "$IMAGE_COMPONENT" in
+            image-detach) test_case=DistributionDetachNative.test_original_holder_visible_until_original_fds_close ;;
+            image-installer-detach) test_case=DistributionDetachNative.test_scripts_only_installer_returns_before_original_detach ;;
+            *) exit 1 ;;
+          esac
+          "$MRK_PYTHON" -I -S -B tests/desktop/test_macos_distribution_detach_native.py "$test_case"
+
+  resident-compile:
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'resident-compile'
+    name: Measure the Intel resident release build without signing
+    runs-on: macos-26-intel
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Prepare the same hosted compiler paths as packaging
+        id: work
+        timeout-minutes: 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-resident-compile.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          export CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup
+          rustup toolchain install 1.98.0 --profile minimal --no-self-update
+          toolchain="$RUSTUP_HOME/toolchains/1.98.0-x86_64-apple-darwin/bin"
+          "$toolchain/cargo" --version
+          "$toolchain/rustc" -vV
+          mkdir -p "$root/android-helper-target/tmp"
+      - name: Measure the actual compiler owner and Command Line Tools SDK
+        id: compile
+        timeout-minutes: 25
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY_RESIDENT'
+          import json, os, sys, time
+          from pathlib import Path
+          root, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          assert sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site
+          sys.path.insert(0, str(root / "desktop/tools"))
+          import macos_android_helper_package as package
+          loader = package.load_data(root, "macos_aqua_qualification.py", "_resident_diagnostic_loader")
+          owner = loader.load_owner(root)
+          target = package.INTEL_TARGET
+          stager = package.load_data(root, "stage_macos_installed.py", "_resident_diagnostic_stager")
+          selection = stager.build_release_data((root / "desktop/macos-installed-inputs/build-release-intel.json").read_bytes(), target=target)
+          release = selection["release"]
+          environment = package.build_environment({"HOME": "/Users/runner",
+              "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0",
+              "GITHUB_SHA": os.environ["GITHUB_SHA"]}, work, release, target=target)
+          cargo = package.direct_rust_tools(target)[0]
+          manifest = str(root / package.WORKSPACE / "Cargo.toml")
+          commands = (("fetch", 120, [cargo, "fetch", "--manifest-path", manifest, "--locked", "--target", target]),
+              ("build", 1200, [cargo, "build", "--manifest-path", manifest, "--locked", "--offline", "--release",
+               "--config", package.RESIDENT_CARGO_OVERRIDE, "--config", package.RESIDENT_SCHEMA_CARGO_OVERRIDE, "--jobs", "1", "--target", target,
+               "--lib", "--message-format=json-render-diagnostics"]))
+          # Same owner, SDK, compiler paths, graph, profile and capture bound as
+          # prepare(). Only this diagnostic's build allowance differs (1200s).
+          for role, seconds, argv in commands:
+              started = time.monotonic()
+              try:
+                  result = owner.run_owned(argv, environ=environment, cwd=root / package.WORKSPACE,
+                      timeout=seconds, capture=True, text=False, output_limit=4 * 1024 * 1024)
+              except BaseException as error:
+                  detail = package.original_failure(error, owner, root, seconds, 4 * 1024 * 1024)
+                  print(json.dumps({"role": role, "elapsedSeconds": round(time.monotonic() - started, 3),
+                      "returned": False, "diagnostic": detail}), flush=True)
+                  raise SystemExit(1) from None
+              print(json.dumps({"role": role, "returncode": result.returncode,
+                  "elapsedSeconds": round(time.monotonic() - started, 3),
+                  "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr)}), flush=True)
+              if role == "build" or result.returncode != 0:
+                  # A real returned result, not a caught timeout, permits this
+                  # disposable task's cleanup. Shared toolchains are not removed.
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                      output.write("returned=true\n")
+              sys.stderr.buffer.write(result.stderr)
+              if result.returncode != 0:
+                  raise SystemExit(result.returncode)
+              if role == "build":
+                  package.artifact(result.stdout, root, work / "android-helper-target",
+                      package_version=selection["packageVersion"], build_target=target)
+          PY_RESIDENT
+      - name: Retire only this returned build's compiler and outputs
+        if: always() && steps.compile.outputs.returned == 'true'
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$WORK_ROOT" == "$RUNNER_TEMP"/mrk-resident-compile.* && -d "$WORK_ROOT" && ! -L "$WORK_ROOT" ]]
+          # Cargo has synchronously returned. Timeout/no-return uses hosted VM
+          # disposal instead; no guessed process kill or shared cache deletion.
+          rm -rf -- "$WORK_ROOT"
+
+  launcher:
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'launcher'
+    name: Compile launcher (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allocate one task-owned component directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-launcher-ci.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Build only the unsigned launcher component with the native SDK
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          bash desktop/native/macos-applications-launcher/build.sh \
+            "$WORK_ROOT/Mobile Release Kit.app" "$TARGET_ARCH"
+          plutil -lint "$WORK_ROOT/Mobile Release Kit.app/Contents/Info.plist"
+          lipo "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher" \
+            -verify_arch "$TARGET_ARCH"
+          # Public component linkage only: integration must use the actual
+          # Swift SDK's library/rpath behavior, not guessed Mach-O policy.
+          otool -L "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher"
+          otool -l "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher" |
+            sed -n '/cmd LC_RPATH/,+3p'
+      - name: Remove only this job's disposable component
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: rm -rf -- "$WORK_ROOT"
+
+  installer-check:
+    name: ${{ inputs.component == 'installer-compile' && 'Compile and link Installer without signing or execution' || inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-removal-fixtures' && 'Check removal fixture roles' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-compile' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-removal-fixtures' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.component == 'installer-compile' && '[{"runner":"macos-26","arch":"arm64"}]' || github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+    steps:
+      - name: Require the explicit ARM-only Installer compile selection
+        if: inputs.component == 'installer-compile'
+        shell: bash
+        env:
+          SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+          if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
+            printf '%s\n' 'installer-compile requires architecture=arm64; no other architecture was compiled.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allocate one task-owned compiler directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-installer-check.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Check exclusive native roles and test pure launcher logic
+        id: native_checks
+        shell: bash
+        working-directory: desktop/src-tauri
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+          INSTALLER_CHECKS: ${{ inputs.component }}
+          COMPONENT_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+          # This is the existing reviewed native clock tuple on both Macs.
+          # 1.98.0 is supported only on Intel, not Apple Silicon.
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if [[ "$INSTALLER_CHECKS" == installer-compile ]]; then
+            [[ "$COMPONENT_EVENT" == workflow_dispatch ]] || exit 1
+            # Reproduce the failed release/codegen/link target, not cargo check.
+            # Match the configured compiler/profile; keep ordinary diagnostics.
+            unset CARGO_BUILD_JOBS CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
+            export DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0
+            started=$SECONDS
+            rustup run 1.98.1 cargo build --locked --release --no-default-features \
+              --features macos-installed-installer --target aarch64-apple-darwin --bin mrk-macos-install
+            printf 'Installer compile/link completed in %ss; no configured package bindings or native execution.\n' "$((SECONDS - started))"
+            # Missing package/inventory/runtime pins keep this a component-only
+            # build, not a reusable Installer or a configured-build timing proof.
+            # The original Cargo failure exits under set -e before this success.
+            exit 0
+          fi
+          if [[ "$INSTALLER_CHECKS" == xcode-setup-files ]]; then
+            [[ "$COMPONENT_EVENT" == workflow_dispatch ]] || exit 1
+            # Normal runner compiles ONLY the native libtest. No root Cargo,
+            # setup binary, Installer, Apple verifier or signing invocation.
+            [[ ! -e "$CARGO_TARGET_DIR" && ! -L "$CARGO_TARGET_DIR" ]] || exit 1
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path "$GITHUB_WORKSPACE/desktop/native/macos-installed-native/Cargo.toml" \
+              --features xcode-setup --lib --no-run --message-format=json-render-diagnostics |
+              /usr/bin/python3 -I -S -c '
+          import os, pathlib, re, stat, sys
+          checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          sys.path.insert(0, str(checkout / "desktop/tools"))
+          import stage_macos_installed as stage
+          limit = 8 * 1024 * 1024
+          data = sys.stdin.buffer.read(limit + 1)
+          if len(data) > limit:
+              # Drain only, with fixed memory, so the original Cargo process
+              # still returns before the failed pipeline permits any cleanup.
+              while sys.stdin.buffer.read(65536):
+                  pass
+              raise SystemExit("native libtest compiler metadata exceeded limit")
+          rows = stage.cargo_records(data)
+          selected = [row for row in rows if row.get("executable") is not None]
+          assert len(selected) == 1, "expected one native libtest executable"
+          row = selected[0]
+          directory = checkout / "desktop/native/macos-installed-native"
+          target = row["target"]
+          assert row.get("manifest_path") == str(directory / "Cargo.toml")
+          assert target.get("name") == "mrk_macos_installed_native"
+          assert target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]
+          assert target.get("src_path") == str(directory / "src/lib.rs")
+          stage.cargo_profile(row, test=True)
+          stage.cargo_features(row, ["xcode-setup"])
+          executable = pathlib.Path(row["executable"])
+          assert executable.is_absolute() and executable.parent == pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "debug/deps"
+          assert re.fullmatch(r"mrk_macos_installed_native-[0-9a-f]+", executable.name)
+          assert row.get("filenames") == [str(executable)] and executable.resolve(strict=True) == executable
+          identity = executable.lstat()
+          assert stat.S_ISREG(identity.st_mode) and identity.st_uid == os.geteuid() and identity.st_mode & 0o111
+          print(executable)
+          ' > "$WORK_ROOT/xcode-files-executable.txt"
+            IFS= read -r native_test < "$WORK_ROOT/xcode-files-executable.txt"
+            # Reuse this same actual native libtest for the five focused pure
+            # entry/cleanup contracts, as the ordinary runner (never root).
+            "$native_test" \
+              macos_xcode_parent::tests::xcode_child_tail_is_one_use_and_lost_wait_never_reauthorizes_signals \
+              macos_xcode_parent::tests::xcode_parent_failure_cutoff_never_renews_original_work \
+              macos_xcode_entry::tests::fixed_entry_routing_never_accepts_paths_clocks_or_noncanonical_fds \
+              macos_xcode_entry::tests::public_exit_requires_original_finality_and_distinguishes_cleanup \
+              macos_xcode_setup::tests::fixed_names_and_relative_link_shape_do_not_pretend_to_resolve_links \
+              --exact --test-threads=1 | tee "$WORK_ROOT/xcode-entry-tail-tests.log"
+            grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-entry-tail-tests.log"
+            # Private mutations stay in this test-only temp parent. The extra
+            # selected-Xcode census is read-only and reports its first refusal;
+            # it neither copies Xcode nor runs signing or Installer.
+            /bin/mkdir -m 700 "$WORK_ROOT/xcode-files-fixtures"
+            /usr/bin/sudo /usr/bin/env -i \
+              PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              HOME="$WORK_ROOT/xcode-files-fixtures" TMPDIR="$WORK_ROOT/xcode-files-fixtures" \
+              "$native_test" \
+              macos_xcode_tree_tests::copier_copies_real_bytes_links_attributes_and_retires_only_its_stage \
+              macos_xcode_tree_tests::retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_aliases \
+              macos_xcode_parent::native::namespace_tests::namespace_creation_seals_umask077_and_preserves_existing_objects \
+              macos_xcode_parent::native::namespace_tests::selected_system_xcode_initial_census_is_read_only_and_reports_first_failure \
+              --exact --ignored --test-threads=1 | tee "$WORK_ROOT/xcode-files-tests.log"
+            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-files-tests.log"
+            # The tests consume originals and remove only their own fixtures;
+            # this succeeds only when that parent is actually empty afterward.
+            /bin/rmdir "$WORK_ROOT/xcode-files-fixtures"
+            exit 0
+          fi
+          if [[ "$INSTALLER_CHECKS" == xcode-setup-compile ]]; then
+            # Passive compile only: provisional helper main always refuses.
+            # No signing credentials, privileged invocation or Xcode copying.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features macos-xcode-setup --bin mrk-macos-xcode-setup
+            # Same native dependency build also validates the joined-worker
+            # diagnostic at its existing DATA-only test entry, not Installer main.
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --features macos-installed-installer --bin mrk-macos-install -- \
+              installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error \
+              --exact --test-threads=1 | tee "$WORK_ROOT/installer-diagnostic-tests.log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-diagnostic-tests.log"
+            # New managed-selection checks: private temporary file originals
+            # and DATA only. No privileged namespace, Xcode or Store operation.
+            rustup run 1.98.1 cargo test --locked --no-default-features --lib -- \
+              installed_runtime::ios_validation_tools_data_tests::ios_managed_absence_is_enoent_only_and_rechecked_on_the_original_directory \
+              installed_runtime::ios_validation_tools_data_tests::ios_managed_presence_never_mints_missing_original_or_renews_cleanup \
+              ios_toolchain::tests::managed_developer_is_exact_without_relaxing_legacy_selection \
+              --exact --test-threads=1 | tee "$WORK_ROOT/managed-selection-tests.log"
+            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/managed-selection-tests.log"
+            exit 0
+          fi
+          if [[ "$INSTALLER_CHECKS" == installer-removal-fixtures ]]; then
+            # Distinct nonshipping graphs; never execute either privileged entry.
+            # One task-owned target reuses unchanged dependencies across checks.
+            for role in abrupt-fixture observer; do
+              rustup run 1.98.1 cargo check --locked --no-default-features \
+                --features "macos-installed-removal-$role" --bin mrk-macos-remove
+            done
+            exit 0
+          fi
+          if [[ "$INSTALLER_CHECKS" == installer-restore-chain ]]; then
+            # Fixed observer DATA only. Previously checked writer-cut graphs
+            # and ordinary installer contracts are unchanged and not repeated.
+            export MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT="$GITHUB_SHA"
+            export MRK_APP_ABSENCE_FIXTURE_RUN_ID="$GITHUB_RUN_ID"
+            export MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --features macos-installed-restore-chain-observer --bin mrk-macos-app-absence-fixture -- \
+              installer::worker::app_absence_fixture::tests:: --test-threads=1 \
+              | tee "$WORK_ROOT/restore-chain-observer-tests.log"
+            grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored;' "$WORK_ROOT/restore-chain-observer-tests.log"
+            exit 0
+          fi
+          if [[ "$INSTALLER_CHECKS" == installer-restore-fixtures ]]; then
+            # Compile only: these fixed fault-injection programs never execute.
+            # Reuse one dependency/target directory for their exclusive graphs.
+            for cut in app-write own-attempt stage-move; do
+              rustup run 1.98.1 cargo check --locked --no-default-features \
+                --features "macos-installed-restore-$cut-fixture" --bin mrk-macos-install
+            done
+            # Test the observer's DATA contract, not its privileged entrypoint.
+            export MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT="$GITHUB_SHA"
+            export MRK_APP_ABSENCE_FIXTURE_RUN_ID="$GITHUB_RUN_ID"
+            export MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --features macos-installed-app-absence-fixture --bin mrk-macos-app-absence-fixture -- \
+              installer::worker::app_absence_fixture::tests::actual_restore_requires_new_app_and_exact_initial_history \
+              --exact --test-threads=1 | tee "$WORK_ROOT/restore-fixture-contract-tests.log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/restore-fixture-contract-tests.log"
+            exit 0
+          fi
+          # Separate invocations keep the two mutually exclusive roles distinct;
+          # dependencies are compiled once in this job's shared target directory.
+          # Fixture-only fixes reuse passed normal-role compilation. Still run
+          # every installer contract and Restore transaction test below.
+          if [[ "$INSTALLER_CHECKS" != installer-tests && "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features macos-installed-installer --bin mrk-macos-install
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features macos-installed-remover --bin mrk-macos-remove
+          fi
+          # Named launcher/path/recovery and journal DATA tests and one original-reader
+          # test on exclusive user-owned temporary files. No Installer main,
+          # root destination, signing or remover execution.
+          tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality
+                 installer::maintenance::noop_recovery::tests::preserved_prefix_transport_is_closed_without_relaxing_ordinary_controls
+                 installer::maintenance::noop_recovery::tests::completed_recovery_snapshot_rehome_requires_receipt_bound_originals_and_prefixes)
+          # Use only for a recovery-test-only correction after both native roles
+          # and launcher tests already passed; normal runs keep their full scope.
+          expected_tests=3
+          if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
+            tests+=(installer::applications::tests::
+                    installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped
+                    installer::maintenance::restore_recovery::
+                    installer::maintenance::output_projection_tests::
+                    installer::tests::collected_inventory_roles_use_original_reader_with_exact_bound_and_post)
+            expected_tests=25
+          fi
+          if [[ "$INSTALLER_CHECKS" == installer-frames ]]; then
+            tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)
+            expected_tests=1
+          fi
+          rustup run 1.98.1 cargo test --locked --no-default-features \
+            --features macos-installed-installer --bin mrk-macos-install -- \
+            "${tests[@]}" --test-threads=1 | tee "$WORK_ROOT/installer-contract-tests.log"
+          grep -Eq "^test result: ok\. $expected_tests passed; 0 failed; 0 ignored;" "$WORK_ROOT/installer-contract-tests.log"
+          if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
+            # Same dependency/target owner, separate pure transaction DATA target.
+            # Neither this test filter nor the bin tests execute Installer main.
+            rustup run 1.98.1 cargo test --locked --no-default-features --lib -- \
+              macos_install_transaction::tests::restore_ \
+              macos_install_transaction::tests::retained_storage_and_original_budget_arithmetic_refuse_before_effects \
+              macos_fresh_recovery::output_enrollment_tests:: \
+              --test-threads=1 | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
+          fi
+      - name: Remove only this job's disposable compiler and dependencies
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          INSTALLER_CHECKS: ${{ inputs.component }}
+          NATIVE_OUTCOME: ${{ steps.native_checks.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$INSTALLER_CHECKS" == xcode-setup-files && "$NATIVE_OUTCOME" != success ]]; then
+            printf 'Native filesystem test incomplete; retain its task root for disposable-host teardown.\n'
+            exit 0
+          fi
+          rm -rf -- "$WORK_ROOT"
+
+  app-check:
+    # This targeted path checks the real packaged Tauri graph without producing
+    # another signed/notarized package or rebuilding unrelated native helpers.
+    if: github.event_name == 'workflow_dispatch' && (inputs.apple_key_component || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-observer-compile' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'automation-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
+    name: ${{ inputs.component == 'app-observer-compile' && 'Compile and link native observer without signing or tests' || inputs.component == 'automation-contracts' && 'Test affected automation and check Mac app graphs' || inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      # The token is passed only to the conditional artifact-restore step.
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON((inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-observer-compile' || inputs.component == 'app-native-tests' || inputs.component == 'automation-contracts') && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
+    steps:
+      - name: Require the explicit ARM-only focused selection
+        if: inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-observer-compile' || inputs.component == 'app-native-tests' || inputs.component == 'automation-contracts'
+        shell: bash
+        env:
+          SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
+          SELECTED_COMPONENT: ${{ inputs.component }}
+          APPLE_KEY_REQUESTED: ${{ inputs.apple_key_component }}
+        run: |
+          set -euo pipefail
+          if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
+            printf '%s\n' 'app-typecheck/app-observer-compile/app-native-tests/automation-contracts require architecture=arm64; no other architecture was compiled.' >&2
+            exit 1
+          fi
+          if [[ "$APPLE_KEY_REQUESTED" == true && "$SELECTED_COMPONENT" != app-typecheck ]]; then
+            printf '%s\n' 'apple_key_component requires component=app-typecheck and architecture=arm64.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - &protected-xcode
+        name: Prepare only the selected Apple Xcode on this disposable hosted runner
+        if: inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts' || inputs.component == 'ios-tools'
+        timeout-minutes: 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]]
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$(/usr/bin/id -u)" != 0 ]]
+          # Fixture setup only. Default Mac usability and native tool admission
+          # remain separate; no signed runtime, private inputs or Store calls.
+          # Tiny real native CoW/replacement fixture, no Xcode contents or signing.
+          /usr/bin/python3 -I -B tests/desktop/test_ci_xcode_preparation.py \
+            ProtectedXcodeFixtureTests.test_independent_clone_preserves_external_alias_and_closes_collision -v
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
+            /usr/bin/python3 -I -B desktop/tools/prepare_ci_xcode.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts' && inputs.component != 'app-native-tests'
+        with:
+          node-version: '24.20.0'
+      - name: Allocate task-owned app compiler directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-app-check.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          # Stable cache paths are required for the Actions cache version. The
+          # fresh job owns these directories; do not adopt a checkout fixture.
+          cache="$GITHUB_WORKSPACE/desktop/.ci-component-cargo"
+          test ! -e "$cache" && test ! -L "$cache"
+          mkdir -m 700 "$cache"
+          printf 'cache_owned=true\n' >> "$GITHUB_OUTPUT"
+          mkdir -m 700 "$cache/registry" "$cache/git" "$cache/target"
+      - name: Identify the actual native SDK for compiler cache isolation
+        id: cache-profile
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          APP_CHECKS: ${{ inputs.component }}
+        run: |
+          set -euo pipefail
+          if [[ "$APP_CHECKS" == app-observer-compile ]]; then
+            export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+          fi
+          {
+            if [[ "$APP_CHECKS" == app-observer-compile ]]; then
+              /usr/bin/xcrun clang --version
+            else
+              /usr/bin/xcodebuild -version
+            fi
+            /usr/bin/xcrun --sdk macosx --show-sdk-version
+            /usr/bin/xcrun --sdk macosx --show-sdk-build-version
+            /usr/bin/xcrun --sdk macosx --show-sdk-path
+          } > "$WORK_ROOT/sdk-profile.txt"
+          sdk=$(shasum -a 256 "$WORK_ROOT/sdk-profile.txt" | awk '{print $1}')
+          printf 'sdk=%s\n' "$sdk" >> "$GITHUB_OUTPUT"
+      - name: Restore this architecture's credential-free compiler cache
+        id: cargo-cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        continue-on-error: true
+        with:
+          path: |
+            desktop/.ci-component-cargo/registry
+            desktop/.ci-component-cargo/git
+            desktop/.ci-component-cargo/target
+          # Exact SDK/Rust/profile/dependency key only. Source changes still
+          # run Cargo, including build.rs SOURCE/release env invalidation.
+          key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
+      - name: ${{ inputs.component == 'app-observer-compile' && 'Compile and link only the failed native observer target' || inputs.component == 'automation-contracts' && 'Run affected automation contracts and check current Mac graphs' || inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'app-native-tests' && 'Run focused library regressions and native backup/IPC checks' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+          MRK_IMAGE_RELEASE_ID: ${{ matrix.release }}
+          MACOSX_DEPLOYMENT_TARGET: '26.0'
+          APP_CHECKS: ${{ inputs.component }}
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$GITHUB_WORKSPACE/desktop/.ci-component-cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$CARGO_HOME/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+          export npm_config_cache="$WORK_ROOT/npm-cache"
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if [[ "$APP_CHECKS" == app-observer-compile ]]; then
+            export DEVELOPER_DIR=/Library/Developer/CommandLineTools CARGO_BUILD_JOBS=1
+            # The observer facade uses checked-in build-release DATA. Do not
+            # inject the older image release projection from the shared matrix.
+            unset MRK_IMAGE_RELEASE_ID
+            npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+            npm --prefix desktop run build
+            # Actual compile AND link, with ordinary visible Cargo diagnostics.
+            # No test execution, private inputs, signing or packaging. Optional
+            # package pins are absent: this is not a configured installed binary.
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/src-tauri/Cargo.toml \
+              --features desktop-shell,custom-protocol,macos-installed-observation \
+              --target aarch64-apple-darwin --test installed-shell-observation --no-run
+            exit 0
+          fi
+          if [[ "$APP_CHECKS" == automation-contracts ]]; then
+            # Reuse 93 unaffected passes from run 39576057474 and the two
+            # corrected regression passes from run 39580082728. This successor
+            # only corrects a Mac sibling's visibility/import; no predicate or
+            # runtime contract changed. Complete the three remaining graphs.
+            # No app launch, provider operations, packaging or signing.
+            export CARGO_BUILD_JOBS=1
+            # generate_context! embeds ../dist in the actual shell graph.
+            # Generate the required assets on this new runner; prior successful
+            # frontend validation is not a retained dist artifact. Do not build
+            # another app binary or enable observation in the shipping graph.
+            npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+            npm --prefix desktop run build
+            rustup run 1.98.1 cargo check --locked --lib \
+              --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features installed-cli --manifest-path desktop/src-tauri/Cargo.toml --bin mrk
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features desktop-shell,custom-protocol,macos-installed-observation \
+              --manifest-path desktop/src-tauri/Cargo.toml --test installed-shell-observation
+            exit 0
+          fi
+          if [[ "$APP_CHECKS" != app-contracts && "$APP_CHECKS" != local-keychain-contracts && "$APP_CHECKS" != app-native-tests ]]; then
+            npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+            npm --prefix desktop run build
+            # Actual packaged graph including command/ACL generation and native
+            # compilation. Never enable the test harness in this shipping image role.
+            if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == app-typecheck ]]; then
+              # Real Rust/Objective-C compilation, without linking another app.
+              rustup run 1.98.1 cargo check --locked --lib \
+                --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+            else
+              rustup run 1.98.1 cargo build --locked --lib \
+                --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+            fi
+          fi
+          if [[ "$APP_CHECKS" == app-typecheck ]]; then
+            # Compile the actual transport-only CLI target, not only the shared
+            # library modules. This does not invoke a CLI or grant Desktop access.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features installed-cli --manifest-path desktop/src-tauri/Cargo.toml --bin mrk
+            # Check the actual nonshipping native observation target before
+            # spending time signing or packaging it. This does not run the app
+            # or add observation features to the separate shipping invocation.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features desktop-shell,custom-protocol,macos-installed-observation \
+              --manifest-path desktop/src-tauri/Cargo.toml --test installed-shell-observation
+            # Fixed DATA only in the ordinary native library graph, separate
+            # from the shipping image check above. These three tests launch no
+            # service, tool, credential or app; do not run the broad suites.
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
+              android_registration::tests::native_prepare_role_predicate_matches_closed_rust_roles \
+              android_catalog_query_wire::tests::upload_generation_role_has_only_same_clock_read_intent_and_finish \
+              android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
+              --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
+            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
+          fi
+          if [[ "$APP_CHECKS" == app-typecheck || "$APP_CHECKS" == app-native-tests ]]; then
+            # app-native-tests reuses unchanged successful shipping/CLI/observer
+            # checks. It still compiles the actual current library test graph.
+            # Twenty-eight Mac-only cache, acquisition, Git-source and Apple
+            # credential/codec cases in the ordinary library, not the shipping
+            # image. These open no files, services or tools; native operations
+            # and persisted credential storage are verified separately.
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+              saved_command_owner::tool_acquisition::cache::tests::unentered_cache_close_never_mints_a_producer_origin \
+              saved_command_owner::tool_acquisition::cache::tests::unknown_survives_empty_cache_and_cannot_become_an_absence_retry \
+              saved_command_owner::tool_acquisition::cache::tests::application_expectation_preserves_missing_and_all_original_fields \
+              saved_command_owner::tool_acquisition::cache::tests::missing_application_never_adopts_appearance_or_recreates_previous_cache \
+              saved_command_owner::tool_acquisition::cache::tests::interrupted_application_creation_retains_first_failure_and_finishes_unentered_slots \
+              asset_source::macos::git_local_sources::tests::exact_own_unlink_allows_ctime_only_without_replacing_old_identity \
+              asset_source::macos::git_local_sources::tests::foreign_index_metadata_never_uses_unlink_exception \
+              installed_runtime::android_registration_source::acquisition::tests::missing_requires_exact_enoent_not_denial_link_or_interruption \
+              installed_runtime::android_registration_source::acquisition::tests::both_compiled_rosters_reserve_one_read_phase_not_registration_authority \
+              installed_runtime::android_registration_source::acquisition::tests::sdk_scope_never_includes_sibling_packages \
+              saved_command_owner::tool_acquisition::picked::tests::source_diagnostic_keeps_original_first_failure_through_generic_cleanup_normalization \
+              installed_runtime::android_registration_source::acquisition::discovery::tests::fixed_lookup_paths_require_native_account_home_and_keep_unentered_account_settled \
+              asset_source::macos::git_local_sources::branch_tests::new_branch_source_head_stays_original_and_only_destination_must_be_absent \
+              asset_source::macos::git_local_sources::branch_tests::old_commit_ref_edge_retains_its_own_branch_and_stage_cannot_select_a_ref \
+              asset_source::macos::git_local_sources::switch_sources::tests::switch_positive_metadata_prefix_is_exact_and_does_not_accept_generic_index_or_ref_receipts \
+              asset_source::macos::git_local_sources::switch_sources::tests::ambiguous_target_lock_acquisition_retains_all_original_routes_without_fake_cleanup_or_retry \
+              asset_source::macos::git_local_sources::switch_sources::tests::one_attempt_slot_retirement_keeps_unknown_and_never_invents_missing_owned_descriptor_success \
+              asset_source::macos::git_local_sources::switch_sources::tests::switch_extra_roster_is_charged_without_discount_for_aliases_review_or_future_close \
+              asset_source::macos::git_local_sources::switch_sources::tests::uncertain_return_promotes_prior_known_refusal_so_original_lock_cleanup_cannot_run \
+              asset_source::macos::git_local_sources::rename_sources::tests::ambiguous_rename_lock_preserves_original_slots_without_fake_close_or_retry \
+              asset_source::macos::git_local_sources::rename_sources::tests::rename_roster_counts_full_ref_and_log_chains_without_future_close_credit \
+              asset_source::macos::git_local_sources::rename_sources::tests::failed_original_rename_rematch_is_sticky_and_cannot_release_ref_locks \
+              asset_session::vault::provisioning_native::profile_store::tests::self_mutation_exception_keeps_original_loan_checks_and_excludes_other_owners \
+              asset_session::vault::provisioning_native::profile_store::tests::known_storage_effect_alone_cannot_retire_unknown_original_or_rearm_save \
+              asset_session::vault::provisioning_native::profile_store::tests::no_save_requires_unattempted_original_even_after_known_refusal \
+              vault_crypto::apple_profile::tests::profile_cipher_uses_the_reserved_revision_and_full_authenticated_bytes \
+              vault_store::macos::tests::apple_key_full_read_is_bound_before_body_allocation \
+              vault_store::macos::tests::apple_key_inventory_compares_old_full_witnesses_and_only_one_new_record \
+              --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            # Current Apple certificate/P12, shared CLI and Fetch/Push logic.
+            # Same library binary/cache; only the selected affected contracts.
+            # Cases with Store I/O use existing exclusive private fixtures and
+            # synchronous close; none invokes Git, a provider or a system tool.
+            # Prefix selectors intentionally omit --exact; the count prevents
+            # a missing/renamed test from silently becoming a pass.
+            (
+              umask 077
+              # Exact additions must each resolve once in the same real libtest.
+              remote_tool_tests=(
+                service_git_remote_protocol::tests::fixed_actions_and_digest_refuse_authority_or_cross_family_additions
+                service_git_remote_protocol::tests::required_null_access_and_fetch_preview_never_default_missing_fields
+                service_git_remote_protocol::tests::effects_are_diagnostics_not_paths_or_a_success_upgrade
+                service_git_remote_protocol::tests::bounded_maximum_reference_summary_remains_below_status_envelope
+                service_git_requests::remote_requests::tests::both_return_orders_withhold_ready_history_and_start_until_all_three_originals
+                service_git_requests::remote_requests::tests::cancelled_failed_and_no_review_still_wait_for_connection_and_caller_return
+                service_git_requests::remote_requests::tests::expiry_and_removed_candidate_do_not_close_before_original_return_or_renew_review
+                service_git_requests::remote_requests::tests::armed_apply_keeps_own_return_and_effect_after_consumed_prepare_review_drops
+                service_git_requests::remote_requests::tests::lost_caller_missing_finish_and_unknown_never_rearm_or_accept_status_as_settlement
+                service_git_requests::remote_requests::tests::connection_return_refuses_foreign_review_identity_and_contradictory_terminal_effect
+                service_git_requests::remote_requests::tests::cross_family_foreign_ids_and_duplicate_body_cannot_select_a_remote_or_another_apply
+                service_git_requests::remote_requests::tests::ordinary_local_family_keeps_its_original_finality_and_has_no_remote_finish_capability
+                asset_session::agent_git_index::remote::tests::only_actual_observe_shape_and_exact_cached_push_target_are_eligible_data
+                asset_session::agent_git_index::remote::tests::desktop_consent_is_kind_specific_and_cli_fields_cannot_select_credentials
+                application_service::git_index::remote::tests::actual_service_dispatch_requires_read_plus_remote_grant_and_preserves_original_on_reconnect
+                application_service::git_index::remote::tests::remote_scope_and_presend_reject_changed_project_alias_and_old_read_session
+                installed_cli::git_index::remote_tests::actual_collector_admits_only_the_five_id_only_remote_commands
+                installed_cli::git_index::remote_tests::wire_and_lost_reply_preserve_exact_ids_without_an_action_or_replay
+                installed_cli::git_index::remote_tests::exact_ready_effect_unknown_and_family_mismatch_remain_distinct
+                installed_cli::git_index::remote_tests::complete_capabilities_remain_bounded_and_discovery_includes_remote
+                github_connection_session::fetch::tests::remote_delegation_current_uses_original_pins_and_never_renews_expiry
+                github_connection_session::push::tests::remote_delegation_current_uses_original_pins_and_never_renews_expiry
+                tool_acquisition_protocol::prerequisite::tests::prerequisite_errors_are_closed_nonretryable_hints_not_generic_failures
+                saved_command_owner::tool_acquisition::tests::unqualified_prepare_census_is_not_a_resumable_missing_prerequisite
+                saved_command_owner::android_catalog::frozen_row_data_tests::missing_catalogue_hint_needs_pristine_state_or_actual_positive_originals
+              )
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+                "${remote_tool_tests[@]}" --exact --list | tee "$WORK_ROOT/app-typecheck-remote-tools-list.log"
+              grep -Fx '25 tests, 0 benchmarks' "$WORK_ROOT/app-typecheck-remote-tools-list.log"
+              for test_name in "${remote_tool_tests[@]}"; do
+                [[ "$(grep -Fxc "$test_name: test" "$WORK_ROOT/app-typecheck-remote-tools-list.log")" == 1 ]]
+              done
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+                credential_format::apple::provisioning_certificate::distribution_policy::tests:: \
+                apple_provisioning_protocol::certificate::tests:: \
+                apple_provisioning_protocol::certificate_recovery::tests:: \
+                saved_command_owner::apple_key::certificate::tests:: \
+                saved_command_owner::apple_provisioning::certificate_review::tests:: \
+                asset_session::vault::key_sources::certificate::tests:: \
+                asset_session::store_material::apple_key::tests:: \
+                service_git_repository_protocol::tests:: \
+                service_git_requests::repository_requests::tests:: \
+                asset_session::agent_git_index::repository::tests:: \
+                application_service::git_index::repository::tests:: \
+                installed_cli::git_index::repository_tests:: \
+                git_fetch_protocol::tests:: \
+                git_local_state::fetch_tests:: \
+                github_connection_session::fetch::tests:: \
+                asset_source::macos::git_local_sources::fetch_sources::tests:: \
+                supervisor::git_local::fetch::tests:: \
+                git_local_protocol::fetch_worker::tests:: \
+                runtime::git_fetch::tests:: \
+                apple_provisioning_protocol::tests::closed_prepare_never_accepts_account_path_query_or_old_consent \
+                saved_command_owner::apple_provisioning::tests::apple_original_session_stop_tightens_audit_and_preserves_earliest_failure \
+                saved_command_owner::apple_provisioning::tests::apple_original_store_closure_keeps_mode_and_owner_gates \
+                saved_command_owner::apple_provisioning::tests::apple_projection_hides_child_data_until_original_terminal_complete \
+                asset_session::apple_key::tests::original_cleanup_guard_keeps_staged_data_and_stop_without_minting_no_generation \
+                apple_provisioning_journal::data::key::tests::certificate_sparse_receipt_and_sent_unknown_cannot_be_rewritten_or_rearmed \
+                apple_provisioning_journal::key::tests::existing_profile_or_certificate_pending_blocks_new_key_without_migration_or_replay \
+                apple_provisioning_journal::key::tests::lost_reserve_ack_survives_restart_without_recreating_original_or_regenerating \
+                service_git_requests::tests::prepare_receipt_does_not_make_ready_and_phase_ids_arm_before_dispatch \
+                service_git_requests::commit::tests::index_grant_and_queries_cannot_consume_or_cancel_commit_and_the_reverse \
+                asset_session::agent_git_index::tests::only_current_successful_observe_data_is_even_eligible_for_native_consent \
+                asset_session::agent_git_index::commit::tests::only_exact_private_draft_and_real_whole_index_review_match_common_native_scope \
+                asset_session::git_local::agent_tests::shared_apply_requires_same_original_request_and_phase_not_matching_public_ids \
+                installed_cli::git_index::tests::compiled_catalogue_names_only_separately_allowed_index_changes_and_stays_bounded \
+                installed_cli::git_index::commit_tests::commit_request_framing_and_catalogue_preserve_no_draft_and_existing_output_cap \
+                application_service::git_index::tests::original_service_requires_both_grants_and_preserves_request_across_client_reconnect \
+                application_service::git_index::commit::tests::same_service_requires_read_and_commit_grants_and_reconnect_cannot_replay \
+                git_local_protocol::tests::strict_local_commands_have_no_provider_or_serialized_plan_route \
+                git_local_protocol::tests::local_admission_keeps_writer_bound_with_shared_document_data_and_full_code \
+                git_local_state::tests::pending_and_unknown_restart_rows_never_authorize_retry \
+                git_local_state::init_tests::init_schema_seven_is_actual_reservation_only_and_old_rows_remain_canonical \
+                supervisor::git_local::tests::local_clock_is_one_original_45_55_with_earliest_failure \
+                supervisor::git_local::tests::local_known_post_go_stop_needs_private_closed_control_and_cancelled_terminal \
+                supervisor::git_local::switch_tests::generic_or_absent_publication_cannot_authorize_switch_old_fd_successors \
+                github_connection_session::tests::supplied_unknown_stays_absorbing_after_late_final_data_and_disconnect \
+                asset_commands::apple_p12_fields::tests::p12_password_is_one_fixed_entropy_attempt_in_existing_private_fields \
+                asset_commands::apple_p12_fields::tests::p12_private_output_is_borrowed_and_strict_before_any_copy \
+                vault_crypto::apple_p12::tests::p12_reserved_identity_cannot_be_recreated_or_corrected_after_failed_seal \
+                vault_crypto::apple_p12::tests::p12_reserved_cipher_requires_full_password_file_and_revision_readback \
+                asset_session::vault::distribution_key::p12::tests::p12_derived_no_save_predicate_never_launders_an_attempted_store \
+                saved_command_owner::apple_key::p12::private::tests::p12_receiver_requires_complete_body_ack_eof_and_close_on_original_backing \
+                saved_command_owner::apple_key::p12::private::tests::p12_receiver_partial_wrong_request_or_lost_ack_never_becomes_empty_or_reusable \
+                saved_command_owner::apple_key::p12::tests::original_normal_terminal_pipe_stop_is_not_failure_and_never_substitutes_for_save_joins \
+                saved_command_owner::apple_provisioning::p12_review::tests::p12_review_never_renews_at_received_or_retired_status \
+                apple_provisioning_journal::p12::tests::p12_local_intent_never_encodes_a_provider_post_or_private_package \
+                apple_provisioning_journal::p12::tests::known_no_save_is_distinct_from_save_attempt_unknown_and_readback \
+                apple_provisioning_journal::p12::tests::p12_no_save_data_cannot_clear_unknown_or_rearm_a_refused_original \
+                apple_provisioning_journal::p12::tests::p12_v4_preserves_prior_canonical_rows_and_default_version \
+                apple_provisioning_journal::p12::tests::p12_actual_cas_lost_ack_stays_original_and_cannot_reserve_again \
+                apple_provisioning_protocol::tests::p12_prepare_requires_explicit_selection_and_never_borrows_issuer_ack_modes \
+                git_push_protocol::tests::only_existing_branch_nonforce_action_and_exact_connection_data_decode \
+                git_push_protocol::tests::review_binds_exact_upstream_oids_commit_set_and_no_message_author_payload \
+                git_push_protocol::tests::candidate_binds_complete_review_not_only_new_oid_and_does_not_mean_sent \
+                git_push_protocol::tests::journal_keeps_same_review_and_refuses_candidate_replacement_or_unbound_finality \
+                git_local_protocol::push_worker::tests::push_quote_preserves_shared_data_writer_remote_and_code_bounds \
+                git_local_protocol::push_worker::tests::original_request_binds_attached_head_and_review_account_while_go_is_private \
+                git_local_protocol::push_worker::tests::exact_candidate_ack_once_revision_has_no_fetch_keep_or_mutable_body_permission \
+                git_local_protocol::push_worker::tests::review_dry_run_accepts_only_exact_no_transmission_result_and_no_child_authority \
+                git_local_protocol::push_worker::tests::apply_requires_complete_same_original_return_and_late_stop_cannot_be_success \
+                git_local_protocol::push_worker::tests::cleanup_unknown_never_returns_progress_or_reconstructs_a_send_receipt \
+                git_local_protocol::push_worker::tests::known_retained_apply_accepts_only_original_flat_or_nested_diagnostic_shape \
+                git_local_state::push_tests::push_first_preparing_cas_uses_schema_eight_and_keeps_exact_old_rows \
+                git_local_state::push_tests::wrong_schema_or_mixed_old_fields_never_become_an_empty_or_adopted_push \
+                git_local_state::push_tests::candidate_amends_only_same_account_refs_and_review_without_erasing_original \
+                git_local_state::push_tests::pending_or_acknowledged_unknown_stays_fenced_after_restart_without_retry \
+                git_local_state::push_tests::remote_receipt_data_does_not_supply_native_finality_or_turn_recovery_into_success \
+                git_local_state::push_tests::shared_row_limit_refuses_new_project_without_evicting_any_unknown \
+                github_connection_session::push::tests::local_git_read_session_rechecks_actual_idle_registration_facts_and_expiry \
+                github_connection_session::push::tests::local_git_read_session_distinguishes_original_disconnect_and_connection_aba \
+                github_connection_session::push::tests::push_requires_reported_write_permission_and_same_account_session_and_revision \
+                github_connection_session::push::tests::prepared_push_binds_all_selected_refs_oids_and_account_not_just_target_name \
+                github_connection_session::push::tests::known_control_cooldown_and_original_expiry_never_renew_push_permission \
+                supervisor::git_local::push::tests::returned_push_only_compares_exact_original_request_and_never_local_publication \
+                supervisor::git_local::push::tests::original_known_receipt_and_joined_control_are_both_required_without_retaining_owner \
+                runtime::git_push::tests::fetch_or_public_source_evidence_never_nominates_a_push_provider \
+                git_push_protocol::new_branch::tests:: \
+                git_local_state::push_new_branch_tests:: \
+                git_local_protocol::push_worker::new_branch_tests:: \
+                "${remote_tool_tests[@]}" \
+                --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 167 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+            )
+            # Real synthetic-record backup backend, not picker/Keychain/signing
+            # or Desktop lifecycle qualification. The injected lost-close receipt
+            # is retained until this exact, synchronous test process has exited.
+            (
+              umask 077
+              test_name=asset_session::vault::backup_native::component_tests::native_apfs_backup_roundtrip_wrong_code_and_lost_close_receipt
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib "$test_name" -- --exact --ignored --list |
+                grep -Fx "$test_name: test"
+              # Same original private APFS fixture convention as desktop-ci.yml.
+              # This subshell owns its trap; the IPC HOME fixture below is separate.
+              temp_root="$(cd -P -- "$RUNNER_TEMP" && pwd -P)"
+              fixture="$(mktemp -d "$temp_root/mrk-backup-component.XXXXXX")"
+              fixture_identity=''
+              cleanup_backup_fixture() {
+                status=$?
+                trap - EXIT
+                cleanup_status=0
+                if [[ -n "$fixture_identity" && -d "$fixture" && ! -L "$fixture" &&
+                      "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" &&
+                      "$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")" == "$fixture_identity" ]]; then
+                  rm -rf -- "$fixture" || cleanup_status=$?
+                else
+                  printf '%s\n' 'Private backup fixture identity changed; leave it for disposable-host teardown.' >&2
+                  cleanup_status=1
+                fi
+                if (( status == 0 )); then status=$cleanup_status; fi
+                exit "$status"
+              }
+              trap cleanup_backup_fixture EXIT
+              [[ -d "$fixture" && ! -L "$fixture" && "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" ]]
+              [[ "$(/usr/bin/stat -f '%u:%Lp' "$fixture")" == "$(id -u):700" ]]
+              fixture_identity="$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")"
+              # No background work: caller cleanup follows the actual test join.
+              MRK_MACOS_VAULT_FIXTURE_ROOT="$fixture" rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib "$test_name" -- --exact --ignored --test-threads=1 |
+                tee "$WORK_ROOT/app-typecheck-backup-component.log"
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-backup-component.log"
+            )
+            # Real Darwin AF_UNIX peer credentials, capability/reconnect checks
+            # and original socket/task shutdown, using the existing library.
+            # No GUI consent, native project operation, cross-UID attack test,
+            # Keychain, installed app or CLI subprocess is claimed by this run.
+            # A short fresh HOME keeps the production sockaddr_un bound; do not
+            # move the fixture to writable /tmp or relax native ancestry checks.
+            ipc_home=$(/usr/bin/mktemp -d "$HOME/.mrki.XXXXXX")
+            trap 'ipc_status=$?; if ! /bin/rmdir "$ipc_home"; then printf "%s\n" "IPC fixture retained; no recursive cleanup attempted." >&2; test "$ipc_status" -ne 0 || ipc_status=1; fi; exit "$ipc_status"' EXIT
+            HOME="$ipc_home" /usr/bin/python3 -I -B - <<'PY'
+          import os
+          home = os.environ["HOME"]
+          assert os.geteuid() != 0 and os.path.isabs(home)
+          probe = home + "/.mrks-0000000000000000/dev.mobile-release-kit.desktop/service-v1/s"
+          assert len(os.fsencode(probe)) < 104, "IPC fixture exceeds native socket path bound"
+          PY
+            HOME="$ipc_home" rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+              installed_cli_ipc::tests::real_socket_two_clients_share_completed_observations_and_history \
+              installed_cli_ipc::tests::stalled_client_and_disconnect_do_not_block_other_client_or_shutdown \
+              installed_cli_ipc::tests::private_capability_wrong_instance_and_revoked_access_are_rejected \
+              installed_cli_ipc::tests::replaced_endpoint_is_retained_and_state_cannot_close_before_join \
+              installed_cli_ipc::tests::stale_descriptor_and_symlink_are_not_an_auto_cleanup_authority \
+              installed_cli_ipc::tests::client_handshake_timeout_closes_original_and_preserves_unknown_close \
+              installed_cli_ipc::tests::poisoned_revoke_still_stops_and_joins_original_workers_once \
+              --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-ipc-contracts.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-ipc-contracts.log"
+            exit 0
+          fi
+          if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
+            # Contracts-only is an explicit retry scope when the unchanged app,
+            # helper and wire/lease graph already passed on the same toolchain.
+            # It still compiles the actual library test graph and runs the selected app contracts.
+            if [[ "$APP_CHECKS" == local-keychain ]]; then
+            # Separate Cargo invocation preserves helper-only native policy.
+            # Closed DATA/DocumentState/driver contracts plus an owned temporary
+            # directory and fixed child processes for real Darwin lease tests.
+            # No Keychain credentials, Document admission or Installer work.
+            export CARGO_PROFILE_TEST_DEBUG=0
+            # The role symbol is deliberately defined by the real helper main,
+            # not by its dependency's standalone libtest executable. Link the
+            # actual helper; run portable wire tests in the ordinary native graph.
+            # Never add a permissive role stub or unresolved-symbol linker flag.
+            rustup run 1.98.1 cargo build --locked \
+              --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml
+            rustup run 1.98.1 cargo test --locked \
+              --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
+              local_keychain_wire::tests::local_exact_context_and_legacy_discriminator \
+              local_keychain_wire::tests::lookup_never_transports_a_proposal_and_bounds_are_original \
+              local_keychain_wire::tests::syntax_cannot_create_absence_or_value_and_context_cannot_alias \
+              local_keychain_wire::tests::positive_absence_is_local_probe_only_and_never_a_key \
+              local_keychain_wire::tests::local_lease_root_bounds_and_legacy_exact_request_length \
+              local_project_lease::tests::kernel_same_ofd_survives_participant_exit \
+              local_project_lease::tests::kernel_inherited_root_and_cloexec_refuse \
+              --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-wire-tests.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-wire-tests.log"
+            fi
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+              vault_keyring_macos::tests::local_failure_and_wrong_domain_never_mint_absence_or_vault_key \
+              vault_keyring_macos::tests::local_unknown_close_and_late_join_cannot_publish_or_refund \
+              asset_session::local_history::tests::local_release_history_needs_registered_project_not_credential_context \
+              local_release_history_protocol::tests::local_release_history_real_decoder_requires_complete_closed_phase_sequence \
+              local_release_history_protocol::tests::local_release_history_original_nonce_replay_and_truncated_terminal_refuse \
+              local_release_history_protocol::tests::local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound \
+              local_release_history_protocol::tests::local_release_history_candidate_context_and_consent_are_action_specific \
+              local_release_history_protocol::tests::local_release_history_candidate_summary_cannot_create_old_finality_or_change_roster \
+              local_release_history_protocol::tests::local_release_history_candidate_phases_bind_successor_and_terminal_head \
+              android_build_protocol::tests::candidate_create_exact_consent_uuid_and_old_signed_domain \
+              android_build_protocol::tests::candidate_create_four_phases_fourteen_frames_match_original_selection \
+              android_build_protocol::tests::candidate_create_rejects_early_build_replayed_context_and_unfinished_success \
+              android_build_protocol::tests::candidate_create_source_only_failure_and_stop_before_ready_keep_real_ledger \
+              saved_command_owner::local_history::native::tests::local_release_history_candidate_helper_rosters_never_enroll \
+              saved_command_owner::local_history::native::tests::local_candidate_create_helpers_cannot_enroll_or_skip_checkpoint \
+              saved_command_owner::local_history::candidate_route_tests::local_candidate_create_phase_events_are_not_acknowledged_native_completion \
+              asset_session::android_signing::candidate_material_tests::local_candidate_create_comparison_material_cannot_mint_document_grant \
+              local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
+              saved_command_owner::local_history::native::tests::local_release_history_pre_admission_refusal_has_no_worker_to_join \
+              installed_runtime::local_history_runtime_audit_requires_original_claim_and_cleanup_clock \
+              local_release_history_protocol::tests::local_release_history_prepared_review_is_exact_read_only_summary_not_prepare_finality \
+              local_release_history_protocol::tests::local_release_history_prepared_review_requires_selected_prepared_row_not_global_latest \
+              local_release_history_protocol::tests::local_release_history_prepared_review_keeps_original_phase_and_failure_finality \
+              local_store_prepare_protocol::tests::local_prepare_requires_exact_candidate_consent_not_access_or_execute \
+              local_store_prepare_protocol::tests::local_prepare_decoder_requires_original_order_and_final_checkpoint \
+              local_store_prepare_protocol::tests::local_prepare_success_binds_candidate_version_ledger_and_known_closes \
+              local_store_prepare_protocol::tests::local_prepare_known_failed_prefix_never_requires_or_fakes_settlement_phase \
+              saved_command_owner::store_prepare::tests::local_prepare_uses_original_store_clock_and_separate_frame_reason_limits \
+              saved_command_owner::local_history::native::prepare_tests::local_prepare_helper_plan_never_enrolls_or_omits_a_checkpoint \
+              asset_session::store_material::tests::local_prepare_comparison_and_private_bytes_do_not_mint_document_grant \
+              local_store_preflight_protocol::tests::local_consent_is_closed_and_terminal_cannot_hide_unknown_ownership \
+              asset_session::store_material::tests::store_command_loan_binds_canonical_context_and_retains_private_writer_bytes \
+              asset_session::store_material::tests::local_loan_uses_original_private_bytes_and_rejects_stale_context_or_assignment \
+              saved_command_owner::store::tests::local_store_failed_post_or_unknown_close_never_becomes_complete \
+              saved_command_owner::store::tests::local_store_original_clock_and_private_backing_are_bounded \
+              installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
+              installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
+              local_store_execute_protocol::tests::local_execute_requires_current_intent_tools_and_separate_consent \
+              local_store_execute_protocol::tests::local_execute_native_request_binds_original_mac_selection_and_profile \
+              local_store_execute_protocol::tests::local_execute_decoder_requires_original_order_and_final_checkpoint \
+              local_store_execute_protocol::tests::local_execute_success_binds_native_authorization_receipt_and_known_closes \
+              local_store_execute_protocol::tests::local_execute_failure_keeps_actual_prefix_including_entered_final_helper \
+              saved_command_owner::store_execute::tests::local_execute_uses_separate_domain_with_original_store_clock_and_no_cross_reason \
+              asset_session::store_material::tests::local_execute_comparison_cannot_replace_current_document_catalog_or_material \
+              asset_session::lookup_memory::local_execute_census_remaining_has_no_overflow_or_added_credit \
+              local_release_history_protocol::tests::local_release_history_execution_review_is_exact_receipt_not_old_finality \
+              local_release_history_protocol::tests::local_release_history_execution_review_requires_selected_success_not_latest_operation \
+              local_release_history_protocol::tests::local_release_history_execution_review_keeps_read_only_phases_and_finality \
+              local_store_reconcile_protocol::tests::local_reconcile_native_request_has_new_authorization_and_no_android_tools \
+              local_store_reconcile_protocol::tests::local_reconcile_four_frames_bind_acknowledged_head_and_readback_only \
+              local_store_reconcile_protocol::tests::local_reconcile_failure_prefixes_and_original_closes_are_not_promoted \
+              saved_command_owner::store_reconcile::tests::local_reconcile_uses_original_store_clock_and_separate_frame_reason_limits \
+              saved_command_owner::local_history::reconcile_route_tests::local_reconcile_actual_ack_head_not_terminal_count_controls_route_completion \
+              saved_command_owner::local_history::native::reconcile_tests::local_reconcile_read_helpers_never_add_or_credit_unjoined_work \
+              asset_session::store_material::tests::local_reconcile_comparison_and_private_bytes_do_not_mint_document_grant \
+              local_release_history_protocol::tests::local_release_history_review_reconcile_requires_current_last_execute_chain \
+              local_store_preflight_protocol::tests::apple_access_consent_scope_and_seven_calls_do_not_widen_google_mutations \
+              asset_session::store_material::tests::apple_access_loan_retains_exact_fields_and_never_lends_google_mutation_material \
+              asset_session::store_material::tests::apple_access_key_and_scalar_bounds_refuse_before_private_writer \
+              local_store_reconcile_protocol::tests::local_recovery_context_and_consent_cannot_upgrade_read_only_reconcile \
+              local_store_reconcile_protocol::tests::local_recovery_checkpoint_requires_next_head_then_five_frames_and_original_closes \
+              local_release_history_protocol::tests::local_release_history_recovery_review_is_distinct_current_files_not_live_or_old_finality \
+              local_release_history_protocol::tests::local_release_history_recovery_review_keeps_two_events_and_all_original_close_checks \
+              saved_command_owner::local_history::reconcile_route_tests::local_recovery_route_requires_actual_third_ack_without_pending_write \
+              saved_command_owner::local_history::native::reconcile_tests::local_recovery_helpers_add_exactly_one_after_three_reads_not_for_offline_review \
+              saved_command_owner::local_history::native::reconcile_tests::local_recovery_joined_final_original_uses_cleanup_tail_not_a_new_forward_grant \
+              asset_session::ios_signing::candidate_tests::ios_candidate_comparison_material_cannot_mint_document_grant \
+              ios_archive_protocol::tests::ios_candidate_context_requires_signed_action_and_original_consent \
+              ios_archive_protocol::tests::ios_candidate_terminal_keeps_actual_source_and_signing_ledgers_separate \
+              ios_archive_protocol::tests::ios_candidate_frame_sequence_binds_four_phases_and_original_nonce \
+              local_release_history_protocol::tests::local_release_history_ios_platform_has_original_distinct_consent \
+              local_release_history_protocol::tests::local_release_history_ios_summary_is_current_bundle_not_android_or_create_finality \
+              saved_command_owner::local_history::native::reconcile_tests::ios_candidate_cleanup_credit_needs_fifth_original_join_not_phase_data \
+              saved_command_owner::local_history::candidate_route_tests::ios_candidate_phase_data_cannot_complete_four_original_replies \
+              local_store_prepare_protocol::tests::local_ios_prepare_requires_distinct_consent_and_closed_fifteen_call_result \
+              asset_session::store_material::tests::apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant \
+              local_release_history_protocol::tests::local_ios_prepared_history_is_exact_platform_summary_not_reconcile_permission \
+              installed_runtime::ios_validation_tools_data_tests::ios_validation_tools_need_original_inspector_and_never_grant_build_or_recovery \
+              local_store_execute_protocol::tests::local_ios_execute_native_selection_is_exact_data_not_android_or_renderer_paths \
+              local_store_execute_protocol::tests::local_ios_execute_exact_platform_consent_receipt_and_actual_sixteen_roles \
+              asset_session::store_material::tests::apple_execute_loan_is_original_asc_not_android_loan_or_document_authority \
+              installed_runtime::ios_upload_tools_tests::ios_upload_projection_requires_actual_selected_originals_not_validation_mode \
+              saved_command_owner::execute_native::ios_tests::local_ios_execute_independent_original_closes_never_create_android_tail \
+              local_release_history_protocol::tests::local_release_history_ios_execution_has_exact_sixteen_fields_and_no_recovery \
+              installed_runtime::ios_upload_tools_tests::ios_upload_actual_selected_tools_pre_post_and_positive_consume \
+              local_store_reconcile_protocol::tests::local_ios_reconcile_original_context_consent_and_request_have_no_tools_or_settlement \
+              local_store_reconcile_protocol::tests::local_ios_reconcile_four_frames_exact_receipt_and_fifteen_roles_do_not_repair_finality \
+              asset_session::store_material::tests::apple_reconcile_loan_is_original_asc_and_cannot_grant_android_settlement_or_document \
+              local_release_history_protocol::tests::local_release_history_ios_reconcile_requires_current_last_execution_and_exact_prepared_files \
+              local_store_prepare_protocol::tests::local_stage_prepare_explicit_lineage_and_original_uuid_never_widen_candidate \
+              local_store_prepare_protocol::tests::local_stage_prepare_actual_decoder_requires_room_and_all_four_acks \
+              local_store_execute_protocol::tests::local_stage_execute_has_no_tool_tuple_and_checks_original_authorization \
+              asset_session::store_material::tests::local_stage_apple_material_retains_every_original_scalar_and_assignment \
+              local_release_history_protocol::tests::local_stage_history_uses_explicit_stage_id_and_never_relabels_candidate_review \
+              asset_session::local_history::tests::local_stage_history_consent_cannot_switch_stage_or_platform_or_mint_document \
+              saved_command_owner::execute_native::ios_tests::local_stage_execute_no_tools_still_consumes_original_store_and_rejects_unknown \
+              local_store_reconcile_protocol::tests::local_external_readiness_requires_explicit_original_context_and_separate_consent \
+              local_store_reconcile_protocol::tests::local_external_readiness_five_frames_bind_original_execution_and_checkpoint_closes \
+              local_release_history_protocol::tests::local_release_history_external_readiness_is_exact_offline_observation_not_old_finality \
+              asset_session::store_material::tests::local_external_readiness_material_uses_original_supplemental_assignments_not_a_new_grant \
+              saved_command_owner::local_history::reconcile_route_tests::local_external_readiness_route_needs_third_actual_ack_and_preserves_pending_failure \
+              saved_command_owner::local_history::native::reconcile_tests::local_external_readiness_final_original_join_alone_selects_cleanup_not_success \
+              --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 102 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            exit 0
+          fi
+          # Compile the real library graph once; run affected memory-only
+          # Store/History/material contracts, never the native Xcode Book fixture.
+          rustup run 1.98.1 cargo test --locked --no-default-features \
+            --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+            installed_runtime::budget::tests::admitted_deep_paths_fit_after_retained_siblings_without_unbounded_growth \
+            asset_session::local_history::tests::local_release_history_needs_registered_project_not_credential_context \
+            local_release_history_protocol::tests::local_release_history_real_decoder_requires_complete_closed_phase_sequence \
+            local_release_history_protocol::tests::local_release_history_original_nonce_replay_and_truncated_terminal_refuse \
+            local_release_history_protocol::tests::local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound \
+            local_release_history_protocol::tests::local_release_history_candidate_context_and_consent_are_action_specific \
+            local_release_history_protocol::tests::local_release_history_candidate_summary_cannot_create_old_finality_or_change_roster \
+            local_release_history_protocol::tests::local_release_history_candidate_phases_bind_successor_and_terminal_head \
+            local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
+            local_release_history_protocol::tests::local_release_history_prepared_review_is_exact_read_only_summary_not_prepare_finality \
+            local_release_history_protocol::tests::local_release_history_prepared_review_requires_selected_prepared_row_not_global_latest \
+            local_release_history_protocol::tests::local_release_history_prepared_review_keeps_original_phase_and_failure_finality \
+            local_store_prepare_protocol::tests::local_prepare_requires_exact_candidate_consent_not_access_or_execute \
+            local_store_prepare_protocol::tests::local_prepare_decoder_requires_original_order_and_final_checkpoint \
+            local_store_prepare_protocol::tests::local_prepare_success_binds_candidate_version_ledger_and_known_closes \
+            local_store_prepare_protocol::tests::local_prepare_known_failed_prefix_never_requires_or_fakes_settlement_phase \
+            asset_session::store_material::tests::local_prepare_comparison_and_private_bytes_do_not_mint_document_grant \
+            asset_session::store_material::tests::store_command_loan_binds_canonical_context_and_retains_private_writer_bytes \
+            asset_session::store_material::tests::local_loan_uses_original_private_bytes_and_rejects_stale_context_or_assignment \
+            installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
+            installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
+            local_store_execute_protocol::tests::local_execute_requires_current_intent_tools_and_separate_consent \
+            local_store_execute_protocol::tests::local_execute_native_request_binds_original_mac_selection_and_profile \
+            local_store_execute_protocol::tests::local_execute_decoder_requires_original_order_and_final_checkpoint \
+            local_store_execute_protocol::tests::local_execute_success_binds_native_authorization_receipt_and_known_closes \
+            local_store_execute_protocol::tests::local_execute_failure_keeps_actual_prefix_including_entered_final_helper \
+            asset_session::store_material::tests::local_execute_comparison_cannot_replace_current_document_catalog_or_material \
+            local_release_history_protocol::tests::local_release_history_execution_review_is_exact_receipt_not_old_finality \
+            local_release_history_protocol::tests::local_release_history_execution_review_requires_selected_success_not_latest_operation \
+            local_release_history_protocol::tests::local_release_history_execution_review_keeps_read_only_phases_and_finality \
+            local_store_reconcile_protocol::tests::local_reconcile_native_request_has_new_authorization_and_no_android_tools \
+            local_store_reconcile_protocol::tests::local_reconcile_four_frames_bind_acknowledged_head_and_readback_only \
+            local_store_reconcile_protocol::tests::local_reconcile_failure_prefixes_and_original_closes_are_not_promoted \
+            saved_command_owner::local_history::reconcile_route_tests::local_reconcile_actual_ack_head_not_terminal_count_controls_route_completion \
+            saved_command_owner::local_history::native::reconcile_tests::local_reconcile_read_helpers_never_add_or_credit_unjoined_work \
+            asset_session::store_material::tests::local_reconcile_comparison_and_private_bytes_do_not_mint_document_grant \
+            local_release_history_protocol::tests::local_release_history_review_reconcile_requires_current_last_execute_chain \
+            asset_session::store_material::tests::apple_access_loan_retains_exact_fields_and_never_lends_google_mutation_material \
+            asset_session::store_material::tests::apple_access_key_and_scalar_bounds_refuse_before_private_writer \
+            local_store_reconcile_protocol::tests::local_recovery_context_and_consent_cannot_upgrade_read_only_reconcile \
+            local_store_reconcile_protocol::tests::local_recovery_checkpoint_requires_next_head_then_five_frames_and_original_closes \
+            local_release_history_protocol::tests::local_release_history_recovery_review_is_distinct_current_files_not_live_or_old_finality \
+            local_release_history_protocol::tests::local_release_history_recovery_review_keeps_two_events_and_all_original_close_checks \
+            saved_command_owner::local_history::reconcile_route_tests::local_recovery_route_requires_actual_third_ack_without_pending_write \
+            saved_command_owner::local_history::native::reconcile_tests::local_recovery_helpers_add_exactly_one_after_three_reads_not_for_offline_review \
+            saved_command_owner::local_history::native::reconcile_tests::local_recovery_joined_final_original_uses_cleanup_tail_not_a_new_forward_grant \
+            local_release_history_protocol::tests::local_release_history_ios_platform_has_original_distinct_consent \
+            local_release_history_protocol::tests::local_release_history_ios_summary_is_current_bundle_not_android_or_create_finality \
+            saved_command_owner::local_history::native::reconcile_tests::ios_candidate_cleanup_credit_needs_fifth_original_join_not_phase_data \
+            local_store_prepare_protocol::tests::local_ios_prepare_requires_distinct_consent_and_closed_fifteen_call_result \
+            asset_session::store_material::tests::apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant \
+            local_release_history_protocol::tests::local_ios_prepared_history_is_exact_platform_summary_not_reconcile_permission \
+            local_store_execute_protocol::tests::local_ios_execute_native_selection_is_exact_data_not_android_or_renderer_paths \
+            local_store_execute_protocol::tests::local_ios_execute_exact_platform_consent_receipt_and_actual_sixteen_roles \
+            asset_session::store_material::tests::apple_execute_loan_is_original_asc_not_android_loan_or_document_authority \
+            saved_command_owner::execute_native::ios_tests::local_ios_execute_independent_original_closes_never_create_android_tail \
+            local_release_history_protocol::tests::local_release_history_ios_execution_has_exact_sixteen_fields_and_no_recovery \
+            local_store_reconcile_protocol::tests::local_ios_reconcile_original_context_consent_and_request_have_no_tools_or_settlement \
+            local_store_reconcile_protocol::tests::local_ios_reconcile_four_frames_exact_receipt_and_fifteen_roles_do_not_repair_finality \
+            asset_session::store_material::tests::apple_reconcile_loan_is_original_asc_and_cannot_grant_android_settlement_or_document \
+            local_release_history_protocol::tests::local_release_history_ios_reconcile_requires_current_last_execution_and_exact_prepared_files \
+            local_store_prepare_protocol::tests::local_stage_prepare_explicit_lineage_and_original_uuid_never_widen_candidate \
+            local_store_prepare_protocol::tests::local_stage_prepare_actual_decoder_requires_room_and_all_four_acks \
+            local_store_execute_protocol::tests::local_stage_execute_has_no_tool_tuple_and_checks_original_authorization \
+            asset_session::store_material::tests::local_stage_apple_material_retains_every_original_scalar_and_assignment \
+            local_release_history_protocol::tests::local_stage_history_uses_explicit_stage_id_and_never_relabels_candidate_review \
+            asset_session::local_history::tests::local_stage_history_consent_cannot_switch_stage_or_platform_or_mint_document \
+            saved_command_owner::execute_native::ios_tests::local_stage_execute_no_tools_still_consumes_original_store_and_rejects_unknown \
+            local_store_reconcile_protocol::tests::local_external_readiness_requires_explicit_original_context_and_separate_consent \
+            local_store_reconcile_protocol::tests::local_external_readiness_five_frames_bind_original_execution_and_checkpoint_closes \
+            local_release_history_protocol::tests::local_release_history_external_readiness_is_exact_offline_observation_not_old_finality \
+            asset_session::store_material::tests::local_external_readiness_material_uses_original_supplemental_assignments_not_a_new_grant \
+            saved_command_owner::local_history::reconcile_route_tests::local_external_readiness_route_needs_third_actual_ack_and_preserves_pending_failure \
+            saved_command_owner::local_history::native::reconcile_tests::local_external_readiness_final_original_join_alone_selects_cleanup_not_success \
+            --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
+          grep -Eq '^test result: ok\. 74 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
+        id: apple-key-python
+        with:
+          python-version: '3.14.7'
+      - name: Restore the SOURCE-selected signed Ruby for the local Apple key/P12 components
+        if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_PYTHON: ${{ steps.apple-key-python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # Same acquisition as store-runtime. No account calls, signing,
+          # runtime build, alternate artifact or retry.
+          "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
+            "$WORK_ROOT/component" --target aarch64-apple-darwin
+      - name: Verify real local Apple key/P12 assembly, encrypted NEW and fresh reuse
+        if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
+        id: apple-key-component
+        timeout-minutes: 10
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.apple-key-python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+          MRK_IMAGE_RELEASE_ID: ${{ matrix.release }}
+          MACOSX_DEPLOYMENT_TARGET: '26.0'
+        run: |
+          set -euo pipefail
+          umask 077
+          # Reuse the actual library graph just tested above. Cargo selects the
+          # executable; no filename guessing or copied/cached-binary authority.
+          export CARGO_HOME="$GITHUB_WORKSPACE/desktop/.ci-component-cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$CARGO_HOME/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+          rustup run 1.98.1 cargo test --locked --no-default-features \
+            --manifest-path desktop/src-tauri/Cargo.toml --lib --no-run --message-format=json \
+            > "$WORK_ROOT/apple-key-cargo.jsonl"
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import importlib.util, json, os, re, resource, stat, subprocess, sys, time
+          from pathlib import Path
+          checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          phase = "prepare"
+          try:
+              assert sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site
+              def load(name):
+                  spec = importlib.util.spec_from_file_location("_apple_key_component_" + name,
+                      checkout / "desktop/tools" / (name + ".py"))
+                  module = importlib.util.module_from_spec(spec)
+                  sys.modules[spec.name] = module
+                  spec.loader.exec_module(module)
+                  return module
+              stager, prep, helper, signing = [load(name) for name in
+                  ("stage_macos_installed", "prepare_runtime", "macos_android_helper_package", "macos_store_signing")]
+              stager.need(os.uname().sysname == "Darwin" and os.uname().machine == "arm64"
+                  and os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+                  and os.environ.get("RUNNER_OS") == "macOS" and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                  and os.environ.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
+                  and os.environ.get("GITHUB_SHA") == os.environ.get("GITHUB_WORKFLOW_SHA"), "apple-key-hosted-source")
+              def directory(value):
+                  stager.need(stat.S_ISDIR(value.st_mode) and value.st_uid == os.geteuid() != 0
+                      and stat.S_IMODE(value.st_mode) == 0o700, "apple-key-private-directory")
+                  return (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode)
+              def private(path, limit):
+                  with stager.parent(path) as (parent, leaf):
+                      body, info = stager.read_at(parent, leaf, limit)
+                  stager.need(info.st_uid == os.geteuid() and info.st_nlink == 1
+                      and stat.S_IMODE(info.st_mode) == 0o600, "apple-key-private-file")
+                  return body, stager.signature(info)
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              held = os.open(work, flags)
+              try:
+                  root_identity = directory(os.fstat(held))
+                  stager.need(directory(work.lstat()) == root_identity
+                      and work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-app-check."),
+                      "apple-key-task-root")
+                  messages = stager.read(work / "apple-key-cargo.jsonl", 4 * 1024 * 1024)
+                  artifacts = [json.loads(line) for line in messages.splitlines()]
+                  candidates = [item for item in artifacts if item.get("reason") == "compiler-artifact"
+                      and item.get("target", {}).get("name") == "mobile_release_desktop"
+                      and item.get("target", {}).get("kind") == ["lib"] and item.get("profile", {}).get("test") is True
+                      and item.get("manifest_path") == str(checkout / "desktop/src-tauri/Cargo.toml")
+                      and item.get("target", {}).get("src_path") == str(checkout / "desktop/src-tauri/src/lib.rs")
+                      and item.get("features") == [] and isinstance(item.get("executable"), str)]
+                  stager.need(len(candidates) == 1, "apple-key-original-test-executable")
+                  binary = Path(candidates[0]["executable"])
+                  stager.need(binary.parent == Path(os.environ["CARGO_TARGET_DIR"]) / "debug/deps"
+                      and re.fullmatch(r"mobile_release_desktop-[0-9a-f]+", binary.name) is not None,
+                      "apple-key-original-test-path")
+                  binary_info = binary.lstat()
+                  stager.need(stat.S_ISREG(binary_info.st_mode) and binary_info.st_uid == os.geteuid()
+                      and binary_info.st_nlink == 1 and binary_info.st_mode & 0o111 != 0
+                      and binary_info.st_mode & 0o022 == 0 and 0 < binary_info.st_size <= 256 * 1024 * 1024,
+                      "apple-key-original-test-shape")
+                  binary_identity = stager.signature(binary_info)
+                  # Identical SOURCE-selected archive/inventory/signature checks
+                  # to store-runtime, without running its six unrelated suites.
+                  target, arch = "aarch64-apple-darwin", "arm64"
+                  capsule = work / "component"
+                  runtime = prep._root(capsule / "extracted/runtime")
+                  original = stager.store_component_inputs(capsule, target)
+                  def snapshot():
+                      rows, directories = [], {}
+                      for path in prep.store_component_files(runtime, directories=directories):
+                          with stager.parent(path) as (parent, leaf):
+                              body, info = stager.read_at(parent, leaf, signing.FILE_LIMIT)
+                          rows.append((path.relative_to(runtime).as_posix(), stager.digest(body), len(body)))
+                      stager.need(tuple(rows) == original[1], "apple-key-runtime-bytes")
+                      return directories
+                  original_directories = snapshot()
+                  producer_path, service_path = checkout / helper.PRODUCER_PROFILE, checkout / helper.PROFILE
+                  producer, service = stager.read(producer_path, 1024), stager.read(service_path, 1024)
+                  stager.packaging_signing_data(producer, service)
+                  identity = stager.service_signing_data(service)
+                  receipt = stager.decode(stager.read(capsule / "store-signed-receipt.json", 256 * 1024))
+                  native = receipt["nativeMembers"]
+                  stager.need(len(native) == signing.NATIVE_COUNT, "apple-key-runtime-native-count")
+                  source_paths = ("fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
+                      "desktop/tools/verify_macos_store_runtime.rb", "tests/workflow/apple_p12_component.rb",
+                      "fastlane/apple_provisioning_p12.rb", "fastlane/apple_provisioning_p12_assemble.rb")
+                  sources = tuple(stager.read(checkout / name, 128 * 1024) for name in source_paths)
+                  home, fixture = work / "apple-key-home", work / "apple-key-fixture"
+                  p12_fixture = work / "apple-p12-fixture"
+                  home.mkdir(mode=0o700); fixture.mkdir(mode=0o700); p12_fixture.mkdir(mode=0o700)
+                  fixture_identity = directory(fixture.lstat())
+                  p12_fixture_identity = directory(p12_fixture.lstat())
+                  for root in (fixture, p12_fixture):
+                      for name in ("generated", "native", "reopened"):
+                          (root / name).mkdir(mode=0o700)
+                  clean = {"PATH": str(runtime / "bin") + ":/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home),
+                      "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "CI": "true",
+                      "FASTLANE_SKIP_UPDATE_CHECK": "1", "FASTLANE_OPT_OUT_USAGE": "1", "FASTLANE_HIDE_CHANGELOG": "1"}
+                  profile = ('(version 1) (allow default) (deny network*) '
+                      '(deny file-write* (subpath (param "RUNTIME"))) (deny file-write* (subpath (param "CHECKOUT")))')
+                  sandbox = ["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime),
+                      "-D", "CHECKOUT=" + str(checkout), "-p", profile]
+                  ruby = [str(runtime / "bin/bundle"), "exec", "ruby"]
+                  resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+                  resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
+                  phase = "runtime-signatures"
+                  with (work / "apple-key-runtime.private").open("xb") as capture:
+                      end = time.monotonic() + 180
+                      for row in native:
+                          name = row["path"]
+                          stager.need(name.startswith("runtime/") and row["identifier"] == signing.identifier(name),
+                              "apple-key-runtime-native-path")
+                          remaining = end - time.monotonic()
+                          stager.need(remaining > 0, "apple-key-runtime-signature-deadline")
+                          requirement = helper.signing_requirement(identity, signing.identifier(name))
+                          subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures",
+                              "--test-requirement", "=" + requirement, str(capsule / "extracted" / name)],
+                              stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                              env=clean, cwd=home, check=True, timeout=min(30, remaining))
+                      phase = "runtime-loader"
+                      subprocess.run(sandbox + ruby + [str(checkout / source_paths[2]), str(runtime), arch, "projected-smoke"],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                          env=clean, cwd=home, check=True, timeout=90)
+                  test_name = ("asset_session::vault::backup_native::component_tests::apple_key::"
+                      "native_apfs_apple_key_new_reopen_and_private_reuse")
+                  p12_test = ("asset_session::vault::backup_native::component_tests::apple_key::p12::"
+                      "native_apfs_apple_p12_new_reopen_and_private_reuse")
+                  phase = "test-selection"
+                  with (work / "apple-key-selection.private").open("xb") as capture:
+                      subprocess.run(sandbox + [str(binary), test_name, p12_test, "--exact", "--ignored", "--list"],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                          env=clean, cwd=home, check=True, timeout=15)
+                  listing = private(work / "apple-key-selection.private", 64 * 1024)[0].splitlines()
+                  stager.need(listing.count((test_name + ": test").encode("ascii")) == 1
+                      and listing.count((p12_test + ": test").encode("ascii")) == 1
+                      and b"2 tests, 0 benchmarks" in listing, "apple-key-p12-original-tests")
+                  generated = fixture / "generated/pending-apple-key.mrk"
+                  reopened = fixture / "reopened/pending-apple-key.mrk"
+                  assembled = p12_fixture / "generated/assembled-apple-p12.mrk"
+                  p12_reopened = p12_fixture / "reopened/distribution.p12"
+                  p12_password = p12_fixture / "reopened/p12-password"
+                  magic = b"MRK-APPLE-DISTRIBUTION-KEY/1\n"
+                  public_magic = b"MRK-APPLE-DISTRIBUTION-KEY-PUBLIC/1\n"
+                  private_limit = len(magic) + 12 + 3072 + 4096 + 1024
+                  public_limit = len(public_magic) + 8 + 4096 + 1024
+                  p12_magic, p12_public_magic = b"MRK-APPLE-P12/1\n", b"MRK-P12-PUBLIC/1\n"
+                  p12_header, p12_limit = len(p12_magic) + 4 + 64, 128 * 1024
+                  # One original90s end for ALL six calls and their checks.
+                  # No phase retry/renewal and no private diagnosticTail.
+                  # This tiny synthetic fixture keeps the existing256KiB
+                  # FSIZE ceiling; no production package limit is raised.
+                  end = time.monotonic() + 90
+                  calls = (
+                      ("generate", ruby + [str(checkout / source_paths[0])], generated, private_limit, 30),
+                      ("native", [str(binary), test_name, "--exact", "--ignored", "--test-threads=1"],
+                          work / "apple-key-native.private", 64 * 1024, 35),
+                      ("verify", ruby + [str(checkout / source_paths[1]), str(reopened)],
+                          work / "apple-key-verifier.private", public_limit, 25),
+                      ("p12-assemble", ruby + [str(checkout / source_paths[3]), str(reopened)],
+                          assembled, p12_limit, 30),
+                      ("p12-native", [str(binary), p12_test, "--exact", "--ignored", "--test-threads=1"],
+                          work / "apple-p12-native.private", p12_limit, 35),
+                      ("p12-reuse", None, work / "apple-p12-reuse.private", p12_limit, 25),
+                  )
+                  for phase, argv, destination, limit, seconds in calls:
+                      remaining = end - time.monotonic()
+                      stager.need(remaining > 0 and directory(fixture.lstat()) == fixture_identity
+                          and directory(p12_fixture.lstat()) == p12_fixture_identity
+                          and stager.signature(binary.lstat()) == binary_identity, "apple-key-original-cut")
+                      if phase == "p12-reuse":
+                          # Public expected leaf digest, not a native binding.
+                          # BOTH private inputs come only from fresh AEAD
+                          # readback after the preceding native original joined.
+                          argv = ruby + [str(checkout / source_paths[4]), str(p12_reopened), str(p12_password), p12_leaf_hash]
+                      error_path = work / ("apple-key-" + phase + "-stderr.private")
+                      resource.setrlimit(resource.RLIMIT_FSIZE, (limit, 256 * 1024))
+                      with destination.open("xb") as output, error_path.open("xb") as errors:
+                          environment = dict(clean)
+                          if phase == "native": environment["MRK_MACOS_VAULT_FIXTURE_ROOT"] = str(fixture)
+                          if phase == "p12-native": environment["MRK_MACOS_VAULT_FIXTURE_ROOT"] = str(p12_fixture)
+                          remaining = end - time.monotonic()
+                          stager.need(remaining > 0, "apple-key-call-deadline")
+                          # run() kills AND waits for this original on timeout;
+                          # any exception stops the loop, never the next phase.
+                          subprocess.run(sandbox + argv, stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
+                              env=environment, cwd=home, check=True, timeout=min(seconds, remaining))
+                          output.flush(); os.fsync(output.fileno())
+                          errors.flush(); os.fsync(errors.fileno())
+                      resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
+                      body, output_identity = private(destination, limit)
+                      stager.need(len(private(error_path, 4096)[0]) == 0 and time.monotonic() < end,
+                          "apple-key-private-call-return")
+                      if phase == "generate":
+                          stager.need(body.startswith(magic) and len(body) > len(magic) + 12, "apple-key-generated-frame")
+                          offset = len(magic)
+                          sizes = [int.from_bytes(body[offset+i:offset+i+4]) for i in (0, 4, 8)]
+                          stager.need(all(0 < size <= cap for size, cap in zip(sizes, (3072, 4096, 1024)))
+                              and len(body) == offset + 12 + sum(sizes), "apple-key-generated-frame-bound")
+                          generated_identity, private_digest = output_identity, stager.digest(body)
+                          expected_public = public_magic + body[offset+4:offset+12] + body[offset+12+sizes[0]:]
+                          key_spki = body[-sizes[2]:]
+                      elif phase == "native":
+                          stager.need(re.search(rb"^test result: ok\. 1 passed; 0 failed; 0 ignored;", body, re.MULTILINE)
+                              is not None, "apple-key-native-count")
+                          fresh, reopened_identity = private(reopened, private_limit)
+                          original_body, current_identity = private(generated, private_limit)
+                          stager.need(stager.digest(fresh) == stager.digest(original_body) == private_digest
+                              and current_identity == generated_identity, "apple-key-native-private-readback")
+                      elif phase == "verify":
+                          stager.need(body.startswith(public_magic) and len(body) >= len(public_magic) + 8,
+                              "apple-key-verified-frame")
+                          offset = len(public_magic)
+                          csr, spki = int.from_bytes(body[offset:offset+4]), int.from_bytes(body[offset+4:offset+8])
+                          stager.need(0 < csr <= 4096 and 0 < spki <= 1024
+                              and len(body) == offset + 8 + csr + spki and body == expected_public,
+                              "apple-key-verified-frame-bound")
+                      elif phase == "p12-assemble":
+                          stager.need(body.startswith(p12_magic) and p12_header < len(body) <= p12_limit,
+                              "apple-p12-private-frame")
+                          size = int.from_bytes(body[len(p12_magic):len(p12_magic)+4])
+                          hashes = len(p12_magic) + 4
+                          stager.need(p12_header + size == len(body) and size > 0
+                              and body[hashes+32:p12_header].hex() == stager.digest(key_spki),
+                              "apple-p12-original-key")
+                          assembled_identity, assembled_hash = output_identity, stager.digest(body)
+                          p12_body_hash, p12_leaf_hash = stager.digest(body[p12_header:]), body[hashes:hashes+32].hex()
+                      elif phase == "p12-native":
+                          stager.need(re.search(rb"^test result: ok\. 1 passed; 0 failed; 0 ignored;", body, re.MULTILINE)
+                              is not None, "apple-p12-native-count")
+                          fresh, p12_reopened_identity = private(p12_reopened, p12_limit)
+                          password, p12_password_identity = private(p12_password, 64)
+                          original_body, current_identity = private(assembled, p12_limit)
+                          stager.need(stager.digest(fresh) == p12_body_hash and password == b"a" * 64
+                              and current_identity == assembled_identity and stager.digest(original_body) == assembled_hash,
+                              "apple-p12-native-private-readback")
+                      else:
+                          stager.need(phase == "p12-reuse" and body.startswith(p12_public_magic)
+                              and len(body) >= len(p12_public_magic) + 9, "apple-p12-reuse-frame")
+                          offset = len(p12_public_magic)
+                          leaf, spki, count = (int.from_bytes(body[offset:offset+4]),
+                              int.from_bytes(body[offset+4:offset+8]), body[offset+8])
+                          offset += 9
+                          stager.need(0 < leaf <= 16 * 1024 and 0 < spki <= 1024 and count == 2
+                              and offset + leaf + spki <= len(body)
+                              and stager.digest(body[offset:offset+leaf]) == p12_leaf_hash
+                              and body[offset+leaf:offset+leaf+spki] == key_spki, "apple-p12-reused-originals")
+                          offset += leaf + spki
+                          for _ in range(count):
+                              stager.need(offset + 4 <= len(body), "apple-p12-reuse-chain-frame")
+                              size = int.from_bytes(body[offset:offset+4]); offset += 4
+                              stager.need(0 < size <= 16 * 1024 and offset + size <= len(body), "apple-p12-reuse-chain-bound")
+                              offset += size
+                          stager.need(offset == len(body), "apple-p12-reuse-exact-frame")
+                  phase = "post"
+                  for path, expected_identity in ((generated, generated_identity), (reopened, reopened_identity)):
+                      current_body, current_identity = private(path, private_limit)
+                      stager.need(current_identity == expected_identity and stager.digest(current_body) == private_digest,
+                          "apple-key-private-original-post")
+                  for path, expected_identity, limit, digest in (
+                      (assembled, assembled_identity, p12_limit, assembled_hash),
+                      (p12_reopened, p12_reopened_identity, p12_limit, p12_body_hash),
+                      (p12_password, p12_password_identity, 64, stager.digest(b"a" * 64)),
+                  ):
+                      current_body, current_identity = private(path, limit)
+                      stager.need(current_identity == expected_identity and stager.digest(current_body) == digest,
+                          "apple-p12-private-original-post")
+                  stager.need(snapshot() == original_directories and stager.store_component_inputs(capsule, target) == original
+                      and stager.read(producer_path, 1024) == producer and stager.read(service_path, 1024) == service
+                      and tuple(stager.read(checkout / name, 128 * 1024) for name in source_paths) == sources
+                      and stager.signature(binary.lstat()) == binary_identity and directory(fixture.lstat()) == fixture_identity
+                      and directory(p12_fixture.lstat()) == p12_fixture_identity
+                      and directory(os.fstat(held)) == root_identity and directory(work.lstat()) == root_identity
+                      and time.monotonic() < end, "apple-key-originals-post")
+              finally:
+                  os.close(held)  # One actual close; never retry or publish through failure.
+              # Only after all actual child returns, file closes and held root
+              # close may the existing caller clean its OWN private task root.
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="ascii") as output:
+                  output.write("root_identity=" + ":".join(map(str, root_identity)) + "\n")
+              print(json.dumps({"localAppleKeyComponent": "passed", "localAppleP12Component": "passed",
+                  "nativeTests": 2, "networkDenied": True, "signedStoreRuby": "3.3.12",
+                  "productionProvisioningQualified": False, "appleCertificateTrustQualified": False}))
+          except BaseException as error:
+              # Never display argv, exception text, CSR/key bytes or captured
+              # output. Unknown/failed ownership retains this private task root.
+              print(json.dumps({"localAppleKeyComponent": "failed", "phase": phase,
+                  "errorType": type(error).__name__, "privateFixtureRetained": True}))
+              raise SystemExit(1) from None
+          PY
+      - name: Bound successful compiler cache publication
+        id: cache-size
+        if: success() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bound logical file bytes (including sparse files), with per-entry
+          # archive overhead. Oversized output does not seed a cache; it does
+          # not undo successful compiler/tests. No source/artifact qualification.
+          python3 - <<'PY'
+          import os, stat
+          from pathlib import Path
+          root = Path("desktop/.ci-component-cargo")
+          size = 0
+          def unreadable(error):
+              raise error
+          for name in ("registry", "git", "target"):
+              for parent, dirs, files in os.walk(root / name, followlinks=False, onerror=unreadable):
+                  for leaf in dirs + files:
+                      value = (Path(parent) / leaf).lstat()
+                      assert stat.S_ISREG(value.st_mode) or stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
+                      size += value.st_size + 1024
+                      if size > 4 * 1024**3:
+                          raise SystemExit(0)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("save=true\n")
+          PY
+      - name: Save only successful bounded compiler outputs
+        if: success() && steps.cache-size.outputs.save == 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        continue-on-error: true
+        with:
+          path: |
+            desktop/.ci-component-cargo/registry
+            desktop/.ci-component-cargo/git
+            desktop/.ci-component-cargo/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Remove only this job's app compiler and frontend outputs
+        if: always() && inputs.component != 'automation-contracts' && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          CARGO_CACHE_OWNED: ${{ steps.work.outputs.cache_owned }}
+          RUN_APPLE_KEY_COMPONENT: ${{ inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component) }}
+          APPLE_KEY_OUTCOME: ${{ steps.apple-key-component.outcome }}
+          APPLE_KEY_ROOT_IDENTITY: ${{ steps.apple-key-component.outputs.root_identity }}
+        run: |
+          python3 - <<'PY'
+          import os, shutil, stat
+          from pathlib import Path
+          work = Path(os.environ["WORK_ROOT"])
+          assert work.parent == Path(os.environ["RUNNER_TEMP"])
+          assert work.name.startswith("mrk-app-check.") and not work.is_symlink()
+          if os.environ["RUN_APPLE_KEY_COMPONENT"] == "true":
+              info = work.lstat()
+              identity = ":".join(map(str, (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)))
+              if (os.environ["APPLE_KEY_OUTCOME"] != "success" or identity != os.environ["APPLE_KEY_ROOT_IDENTITY"]
+                      or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                      or stat.S_IMODE(info.st_mode) != 0o700):
+                  print("Apple key component did not return with original custody; leave task files for disposable-host teardown.")
+                  raise SystemExit(1)
+          cache = (Path("desktop/.ci-component-cargo"),) if os.environ["CARGO_CACHE_OWNED"] == "true" else ()
+          for path in (work, *cache, Path("desktop/node_modules"), Path("desktop/dist")):
+              if path.exists():
+                  assert path.is_dir() and not path.is_symlink()
+                  shutil.rmtree(path)
+          PY
+
+  ios-tools-layout:
+    # Read-only host facts, not tool admission or a replacement for native tests.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'ios-tools-layout'
+    name: Observe selected Xcode layout (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - name: Read fixed public filesystem metadata without changing the host
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I -B - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+
+          def emit(role, **facts):
+              print(json.dumps({"role": role, **facts}, sort_keys=True, separators=(",", ":")))
+
+          def observe(role, path):
+              try:
+                  row = os.lstat(path)
+              except OSError:
+                  emit(role, state="unavailable")
+                  return None
+              kind = ("directory" if stat.S_ISDIR(row.st_mode) else
+                      "symlink" if stat.S_ISLNK(row.st_mode) else
+                      "regular" if stat.S_ISREG(row.st_mode) else "other")
+              emit(role, state="observed", kind=kind, uid=row.st_uid, gid=row.st_gid,
+                   mode=format(row.st_mode, "#07o"), flags=getattr(row, "st_flags", 0),
+                   nlink=row.st_nlink, rootOwned=row.st_uid == 0,
+                   protectedMode=(row.st_mode & 0o7022) == 0)
+              return row
+
+          def altool_layout(app_path):
+              # Metadata only: the fixed nomination is never executed or read.
+              # A diagnostic observation does not admit an executable or its owner.
+              opened = []
+              links = 0
+              def identity(row):
+                  return (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid,
+                          row.st_nlink, row.st_size, row.st_mtime_ns, row.st_ctime_ns,
+                          getattr(row, "st_flags", 0))
+              def need(condition):
+                  if not condition:
+                      raise ValueError("unsupported-layout")
+              def directory(name, parent=None):
+                  need(len(opened) < 32)
+                  before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  need(stat.S_ISDIR(before.st_mode))
+                  fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                               dir_fd=parent)
+                  opened.append(fd)
+                  need(identity(before) == identity(os.fstat(fd)) ==
+                       identity(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                  return fd
+              try:
+                  root = directory(b"/")
+                  for name in app_path.split(b"/")[1:] + [b"Contents"]:
+                      root = directory(name, root)
+                  # Two fixed public Apple aliases refused the actual source census.
+                  # Snapshot only: never execute or admit a target, and do not
+                  # print any regular-file contents, selected host path or xattrs.
+                  for alias_role, parent_parts, alias_name in (
+                      ("instruments-xccontentsdir", (b"Applications", b"Instruments.app", b"Contents"), b"XCContentsDir"),
+                      ("appletvos-swift-soundanalysis", (b"Developer", b"Platforms", b"AppleTVOS.platform",
+                       b"Developer", b"SDKs", b"AppleTVOS.sdk", b"usr", b"lib", b"swift"), b"libswiftSoundAnalysis.tbd"),
+                  ):
+                      try:
+                          alias_parent = root
+                          for part in parent_parts:
+                              alias_parent = directory(part, alias_parent)
+                          row = os.stat(alias_name, dir_fd=alias_parent, follow_symlinks=False)
+                          need(stat.S_ISLNK(row.st_mode) and row.st_nlink == 1 and 1 <= row.st_size <= 1024)
+                          target = os.readlink(alias_name, dir_fd=alias_parent)
+                          need(len(target) <= 1024)
+                          after = os.stat(alias_name, dir_fd=alias_parent, follow_symlinks=False)
+                          emit(alias_role, state="observed", qualification=False,
+                               target=target.decode("ascii", "backslashreplace"), targetBytes=len(target),
+                               metadataBytes=row.st_size, metadataStable=identity(row) == identity(after),
+                               uid=row.st_uid, gid=row.st_gid, mode=format(row.st_mode, "#07o"),
+                               flags=getattr(row, "st_flags", 0),
+                               relative=not target.startswith(b"/"), trailingSlash=target.endswith(b"/"),
+                               emptyComponent=any(not part for part in target.split(b"/")))
+                      except (OSError, ValueError):
+                          emit(alias_role, state="unavailable-or-unsupported", qualification=False)
+                  boundary = app_path + b"/Contents/"
+                  device = os.fstat(root).st_dev
+                  stack, names = [root], []
+                  pending = [b"Developer", b"usr", b"bin", b"altool"]
+                  seen = set()
+                  for _ in range(128):
+                      need(pending and len(pending) <= 128 and
+                           sum(len(v) + 1 for v in names + pending) <= 4096)
+                      name = pending.pop(0)
+                      if name in (b"", b"."):
+                          continue
+                      if name == b"..":
+                          need(len(stack) > 1)
+                          stack.pop(); names.pop()
+                          continue
+                      need(len(name) <= 255 and re.fullmatch(rb"[A-Za-z0-9._+@ -]+", name) is not None)
+                      row = os.stat(name, dir_fd=stack[-1], follow_symlinks=False)
+                      need(row.st_dev == device)
+                      if stat.S_ISLNK(row.st_mode):
+                          need(links < 8 and row.st_nlink == 1 and 1 <= row.st_size <= 1024)
+                          key = (row.st_dev, row.st_ino)
+                          need(key not in seen)
+                          target = os.readlink(name, dir_fd=stack[-1])
+                          need(identity(row) == identity(os.stat(name, dir_fd=stack[-1], follow_symlinks=False))
+                               and len(target) == row.st_size and re.fullmatch(rb"[A-Za-z0-9._+@ /-]+", target) is not None)
+                          seen.add(key); links += 1
+                          if target.startswith(b"/"):
+                              need(target.startswith(boundary))
+                              target = target[len(boundary):]
+                              stack, names = [root], []
+                          pending = target.split(b"/") + pending
+                          emit("altool-alias", index=links, uid=row.st_uid, gid=row.st_gid,
+                               mode=format(row.st_mode, "#07o"), nlink=row.st_nlink, targetBytes=row.st_size)
+                      elif pending:
+                          stack.append(directory(name, stack[-1])); names.append(name)
+                      else:
+                          need(stat.S_ISREG(row.st_mode) and len(name) <= 128 and
+                               re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9._+-]*", name) is not None)
+                          emit("altool-physical", state="observed", basename=name.decode("ascii"),
+                               aliases=links, uid=row.st_uid, gid=row.st_gid, mode=format(row.st_mode, "#07o"),
+                               flags=getattr(row, "st_flags", 0), nlink=row.st_nlink, size=row.st_size,
+                               executable=bool(row.st_mode & 0o111), qualification=False)
+                          return
+                  raise ValueError("unsupported-layout")
+              except (OSError, ValueError):
+                  emit("altool-physical", state="unavailable-or-unsupported", aliases=links, qualification=False)
+              finally:
+                  closed = True
+                  for fd in reversed(opened):
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          closed = False
+                  emit("altool-observation-closes", known=closed, qualification=False)
+                  if not closed:
+                      raise SystemExit(1)
+
+          def main():
+              # Fixed public tool metadata only, not tool admission or execution.
+              for name in ("pkgbuild", "lsbom", "tar", "bsdtar", "xar", "productbuild"):
+                  path = "/usr/bin/" + name
+                  row = observe("package-tool-" + name, path)
+                  if row is not None and stat.S_ISLNK(row.st_mode):
+                      try:
+                          target = os.readlink(path)
+                      except OSError:
+                          emit("package-tool-alias-" + name, state="unavailable")
+                      else:
+                          emit("package-tool-alias-" + name, state="observed",
+                               target=target if target in ("bsdtar", "/usr/bin/bsdtar") else "other",
+                               qualification=False)
+              # No contents, directory census, credentials, selected-path echo,
+              # subprocesses, writes, or ACL/finality claims from these snapshots.
+              observe("root", b"/")
+              applications = observe("applications", b"/Applications")
+              if applications is None or not stat.S_ISDIR(applications.st_mode):
+                  return
+              alias_path = b"/Applications/Xcode.app"
+              alias = observe("selection", alias_path)
+              if alias is None:
+                  return
+              app_path = alias_path
+              if stat.S_ISLNK(alias.st_mode):
+                  owner_ok = os.getuid() != 0 and alias.st_uid in (0, os.getuid())
+                  size_ok = alias.st_nlink == 1 and 1 <= alias.st_size <= 1024
+                  if not size_ok:
+                      emit("selection-rule", ownerAccepted=owner_ok, shapeAccepted=False)
+                      return
+                  try:
+                      target = os.readlink(alias_path)
+                  except OSError:
+                      emit("selection-rule", state="unavailable")
+                      return
+                  name = target.removeprefix(b"/Applications/")
+                  shape_ok = (len(target) <= 1024 and len(name) <= 255 and name != b"Xcode.app"
+                              and re.fullmatch(rb"Xcode[A-Za-z0-9._+-]*\.app", name) is not None)
+                  emit("selection-rule", ownerAccepted=owner_ok, shapeAccepted=shape_ok)
+                  if not shape_ok:
+                      return
+                  app_path = b"/Applications/" + name
+              elif not stat.S_ISDIR(alias.st_mode):
+                  return
+              app = observe("selected-app", app_path)
+              if app is None or not stat.S_ISDIR(app.st_mode):
+                  return
+              contents = observe("contents", app_path + b"/Contents")
+              if contents is None or not stat.S_ISDIR(contents.st_mode):
+                  return
+              observe("developer", app_path + b"/Contents/Developer")
+              altool_layout(app_path)
+
+          main()
+          PY
+
+  store-runtime:
+    # Explicit reuse only: no gem/Ruby/app rebuild, signing or automatic rerun.
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'store-runtime' || inputs.component == 'store-local-altool')
+    name: Smoke signed Store runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64","target":"aarch64-apple-darwin"}]' || inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64","target":"x86_64-apple-darwin"}]' || '[{"runner":"macos-26","arch":"arm64","target":"aarch64-apple-darwin"},{"runner":"macos-26-intel","arch":"x86_64","target":"x86_64-apple-darwin"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Allocate one task-owned offline smoke directory
+        id: work
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-store-smoke.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Restore only the SOURCE-selected successful signed Store component
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          COMPONENT_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
+            "$WORK_ROOT/component" --target "$COMPONENT_TARGET"
+      - name: Verify signed runtime and focused offline Store regressions
+        timeout-minutes: 10
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          COMPONENT_TARGET: ${{ matrix.target }}
+          COMPONENT_ARCH: ${{ matrix.arch }}
+          STORE_TEST_SCOPE: ${{ inputs.component }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import importlib.util, json, os, re, resource, subprocess, sys, time, unicodedata
+          from pathlib import Path
+          checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          target, arch = os.environ["COMPONENT_TARGET"], os.environ["COMPONENT_ARCH"]
+          def load(name):
+              spec = importlib.util.spec_from_file_location("_store_smoke_" + name, checkout / "desktop/tools" / (name + ".py"))
+              module = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = module
+              spec.loader.exec_module(module)
+              return module
+          stager, prep, helper, signing = [load(name) for name in
+              ("stage_macos_installed", "prepare_runtime", "macos_android_helper_package", "macos_store_signing")]
+          capsule = work / "component"
+          runtime = prep._root(capsule / "extracted/runtime")
+          original = stager.store_component_inputs(capsule, target)
+          expected = original[1]
+          def snapshot():
+              rows, directories = [], {}
+              for path in prep.store_component_files(runtime, directories=directories):
+                  with stager.parent(path) as (parent, leaf):
+                      body, info = stager.read_at(parent, leaf, signing.FILE_LIMIT)
+                  rows.append((path.relative_to(runtime).as_posix(), stager.digest(body), len(body)))
+              stager.need(tuple(rows) == expected, "store-smoke-complete-extracted-bytes")
+              return directories
+          original_directories = snapshot()
+          producer_path = checkout / helper.PRODUCER_PROFILE
+          service_path = checkout / helper.PROFILE
+          producer, service = stager.read(producer_path, 1024), stager.read(service_path, 1024)
+          stager.packaging_signing_data(producer, service)
+          identity = stager.service_signing_data(service)
+          receipt = stager.decode(stager.read(capsule / "store-signed-receipt.json", 256 * 1024))
+          native = receipt["nativeMembers"]
+          stager.need(len(native) == signing.NATIVE_COUNT, "store-smoke-native-count")
+          home = work / "home"
+          home.mkdir(mode=0o700)
+          clean = {"PATH": str(runtime / "bin") + ":/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home),
+              "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "CI": "true",
+              "FASTLANE_SKIP_UPDATE_CHECK": "1", "FASTLANE_OPT_OUT_USAGE": "1", "FASTLANE_HIDE_CHANGELOG": "1"}
+          # One finite capture for the whole batch, not unbounded communicate().
+          # subprocess.run kills and waits for its original child on timeout.
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
+          phase, index = "signature", 0
+          capture_path = work / "native-output.log"
+          test_results = {}
+          try:
+              with capture_path.open("xb") as capture:
+                  deadline = time.monotonic() + 180
+                  for index, row in enumerate(native, 1):
+                      name = row["path"]
+                      stager.need(name.startswith("runtime/") and row["identifier"] == signing.identifier(name), "store-smoke-native-path")
+                      requirement = helper.signing_requirement(identity, signing.identifier(name))
+                      remaining = deadline - time.monotonic()
+                      stager.need(remaining > 0, "store-smoke-signature-deadline")
+                      subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures",
+                          "--test-requirement", "=" + requirement, str(capsule / "extracted" / name)],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT, env=clean,
+                          cwd=home, check=True, timeout=min(30, remaining))
+                  phase = "ruby"
+                  # This is a loader smoke, not proof of general sandbox/API support.
+                  profile = '(version 1) (allow default) (deny network*) (deny file-write* (subpath (param "RUNTIME")))'
+                  subprocess.run(["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime), "-p", profile,
+                      str(runtime / "bin/bundle"), "exec", "ruby", str(checkout / "desktop/tools/verify_macos_store_runtime.rb"),
+                      str(runtime), arch, "projected-smoke"], stdin=subprocess.DEVNULL, stdout=capture,
+                      stderr=subprocess.STDOUT, env=clean, cwd=home, check=True, timeout=90)
+              # Same signed Ruby/locked gems, current project code, synthetic
+              # providers only. Each original child is killed+joined on timeout.
+              # Six finite256KiB captures avoid verbose fixtures exhausting a
+              # shared stream; successes need only their Minitest counts.
+              clean["MT_CPU"] = "1"
+              suites = (
+                  ("apple-lanes", "test_apple_lanes.rb", 40),
+                  ("play-lanes", "test_play_lanes.rb", 60),
+                  ("local-runtime", "test_local_store_execution_runtime.rb", 21),
+                  ("apple-production", "test_apple_production.rb", 49),
+                  ("lane-resources", "test_store_lane_resources.rb", 13),
+                  ("lane-lifetime", "test_store_lane_lifetime.rb", 21),
+              )
+              selected = os.environ["STORE_TEST_SCOPE"]
+              stager.need(selected in ("store-runtime", "store-local-altool"), "store-test-scope")
+              test_filter = []
+              if selected == "store-local-altool":
+                  suites = (("local-altool-bridge", "test_apple_lanes.rb", 2),)
+                  test_filter = ["-n", "/^test_local_ios_(original_pinned_bridge_constructor_key_parser_and_direct_send|lost_return_after_original_send_only_reads_back_without_resend)$/"]
+              for phase, filename, expected_count in suites:
+                  capture_path = work / (phase + ".log")
+                  with capture_path.open("xb") as capture:
+                      subprocess.run(["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime), "-p", profile,
+                          str(runtime / "bin/bundle"), "exec", "ruby",
+                          str(checkout / "tests/workflow" / filename), "--verbose", *test_filter],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                          # The production suite exercises49 screenshot/recovery cases;
+                          # its45s blanket budget timed out on Intel, not a case assertion.
+                          # Keep a finite suite budget and print the exact slow/failing case.
+                          env=clean, cwd=checkout, check=True, timeout=180 if phase == "apple-production" else 45)
+                  output = stager.read(capture_path, 256 * 1024)
+                  stager.need(re.search(rb"^" + str(expected_count).encode("ascii") +
+                      rb" runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$", output, re.MULTILINE) is not None,
+                      "store-tests-" + phase + "-count")
+                  test_results[phase] = expected_count
+                  capture_path.unlink()  # Only this joined test's disposable output.
+              phase = "post"
+              stager.need(snapshot() == original_directories, "store-smoke-directory-original-post")
+              stager.need(stager.store_component_inputs(capsule, target) == original
+                  and stager.read(producer_path, 1024) == producer and stager.read(service_path, 1024) == service,
+                  "store-smoke-source-input-post")
+          except Exception as error:
+              def diagnostic(value, maximum):
+                  value = value.replace(str(work), "<work>").replace(str(checkout), "<checkout>")
+                  value = "".join(char for char in value if not unicodedata.category(char).startswith("C"))
+                  return value.encode("utf-8")[:maximum].decode("utf-8", "ignore")
+              try:
+                  tail = stager.read(capture_path, 256 * 1024)[-4096:].decode("utf-8", "replace")
+                  tail = diagnostic(tail, 4096)
+              except Exception as capture_error:
+                  tail = "capture-unavailable:" + type(capture_error).__name__
+              reason = diagnostic(str(error), 256) if isinstance(error, (stager.Refused, helper.Refused, signing.Refused)) else None
+              print(json.dumps({"phase": phase, "nativeIndex": index, "errorType": type(error).__name__,
+                  "returncode": getattr(error, "returncode", None), "reason": reason, "diagnosticTail": tail}), flush=True)
+              raise SystemExit(1)
+          print(json.dumps({"nativeVerified": len(native), "filesPostChecked": len(expected),
+              "projectedCrc32FastlaneSmoke": "passed", "appleP256PemDerSigning": "passed",
+              "networkDenied": True, "syntheticStoreTests": test_results, "liveStoreRun": False}))
+          PY
+      - name: Remove only this job's restored component and smoke scratch
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import os, shutil, stat
+          from pathlib import Path
+          work = Path(os.environ["WORK_ROOT"])
+          info = work.lstat()
+          assert work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-store-smoke.")
+          assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+          shutil.rmtree(work)
+          PY
+
+  ios-tools:
+    # Manual tool qualification only; no signed runtime/dependency/app rebuild.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'ios-tools'
+    name: Qualify iOS resolver and documented tool (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 42
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allocate one task-owned iOS tools directory
+        id: work
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-ios-tools.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - *protected-xcode
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Qualify selected Xcrun resolution and credential-free tool help
+        timeout-minutes: 2
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import json, os, re, resource, sys, time, unicodedata
+          from pathlib import Path
+          checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          sys.path.insert(0, str(checkout / "desktop/tools"))
+          from ci_bounded_output import run_bounded
+          home = work / "resolver-home"
+          home.mkdir(mode=0o700)
+          capture_path = None
+          limit = 256 * 1024
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+          clean = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(home),
+              "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONDONTWRITEBYTECODE": "1",
+              "PYTHONPATH": os.pathsep.join(str(checkout / path) for path in ("src", "tests", "tests/desktop"))}
+          cases = (
+              ("offline-resolver", "test_original_xcrun_resolution_post_and_close_before_pending_or_asc", True),
+              ("online-help", "test_documented_xcrun_altool_help_returns_and_settles", False),
+          )
+          deadline = time.monotonic() + 90
+          phase = "not-started"
+          def output():
+              with capture_path.open("rb") as capture:
+                  raw = capture.read(limit + 1)
+              if len(raw) > limit:
+                  raise ValueError("resolver-capture-bound")
+              return raw
+          try:
+              for phase, method, offline in cases:
+                  # Apple's shim may fetch public Transporter defaults even for
+                  # --help. This credential-free startup check is explicitly online;
+                  # the resolver and synthetic Store tests remain network-denied.
+                  profile = '(version 1) (allow default) ' + ('(deny network*) ' if offline else '')
+                  profile += '(deny file-write* (subpath (param "CHECKOUT")))'
+                  capture_path = work / (phase + "-output.log")
+                  remaining = deadline - time.monotonic()
+                  if remaining <= 0:
+                      raise TimeoutError("resolver-and-help-aggregate-deadline")
+                  run_bounded(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
+                      os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v",
+                      "test_local_ios_store_execute_macos.IOSStoreResolverMacTests." + method],
+                      capture_path=capture_path, env=clean, cwd=checkout, timeout=remaining, limit=limit)
+                  if time.monotonic() >= deadline:
+                      raise TimeoutError("resolver-and-help-aggregate-deadline")
+                  if re.search(rb"\nRan 1 test in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
+                      raise ValueError("each-original-test-must-pass-without-skips")
+          except Exception as error:
+              try:
+                  tail = output()[-4096:].decode("utf-8", "replace")
+                  tail = tail.replace(str(work), "<work>").replace(str(checkout), "<checkout>")
+                  tail = "".join(char for char in tail if not unicodedata.category(char).startswith("C"))
+                  tail = tail.encode("utf-8")[:4096].decode("utf-8", "ignore")
+              except Exception as capture_error:
+                  tail = "capture-unavailable:" + type(capture_error).__name__
+              print(json.dumps({"phase": phase, "errorType": type(error).__name__,
+                  "returncode": getattr(error, "returncode", None), "diagnosticTail": tail}), flush=True)
+              raise SystemExit(1)
+          print(json.dumps({"originalXcrunResolver": "passed", "documentedAltoolHelp": "passed", "tests": 2, "skips": 0,
+              "offlineResolverNetworkDenied": True, "helpNetworkDenied": False, "liveStoreRun": False}))
+          PY
+      - name: Remove only this job's iOS tools scratch
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          /usr/bin/python3 -I -B - <<'PY'
+          import os, shutil, stat
+          from pathlib import Path
+          work = Path(os.environ["WORK_ROOT"])
+          info = work.lstat()
+          assert work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-ios-tools.")
+          assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+          shutil.rmtree(work)
+          PY
+
+  xcode-package-probe:
+    # Explicit synthetic PackageKit or unsigned metadata only; no A/Xcode/signing.
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'xcode-package-probe' || inputs.component == 'xcode-product-metadata')
+    name: Probe fixed Xcode package metadata (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run only the selected fixed package probe
+        timeout-minutes: 6
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+          PACKAGE_PROBE: ${{ inputs.component }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          ulimit -f 2048
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          case "$PACKAGE_PROBE" in
+            xcode-package-probe)
+              marker=MRK_XCODE_SETUP_PACKAGE_PROBE=1
+              method=XcodeSetupPackageNative.test_component_callback_once_reinstall_and_documented_timeout
+              ;;
+            xcode-product-metadata)
+              marker=MRK_XCODE_PRODUCT_METADATA_PROBE=1
+              method=XcodeSetupProductMetadataNative.test_unsigned_product_original_metadata_matches_production_parsers
+              ;;
+            *) exit 1 ;;
+          esac
+          log="$RUNNER_TEMP/mrk-xcode-package-probe-tests.log"
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_TEMP="$RUNNER_TEMP" \
+            "$marker" \
+            /usr/bin/python3 -I -B tests/desktop/test_macos_xcode_setup_package.py -v \
+              "$method" \
+              > "$log" 2>&1
+          status=$?
+          set -e
+          /usr/bin/tail -c 16384 "$log"
+          [[ "$status" == 0 ]] || exit "$status"
+          grep -Eq '^Ran 1 test in [0-9]+([.][0-9]+)?s$' "$log"
+          grep -qx 'OK' "$log"
+      - name: Retain only bounded public synthetic package observations
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcode-package-probe-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mrk-xcode-package-probe-tests.log
+            ${{ runner.temp }}/mrk-xcode-package-probe/PackageInfo.xml
+            ${{ runner.temp }}/mrk-xcode-package-probe/ProductTOC.xml
+            ${{ runner.temp }}/mrk-xcode-package-probe/BOM.txt
+            ${{ runner.temp }}/mrk-xcode-package-probe/Original.bom
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.plist.raw
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.plist.xml
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.facts.json
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.bom
+            ${{ runner.temp }}/mrk-xcode-package-probe/RESULT.json
+            ${{ runner.temp }}/mrk-xcode-package-probe/Failure.json
+            ${{ runner.temp }}/mrk-xcode-product-metadata/PackageInfo.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/Distribution.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/ComponentTOC.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/ProductTOC.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/BOM.txt
+            ${{ runner.temp }}/mrk-xcode-product-metadata/RESULT.json
+            ${{ runner.temp }}/mrk-xcode-product-metadata/Failure.json
+          if-no-files-found: error
+          retention-days: 7
+    # Only the test's positively observed same-attempt fixture is cleaned. On
+    # timeout/failure preserve root state for disposable-host teardown; killing
+    # an Installer client does not prove PackageKit service finality.
+
+# No production Installer/Remover main, app launch, distribution signing or
+# notarization runs. The explicit package probe alone installs/removes its fixed
+# inert synthetic carrier; it does not execute the Xcode setup helper. The explicit Store job only verifies already-signed code
+# and executes the network-denied CRC32/Fastlane loader smoke, never a Store lane.
+# Installation/update/removal behavior still requires native integration tests.

@@ -303,6 +303,7 @@ class StoreLaneFiles(_Owner):
         self.original_outcome = None
         self.terminal_identity: wire.Identity | None = None
         self._document_bytes: bytes | None = None
+        self.document_identity = None
         self._publication_consumed = False
         self._cleanup_complete = False
         self.bindings = {role: record.bind_resource(role, self, cancellation=cancellation)
@@ -367,6 +368,9 @@ class StoreLaneFiles(_Owner):
             label = wire.clock_label()
             run = time.monotonic_ns() + wire.RUN_NS
             self.timing = wire.Timing(label, run, run + wire.CLEANUP_NS)
+            local=getattr(self.guard,"_local_store_source",None)
+            if local is not None:
+                self.timing=local.require_operation().lane_timing(self,label)
             wire.need(self.timing.hard <= wire.MAX_TIME)
             result.update({
                 wire.PREFIX + "NONCE": self.record._nonce.hex(),
@@ -378,6 +382,16 @@ class StoreLaneFiles(_Owner):
                 "TMPDIR": str(self.root_path / "tmp"), "TMP": str(self.root_path / "tmp"),
                 "TEMP": str(self.root_path / "tmp"),
             })
+            execute=self.guard._store_execution_source
+            if execute is not None:
+                key='LOCAL_RECONCILE' if self.guard._store_reconcile_source is not None else 'LOCAL_EXECUTE'
+                if self.guard._store_reconcile_source is not None and execute.require_operation().readiness:key='LOCAL_READINESS'
+                result[wire.PREFIX+key]=execute.require_operation().lane_context(self)
+            elif local is not None:
+                from .local_store_prepare import LocalStorePrepareRun
+                owner=local.require_operation()
+                if type(owner) is LocalStorePrepareRun and owner.later_stage:
+                    result[wire.PREFIX+'LOCAL_STAGE']=owner.lane_context(self)
             if self.shell_home:
                 # The caller admits its concrete toolchain before this private
                 # shell-HOME selection; ambient key directories are never used.
@@ -507,6 +521,7 @@ class StoreLaneFiles(_Owner):
             self.record.publish_terminal(self.bindings["terminal"], owner=self,
                                           terminal=self.terminal, cancellation=self.guard)
             self._document_bytes = data
+            self.document_identity = None if value.document is None else value.document.identity
             return self.terminal
         except BaseException as error:
             self.remember(error)
@@ -612,7 +627,9 @@ class StoreLaneAttempt(_Owner):
         super().__init__(record, cancellation)
         wire.need(type(mode) is str and mode in ("prepare", "execute")
                   and isinstance(app_root, Path) and wire.absolute(str(app_root)))
-        self.key = (execution_attempt_key(intent_sha256, executed_by, record._lane)
+        local=cancellation._store_execution_source
+        self.key = (local.require_operation().attempt_key(record,app_root,mode,intent_sha256,executed_by)
+                    if local is not None else execution_attempt_key(intent_sha256, executed_by, record._lane)
                     if mode == "execute" else record._nonce.hex())
         self.app_root, self.mode = app_root, mode
         self.name = self.key + ".pending"
@@ -634,6 +651,8 @@ class StoreLaneAttempt(_Owner):
             self.guard.check()
             store = _store_directory(self, self.app_root)
             self.directory = _private_child(self, store, "lane-attempts-v1", exclusive=False)
+            local=self.guard._store_execution_source
+            if local is not None:local.require_operation().attempt_directory(self,self.directory)
             number = writer.open(self.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                                  parent=self.directory.fd)
             initial = os.fstat(number)

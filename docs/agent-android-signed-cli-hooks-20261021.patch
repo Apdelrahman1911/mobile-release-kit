@@ -1,0 +1,2160 @@
+diff --git a/desktop/src/agentAndroidBuild.ts b/desktop/src/agentAndroidBuild.ts
+--- a/desktop/src/agentAndroidBuild.ts
++++ b/desktop/src/agentAndroidBuild.ts
+@@ -1,19 +1,21 @@
++import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, signedAndroidAgentInput } from './agentAndroidSigned.ts';
++export { AGENT_ANDROID_BUILD_SIGNED_CONSENT } from './agentAndroidSigned.ts';
+ import { BuildPermission } from './agentBuildPermission.ts';
+ // A single exact-input START permission, separate from reading and local checks.
+ // The existing Android controller owns display/STOP; this creates no executor.
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { copyAndroidBuildRequest } from './androidBuildProtocol.ts';
+ import { parseAndroidMacToolchainSelection } from './androidToolchainCatalogProtocol.ts';
+-import { parseLocalCheckAccess } from './agentLocalChecks.ts';
+-import type { LocalCheckAccess } from './agentLocalChecks.ts';
++import { parseBuildPermissionAccess, buildPermissionRevision } from './agentBuildPermissionProtocol.ts';
++import type { BuildPermissionAccess } from './agentBuildPermissionProtocol.ts';
+ import type { PrepareAndroidBuild, AndroidMacToolchainSelection } from './androidBuildTypes.ts';
+ export const AGENT_ANDROID_BUILD_CONSENT = 'agent-saved-android-build-inspect-v1';
+ const REQUEST_LIMIT = 4096; // Same whole RAW GUI body / service frame limit, not stdin alone.
+ export interface AndroidBuildApproval { input: PrepareAndroidBuild; toolchainSelection: AndroidMacToolchainSelection }
+-export type AndroidBuildAccess = LocalCheckAccess; // Same closed DATA shape, not a reusable grant.
+-export const parseAndroidBuildAccess = parseLocalCheckAccess;
++export type AndroidBuildAccess = BuildPermissionAccess; // Same closed DATA shape, not a reusable grant.
++export const parseAndroidBuildAccess = parseBuildPermissionAccess;
+ export interface AgentAndroidBuildApi {
+-  status(): Promise<AndroidBuildAccess>; allow(input: AndroidBuildApproval): Promise<AndroidBuildAccess>; revoke(): Promise<AndroidBuildAccess>;
++  status(): Promise<AndroidBuildAccess>; allow(input: AndroidBuildApproval, expectedPermissionRevision: string): Promise<AndroidBuildAccess>; revoke(): Promise<AndroidBuildAccess>;
+ }
+ type Command = 'agent_android_build_access' | 'allow_agent_android_build' | 'revoke_agent_android_build';
+ type Invoke = <T>(command: string, input?: Record<string, unknown> | Uint8Array) => Promise<T>;
+@@ -25,8 +27,10 @@
+     if (!keys(v, ['input', 'toolchainSelection'])) return null;
+     const input = copyAndroidBuildRequest('prepare_android_build', v.input) as PrepareAndroidBuild | null;
+     const selected = parseAndroidMacToolchainSelection(v.toolchainSelection);
+-    if (!input || input.signing !== undefined || input.operation !== undefined || input.action !== undefined ||
+-      input.artifactValidation.mode !== 'structure-and-version' || input.artifactValidation.uploadCertificateSha256 !== null || !selected) return null;
++    if (!input || input.operation !== undefined || input.action !== undefined || !selected) return null;
++    if (input.signing !== undefined ? !signedAndroidAgentInput(input) :
++        input.artifactValidation.mode !== 'structure-and-version' || input.artifactValidation.uploadCertificateSha256 !== null) return null;
++    if (input.signing) { for (const row of input.signing.assignments) Object.freeze(row); Object.freeze(input.signing.assignments); Object.freeze(input.signing); }
+     Object.freeze(input.savedConfig); Object.freeze(input.savedVersion); Object.freeze(input.artifactValidation);
+     return Object.freeze({ input: Object.freeze(input), toolchainSelection: Object.freeze(selected) });
+   } catch { return null; }
+@@ -35,7 +39,7 @@
+   try {
+     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
+     if (command === 'allow_agent_android_build') {
+-      if (!keys(v, ['input', 'toolchainSelection', 'consentVersion']) || v.consentVersion !== AGENT_ANDROID_BUILD_CONSENT ||
++      if (!keys(v, ['input', 'toolchainSelection', 'consentVersion', 'expectedPermissionRevision']) || v.consentVersion !== ((v.input as PrepareAndroidBuild)?.signing ? AGENT_ANDROID_BUILD_SIGNED_CONSENT : AGENT_ANDROID_BUILD_CONSENT) || !buildPermissionRevision(v.expectedPermissionRevision) ||
+           !copyAndroidBuildApproval({ input: v.input, toolchainSelection: v.toolchainSelection })) return null;
+     } else if ((command !== 'agent_android_build_access' && command !== 'revoke_agent_android_build') || !keys(v, [])) return null;
+     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= REQUEST_LIMIT ? bytes : null;
+@@ -50,11 +54,12 @@
+     catch { return Promise.reject(refusal()); }
+   };
+   return Object.freeze({ status: () => call('agent_android_build_access', {}),
+-    allow: (input: AndroidBuildApproval) => { const safe = copyAndroidBuildApproval(input); return safe ? call('allow_agent_android_build', { ...safe, consentVersion: AGENT_ANDROID_BUILD_CONSENT }) : Promise.reject(refusal()); },
++    allow: (input: AndroidBuildApproval, expectedPermissionRevision: string) => { const safe = copyAndroidBuildApproval(input); return safe ? call('allow_agent_android_build', { ...safe, consentVersion: safe.input.signing ? AGENT_ANDROID_BUILD_SIGNED_CONSENT : AGENT_ANDROID_BUILD_CONSENT, expectedPermissionRevision }) : Promise.reject(refusal()); },
+     revoke: () => call('revoke_agent_android_build', {}) });
+ }
+ export type PermissionContext = import('./agentBuildPermission.ts').PermissionContext<AndroidBuildApproval>;
+ export type { PermissionState } from './agentBuildPermission.ts';
+ export class AgentAndroidBuildPermission extends BuildPermission<AndroidBuildApproval> {
+   constructor(current?:()=>PermissionContext){super(copyAndroidBuildApproval,current);}
++  signingSelected(): boolean { return this.comparison()?.input.signing !== undefined; }
+ }
+diff --git a/desktop/src/agentAndroidBuildOrigin.ts b/desktop/src/agentAndroidBuildOrigin.ts
+--- a/desktop/src/agentAndroidBuildOrigin.ts
++++ b/desktop/src/agentAndroidBuildOrigin.ts
+@@ -1,3 +1,4 @@
++import { agentAndroidBuildContext } from './agentAndroidSigned.ts';
+ // Native Projection DATA only: observe/STOP, never permission to Prepare/Start.
+ import type { AndroidBuildStatus } from './androidBuildTypes.ts';
+ export interface AgentAndroidBuildOrigin { serviceInstance: string; projectId: string; requestId: string }
+@@ -13,7 +14,7 @@
+ }
+ export function canObserveAgentAndroidBuild(previous: AndroidBuildStatus | null, next: AndroidBuildStatus, guiPending: boolean): boolean {
+   const a = previous?.operation, b = next.operation;
+-  return !guiPending && !!b && b.context.operation === 'android-build-inspect' && b.context.artifactValidation.mode === 'structure-and-version' &&
++  return !guiPending && !!b && agentAndroidBuildContext(b.context) &&
+     !!b.agentAndroidBuild && validAgentAndroidBuildOrigin(b.agentAndroidBuild) && (!previous || next.statusRevision > previous.statusRevision) &&
+     (!a || a.phase === 'terminal') && (!a || a.operationId !== b.operationId || a.ownerGeneration !== b.ownerGeneration);
+ }
+diff --git a/desktop/src/agentBuildPermission.ts b/desktop/src/agentBuildPermission.ts
+--- a/desktop/src/agentBuildPermission.ts
++++ b/desktop/src/agentBuildPermission.ts
+@@ -1,9 +1,12 @@
+ // Shared finite UI promise bookkeeping, not native permission/execution.
+ // Only the two fixed family wrappers supply descriptor-safe comparison copying;
+ // native codecs/Inbox independently enforce the exact family at each boundary.
+-import type { LocalCheckAccess } from './agentLocalChecks.ts';
+-export interface PermissionApi<A> {status():Promise<LocalCheckAccess>;allow(input:A):Promise<LocalCheckAccess>;revoke():Promise<LocalCheckAccess>}
+-export interface PermissionState { access: LocalCheckAccess | null; acknowledged: boolean; pending: 'allow' | 'status' | null; revokePending: boolean; uncertain: boolean; message: string | null }
++import { parseBuildPermissionAccess, nextBuildPermissionRevision } from './agentBuildPermissionProtocol.ts';
++import type { BuildPermissionAccess } from './agentBuildPermissionProtocol.ts';
++export { parseBuildPermissionAccess } from './agentBuildPermissionProtocol.ts';
++export type { BuildPermissionAccess } from './agentBuildPermissionProtocol.ts';
++export interface PermissionApi<A> {status():Promise<BuildPermissionAccess>;allow(input:A,expectedPermissionRevision:string):Promise<BuildPermissionAccess>;revoke():Promise<BuildPermissionAccess>}
++export interface PermissionState { access: BuildPermissionAccess | null; acknowledged: boolean; pending: 'allow' | 'status' | null; revokePending: boolean; uncertain: boolean; message: string | null }
+ export interface PermissionContext<A> { api: PermissionApi<A> | null; project: A | null; blocked: boolean }
+ interface Work<A> { api: PermissionApi<A>; epoch: number; context: A | null; superseded: boolean }
+ /** App-owned finite UI requests: one read/allow and one independent revoke.
+@@ -12,6 +15,7 @@
+   private readonly copy:(value:unknown)=>A|null;
+   private api: PermissionApi<A> | null = null;
+   private original: PermissionApi<A> | null = null;
++  private observed: Readonly<{api: PermissionApi<A>; revision: string}> | null = null;
+   private context: A | null = null;
+   private epoch = 0;
+   private blocked = false;
+@@ -22,6 +26,7 @@
+   private state: PermissionState = { access: null, acknowledged: false, pending: null, revokePending: false, uncertain: false, message: null };
+   constructor(copy: (value:unknown)=>A|null,current?:()=>PermissionContext<A>) {this.copy=copy;this.current=current??null;}
+   getState(): PermissionState { return this.state; }
++  protected comparison(): A | null { return this.context; }
+   subscribe(listener: (state: PermissionState) => void): () => void { this.listeners.add(listener); listener(this.state); return () => { this.listeners.delete(listener); }; }
+   private update(value: Partial<PermissionState>): void { this.state = Object.freeze({ ...this.state, ...value }); for (const fn of this.listeners) fn(this.state); }
+   bind(api: PermissionApi<A> | null, input: A | null): void {
+@@ -40,11 +45,12 @@
+   }
+   acknowledge(value: boolean): void { this.update({ acknowledged: value === true }); }
+   canAllow(): boolean { return !this.blocked && !!this.api && !!this.context && (!this.original || this.original === this.api) && !this.work && !this.revokeWork &&
+-    !this.state.uncertain && this.state.acknowledged && this.epoch < Number.MAX_SAFE_INTEGER; }
++    !this.state.uncertain && this.observed?.api === this.api && nextBuildPermissionRevision(this.observed.revision) !== null && this.state.acknowledged && this.epoch < Number.MAX_SAFE_INTEGER; }
+   async allow(): Promise<void> {
+     this.syncContext(); // Native invocation uses current event-time selection, not an earlier render/effect.
+     if (!this.canAllow()) return;
+-    const api = this.api!, context = this.context!, work: Work<A> = { api, context, epoch: this.epoch, superseded: false };
++    const api = this.api!, context = this.context!, observed = this.observed!, expected = observed.revision;
++    const work: Work<A> = { api, context, epoch: this.epoch, superseded: false };
+     this.original = api; this.work = work; this.update({ pending: 'allow', acknowledged: false, message: null });
+     try {
+       // Notification is synchronous: a subscriber can revoke or change the
+@@ -52,9 +58,13 @@
+       // that original Revoke merely because its eventual ACK would be ignored.
+       this.syncContext();
+       if (this.work !== work || work.superseded || work.epoch !== this.epoch || this.revokeWork ||
+-          this.api !== api || this.context !== context || this.blocked) return;
+-      const result = await api.allow(context);
+-      if (this.work === work && !work.superseded && work.epoch === this.epoch && this.api === api && this.context === context) this.update({ access: result, uncertain: false });
++          this.api !== api || this.context !== context || this.blocked || this.observed !== observed) return;
++      const result = parseBuildPermissionAccess(await api.allow(context, expected));
++      if (!result || result.permissionRevision !== nextBuildPermissionRevision(expected)) throw new Error('Unconfirmed permission');
++      if (this.work === work && !work.superseded && work.epoch === this.epoch && this.api === api && this.context === context) {
++        this.observed = Object.freeze({ api, revision: result.permissionRevision });
++        this.update({ access: result, acknowledged: false, uncertain: false });
++      }
+       else if (!work.superseded && work.epoch === this.epoch) this.update({ uncertain: true, message: 'Selection changed while permission was pending. Revoke the original permission before allowing again.' });
+     } catch { if (!work.superseded && work.epoch === this.epoch) this.update({ uncertain: true, message: 'Permission was not confirmed. Refresh or stop it in the original Desktop; do not repeat the build.' }); }
+     finally { if (this.work === work) { this.work = null; this.update({ pending: null }); } }
+@@ -66,7 +76,15 @@
+     // Keep that exact connection until original Revoke, even after rebinding.
+     this.original = api;
+     const work: Work<A> = { api, context: this.context, epoch: this.epoch, superseded: false }; this.work = work; this.update({ pending: 'status' });
+-    try { const result = await api.status(); if (!work.superseded && work.epoch === this.epoch) this.update({ access: result, message: null }); }
++    try { const result = parseBuildPermissionAccess(await api.status());
++      if (!result) throw new Error('Unconfirmed permission');
++      if (this.work === work && !work.superseded && work.epoch === this.epoch) {
++        this.observed = Object.freeze({ api, revision: result.permissionRevision });
++        // An earlier acknowledgement (including one made while this read
++        // was pending) cannot authorize a newly returned permission origin.
++        this.update({ access: result, acknowledged: false, message: null });
++      }
++    }
+     catch { if (!work.superseded && work.epoch === this.epoch) this.update({ message: 'Permission was not confirmed. Refresh or stop it in the original Desktop; do not repeat the build.' }); }
+     finally { if (this.work === work) { this.work = null; this.update({ pending: null }); } }
+   }
+@@ -80,9 +98,11 @@
+     const work: Work<A> = { api, context: null, epoch: this.epoch, superseded: false }; this.revokeWork = work;
+     this.update({ revokePending: true, access: null, acknowledged: false });
+     try {
+-      const result = await api.revoke();
+-      if (result.enabled) throw new Error("Permission remains enabled");
+-      if (this.revokeWork === work) { this.original = null; this.update({ access: result, uncertain: false, message: 'Permission stopped. Wait for any running build to finish stopping.' }); }
++      const result = parseBuildPermissionAccess(await api.revoke());
++      if (!result || result.enabled) throw new Error("Permission remains enabled");
++      if (this.revokeWork === work) { this.original = null;
++        this.observed = Object.freeze({ api, revision: result.permissionRevision });
++        this.update({ access: result, acknowledged: false, uncertain: false, message: 'Permission stopped. Wait for any running build to finish stopping.' }); }
+     } catch { this.original = api; this.update({ uncertain: true, message: 'Permission was not confirmed. Refresh or stop it in the original Desktop; do not repeat the build.' }); }
+     finally { if (this.revokeWork === work) { this.revokeWork = null; this.update({ revokePending: false }); } }
+   }
+diff --git a/desktop/src/androidBuild.ts b/desktop/src/androidBuild.ts
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -1655,10 +1655,10 @@
+     this.syncProject();
+     const project = this.state.project, toolchainSelection = this.state.catalogStatus?.selected;
+     if (this.prepareReason() || this.pendingGuiSubmissions !== 0 || !project || project.dirtyDraft || !project.savedConfig || !project.savedVersion ||
+-        !toolchainSelection || this.state.buildMode !== 'unsigned' || this.state.retainCandidateInputs || this.state.verifyUploadSignature) return null;
++        !toolchainSelection || this.state.retainCandidateInputs || this.state.buildMode === 'unsigned' && this.state.verifyUploadSignature) return null;
+     return copyAndroidBuildApproval({ input: { projectId: project.projectId, draftRevision: project.draftRevision,
+       baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
+-      artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } }, toolchainSelection });
++      artifactValidation: this.artifactValidation(), ...(this.state.buildMode === 'signed' ? { signing: this.state.signing.selection } : {}) }, toolchainSelection });
+   }
+   prepareReason = (): string | null => this.commonReason() ?? androidBuildOwnerReason(this.state) ??
+     (this.state.status?.availability === 'busy' ? androidBuildAvailabilityText.busy : null);
+diff --git a/desktop/src/androidBuildProtocol.ts b/desktop/src/androidBuildProtocol.ts
+--- a/desktop/src/androidBuildProtocol.ts
++++ b/desktop/src/androidBuildProtocol.ts
+@@ -1,3 +1,4 @@
++import { agentAndroidBuildContext } from './agentAndroidSigned.ts';
+ import { sameAgentAndroidBuildOrigin, validAgentAndroidBuildOrigin } from './agentAndroidBuildOrigin.ts';
+ import { candidateInputs, LOCAL_CANDIDATE_CONSENT as ANDROID_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
+ import type { AndroidCandidateInputsResult, AndroidBuildPublishedResult } from './androidBuildTypes.ts';
+@@ -361,7 +362,7 @@
+         (value.context.operation === 'android-candidate-inputs' ? candidateResult(value.result, value.operationId) : result(value.result)))) return false;
+   const op = value as unknown as AndroidBuildOperation;
+   if (Object.hasOwn(value, 'agentAndroidBuild') && (!validAgentAndroidBuildOrigin(value.agentAndroidBuild) ||
+-      op.context.operation !== 'android-build-inspect' || op.context.artifactValidation.mode !== 'structure-and-version')) return false;
++      !agentAndroidBuildContext(op.context))) return false;
+   const candidate = op.context.operation === 'android-candidate-inputs';
+   if (candidate ? !/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(op.operationId) :
+       ['journal-unavailable', 'recovery-required', 'candidate-inputs-unavailable'].includes(op.reason)) return false;
+diff --git a/desktop/src/components/AgentAndroidBuildAccess.tsx b/desktop/src/components/AgentAndroidBuildAccess.tsx
+--- a/desktop/src/components/AgentAndroidBuildAccess.tsx
++++ b/desktop/src/components/AgentAndroidBuildAccess.tsx
+@@ -2,22 +2,22 @@
+ import type { AgentAndroidBuildPermission } from '../agentAndroidBuild.ts';
+ export function AgentAndroidBuildAccess({controller}:{controller:AgentAndroidBuildPermission}){
+   const [state,setState]=useState(controller.getState());useEffect(()=>controller.subscribe(setState),[controller]);
+-  const access=state.access;
++  const access=state.access, signed=controller.signingSelected();
+   return <section className="session-review" aria-label="One agent Android build permission">
+     <h3>Let an AI or CLI agent build this project once</h3>
+-    <p>Allow one build from the current saved inputs. The agent has 15 minutes to start. This does not grant MRK signing credentials or Store publishing permission.</p>
++    <p>{signed ? 'Allow one local signed build using the existing upload key explicitly assigned in this Desktop. Key bytes, passwords and alias stay private; the CLI receives no credentials. No new key is generated.' : 'Allow one build and structure/version inspection from the current saved inputs. MRK supplies no signing credentials.'} No Store publishing permission is granted. The original read permission and five-minute native review may shorten the 15-minute start window.</p>
+     <p className="review-caution">Gradle and project scripts may run programs, change files, use the network, or sign using the project’s own settings. This is not a sandbox or a guarantee that scripts cannot sign.</p>
+     <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending||state.revokePending}
+-      onChange={(e)=>controller.acknowledge(e.target.checked)}/>I approve one agent build from these saved inputs, with these risks.</label>
++      onChange={(e)=>controller.acknowledge(e.target.checked)}/>{signed ? 'I approve one local signed agent build with this assigned existing upload key and these project-code risks.' : 'I approve one agent build from these saved inputs, with these risks.'}</label>
+     <div className="button-row"><button className="button secondary" type="button" disabled={!controller.canAllow()} onClick={()=>void controller.allow()}>Allow</button>
+       <button className="button secondary" type="button" disabled={state.revokePending} onClick={()=>void controller.revoke()}>Stop</button>
+       <button className="button secondary" type="button" disabled={!!state.pending||state.revokePending} onClick={()=>void controller.status()}>Refresh</button></div>
+-    <p>{access ? access.enabled ? 'Last checked: allowed for one request.' : access.consumed ? 'Permission used. Follow the build status above.' : 'Last checked: not allowed.' : 'Permission has not been checked.'} Stop revokes permission and asks a running build to stop; cleanup may take time.</p>
++    <p>{access ? access.enabled ? 'Last checked: allowed for one request.' : access.consumed ? 'Permission used. Follow the build status above.' : 'Last checked: not allowed.' : 'Refresh permission before approving this exact selection.'} Stop revokes permission and asks a running build to stop; cleanup may take time.</p>
+     <p>Android and iOS share one build permission. Explicitly allowing either replaces the other unused permission, never a running or unconfirmed build.</p>
+     <details><summary>CLI details</summary>
+       {access?.projectId&&<p>Project <code>{access.projectId}</code> · saved observation <code>{access.observationRevision}</code></p>}
+       <p>Use <code>mrk android-build-prepare PROJECT_ID OBSERVATION_REVISION --json</code>, review its response, then use its separate Start command. Keep the printed IDs for Status/Cancel and do not repeat after a lost reply.</p>
+-      <p>The same Android panel observes and can stop the build. It cannot start the agent’s prepared build again. Preparation does not renew the permission; an admitted build keeps its existing execution deadline. Results describe artifact structure and version checks, not signing or release approval.</p>
++      <p>The same Android panel observes and can stop the build. It cannot start the agent’s prepared build again. Preparation does not renew permission; an admitted build keeps its original execution deadline. Signed-mode results include validated signature comparisons only when actually returned; no result or cleanup uncertainty is not success. Neither mode grants release approval or automated recovery.</p>
+     </details>
+     {state.message&&<p role="status" className="review-caution">{state.message}</p>}
+   </section>;
+diff --git a/desktop/src-tauri/src/agent_android_build.rs b/desktop/src-tauri/src/agent_android_build.rs
+--- a/desktop/src-tauri/src/agent_android_build.rs
++++ b/desktop/src-tauri/src/agent_android_build.rs
+@@ -10,6 +10,9 @@
+ use std::{sync::Arc, time::Instant};
+ 
+ 
++#[path = "agent_android_signed.rs"]
++pub mod signed;
++
+ pub const CONSENT: &str = "agent-saved-android-build-inspect-v1";
+ pub const LIMIT: usize = crate::agent_build_requests::LIMIT;
+ pub const START_WINDOW: Duration = crate::agent_build_requests::START_WINDOW;
+@@ -59,6 +62,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Mode {
+     SavedAndroidBuildStructureAndVersion,
++    SavedAndroidLocalUploadKeySign,
+ }
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -67,10 +71,19 @@
+     pub saved_config: Config,
+     pub saved_version: Version,
+     pub tools: Tools,
++    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
++    pub signing: Option<signed::Selection>,
++    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
++    pub upload_certificate_sha256: Option<String>,
+ }
+ impl Review {
+     pub fn valid(&self) -> bool {
+         self.saved_config.valid() && self.saved_version.valid() && self.tools.valid()
++            && match self.mode {
++                Mode::SavedAndroidBuildStructureAndVersion => self.signing.is_none() && self.upload_certificate_sha256.is_none(),
++                Mode::SavedAndroidLocalUploadKeySign => self.signing.as_ref().is_some_and(signed::Selection::valid)
++                    && self.upload_certificate_sha256.as_ref().is_some_and(|v| hash(v)),
++            }
+     }
+ }
+ pub use crate::agent_build_requests::{Prepare, Query, Start, RequestState, StartState};
+@@ -114,6 +127,11 @@
+     ResultLimit,
+     WorkRetained,
+     CleanupUnknown,
++    SigningInputMissing,
++    SigningInputInvalid,
++    SigningValidationFailed,
++    SigningCommandFailed,
++    BuildInputsUnrestored,
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "kebab-case")]
+@@ -124,6 +142,9 @@
+     Capturing,
+     Inspecting,
+     DisposingWork,
++    ValidatingSigning,
++    Signing,
++    RestoringInputs,
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+ #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+@@ -148,6 +169,7 @@
+     VersionName,
+     ReleaseFlags,
+     Signer,
++    Signature,
+     CoreLifecycle,
+     OtherCoreFinding,
+ }
+@@ -186,6 +208,8 @@
+     pub findings: Vec<Finding>,
+     pub summary: Summary,
+     pub artifact: Artifact,
++    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
++    pub signing: Option<signed::Report>,
+ }
+ impl Report {
+     pub fn valid(&self) -> bool {
+@@ -193,6 +217,9 @@
+             && self.used_version.valid()
+             && (1..=1024 * 1024 * 1024).contains(&self.artifact.size)
+             && hash(&self.artifact.sha256)
++            && self.signing.as_ref().is_none_or(signed::Report::valid)
++            && (self.signing.is_none() || self.findings.iter().filter(|r| r.check == Check::Signature && r.status == FindingStatus::Pass).count() == 1
++                && self.findings.iter().filter(|r| r.check == Check::Signer && r.status == FindingStatus::Pass).count() == 1)
+             && self.findings.len() <= 128
+             && self.summary.shown as usize == self.findings.len()
+             && self.summary.shown == self.summary.total
+@@ -207,7 +234,8 @@
+                 == Some(self.summary.total)
+             && self.findings.iter().enumerate().all(|(n, row)| {
+                 row.ordinal == n as u32
+-                    && (row.check != Check::Signer || row.status == FindingStatus::Skip)
++                    && if self.signing.is_some() { matches!(row.status, FindingStatus::Pass | FindingStatus::NotApplicable) }
++                        else { row.check != Check::Signature && (row.check != Check::Signer || row.status == FindingStatus::Skip) }
+             })
+             && self.summary.counts.iter().all(|(status, n)| {
+                 self.findings
+@@ -318,6 +346,20 @@
+         }
+     }
+ }
++impl Operation {
++    pub(crate) fn valid_for(&self, review: &Review) -> bool {
++        let signed = review.mode == Mode::SavedAndroidLocalUploadKeySign;
++        self.valid() && review.valid()
++            && (signed || !matches!(self.reason, Reason::SigningInputMissing | Reason::SigningInputInvalid
++                | Reason::SigningValidationFailed | Reason::SigningCommandFailed | Reason::BuildInputsUnrestored))
++            && (signed || !matches!(self.stage, Some(Stage::ValidatingSigning | Stage::Signing | Stage::RestoringInputs)))
++            && self.result.as_ref().is_none_or(|r| {
++                r.used_config == review.saved_config && r.used_version == review.saved_version
++                    && r.signing.is_some() == signed
++                    && r.signing.as_ref().is_none_or(|s| Some(&s.upload_certificate_sha256) == review.upload_certificate_sha256.as_ref())
++            })
++    }
++}
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub struct Status {
+@@ -335,16 +377,11 @@
+         if self.expected_observation_revision == 0
+             || !self.do_not_replay
+             || !self.review.valid()
+-            || self.operation.as_ref().is_some_and(|o| {
+-                !o.valid()
+-                    || o.result.as_ref().is_some_and(|r| {
+-                        r.used_config != self.review.saved_config
+-                            || r.used_version != self.review.saved_version
+-                    })
+-            })
++            || self.operation.as_ref().is_some_and(|o| !o.valid_for(&self.review))
+             || self.history_available && self.operation.is_none()
+             || self.request_state == RequestState::OriginalAvailable && self.operation.is_none()
+             || self.start_state != StartState::NotRequested && self.operation.is_none()
++                && self.request_state != RequestState::AdmissionUnknown
+         {
+             Err(Error::InvalidRequest)
+         } else {
+diff --git a/desktop/src-tauri/src/agent_android_build_tests.rs b/desktop/src-tauri/src/agent_android_build_tests.rs
+--- a/desktop/src-tauri/src/agent_android_build_tests.rs
++++ b/desktop/src-tauri/src/agent_android_build_tests.rs
+@@ -6,6 +6,7 @@
+ pub(super) fn review() -> Review {
+     Review {
+         mode: Mode::SavedAndroidBuildStructureAndVersion,
++        signing: None, upload_certificate_sha256: None,
+         saved_config: Config {
+             bytes: 100,
+             sha256: "a".repeat(64),
+@@ -44,6 +45,7 @@
+             document: Arc::downgrade(&document),
+             observation_revision: 5,
+             review: review().into(),
++            read: None,
+             draft_revision: 1,
+             baseline_generation: 2,
+             changes,
+@@ -84,6 +86,7 @@
+             .bind(FAMILY,id(5), id(6), 1, Instant::now() + Duration::from_secs(300))
+             .unwrap();
+         claim.returned(true);
++        acknowledge(&link);
+         (input, link)
+     }
+ }
+@@ -94,14 +97,16 @@
+         owner_generation: id(6),
+     }
+ }
+-fn final_cancel(link: &NativeLink, revision: u32) -> Operation {
+-    let mut op = link.entry().status().unwrap().operation.unwrap().android().clone();
+-    op.status_revision = revision;
+-    op.state = OperationState::Cancelled;
+-    op.settlement = Settlement::Settled;
+-    op.outcome = Some(Outcome::Cancelled);
+-    op.reason = Reason::Cancelled;
+-    op
++fn final_cancel(_link: &NativeLink, revision: u32) -> Operation {
++    // Inert native-return DATA, not a getter that promotes a hidden success.
++    Operation { operation_id: id(5), owner_generation: id(6), status_revision: revision,
++        state: OperationState::Cancelled, settlement: Settlement::Settled,
++        outcome: Some(Outcome::Cancelled), reason: Reason::Cancelled,
++        stage: None, disposition: None, result: None }
++}
++fn acknowledge(link: &NativeLink) {
++    let (_, data) = link.entry().claim_history().unwrap().unwrap();
++    link.entry().history_returned(data.status_revision(), Ok(())).unwrap();
+ }
+ #[test]
+ fn named_grant_and_exact_saved_point_required_before_any_prepare() {
+@@ -211,7 +216,7 @@
+     drop(claim);
+     let status = f.inbox.prepare(FAMILY,input.clone(), &f.point).unwrap();
+     assert_eq!(status.request_state, RequestState::AdmissionUnknown);
+-    assert!(status.operation.is_some());
++    assert!(status.operation.is_none());
+     assert!(f.inbox.start(FAMILY,&start(&input)).is_err());
+     assert!(f.inbox.allow(f.scope.clone()).is_err());
+     assert!(link.entry().stop_at(Instant::now()).is_some());
+@@ -225,12 +230,12 @@
+     f.inbox.start(FAMILY,&request).unwrap();
+     let claim = f.inbox.claim(FAMILY).unwrap().unwrap();
+     link.consume_start(FAMILY).unwrap();
++    let mut unknown = link.entry().status().unwrap().operation.unwrap().android().clone();
+     drop(claim);
+     assert_eq!(
+         f.inbox.start(FAMILY,&request).unwrap().request_state,
+         RequestState::AdmissionUnknown
+     );
+-    let mut unknown = link.entry().status().unwrap().operation.unwrap().android().clone();
+     unknown.status_revision += 1;
+     unknown.state = OperationState::Unknown;
+     unknown.settlement = Settlement::Unknown;
+@@ -327,27 +332,21 @@
+ fn claimed_history_is_separate_from_latest_and_failure_never_settles_native_work() {
+     let f = Fixture::new();
+     let (_, link) = f.bound();
+-    let (first, operation) = link.entry().claim_history().unwrap().unwrap();
+-    let op = operation.android().clone();
+-    assert!(first);
+-    let mut running = op.clone();
+-    running.status_revision += 1;
+-    running.state = OperationState::Running;
++    let mut running = link.entry().status().unwrap().operation.unwrap().android().clone();
++    running.status_revision = 2; running.state = OperationState::Running;
+     link.publish(running.clone()).unwrap();
+-    assert!(link.entry().claim_history().is_err());
+-    link.entry()
+-        .history_returned(op.status_revision, Ok(()))
+-        .unwrap();
+-    let (first, latest) = link.entry().claim_history().unwrap().unwrap();
++    let (first, original) = link.entry().claim_history().unwrap().unwrap();
+     assert!(!first);
+-    assert_eq!(latest.android(), &running);
+-    assert!(link
+-        .entry()
+-        .history_returned(latest.status_revision(), Err(Error::StateUnknown))
+-        .is_err());
++    assert_eq!(link.entry().status().unwrap().operation.unwrap().state(), OperationState::Prepared);
++    let mut next = running.clone(); next.status_revision = 3;
++    link.publish(next.clone()).unwrap();
++    link.entry().history_returned(original.status_revision(), Ok(())).unwrap();
++    let (_, latest) = link.entry().claim_history().unwrap().unwrap();
++    assert_eq!(latest.android(), &next);
++    assert!(link.entry().history_returned(latest.status_revision(), Err(Error::StateUnknown)).is_err());
+     let state = link.entry().status().unwrap();
+-    assert!(!state.history_available);
+-    assert_eq!(state.operation.unwrap().settlement(), Settlement::Pending);
++    assert!(!state.history_available && state.operation.is_none());
++    assert_eq!(state.request_state, RequestState::AdmissionUnknown);
+     assert!(link.entry().claim_history().unwrap().is_none());
+ }
+ #[test]
+@@ -370,7 +369,7 @@
+     );
+ }
+ #[test]
+-fn native_retirement_can_resolve_admission_unknown_but_cannot_rearm_start() {
++fn native_retirement_cannot_resolve_lost_caller_or_rearm_start() {
+     let f = Fixture::new();
+     let (input, link) = f.bound();
+     f.inbox.start(FAMILY,&start(&input)).unwrap();
+@@ -378,8 +377,10 @@
+     drop(claim);
+     link.publish(final_cancel(&link, 2)).unwrap();
+     let status = f.inbox.start(FAMILY,&start(&input)).unwrap();
+-    assert_eq!(status.operation.unwrap().settlement(), Settlement::Settled);
++    assert!(status.operation.is_none());
++    assert_eq!(status.request_state, RequestState::AdmissionUnknown);
+     assert_eq!(status.start_state, StartState::Admitting);
++    assert!(f.inbox.allow(f.scope.clone()).is_err());
+     assert!(f.inbox.claim(FAMILY).unwrap().is_none());
+ }
+ #[test]
+diff --git a/desktop/src-tauri/src/agent_build_requests.rs b/desktop/src-tauri/src/agent_build_requests.rs
+--- a/desktop/src-tauri/src/agent_build_requests.rs
++++ b/desktop/src-tauri/src/agent_build_requests.rs
+@@ -15,6 +15,10 @@
+     },
+     time::{Duration, Instant},
+ };
++#[path = "agent_build_permission.rs"]
++mod permission;
++pub(crate) use permission::{permission_next, permission_revision, MainAccess};
++
+ pub const LIMIT: usize = 32;
+ pub const START_WINDOW: Duration = Duration::from_secs(900);
+ // ONE shared32-row allocation (not32 per family). The full terminal report is
+@@ -70,9 +74,17 @@
+             && self.version().name.capacity() <= 64
+             && match self {
+                 Self::Android(v) => v.tools.record_sha256.capacity() <= 64
+-                    && v.tools.instance.retained_bytes() <= ID_HEAP_BYTES,
+-                Self::Ios(_) => true,
++                    && v.tools.instance.retained_bytes() <= ID_HEAP_BYTES
++                    && v.signing.as_ref().is_none_or(android::signed::Selection::capacity_valid)
++                    && v.upload_certificate_sha256.as_ref().is_none_or(|s| s.capacity() <= 64),
++                Self::Ios(v) => v.signing.as_ref().is_none_or(ios::signed::Review::capacity_valid),
+             }
++    }
++    pub(crate) fn requires_original_read(&self) -> bool {
++        match self {
++            Self::Android(r) => r.mode == android::Mode::SavedAndroidLocalUploadKeySign,
++            Self::Ios(r) => r.mode == ios::Mode::SavedIosSignedExport,
++        }
+     }
+     pub(crate) fn config(&self) -> &Config {
+         match self {
+@@ -155,18 +167,8 @@
+     }
+     fn valid_for(&self, review: &Review) -> bool {
+         match (self, review) {
+-            (Self::Android(o), Review::Android(r)) => {
+-                o.valid()
+-                    && o.result.as_ref().is_none_or(|v| {
+-                        v.used_config == r.saved_config && v.used_version == r.saved_version
+-                    })
+-            }
+-            (Self::Ios(o), Review::Ios(r)) => {
+-                o.valid()
+-                    && o.result.as_ref().is_none_or(|v| {
+-                        v.used_config == r.saved_config && v.used_version == r.saved_version
+-                    })
+-            }
++            (Self::Android(o), Review::Android(r)) => o.valid_for(r),
++            (Self::Ios(o), Review::Ios(r)) => o.valid_for(r),
+             _ => false,
+         }
+     }
+@@ -181,6 +183,7 @@
+                     .checked_add(r.artifact.sha256.capacity())?
+                     .checked_add(r.findings.capacity().checked_mul(std::mem::size_of::<android::Finding>())?)?
+                     .checked_add(SUMMARY_HEAP_BYTES)?;
++                if let Some(s) = &r.signing { n = n.checked_add(s.upload_certificate_sha256.capacity())?; }
+             },
+             Self::Ios(o) => if let Some(r) = &o.result {
+                 n = n.checked_add(r.used_config.sha256.capacity())?
+@@ -206,6 +209,7 @@
+                 compact_string(&mut r.used_config.sha256);
+                 compact_version(&mut r.used_version);
+                 compact_string(&mut r.artifact.sha256);
++                if let Some(s) = &mut r.signing { compact_string(&mut s.upload_certificate_sha256); }
+                 r.findings = std::mem::take(&mut r.findings).into_boxed_slice().into_vec();
+                 r.summary.counts = std::mem::take(&mut r.summary.counts).into_iter().collect();
+             },
+@@ -214,9 +218,10 @@
+                 compact_version(&mut r.used_version);
+             },
+         }
+-        // Three Query IDs and the unchanged maximum five-heap Review coexist
++        // Three Query IDs and the exact closed Review (including signing) coexist
+         // with the public operation. Inline enums/DTOs are charged separately.
+-        if self.heap_bytes().and_then(|n| n.checked_add(8 * ID_HEAP_BYTES))
++        if self.heap_bytes().is_none_or(|n| n > OPERATION_HEAP_CEILING)
++            || self.heap_bytes().and_then(|n| n.checked_add(3 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING))
+             .is_none_or(|n| n > STATUS_HEAP_BYTES)
+         {
+             return Err(Error::StateUnknown);
+@@ -367,6 +372,7 @@
+             || self.history_available && self.operation.is_none()
+             || self.request_state == RequestState::OriginalAvailable && self.operation.is_none()
+             || self.start_state != StartState::NotRequested && self.operation.is_none()
++                && self.request_state != RequestState::AdmissionUnknown
+         {
+             Err(Error::StateUnknown)
+         } else {
+@@ -386,6 +392,7 @@
+     pub(crate) document: Weak<()>,
+     pub(crate) observation_revision: u64,
+     pub(crate) review: Review,
++    pub(crate) read: Option<Arc<crate::service_version_reserve_requests::ReadPermission>>,
+     pub(crate) draft_revision: u32,
+     pub(crate) baseline_generation: u32,
+     pub(crate) changes: tokio::sync::watch::Sender<u32>,
+@@ -394,6 +401,8 @@
+     fn valid(&self) -> bool {
+         self.review.valid()
+             && self.review.capacity_valid()
++            && self.read.is_some() == self.review.requires_original_read()
++            && self.read.as_ref().is_none_or(|r| matches!(r.stop(Instant::now()), Ok(None)))
+             && self.observation_revision != 0
+             && self.inode != 0
+             && self.registration != 0
+@@ -408,6 +417,12 @@
+             && self.root.as_os_str().len() <= 4096
+             && self.root.capacity() <= ROOT_HEAP_BYTES
+     }
++    pub(crate) fn matches_read(&self, read: &Arc<crate::service_version_reserve_requests::ReadPermission>) -> bool {
++        match &self.read {
++            Some(original) => Arc::ptr_eq(original, read) && matches!(original.stop(Instant::now()), Ok(None)),
++            None => !self.review.requires_original_read(),
++        }
++    }
+     pub(crate) fn matches(&self, point: &crate::agent_local_checks::SavedPoint) -> bool {
+         self.project_id == point.project_id
+             && self.runtime_id == point.runtime_id
+@@ -429,6 +444,13 @@
+ impl Lease {
+     fn stop_at(&self, now: Instant, consumed: bool) -> Option<Instant> {
+         let mut at = self.revoked.get().copied();
++        if let Some(read) = &self.scope.read {
++            match read.stop(now) {
++                Ok(Some((_, stop))) => at = Some(at.map_or(stop, |v| v.min(stop))),
++                Ok(None) => {},
++                Err(_) => at = Some(at.unwrap_or(now)),
++            }
++        }
+         if !consumed && now >= self.expires {
+             at = Some(at.map_or(self.expires, |old| old.min(self.expires)));
+         }
+@@ -457,6 +479,7 @@
+ }
+ struct Publication {
+     acknowledged: Option<u32>,
++    visible: Option<Arc<Operation>>,
+     claim: Option<Arc<Operation>>,
+     failed: bool,
+ }
+@@ -464,6 +487,8 @@
+     input: Prepare,
+     lease: Arc<Lease>,
+     phase: AtomicU8,
++    prepare_returned: AtomicBool,
++    start_returned: AtomicBool,
+     original: OnceLock<Original>,
+     start: AtomicU8,
+     start_at: OnceLock<Instant>,
+@@ -472,25 +497,38 @@
+     latest: Mutex<Option<Arc<Operation>>>,
+     publication: Mutex<Publication>,
+ }
+-// Include two scalar operation cells but only one full terminal report graph.
++// Include three scalar operation cells but only one full terminal report graph.
+ // Actual monotone publish rejects every changed successor of a terminal value.
+ // Scope capacities are checked BEFORE Allow; compact report/public DTO bounds
+ // include all hashes/IDs/version text and the freshly rebuilt nine-entry map.
+-const REVIEW_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES;
++const REVIEW_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES + android::signed::SELECTION_HEAP + 64;
+ const SCOPE_HEAP_CEILING: usize = ROOT_HEAP_BYTES + 2 * ID_HEAP_BYTES
+     + REVIEW_HEAP_CEILING;
+-const PUBLIC_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING
+-    + 4 * 64 + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES;
++// One retained terminal payload, not a second copy of the complete public
++// Status (whose query IDs and Review are already charged in Scope/Entry).
++const OPERATION_HEAP_CEILING: usize = 2 * ID_HEAP_BYTES + 5 * 64
++    + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES;
++const PUBLIC_HEAP_CEILING: usize = 3 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING
++    + OPERATION_HEAP_CEILING;
++// Each genuine current signing approval/pin is capacity-checked in its native
++// child. Conservatively allow all four ancillary holders for BOTH platforms.
++pub(crate) const SIGNED_BINDING_BYTES: usize = 2 * 1024;
++const SIGNED_BINDINGS_BACKING: usize = 4 * (SIGNED_BINDING_BYTES + SIGNED_BINDING_BYTES);
++// The nine standalone ID heaps are Prepare3 + Original2 + the two extra
++// nonterminal Operation cells2*2. The remaining Operation's IDs/report are in
++// OPERATION_HEAP_CEILING; Scope/Review heaps are counted separately in full.
+ const ROW_CEILING: usize = std::mem::size_of::<Entry>()
+     + std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
+-    + 2 * std::mem::size_of::<Operation>() + std::mem::size_of::<NativeLink>()
+-    + 8 * 2 * std::mem::size_of::<usize>() + 2 * 512 + 9 * ID_HEAP_BYTES
+-    + SCOPE_HEAP_CEILING + STATUS_HEAP_BYTES;
++    + 3 * std::mem::size_of::<Operation>() + std::mem::size_of::<NativeLink>()
++    + std::mem::size_of::<crate::service_version_reserve_requests::ReadPermission>()
++    + 10 * 2 * std::mem::size_of::<usize>() + 2 * 512 + 9 * ID_HEAP_BYTES
++    + SCOPE_HEAP_CEILING + OPERATION_HEAP_CEILING;
+ const ANCILLARY_CEILING: usize = std::mem::size_of::<Inbox>()
+     + std::mem::size_of::<Book>() + 2 * LIMIT * std::mem::size_of::<Arc<Entry>>()
+     + 4 * (std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
+         + SCOPE_HEAP_CEILING + 512)
+-    + 8 * (std::mem::size_of::<Access>() + ID_HEAP_BYTES) + 4096;
++    + 8 * (std::mem::size_of::<MainAccess>() + ID_HEAP_BYTES + 32) + 4096
++    + SIGNED_BINDINGS_BACKING;
+ const _: () = {
+     assert!(PUBLIC_HEAP_CEILING <= STATUS_HEAP_BYTES);
+     assert!(ROW_CEILING <= ROW_BACKING);
+@@ -514,9 +552,26 @@
+             .get()
+             .map_or(self.lease.expires, |o| o.expires.min(self.lease.expires))
+     }
++    pub(crate) fn read_end(&self) -> Option<Instant> { self.scope().read.as_ref().map(|r| r.end()) }
++    pub(crate) fn read_stop(&self, now: Instant) -> Result<Option<Instant>, Error> {
++        match &self.scope().read {
++            Some(read) => read.stop(now).map(|v| v.map(|(_, at)| at)),
++            None if !self.scope().review.requires_original_read() => Ok(None),
++            None => Err(Error::StateUnknown),
++        }
++    }
++    pub(crate) fn control_poll(&self) -> Option<Duration> {
++        (self.scope().read.is_some() || self.scope().review.requires_original_read())
++            .then_some(Duration::from_millis(5))
++    }
+     pub(crate) fn stop_at(&self, now: Instant) -> Option<Instant> {
+         let consumed = self.start.load(Ordering::Acquire) == START_CONSUMED;
+         let mut at = self.lease.stop_at(now, consumed);
++        match self.read_stop(now) {
++            Ok(Some(read_at)) => at = Some(at.map_or(read_at, |v| v.min(read_at))),
++            Ok(None) => {},
++            Err(_) => { self.unconfirmed(); at = Some(at.unwrap_or(now)); },
++        }
+         if !consumed && now >= self.start_deadline() {
+             at = Some(at.map_or(self.start_deadline(), |v| v.min(self.start_deadline())));
+         }
+@@ -551,20 +606,52 @@
+         self.phase.store(UNKNOWN, Ordering::Release);
+         self.cancel();
+     }
++    fn callers_returned(&self) -> bool {
++        self.prepare_returned.load(Ordering::Acquire)
++            && (self.start.load(Ordering::Acquire) == NO_START
++                || self.start_returned.load(Ordering::Acquire))
++    }
+     fn occupies(&self) -> bool {
+         if self.phase.load(Ordering::Acquire) == QUEUED && self.stop_at(Instant::now()).is_some() {
+-            let _ =
+-                self.phase
+-                    .compare_exchange(QUEUED, EXPIRED, Ordering::AcqRel, Ordering::Acquire);
++            let _ = self.phase.compare_exchange(QUEUED, EXPIRED, Ordering::AcqRel, Ordering::Acquire);
+         }
+         match self.phase.load(Ordering::Acquire) {
+             QUEUED | PREPARING | UNKNOWN => true,
+-            BOUND => self.latest.lock().map_or(true, |v| {
+-                v.as_ref()
+-                    .is_none_or(|v| v.settlement() != Settlement::Settled)
+-            }),
++            BOUND => {
++                // Native retirement alone never releases a retained relay
++                // Claim, nor a pending/failed original history write.
++                let latest = match self.latest.lock() {
++                    Ok(v) => v.clone(), Err(_) => return true,
++                };
++                let Some(latest) = latest else { return true; };
++                let acknowledged = self.publication.lock().is_ok_and(|p| {
++                    !p.failed && p.claim.is_none() && p.visible.as_ref()
++                        .is_some_and(|v| Arc::ptr_eq(v, &latest))
++                });
++                latest.settlement() != Settlement::Settled || !acknowledged
++                    || !self.callers_returned() || self.phase.load(Ordering::Acquire) == UNKNOWN
++            }
+             _ => false,
+         }
++    }
++    /// A known candidate becomes public only after its actual writer ACK.
++    /// Uncertainty bypasses that gate immediately and can never expose the
++    /// previous Prepared/Complete as current usable authority.
++    fn public_operation(&self) -> Result<(Option<Arc<Operation>>, bool, RequestState, StartState), Error> {
++        let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
++        let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
++        let request_state = self.observed_request_state();
++        let start_state = self.observed_start_state();
++        if p.failed || request_state == RequestState::AdmissionUnknown
++            || latest.as_ref().is_some_and(|o| o.settlement() == Settlement::Unknown)
++        {
++            return Ok((latest.filter(|o| o.settlement() == Settlement::Unknown), false,
++                RequestState::AdmissionUnknown, start_state));
++        }
++        let request_state = if request_state == RequestState::OriginalAvailable && p.visible.is_none() {
++            RequestState::Preparing
++        } else { request_state };
++        Ok((p.visible.clone(), p.visible.is_some(), request_state, start_state))
+     }
+     fn observed_request_state(&self) -> RequestState {
+         let request_state = match self.phase.load(Ordering::Acquire) {
+@@ -591,22 +678,15 @@
+     pub(crate) fn catalogue_metadata(&self) -> Result<crate::service_request_catalogue::Request, Error> {
+         use crate::service_request_catalogue as data;
+         self.occupies();
+-        let operation = {
+-            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
+-            latest.as_ref().map(|value| data::Operation {
+-                operation_id: value.operation_id().clone(), owner_generation: value.owner_generation().clone(),
+-                status_revision: value.status_revision(), state: value.state(), settlement: value.settlement(),
+-            })
+-        }; // Never invert the existing latest -> publication order.
+-        let request_state = self.observed_request_state();
+-        let start_state = self.observed_start_state();
++        let (visible, history_available, request_state, start_state) = self.public_operation()?;
++        let operation = visible.as_ref().map(|value| data::Operation {
++            operation_id: value.operation_id().clone(), owner_generation: value.owner_generation().clone(),
++            status_revision: value.status_revision(), state: value.state(), settlement: value.settlement(),
++        });
+         let progress = match self.family() {
+             Family::AndroidInspect => data::Progress::AndroidBuild { request_state, start_state },
+             Family::IosArchive => data::Progress::IosArchive { request_state, start_state },
+         };
+-        let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+-        let history_available = !history.failed && operation.as_ref()
+-            .is_some_and(|value| history.acknowledged == Some(value.status_revision));
+         let row = data::Request {
+             request_id: self.input.request_id.clone(),
+             expected_observation_revision: self.input.expected_observation_revision,
+@@ -617,23 +697,13 @@
+     }
+     pub(crate) fn status(&self) -> Result<Snapshot, Error> {
+         self.occupies();
+-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?
+-            .as_deref().cloned();
+-        let request_state = self.observed_request_state();
+-        let start_state = self.observed_start_state();
+-        let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
++        let (visible, history_available, request_state, start_state) = self.public_operation()?;
++        let operation = visible.as_deref().cloned();
+         let result = Snapshot {
+             origin: self.input.query(),
+             expected_observation_revision: self.input.expected_observation_revision,
+-            request_state,
+-            start_state,
+-            review: self.scope().review.clone(),
+-            history_available: !p.failed
+-                && operation
+-                    .as_ref()
+-                    .is_some_and(|o| p.acknowledged == Some(o.status_revision())),
+-            operation,
+-            do_not_replay: true,
++            request_state, start_state,
++            review: self.scope().review.clone(), history_available, operation, do_not_replay: true,
+         };
+         result.validate()?;
+         Ok(result)
+@@ -673,7 +743,10 @@
+             self.unconfirmed();
+             return Err(Error::StateUnknown);
+         }
+-        self.phase.store(BOUND, Ordering::Release);
++        if self.phase.compare_exchange(PREPARING, BOUND, Ordering::AcqRel, Ordering::Acquire).is_err() {
++            self.unconfirmed();
++            return Err(Error::StateUnknown);
++        }
+         Ok(link)
+     }
+     fn request_start(&self, input: &Start) -> Result<Snapshot, Error> {
+@@ -698,10 +771,13 @@
+             return Err(Error::Expired);
+         }
+         {
+-            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
+-            if latest.as_ref().is_none_or(|v| {
+-                v.state() != OperationState::Prepared || v.settlement() != Settlement::Pending
+-            }) {
++            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
++            let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
++            if !self.prepare_returned.load(Ordering::Acquire) || p.failed
++                || latest.as_ref().is_none_or(|v| {
++                    v.state() != OperationState::Prepared || v.settlement() != Settlement::Pending
++                        || p.visible.as_ref().is_none_or(|a| !Arc::ptr_eq(a, v))
++                }) {
+                 return Err(Error::Conflict);
+             }
+         }
+@@ -725,8 +801,14 @@
+             return Ok(None);
+         }
+         if p.claim.is_some() {
++            p.failed = true;
++            drop(p);
++            self.unconfirmed();
+             return Err(Error::StateUnknown);
+         }
++        if latest.settlement() != Settlement::Unknown
++            && (!self.callers_returned() || self.phase.load(Ordering::Acquire) == UNKNOWN)
++        { return Ok(None); }
+         if p.acknowledged == Some(latest.status_revision()) {
+             return Ok(None);
+         }
+@@ -740,20 +822,30 @@
+         result: Result<(), Error>,
+     ) -> Result<(), Error> {
+         let mut p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+-        if p.claim
++        if p.failed || p.claim
+             .as_ref()
+             .is_none_or(|c| c.status_revision() != revision)
+         {
+             p.failed = true;
++            drop(p);
++            self.unconfirmed();
+             return Err(Error::StateUnknown);
+         }
+         if let Err(e) = result {
+             p.failed = true;
++            drop(p);
++            self.unconfirmed();
+             return Err(e);
+         }
+-        p.claim = None;
++        p.visible = p.claim.take(); // SAME immutable claim, after actual writer return.
+         p.acknowledged = Some(revision);
++        drop(p);
++        self.scope().changes.send_modify(|_| {});
+         Ok(())
++    }
++    pub(crate) fn history_lost(&self) {
++        if let Ok(mut p) = self.publication.lock() { p.failed = true; }
++        self.unconfirmed(); // Claim remains retained; loss is never a returned write.
+     }
+ }
+ /// Original Prepared -> SAME Session. A weak identity disappearing is NEVER
+@@ -836,12 +928,11 @@
+             }
+         }
+         let data = data.compact()?;
+-        // Actual same-owner retirement can resolve lost admission ACK, never
+-        // a native UNKNOWN. It cannot make the one-use Start available again.
+-        if data.settlement() == Settlement::Settled {
+-            self.entry.phase.store(BOUND, Ordering::Release);
+-        }
++        let unknown = data.settlement() == Settlement::Unknown;
+         *latest = Some(Arc::new(data));
++        drop(latest);
++        if unknown { self.entry.unconfirmed(); }
++        // A known late native return cannot heal a lost caller/history cut.
+         self.entry.scope().changes.send_modify(|_| {});
+         Ok(())
+     }
+@@ -865,24 +956,23 @@
+     }
+     pub(crate) fn returned(mut self, ok: bool) {
+         self.returned = true;
+-        if ok && self.entry.original.get().is_some() {
++        let flag = match self.kind {
++            ClaimKind::Prepare => &self.entry.prepare_returned,
++            ClaimKind::Start => &self.entry.start_returned,
++        };
++        if flag.swap(true, Ordering::AcqRel) {
++            self.entry.unconfirmed();
+             return;
+         }
+         if self.entry.original.get().is_none() && !ok {
+-            let _ = self.entry.phase.compare_exchange(
+-                PREPARING,
+-                REFUSED,
+-                Ordering::AcqRel,
+-                Ordering::Acquire,
+-            );
+-        } else if self.entry.latest.lock().is_ok_and(|v| {
+-            v.as_ref()
+-                .is_some_and(|o| o.settlement() == Settlement::Settled)
+-        }) {
+-            self.entry.phase.store(BOUND, Ordering::Release);
+-        } else {
++            let _ = self.entry.phase.compare_exchange(PREPARING, REFUSED, Ordering::AcqRel, Ordering::Acquire);
++        } else if !(ok && self.entry.original.get().is_some())
++            && !self.entry.latest.lock().is_ok_and(|v| v.as_ref()
++                .is_some_and(|o| o.settlement() == Settlement::Settled))
++        {
+             self.entry.unconfirmed();
+         }
++        self.entry.scope().changes.send_modify(|_| {});
+     }
+ }
+ impl Drop for Claim {
+@@ -1036,6 +1126,8 @@
+             input,
+             lease: lease.clone(),
+             phase: AtomicU8::new(QUEUED),
++            prepare_returned: AtomicBool::new(false),
++            start_returned: AtomicBool::new(false),
+             original: OnceLock::new(),
+             start: AtomicU8::new(NO_START),
+             start_at: OnceLock::new(),
+@@ -1044,6 +1136,7 @@
+             latest: Mutex::new(None),
+             publication: Mutex::new(Publication {
+                 acknowledged: None,
++                visible: None,
+                 claim: None,
+                 failed: false,
+             }),
+diff --git a/desktop/src-tauri/src/agent_build_requests_tests.rs b/desktop/src-tauri/src/agent_build_requests_tests.rs
+--- a/desktop/src-tauri/src/agent_build_requests_tests.rs
++++ b/desktop/src-tauri/src/agent_build_requests_tests.rs
+@@ -40,6 +40,7 @@
+         let review = match family {
+             Family::AndroidInspect => Review::Android(android::Review {
+                 mode: android::Mode::SavedAndroidBuildStructureAndVersion,
++                signing: None, upload_certificate_sha256: None,
+                 saved_config: config,
+                 saved_version: version,
+                 tools: android::Tools {
+@@ -50,6 +51,7 @@
+             }),
+             Family::IosArchive => Review::Ios(ios::Review {
+                 mode: ios::Mode::SavedIosUnsignedArchive,
++                signing: None,
+                 saved_config: config,
+                 saved_version: version,
+             }),
+@@ -66,6 +68,7 @@
+             document: Arc::downgrade(&self.document),
+             observation_revision: 5,
+             review,
++            read: None,
+             draft_revision: 1,
+             baseline_generation: 1,
+             changes,
+@@ -97,8 +100,13 @@
+             )
+             .unwrap();
+         claim.returned(true);
++        acknowledge(&link);
+         (input, link)
+     }
++}
++fn acknowledge(link: &NativeLink) {
++    let (_, data) = link.entry().claim_history().unwrap().unwrap();
++    link.entry().history_returned(data.status_revision(), Ok(())).unwrap();
+ }
+ #[test]
+ fn other_family_cannot_spend_query_cancel_claim_or_bind_the_grant() {
+@@ -234,11 +242,12 @@
+         .unwrap();
+     let claim = f.inbox.claim(Family::IosArchive).unwrap().unwrap();
+     link.consume_start(Family::IosArchive).unwrap();
+-    drop(claim);
+     let mut op = ios::Status::try_from(link.entry().status().unwrap())
+         .unwrap()
+         .operation
+         .unwrap();
++    drop(claim);
++    assert!(link.entry().status().unwrap().operation.is_none());
+     op.status_revision = 2;
+     op.state = OperationState::Unknown;
+     op.settlement = Settlement::Unknown;
+@@ -274,6 +283,7 @@
+         used_version: s.review.saved_version,
+         entries: 10,
+         bytes: 100,
++        export: None,
+     };
+     assert!(r.valid());
+     let value = serde_json::to_value(&r).unwrap();
+@@ -337,6 +347,7 @@
+                 }).collect(),
+                 summary: android::Summary { total: 128, shown: 128, omitted: 0, counts },
+                 artifact: android::Artifact { size: 1024, sha256: "f".repeat(64) },
++                signing: None,
+             });
+         }
+         Operation::Ios(o) => {
+@@ -354,7 +365,7 @@
+                 scope: ios::Scope::LocalUnsignedIosArchiveObservation,
+                 used_config: link.entry().scope().review.config().clone(),
+                 used_version: link.entry().scope().review.version().clone(),
+-                entries: 100_000, bytes: 8 * 1024u64.pow(3),
++                entries: 100_000, bytes: 8 * 1024u64.pow(3), export: None,
+             });
+         }
+     }
+@@ -380,7 +391,7 @@
+ }
+ 
+ #[test]
+-fn all32_mixed_family_failed_claims_share_terminal_and_public_copies_cannot_mutate_them() {
++fn all32_mixed_rows_retain_acknowledged_reports_and_one_absorbing_failed_claim() {
+     let mut f = Fixture::new();
+     f.point.runtime_id = "r".repeat(64);
+     f.point.root = format!("/{}", "r".repeat(ROOT_HEAP_BYTES - 1)).into();
+@@ -390,6 +401,7 @@
+         // bound, not32 entries all borrowing one artificially cheap scope.
+         let scope = maximal_scope(&f, family);
+         let (input, link) = memory_bound(&f, &scope, n);
++        acknowledge(&link);
+         let start = Start {
+             origin: input.query(), operation_id: id((n + 100) as u8), owner_generation: id((n + 200) as u8),
+         };
+@@ -424,15 +436,23 @@
+         assert!(Arc::ptr_eq(&retained,
+             link.entry().publication.lock().unwrap().claim.as_ref().unwrap()));
+         corrupt_copy(&mut history_dto);
+-        let mut status_dto = link.entry().status().unwrap();
+-        corrupt_copy(status_dto.operation.as_mut().unwrap());
+-        assert!(link.entry().history_returned(2, Err(Error::StateUnknown)).is_err());
++        let failed = n + 1 == LIMIT;
++        if failed {
++            assert!(link.entry().history_returned(2, Err(Error::StateUnknown)).is_err());
++            assert!(link.entry().status().unwrap().operation.is_none());
++        } else {
++            link.entry().history_returned(2, Ok(())).unwrap();
++            let mut status_dto = link.entry().status().unwrap();
++            corrupt_copy(status_dto.operation.as_mut().unwrap());
++        }
+         assert!(retained.valid_for(&scope.review));
+         assert!(link.entry().claim_history().unwrap().is_none());
+         let status = f.inbox.prepare(family, input.clone(), &f.point).unwrap();
+-        assert!(status.do_not_replay && !status.history_available);
++        assert!(status.do_not_replay);
++        assert_eq!(status.history_available, !failed);
+         assert_eq!(status.start_state, StartState::Consumed);
+-        assert_eq!(status.operation.as_ref().unwrap().settlement(), Settlement::Settled);
++        if failed { assert_eq!(status.request_state, RequestState::AdmissionUnknown); }
++        else { assert_eq!(status.operation.as_ref().unwrap().settlement(), Settlement::Settled); }
+         // Exercise the actual unchanged public family projection/validator,
+         // not just a private compact record or a fabricated serialized value.
+         let bytes = match family {
+@@ -452,8 +472,8 @@
+         for entry in entries {
+             let latest = entry.latest.lock().unwrap().clone().unwrap();
+             let publication = entry.publication.lock().unwrap();
+-            assert!(publication.failed);
+-            assert!(Arc::ptr_eq(&latest, publication.claim.as_ref().unwrap()));
++            if publication.failed { assert!(Arc::ptr_eq(&latest, publication.claim.as_ref().unwrap())); }
++            else { assert!(publication.claim.is_none()); assert!(Arc::ptr_eq(&latest, publication.visible.as_ref().unwrap())); }
+         }
+         assert!(matches!(f.inbox.allow(maximal_scope(&f, family)), Err(Error::Busy)));
+     }
+@@ -521,6 +541,10 @@
+         assert!(Arc::ptr_eq(&original, link.entry().latest.lock().unwrap().as_ref().unwrap()));
+         assert!(Arc::ptr_eq(&scope, &link.entry().lease.scope));
+         link.publish(terminal(&link)).unwrap();
++        acknowledge(&link);
+         assert_eq!(link.entry().status().unwrap().operation.unwrap().settlement(), Settlement::Settled);
+     }
+ }
++
++#[path = "agent_build_original_return_tests.rs"]
++mod original_returns;
+diff --git a/desktop/src-tauri/src/android_build_protocol.rs b/desktop/src-tauri/src/android_build_protocol.rs
+--- a/desktop/src-tauri/src/android_build_protocol.rs
++++ b/desktop/src-tauri/src/android_build_protocol.rs
+@@ -2220,7 +2220,7 @@
+         value["outcome"]=json!("unknown");value["reason"]=json!("cleanup-unknown");assert!(!terminal(&value,&candidate_context()).unwrap().settled());
+     }
+ 
+-    fn signed_complete() -> Value {
++    pub(super) fn signed_complete() -> Value {
+         let mut value = upload_complete(); value["context"] = json!(signed_context());
+         value["result"]["schemaVersion"] = json!(2);
+         value["result"]["toolchainProfile"] = json!(MAC_TOOLCHAIN_PROFILE);
+@@ -2460,3 +2460,6 @@
+     mac_toolchain_contract_tests::original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data();
+     mac_toolchain_contract_tests::native_request_binding_rejects_host_root_and_selected_identity_mismatch_data();
+ }
++
++#[path = "android_build_agent_signed_projection.rs"]
++mod agent_signed;
+diff --git a/desktop/src-tauri/src/application_service_agent_android_build.rs b/desktop/src-tauri/src/application_service_agent_android_build.rs
+--- a/desktop/src-tauri/src/application_service_agent_android_build.rs
++++ b/desktop/src-tauri/src/application_service_agent_android_build.rs
+@@ -36,17 +36,21 @@
+         })
+     }
+     pub(crate) fn build_point_for_runtime(&self, runtime: &str) -> Result<SavedPoint, Error> {
++        self.build_point_with_read(runtime).map(|(point, _)| point)
++    }
++    /// SAME live READ facet as the already-listening original Service Grant.
++    /// Signed delegates retain this identity, never a later renewed grant.
++    pub(crate) fn build_point_with_read(&self, runtime: &str) -> Result<(SavedPoint, Arc<crate::service_version_reserve_requests::ReadPermission>), Error> {
+         let state = self.lock()?;
+         self.check(&state)?;
+         let id = state.runtime_aliases.get(runtime).ok_or(Error::Conflict)?;
+-        if !live_grant(&state)?.projects.contains(id) {
+-            return Err(Error::AccessDenied);
+-        }
++        let grant = live_grant(&state)?;
++        if !grant.projects.contains(id) { return Err(Error::AccessDenied); }
+         let point = Self::build_point(&state, id)?;
+         if point.runtime_id != runtime || !point.fresh || point.config.is_none() {
+             return Err(Error::Conflict);
+         }
+-        Ok(point)
++        Ok((point, grant.reserve_read.clone()))
+     }
+     /// Start's possible project effects make the old shared observation stale.
+     /// The original Doc/Edit inputs are rematched AFTER this existing writer.
+@@ -56,7 +60,8 @@
+     ) -> Result<(), Error> {
+         let mut state = self.lock()?;
+         self.check(&state)?;
+-        if !live_grant(&state)?.projects.contains(&scope.project_id)
++        let grant = live_grant(&state)?;
++        if !grant.projects.contains(&scope.project_id) || !scope.matches_read(&grant.reserve_read)
+             || !scope.matches(&Self::build_point(&state, &scope.project_id)?)
+         {
+             return Err(Error::Conflict);
+@@ -181,6 +186,7 @@
+             observation_revision: point.revision,
+             review: build::Review {
+                 mode: build::Mode::SavedAndroidBuildStructureAndVersion,
++                signing: None, upload_certificate_sha256: None,
+                 saved_config: point.config.clone().unwrap(),
+                 saved_version: build::Version {
+                     bytes: 32,
+@@ -194,6 +200,7 @@
+                     record_sha256: "c".repeat(64),
+                 },
+             }.into(),
++            read: None,
+             draft_revision: 1,
+             baseline_generation: 1,
+             changes,
+@@ -216,6 +223,10 @@
+             )
+             .unwrap();
+         claim.returned(true);
++        let (_, published) = link.entry().claim_history().unwrap().unwrap();
++        let ack = service.begin_operation("project-1", published.operation_id().clone(), p::Action::Build,
++            published.state(), published.settlement());
++        link.entry().history_returned(published.status_revision(), ack).unwrap();
+         let second = service.admit_client().unwrap();
+         assert_ne!(first.client_id, second.client_id);
+         service
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -155,6 +155,7 @@
+             document: Arc::downgrade(document),
+             observation_revision: point.revision,
+             config: point.config.unwrap(),
++            read: None,
+             draft_revision: 1,
+             baseline_generation: 1,
+             changes,
+@@ -184,6 +185,7 @@
+         let review = match family {
+             build::Family::AndroidInspect => android::Review {
+                 mode: android::Mode::SavedAndroidBuildStructureAndVersion,
++                signing: None, upload_certificate_sha256: None,
+                 saved_config: config,
+                 saved_version: version,
+                 tools: android::Tools {
+@@ -195,6 +197,7 @@
+             .into(),
+             build::Family::IosArchive => ios::Review {
+                 mode: ios::Mode::SavedIosUnsignedArchive,
++                signing: None,
+                 saved_config: config,
+                 saved_version: version,
+             }
+@@ -212,6 +215,7 @@
+             document: Arc::downgrade(document),
+             observation_revision: point.revision,
+             review,
++            read: None,
+             draft_revision: 1,
+             baseline_generation: 1,
+             changes,
+@@ -457,7 +461,7 @@
+             .unwrap();
+         let operation = Id::random().unwrap();
+         let generation = Id::random().unwrap();
+-        let _link = claim
++        let link = claim
+             .entry()
+             .bind(
+                 build::Family::IosArchive,
+@@ -468,6 +472,10 @@
+             )
+             .unwrap();
+         claim.returned(true);
++        let (_, original) = link.entry().claim_history().unwrap().unwrap();
++        let returned = service.begin_operation(&ios.runtime_id, original.operation_id().clone(), p::Action::Build,
++            original.state(), original.settlement());
++        link.entry().history_returned(original.status_revision(), returned).unwrap();
+         let view = discover(&service, &client, &project);
+         assert_eq!(view.requests.len(), 2);
+         assert_eq!(view.requests[0].request_id, old.request_id);
+diff --git a/desktop/src-tauri/src/asset_session_agent_android_build.rs b/desktop/src-tauri/src/asset_session_agent_android_build.rs
+--- a/desktop/src-tauri/src/asset_session_agent_android_build.rs
++++ b/desktop/src-tauri/src/asset_session_agent_android_build.rs
+@@ -9,6 +9,9 @@
+     service_protocol::{Action, Error},
+ };
+ use serde::Deserialize;
++#[path = "asset_session_agent_android_signed.rs"]
++mod signed;
++use crate::agent_build_requests::{MainAccess, permission_revision, permission_next};
+ 
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -16,6 +19,7 @@
+     input: wire::Prepare,
+     toolchain_selection: wire::MacToolchainSelection,
+     consent_version: String,
++    expected_permission_revision: String,
+ }
+ /// The current saved reader, edit stamp and catalog comparison are ORIGINALS,
+ /// not decoded from the consent body. Only one grant retains this small pair.
+@@ -25,6 +29,7 @@
+     stamp: SavedEditStamp,
+     saved: ValidatedSavedInput,
+     approval: Arc<crate::saved_command_owner::AgentAndroidBuildApproval>,
++    signing: Option<signed::Pins>,
+ }
+ fn public(error: Error) -> BridgeError {
+     application_service::public_error(error)
+@@ -101,30 +106,37 @@
+         {
+             return Err(public(Error::Conflict));
+         }
++        self.agent_android_signing_material(state, grant, registration, root)?;
+         Ok(())
+     }
+     pub(crate) fn agent_android_build_access(
+         &self,
+         window: &str,
+-    ) -> Result<agent::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.agent_android_service()? {
+-            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public),
+-            None => Ok(empty()),
+-        }
++        let _state = self.lock();
++        let revision = self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire);
++        let access = match self.agent_android_service()? {
++            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public)?,
++            None => empty(),
++        };
++        Ok(MainAccess::new(access, revision))
+     }
+     pub(crate) fn allow_agent_android_build(
+         &self,
+         window: &str,
+         args: Allow,
+-    ) -> Result<agent::Access, BridgeError> {
+-        if window != MAIN || args.consent_version != agent::CONSENT {
++    ) -> Result<MainAccess, BridgeError> {
++        let signed = args.input.signing.is_some();
++        if window != MAIN || args.consent_version != if signed { agent::signed::CONSENT } else { agent::CONSENT } {
+             return Err(BridgeError::invalid());
+         }
+-        let (native, stamp, saved, approval, epoch) = {
++        let expected = permission_revision(&args.expected_permission_revision).map_err(public)?;
++        let (native, stamp, saved, approval, signing) = {
+             let mut state = self.lock();
++            permission_next(expected, self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire)).map_err(public)?;
+             if self.android_build_gate(&state) != wire::Availability::Available {
+                 return Err(crate::android_build_owner::unavailable());
+             }
+@@ -155,14 +167,13 @@
+                     &args.toolchain_selection,
+                     &self.inner.session_identity,
+                 )?;
+-            let epoch = self
+-                .inner
+-                .agent_android_build_revoke_epoch
+-                .load(Ordering::Acquire);
+-            if epoch == u64::MAX {
+-                return Err(public(Error::StateUnknown));
+-            }
+-            (native, edit.stamp()?, saved, approval, epoch)
++            let signing = if signed {
++                let material = self.review_android_material(&state, &approval.input().context(), registration, &root)?;
++                let pins = signed::Pins::capture(&material)?;
++                pins.admitted(&approval)?;
++                Some(pins) // Only weak comparison pins cross this Doc cut.
++            } else { None };
++            (native, edit.stamp()?, saved, approval, signing)
+         };
+         // These original Host/Service calls may perform store IO. NEVER hold
+         // Doc/Edit across them. They require the already-listening read host;
+@@ -173,9 +184,7 @@
+             .application_service
+             .identity_request_service(&native)
+             .map_err(public)?;
+-        let point = service
+-            .build_point_for_runtime(&native.runtime_id)
+-            .map_err(public)?;
++        let (point, read) = service.build_point_with_read(&native.runtime_id).map_err(public)?;
+         let scope = Arc::new(agent::NativeScope {
+             project_id: point.project_id.clone(),
+             runtime_id: native.runtime_id.clone(),
+@@ -187,6 +196,7 @@
+             document: Arc::downgrade(&self.inner.session_identity),
+             observation_revision: point.revision,
+             review: approval.review().clone().into(),
++            read: signed.then_some(read),
+             draft_revision: approval.input().draft_revision,
+             baseline_generation: approval.input().baseline_generation,
+             changes: self.inner.changes.clone(),
+@@ -200,6 +210,7 @@
+             stamp,
+             saved,
+             approval,
++            signing,
+         });
+         let mut state = self.lock();
+         if self.android_build_gate(&state) != wire::Availability::Available {
+@@ -214,14 +225,8 @@
+             .edits
+             .saved_registration_guard(&self.inner.session_identity)?;
+         self.agent_android_current(&state, &grant, &edit, registration, &root)?;
+-        if self
+-            .inner
+-            .agent_android_build_revoke_epoch
+-            .load(Ordering::Acquire)
+-            != epoch
+-        {
+-            return Err(public(Error::AccessDenied));
+-        }
++        let next = permission_next(expected,
++            self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire)).map_err(public)?;
+         if let Some(original) = self.inner.agent_android_build_service.get() {
+             if original.as_ptr() != Arc::as_ptr(&service) {
+                 return Err(public(Error::Conflict));
+@@ -232,16 +237,18 @@
+                 .set(Arc::downgrade(&service))
+                 .map_err(|_| public(Error::StateUnknown))?;
+         }
+-        // Same Doc guard linearizes first-Allow against Revoke. Inbox is only
+-        // bounded memory, and has no reverse callback into this document.
++        // Both cuts compare the SAME revision actually returned to MAIN;
++        // an earlier Revoke or successful Allow cannot be silently rebased.
++        // Overflow was checked before any Inbox/Doc grant installation.
+         let access = service.build_requests().allow(scope).map_err(public)?;
+         state.agent_android_build_grant = Some(grant);
+-        Ok(access)
++        self.inner.agent_android_build_revoke_epoch.store(next, Ordering::Release);
++        Ok(MainAccess::new(access, next))
+     }
+     pub(crate) fn revoke_agent_android_build(
+         &self,
+         window: &str,
+-    ) -> Result<agent::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+@@ -256,7 +263,9 @@
+             Ok(None) => Ok(empty()),
+             Err(e) => Err(e),
+         };
+-        advanced.and(revoked) // Counter failure must not skip the original STOP.
++        // Counter failure must not skip the original STOP.
++        advanced.and(revoked).map(|a| MainAccess::new(a,
++            self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire)))
+     }
+     fn admit_agent_android_build(
+         &self,
+@@ -285,12 +294,8 @@
+         }
+         match kind {
+             agent::ClaimKind::Prepare => {
+-                if !entry.prepare_live()
+-                    || !entry.scope().matches(
+-                        &service
+-                            .build_point_for_runtime(&grant.native.runtime_id)
+-                            .map_err(public)?,
+-                    )
++                let (point, read) = service.build_point_with_read(&grant.native.runtime_id).map_err(public)?;
++                if !entry.prepare_live() || !entry.scope().matches(&point) || !entry.scope().matches_read(&read)
+                 {
+                     return Err(public(Error::Conflict));
+                 }
+@@ -336,15 +341,25 @@
+                         entry.clone(),
+                         grant.approval.clone(),
+                         registration,
+-                        root,
++                        root.clone(),
+                         gate,
++                        self.agent_android_signing_material(&state, &grant, registration, &root)?,
+                     )?;
+             }
+             agent::ClaimKind::Start => {
++                let material = self.inner.bridge.android_build.agent_android_build_material(entry)?;
++                match (&grant.signing, &material) {
++                    (None, None) => {},
++                    (Some(pins), Some(original)) if pins.matches(original) => {
++                        self.recheck_android_material(&state, original, registration, &root)?;
++                    },
++                    _ => return Err(public(Error::Conflict)),
++                }
+                 let admitted = self.inner.bridge.android_build.start_agent_android_build(
+                     entry,
+                     Some((registration, root)),
+                     gate,
++                    material,
+                 )?;
+                 drop(edit);
+                 drop(state);
+@@ -434,6 +449,11 @@
+         let Some((first, data)) = claimed else {
+             continue;
+         };
++        struct OriginalHistory<'a> { entry: &'a agent::Entry, returned: bool }
++        impl Drop for OriginalHistory<'_> {
++            fn drop(&mut self) { if !self.returned { self.entry.history_lost(); } }
++        }
++        let mut original = OriginalHistory { entry: &entry, returned: false };
+         let result = if first {
+             service.begin_operation(
+                 &entry.scope().runtime_id,
+@@ -451,9 +471,9 @@
+                 data.settlement(),
+             )
+         };
+-        if let Err(e) = entry.history_returned(data.status_revision(), result) {
+-            failed.get_or_insert(e);
+-        }
++        let result = entry.history_returned(data.status_revision(), result);
++        original.returned = true;
++        if let Err(e) = result { failed.get_or_insert(e); }
+     }
+     if let Some(e) = failed {
+         Err(e)
+@@ -480,11 +500,30 @@
+         assert!(!bridge.application_service.status().unwrap().enabled);
+     }
+     #[test]
++    fn actual_main_revoke_before_first_allow_cut_invalidates_the_returned_revision() {
++        let bridge=Arc::new(DesktopBridge::new(std::path::PathBuf::from("/inert/unopened-build-revision")));
++        let doc=DocumentBinding::new(bridge.clone());
++        let access=doc.agent_android_build_access(MAIN).unwrap();assert_eq!(access.permission_revision,"0");
++        assert_eq!(doc.revoke_agent_android_build(MAIN).unwrap().permission_revision,"1");
++        let input=wire::prepare(&serde_json::json!({"projectId":"inert","draftRevision":1,"baselineGeneration":2,
++            "savedConfig":{"bytes":123,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":32,"sha256":"b".repeat(64),"name":"1.2.3","build":7},
++            "artifactValidation":{"mode":"structure-and-version","uploadCertificateSha256":null}})).unwrap();
++        let selection=wire::MacToolchainSelection { instance:"c".repeat(32),owner_uid:501,catalog_generation:1,
++            record_sha256:"d".repeat(64),inventory_sha256:"e".repeat(64),os_provider_sha256:"f".repeat(64) };
++        let args=Allow {input,toolchain_selection:selection,consent_version:agent::CONSENT.into(),expected_permission_revision:access.permission_revision};
++        assert_eq!(doc.allow_agent_android_build(MAIN,args).unwrap_err().code,public(Error::AccessDenied).code);
++        assert!(doc.lock().agent_android_build_grant.is_none());assert!(doc.inner.agent_android_build_service.get().is_none());
++        doc.inner.agent_android_build_revoke_epoch.store(u64::MAX,Ordering::Release);
++        assert!(doc.revoke_agent_android_build(MAIN).is_err());
++        assert_eq!(doc.agent_android_build_access(MAIN).unwrap().permission_revision,u64::MAX.to_string());
++        assert!(!bridge.application_service.status().unwrap().enabled);
++    }
++    #[test]
+     fn consent_body_cannot_supply_paths_commands_original_ids_or_window() {
+         let base = serde_json::json!({"input":{"projectId":"project-1","draftRevision":0,"baselineGeneration":0,
+             "savedConfig":{"bytes":2,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":3,"sha256":"b".repeat(64),"name":"1.0","build":1},
+             "artifactValidation":{"mode":"structure-and-version","uploadCertificateSha256":null}},
+-            "toolchainSelection":{"instance":"c".repeat(32),"ownerUid":501,"catalogGeneration":1,"recordSha256":"d".repeat(64),"inventorySha256":"e".repeat(64),"osProviderSha256":"f".repeat(64)},"consentVersion":agent::CONSENT});
++            "toolchainSelection":{"instance":"c".repeat(32),"ownerUid":501,"catalogGeneration":1,"recordSha256":"d".repeat(64),"inventorySha256":"e".repeat(64),"osProviderSha256":"f".repeat(64)},"consentVersion":agent::CONSENT,"expectedPermissionRevision":"0"});
+         let decode = |v: &Value| {
+             super::super::agent_identity::decode::<Allow>(&serde_json::to_vec(v).unwrap())
+         };
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -167,6 +167,7 @@
+ Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
+ Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
+ Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
++The separately approved signed Android mode reuses the assigned upload key; no password, key generation, Store action or automatic recovery is accepted from CLI.\n\
+ The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
+ Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
+ Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
+@@ -283,7 +284,8 @@
+                 "commands": LOCAL_CHECK_COMMANDS,
+             },
+             "androidBuilds": {
+-                "scope": "saved-android-build-structure-and-version", "defaultEnabled": false, "oneUse": true,
++                "scope": "saved-android-build-structure-and-version", "scopes": ["saved-android-build-structure-and-version", "saved-android-local-upload-key-sign"], "defaultEnabled": false, "oneUse": true,
++                "signedScope":{"scope":"saved-android-local-upload-key-sign","toolkitSigning":true,"separateConsent":true,"existingAssignedKeyOnly":true,"originalReadStopsWork":true,"cliSecrets":false,"keyGeneration":false,"nativeAvailabilityChecked":false},
+                 "maxStartWindowSeconds": crate::agent_android_build::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_android_build::LIMIT,
+                 "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
+                 "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
+@@ -731,7 +733,11 @@
+         assert_eq!(value["localChecks"]["commands"].as_array().unwrap().len(), 3);
+         assert_eq!(value["androidBuilds"]["commands"].as_array().unwrap().len(), 4);
+         assert_eq!(value["androidBuilds"]["prepareStartsBuild"], false);
+-        assert_eq!(value["androidBuilds"]["toolkitSigning"], false);
++        assert_eq!(value["androidBuilds"]["toolkitSigning"], false); // Original default scope is unchanged.
++        let signing=&value["androidBuilds"]["signedScope"];
++        assert_eq!(signing["scope"],"saved-android-local-upload-key-sign");assert_eq!(signing["existingAssignedKeyOnly"],true);
++        assert_eq!(signing["separateConsent"],true);assert_eq!(signing["originalReadStopsWork"],true);
++        assert_eq!(signing["cliSecrets"],false);assert_eq!(signing["keyGeneration"],false);
+         assert_eq!(value["androidBuilds"]["maxStartWindowSeconds"], crate::agent_android_build::START_WINDOW.as_secs());
+         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
+         assert_eq!(value["foregroundHistory"]["commands"], serde_json::json!(["status","projects","observe","operations","operation"]));
+diff --git a/desktop/src-tauri/src/installed_cli_android_build.rs b/desktop/src-tauri/src/installed_cli_android_build.rs
+--- a/desktop/src-tauri/src/installed_cli_android_build.rs
++++ b/desktop/src-tauri/src/installed_cli_android_build.rs
+@@ -35,7 +35,12 @@
+         s.review.saved_version.build,
+         s.review.saved_version.sha256
+     );
+-    text.push_str("Scope: existing Android build + structure/version inspection. Project code may read/write files, use network or sign itself; no toolkit signing, credentials, Store upload or release approval is granted.\n");
++    text.push_str(match s.review.mode {
++        build::Mode::SavedAndroidBuildStructureAndVersion => "Scope: existing Android build + structure/version inspection. Project code may read/write files, use network or sign itself; no toolkit signing credentials are supplied.\n",
++        build::Mode::SavedAndroidLocalUploadKeySign => "Scope: one local signed Android build with the Desktop's explicitly assigned existing upload key. Private key/password inputs never cross CLI. Original READ expiry/revoke still stops work; no key generation or rotation.\n",
++    });
++    text.push_str("No Store upload, release approval or automatic recovery is granted.\n");
++    if let Some(hash) = &s.review.upload_certificate_sha256 { text.push_str(&format!("Reviewed upload certificate SHA-256: {hash}\n")); }
+     if let Some(op) = &s.operation {
+         text.push_str(&format!(
+             "Operation {} / {} · {:?} · {:?}\nStart: {:?}\n",
+@@ -55,6 +60,9 @@
+         }
+         if let Some(result) = &op.result {
+             text.push_str(&format!("Historical artifact observation: {} bytes / {}\n{} findings (completion is not PASS or release readiness).\n", result.artifact.size, result.artifact.sha256, result.summary.total));
++            if let Some(signing) = &result.signing {
++                text.push_str(&format!("Returned signature: {:?}; signer: {:?}; upload certificate SHA-256 {}\n", signing.signature, signing.signer, signing.upload_certificate_sha256));
++            }
+             for (status, count) in &result.summary.counts {
+                 text.push_str(&format!("{status:?}: {count}\n"));
+             }
+@@ -115,4 +123,22 @@
+         .unwrap();
+         assert!(p::encode_request(&frame).unwrap().len() <= p::REQUEST_BYTES);
+     }
++    #[test]
++    fn signed_scope_is_explicit_but_unknown_never_prints_start_or_private_assignment() {
++        let value=serde_json::json!({"origin":{"projectId":"a".repeat(32),"serviceInstance":"b".repeat(32),"requestId":"c".repeat(32)},
++            "expectedObservationRevision":1,"requestState":"preparing","startState":"not-requested","operation":null,"historyAvailable":false,"doNotReplay":true,
++            "review":{"mode":"saved-android-local-upload-key-sign","savedConfig":{"bytes":123,"sha256":"d".repeat(64)},
++                "savedVersion":{"bytes":32,"sha256":"e".repeat(64),"name":"1.2.3","build":7},
++                "tools":{"instance":"f".repeat(32),"catalogGeneration":1,"recordSha256":"a".repeat(64)},
++                "signing":{"mode":"local-upload-key","assignments":[{"kind":"android-keystore","recordId":"d".repeat(32),"recordRevision":1,"contextRevision":2}]},
++                "uploadCertificateSha256":"b".repeat(64)}});
++        let mut status:build::Status=serde_json::from_value(value).unwrap();status.validate().unwrap();
++        let text=human(&status);assert!(text.contains("explicitly assigned existing upload key"));
++        assert!(text.contains("no key generation or rotation"));
++        assert!(text.contains("No Store upload, release approval or automatic recovery"));
++        assert!(!text.contains("mrk android-build-start")&&!text.contains("recordRevision")&&!text.contains("storePassword"));
++        status.request_state=build::RequestState::AdmissionUnknown;status.start_state=build::StartState::Consumed;
++        status.validate().unwrap();assert!(!human(&status).contains("Start once"));
++    }
++
+ }
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -300,6 +300,8 @@
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
+         p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
++        p::ResponseBody::AndroidBuildRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
++        p::ResponseBody::IosArchiveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::LocalHistoryRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::LocalHistoryAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
+         p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+diff --git a/desktop/src-tauri/src/saved_command_agent_android_build.rs b/desktop/src-tauri/src/saved_command_agent_android_build.rs
+--- a/desktop/src-tauri/src/saved_command_agent_android_build.rs
++++ b/desktop/src-tauri/src/saved_command_agent_android_build.rs
+@@ -3,6 +3,8 @@
+ use super::*;
+ use crate::{agent_android_build as agent, service_protocol as service};
+ use serde_json::Value;
++#[path = "saved_command_agent_android_signed.rs"]
++mod signed;
+ 
+ fn failure() -> BridgeError {
+     BridgeError::new("agent_android_build_unavailable", "This original Android build request cannot proceed. Inspect its exact request; do not replay it.")
+@@ -62,11 +64,10 @@
+     };
+     let s = entry.scope();
+     let Some(review) = s.review.android() else { return false };
+-    c.operation == android_wire::Operation::AndroidBuildInspect
+-        && c.signing.is_none()
+-        && c.action.is_none()
+-        && c.artifact_validation.mode == android_wire::ValidationMode::StructureAndVersion
+-        && c.artifact_validation.upload_certificate_sha256.is_none()
++    (if review.mode == agent::Mode::SavedAndroidLocalUploadKeySign { signed::same(c, review) }
++        else { c.operation == android_wire::Operation::AndroidBuildInspect && c.signing.is_none() && c.action.is_none()
++            && c.artifact_validation.mode == android_wire::ValidationMode::StructureAndVersion
++            && c.artifact_validation.upload_certificate_sha256.is_none() })
+         && c.project_id == s.runtime_id
+         && c.draft_revision == s.draft_revision
+         && c.baseline_generation == s.baseline_generation
+@@ -169,9 +170,9 @@
+     let Context::AndroidBuild(c) = &p.context else {
+         return Err(failure());
+     };
+-    if c.operation != android_wire::Operation::AndroidBuildInspect
+-        || c.signed()
+-        || c.artifact_validation.mode != android_wire::ValidationMode::StructureAndVersion
++    if !matches!(c.operation, android_wire::Operation::AndroidBuildInspect | android_wire::Operation::AndroidBuildSign)
++        || c.action.is_some()
++        || (!c.signed() && c.artifact_validation.mode != android_wire::ValidationMode::StructureAndVersion)
+     {
+         return Err(failure());
+     }
+@@ -201,7 +202,8 @@
+             Some(Terminal::AndroidBuild(t)) => (
+                 Some(copy(&t.disposition)?),
+                 if outcome == agent::Outcome::Complete {
+-                    Some(report(t.result.as_ref().ok_or_else(failure)?)?)
++                    let native = t.result.as_ref().ok_or_else(failure)?;
++                    Some(if c.signed() { native.agent_signed_report(c)? } else { report(native)? })
+                 } else {
+                     None
+                 },
+@@ -309,7 +311,7 @@
+     ) -> Result<Arc<Approval>, BridgeError> {
+         self.require_domain(SavedCommandDomain::AndroidBuild)?;
+         let input = android_wire::prepare(&serde_json::to_value(input).map_err(|_| failure())?)?;
+-        if !fixed(&input) || !self.inner.android_original_document_matches(Some(document)) {
++        if !(fixed(&input) || signed::fixed(&input)) || !self.inner.android_original_document_matches(Some(document)) {
+             return Err(failure());
+         }
+         let r = self.inner.lock();
+@@ -326,7 +328,9 @@
+             .filter(|s| s.data() == selected && s.matches_owner(&self.inner))
+             .ok_or_else(failure)?;
+         let review = agent::Review {
+-            mode: agent::Mode::SavedAndroidBuildStructureAndVersion,
++            mode: if input.signing.is_some() { agent::Mode::SavedAndroidLocalUploadKeySign } else { agent::Mode::SavedAndroidBuildStructureAndVersion },
++            signing: input.signing.as_ref().map(signed::selection).transpose()?,
++            upload_certificate_sha256: input.artifact_validation.upload_certificate_sha256.as_deref().and_then(agent::signed::fingerprint),
+             saved_config: agent::Config {
+                 bytes: input.saved_config.bytes,
+                 sha256: input.saved_config.sha256.clone(),
+@@ -355,25 +359,41 @@
+         registration: u32,
+         root: RegisteredRoot,
+         gate: android_wire::Availability,
++        material: Option<Arc<crate::asset_session::AndroidSigningMaterial>>,
+     ) -> Result<android_wire::Status, BridgeError> {
+         self.require_domain(SavedCommandDomain::AndroidBuild)?;
++        if approval.input.signing.is_some() != material.is_some() { return Err(failure()); }
+         self.prepare_bound_requests(
+             Context::AndroidBuild(approval.input.context()),
+             registration,
+             root,
+             Availability::from_android(gate),
+-            None,
++            material.map(PrivateSigningMaterial::Android),
+             None,
+             None,
+             Some(agent_build::Preparation::Android(Preparation { entry, approval })),
+         )?
+         .android()
++    }
++    /// SAME retained Prepared material, never a fresh replacement wrapper.
++    pub(crate) fn agent_android_build_material(&self, entry: &Arc<agent::Entry>)
++        -> Result<Option<Arc<crate::asset_session::AndroidSigningMaterial>>, BridgeError>
++    {
++        let r = self.inner.lock();
++        let p = r.prepared.as_ref().filter(|p| start_matches(p, Some(entry))).ok_or_else(failure)?;
++        match (&p.projection.context, &p.material) {
++            (Context::AndroidBuild(c), Some(PrivateSigningMaterial::Android(m)))
++                if c.operation == android_wire::Operation::AndroidBuildSign => Ok(Some(m.clone())),
++            (Context::AndroidBuild(c), None) if c.operation == android_wire::Operation::AndroidBuildInspect => Ok(None),
++            _ => Err(failure()),
++        }
+     }
+     pub(crate) fn start_agent_android_build(
+         &self,
+         entry: &Arc<agent::Entry>,
+         registered: Option<(u32, RegisteredRoot)>,
+         gate: android_wire::Availability,
++        material: Option<Arc<crate::asset_session::AndroidSigningMaterial>>,
+     ) -> Result<crate::android_build_owner::Admitted, BridgeError> {
+         self.require_domain(SavedCommandDomain::AndroidBuild)?;
+         let input = {
+@@ -383,6 +403,11 @@
+                 .as_ref()
+                 .filter(|p| start_matches(p, Some(entry)))
+                 .ok_or_else(failure)?;
++            if !match (&p.material, &material) {
++                (None, None) => true,
++                (Some(PrivateSigningMaterial::Android(a)), Some(b)) => Arc::ptr_eq(a, b),
++                _ => false,
++            } { return Err(failure()); }
+             Start {
+                 operation_id: p.projection.operation_id.clone(),
+                 owner_generation: p.projection.owner_generation.clone(),
+@@ -394,7 +419,7 @@
+             at,
+             registered,
+             Availability::from_android(gate),
+-            None,
++            material.map(PrivateSigningMaterial::Android),
+             None,
+             None,
+             None,
+@@ -485,11 +510,13 @@
+             input_revision: 0,
+             document: Arc::downgrade(&document),
+             observation_revision: 2,
++            read: None,
+             draft_revision: input.draft_revision,
+             baseline_generation: input.baseline_generation,
+             changes,
+             review: agent::Review {
+                 mode: agent::Mode::SavedAndroidBuildStructureAndVersion,
++                signing: None, upload_certificate_sha256: None,
+                 saved_config: agent::Config {
+                     bytes: input.saved_config.bytes,
+                     sha256: input.saved_config.sha256.clone(),
+@@ -532,6 +559,8 @@
+             .bind(agent::FAMILY,id('a'), id('b'), 1, expires)
+             .unwrap();
+         preparing.returned(true);
++        let (_, published) = link.entry().claim_history().unwrap().unwrap();
++        link.entry().history_returned(published.status_revision(), Ok(())).unwrap();
+         let owner = SavedCommandOwner::android_build(
+             RuntimeConfig::packaged("/unopened-android-runtime".into()),
+             None,
+@@ -586,7 +615,8 @@
+                 gui,
+                 Instant::now(),
+                 Some((1, root.clone())),
+-                android_wire::Availability::RuntimeUnqualified
++                android_wire::Availability::RuntimeUnqualified,
++                None,
+             )
+             .is_err());
+         assert!(owner.inner.lock().prepared.is_some());
+@@ -611,7 +641,8 @@
+             .start_agent_android_build(
+                 starting.entry(),
+                 Some((1, root.clone())),
+-                android_wire::Availability::RuntimeUnqualified
++                android_wire::Availability::RuntimeUnqualified,
++                None,
+             )
+             .is_err());
+         assert!(owner.inner.lock().prepared.is_some());
+@@ -632,6 +663,7 @@
+                 starting.entry(),
+                 Some((1, root)),
+                 android_wire::Availability::RuntimeUnqualified,
++                None,
+             )
+             .unwrap()
+             .release();
+@@ -639,15 +671,20 @@
+             let r = owner.inner.lock();
+             assert!(r.prepared.is_none() && r.active.is_none());
+         }
+-        let result = starting.entry().status().unwrap();
+-        assert_eq!(result.start_state, agent::StartState::Consumed);
++        let waiting = starting.entry().status().unwrap();
++        assert_eq!(waiting.start_state, agent::StartState::Consumed);
++        assert_eq!(waiting.operation.unwrap().state(), service::OperationState::Prepared);
++        assert!(starting.entry().claim_history().unwrap().is_none());
++        starting.returned(true);
++        let (_, returned) = link.entry().claim_history().unwrap().unwrap();
++        link.entry().history_returned(returned.status_revision(), Ok(())).unwrap();
++        let result = link.entry().status().unwrap();
+         let operation = result.operation.unwrap();
+         let result = operation.android();
+         assert_eq!(
+             (result.outcome, result.settlement),
+             (Some(agent::Outcome::Refused), service::Settlement::Settled)
+         );
+-        starting.returned(true);
+         assert!(inbox.claim(agent::FAMILY).unwrap().is_none());
+     }
+     #[test]
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1611,7 +1611,7 @@
+     }
+     async fn android_control_tick(&self) {
+         // Store shares this original control-select slot; no new watchdog or clock.
+-        if let Some(delay)=self.agent_history.as_ref().map(|_|Duration::from_millis(5)).or_else(||agent_store::control_poll(self)).or_else(||tool_acquisition::agent::poll(self)).or_else(||apple_provisioning::agent::control_poll(self)){tokio::time::sleep(delay).await;return;}
++        if let Some(delay)=self.agent_history.as_ref().map(|_|Duration::from_millis(5)).or_else(||agent_store::control_poll(self)).or_else(||tool_acquisition::agent::poll(self)).or_else(||apple_provisioning::agent::control_poll(self)).or_else(||self.agent_build.as_ref().and_then(|link|link.entry().control_poll())){tokio::time::sleep(delay).await;return;}
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         if self.android_control.is_some(){tokio::time::sleep(android_leased::CONTROL_POLL).await;return;}
+         pending::<()>().await
+@@ -3454,7 +3454,12 @@
+         if let Some((reason,at))=tool_acquisition::agent::stop_at(owner,now){self.stop_locked(r,owner,reason,at);}
+         if let Some((reason,at))=owner.agent_store.as_ref().and_then(|link|link.stop_at(now)).or_else(||owner.agent_store_preparation.as_ref().and_then(|link|link.stop_at(now))).or_else(||owner.agent_history.as_ref().and_then(|link|link.stop_at(now))){self.stop_locked(r,owner,reason,at);}
+         if let Some((reason,at))=apple_provisioning::agent::binding(owner).and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
+-        if let Some(at)=owner.agent_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
++        if let Some(link)=&owner.agent_build {
++            if link.entry().read_stop(now).is_err() {
++                link.entry().unconfirmed(); self.unknown_locked_at(r,owner,now);
++            }
++            if let Some(at)=link.entry().stop_at(now) { self.stop_locked(r,owner,Reason::Cancelled,at); }
++        }
+         if let Some(at)=owner.agent_local_check.as_ref().and_then(|link|link.entry().stop_at(now)) {
+             self.stop_locked(r,owner,Reason::Cancelled,at);
+         }
+@@ -3498,6 +3503,7 @@
+         if a.unknown {None} else if a.first_stop.is_some() || owner.android_control_stopped() {
+             Some(owner.finality_end(a.first_stop))
+         } else {Some(owner.clocks.work.min(owner.finality_end(None))
++            .min(owner.agent_build.as_ref().and_then(|link|link.entry().read_end()).unwrap_or(owner.clocks.work))
+             .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(owner.agent_store_preparation.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(owner.agent_history.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(tool_acquisition::agent::read_end(owner).unwrap_or(owner.clocks.work)).min(apple_provisioning::agent::binding(owner).map_or(owner.clocks.work,|link|link.read_end())))}
+     }
+     fn accept(&self, owner: &Session, frame: Frame) { self.accept_at(owner, frame, Instant::now()); }
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -103,7 +103,8 @@
+                 start_state,
+             } => {
+                 if (*request_state == build::RequestState::OriginalAvailable
+-                    || *start_state != build::StartState::NotRequested)
++                    || (*start_state != build::StartState::NotRequested
++                        && *request_state != build::RequestState::AdmissionUnknown))
+                     && !has_operation
+                 {
+                     return Err(Error::InvalidRequest);
+diff --git a/desktop/tests/agent-android-build.test.mjs b/desktop/tests/agent-android-build.test.mjs
+--- a/desktop/tests/agent-android-build.test.mjs
++++ b/desktop/tests/agent-android-build.test.mjs
+@@ -4,6 +4,8 @@
+ import test from 'node:test';
+ import { AGENT_ANDROID_BUILD_CONSENT, AgentAndroidBuildPermission, copyAndroidBuildApproval,
+   createAgentAndroidBuildApi, encodeAndroidBuildAccessRequest, parseAndroidBuildAccess } from '../src/agentAndroidBuild.ts';
++import { buildPermissionRevision } from '../src/agentBuildPermissionProtocol.ts';
++import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, canonicalAndroidUploadFingerprint } from '../src/agentAndroidSigned.ts';
+ import { canObserveAgentAndroidBuild } from '../src/agentAndroidBuildOrigin.ts';
+ import { AndroidBuildController } from '../src/androidBuild.ts';
+ import { ReleaseVersionController } from '../src/releaseVersion.ts';
+@@ -19,8 +21,8 @@
+   recordSha256: '2'.repeat(64), inventorySha256: '3'.repeat(64), osProviderSha256: '4'.repeat(64) };
+ const approval = () => ({ input: { projectId: 'p1', draftRevision: 0, baselineGeneration: 1, savedConfig: clone(CONFIG),
+   savedVersion: clone(VERSION), artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } }, toolchainSelection: clone(TOOLS) });
+-const enabled = () => ({ enabled: true, remainingMs: 900_000, projectId: ORIGIN.projectId, observationRevision: 7, consumed: false });
+-const disabled = () => ({ enabled: false, remainingMs: 0, projectId: null, observationRevision: null, consumed: false });
++const enabled = (permissionRevision = '1') => ({ permissionRevision, enabled: true, remainingMs: 900_000, projectId: ORIGIN.projectId, observationRevision: 7, consumed: false });
++const disabled = (permissionRevision = '0') => ({ permissionRevision, enabled: false, remainingMs: 0, projectId: null, observationRevision: null, consumed: false });
+ const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+ const flush = async () => { for (let n = 0; n < 18; n++) await Promise.resolve(); };
+ function port() {
+@@ -30,7 +32,13 @@
+   }]));
+   return { api, calls };
+ }
+-function permission(p = port()) { const controller = new AgentAndroidBuildPermission(); controller.bind(p.api, approval()); return { ...p, controller }; }
++async function refresh(controller, p) {
++  const before = p.calls.length, reading = controller.status();
++  assert.equal(p.calls[before].kind, 'status'); p.calls[before].resolve(disabled()); await reading;
++  p.calls.splice(before, 1); // Fixture setup retained a real Status Promise; scenario starts afterwards.
++}
++async function permission(p = port()) { const controller = new AgentAndroidBuildPermission(); controller.bind(p.api, approval());
++  await refresh(controller, p); return { ...p, controller }; }
+ const status = (revision = 0, operation = null) => ({ schemaVersion: 1, statusRevision: revision, availability: 'available', operation });
+ const operation = (patch = {}, input = approval().input) => ({ operationId: id('d'), ownerGeneration: id('e'),
+   context: { ...clone(input), platform: 'android', operation: 'android-build-inspect' },
+@@ -99,9 +107,9 @@
+     assert.ok(raw instanceof Uint8Array && raw.length <= 4096);
+     calls.push({ command, value: JSON.parse(new TextDecoder().decode(raw)) }); return disabled();
+   });
+-  await api.allow(approval()); await api.status(); await api.revoke();
++  await api.allow(approval(), '0'); await api.status(); await api.revoke();
+   assert.deepEqual(calls.map((c) => c.command), ['allow_agent_android_build', 'agent_android_build_access', 'revoke_agent_android_build']);
+-  assert.deepEqual(calls[0].value, { ...approval(), consentVersion: AGENT_ANDROID_BUILD_CONSENT });
++  assert.deepEqual(calls[0].value, { ...approval(), consentVersion: AGENT_ANDROID_BUILD_CONSENT, expectedPermissionRevision: '0' });
+   for (const extra of ['root', 'command', 'window', 'operationId', 'executable', 'environment'])
+     assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build', { ...calls[0].value, [extra]: 'not-authority' }), null);
+   assert.equal(encodeAndroidBuildAccessRequest('shell', {}), null);
+@@ -126,7 +134,7 @@
+   let reads = 0, invocations = 0;
+   const a = approval(); Object.defineProperty(a.input, 'savedConfig', { enumerable: true, get() { reads++; return CONFIG; } });
+   const api = createAgentAndroidBuildApi('native', async () => { invocations++; return disabled(); });
+-  await assert.rejects(api.allow(a)); assert.equal(reads, 0); assert.equal(invocations, 0);
++  await assert.rejects(api.allow(a, '0')); assert.equal(reads, 0); assert.equal(invocations, 0);
+   const b = approval(); b.toJSON = () => { reads++; return approval(); }; assert.equal(copyAndroidBuildApproval(b), null);
+   assert.equal(parseAndroidBuildAccess({ ...enabled(), get consumed() { reads++; return false; } }), null);
+   assert.equal(reads, 0);
+@@ -142,7 +150,7 @@
+ 
+ test('Allow samples current saved version, catalog and busy state before dispatch', async () => {
+   const p = port(); let current = { api: p.api, project: approval(), blocked: false };
+-  const c = new AgentAndroidBuildPermission(() => current); c.syncContext(); c.acknowledge(true);
++  const c = new AgentAndroidBuildPermission(() => current); c.syncContext(); await refresh(c, p); c.acknowledge(true);
+   current = { ...current, project: approval() }; current.project.input.savedVersion.build++;
+   await c.allow(); assert.equal(p.calls.length, 0); assert.equal(c.getState().acknowledged, false);
+   c.acknowledge(true); current.project.toolchainSelection.catalogGeneration++;
+@@ -153,7 +161,7 @@
+ });
+ 
+ test('reentrant Revoke before native Allow invocation cannot recreate permission', async () => {
+-  const p = permission(); let revoked = false, revoking;
++  const p = await permission(); let revoked = false, revoking;
+   const unsubscribe = p.controller.subscribe((state) => {
+     if (state.pending === 'allow' && !revoked) { revoked = true; revoking = p.controller.revoke(); }
+   });
+@@ -164,17 +172,19 @@
+ });
+ 
+ test('status-only reconnect retains its original API until actual Revoke even after rebinding', async () => {
+-  const p = permission(), next = port(); const reading = p.controller.status();
++  const p = await permission(), next = port(); const reading = p.controller.status();
+   p.controller.bind(next.api, approval()); p.calls[0].resolve(enabled()); await reading;
+   p.controller.acknowledge(true); await p.controller.allow(); assert.equal(next.calls.length, 0);
+   const revoking = p.controller.revoke(); assert.deepEqual(p.calls.map((c) => c.kind), ['status', 'revoke']);
+   p.calls[1].resolve(disabled()); await revoking;
+-  p.controller.acknowledge(true); const allowing = p.controller.allow(); assert.equal(next.calls[0].kind, 'allow');
++  p.controller.acknowledge(true); await p.controller.allow(); assert.equal(next.calls.length, 0);
++  await refresh(p.controller, next); p.controller.acknowledge(true);
++  const allowing = p.controller.allow(); assert.equal(next.calls[0].kind, 'allow');
+   next.calls[0].resolve(enabled()); await allowing;
+ });
+ 
+ test('lost Allow ACK and changed inputs remain uncertain; status DATA cannot clear that uncertainty', async () => {
+-  const p = permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
++  const p = await permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
+   p.calls[0].reject(new Error('sensitive-not-rendered')); await allowing;
+   const reading = p.controller.status(); p.calls[1].resolve(disabled()); await reading;
+   p.controller.acknowledge(true); await p.controller.allow(); assert.equal(p.calls.length, 2); assert.equal(p.controller.getState().uncertain, true);
+@@ -186,7 +196,7 @@
+ });
+ 
+ test('saturated UI epoch still revokes original permission and suppresses its late Allow ACK', async () => {
+-  const p = permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
++  const p = await permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
+   p.controller.epoch = Number.MAX_SAFE_INTEGER; const revoking = p.controller.revoke();
+   p.calls[1].resolve(disabled()); await revoking; p.calls[0].resolve(enabled()); await allowing;
+   assert.equal(p.controller.getState().access.enabled, false); p.controller.acknowledge(true); await p.controller.allow(); assert.equal(p.calls.length, 2);
+@@ -257,3 +267,100 @@
+   assert.equal(h.controller.getSnapshot().status.operation.operationId, id('d')); assert.equal(h.controller.getSnapshot().integrityFailed, false);
+   await h.controller.start(id('d'), id('e')); assert.equal(h.calls.length, 2);
+ });
++
++
++function signedApproval() {
++  const value = approval(); value.input.artifactValidation = { mode: 'upload-signature', uploadCertificateSha256: Array(32).fill('AF').join(':') };
++  value.input.signing = { mode: 'local-upload-key', assignments: [
++    { kind: 'android-keystore', recordId: id('8'), recordRevision: 1, contextRevision: 2 }] };
++  return value;
++}
++test('signed scope keeps raw policy, exact assigned existing key and a separate one-use consent', async () => {
++  const a = signedApproval(), safe = copyAndroidBuildApproval(a); assert.ok(safe);
++  assert.equal(safe.input.artifactValidation.uploadCertificateSha256, a.input.artifactValidation.uploadCertificateSha256);
++  assert.equal(canonicalAndroidUploadFingerprint(safe.input.artifactValidation.uploadCertificateSha256), 'af'.repeat(32));
++  a.input.signing.assignments[0].recordRevision++; assert.equal(safe.input.signing.assignments[0].recordRevision, 1);
++  assert.ok(Object.isFrozen(safe.input.signing.assignments[0]));
++  const encoded = encodeAndroidBuildAccessRequest('allow_agent_android_build', { ...safe,
++    consentVersion: AGENT_ANDROID_BUILD_SIGNED_CONSENT, expectedPermissionRevision: '9007199254740993' });
++  assert.ok(encoded);
++  assert.equal(JSON.parse(new TextDecoder().decode(encoded)).expectedPermissionRevision, '9007199254740993');
++  for (const [value, consent] of [[safe, AGENT_ANDROID_BUILD_CONSENT], [approval(), AGENT_ANDROID_BUILD_SIGNED_CONSENT]])
++    assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build', { ...value, consentVersion: consent, expectedPermissionRevision: '0' }), null);
++  for (const raw of ['af'.repeat(32) + '\n', ' ' + 'af'.repeat(32), 'af:'.repeat(32), 'af'.repeat(31) + 'ag']) {
++    const v=signedApproval();v.input.artifactValidation.uploadCertificateSha256=raw; assert.equal(copyAndroidBuildApproval(v),null);
++  }
++  const v=signedApproval();v.input.operation='android-candidate-inputs';v.input.action='create';assert.equal(copyAndroidBuildApproval(v),null);
++});
++test('Build MAIN revision is exact full-u64 DATA and old five-field/other API access cannot authorize Allow', async () => {
++  for (const value of ['0','1','9007199254740993','18446744073709551615']) assert.ok(buildPermissionRevision(value));
++  for (const value of ['0\n','1\r','1\u2028','','01','+1','-0','1.0','1e2','18446744073709551616',0]) assert.equal(buildPermissionRevision(value),false);
++  const old = disabled();delete old.permissionRevision;assert.equal(parseAndroidBuildAccess(old),null);
++  const p=port(), controller=new AgentAndroidBuildPermission();controller.bind(p.api,approval());controller.acknowledge(true);
++  await controller.allow();assert.equal(p.calls.length,0);
++  const reading=controller.status();p.calls[0].resolve(disabled('18446744073709551615'));await reading;
++  controller.acknowledge(true);await controller.allow();assert.equal(p.calls.length,1);
++  const revoke=controller.revoke();assert.equal(p.calls[1].kind,'revoke');p.calls[1].reject(new Error('exhausted'));await revoke;
++  assert.equal(controller.getState().uncertain,true);
++});
++test('Revoke before the delayed native first Allow cut cannot recreate either permission or UI authority', async () => {
++  let revision=0n, active=false, received, finish;
++  const original = deferred();
++  const api={status:async()=>disabled(String(revision)), allow:(_input, expected)=>{
++      received=expected; finish=()=>{if(expected!==String(revision))original.reject(new Error('stale revision'));else{active=true;revision++;original.resolve(enabled(String(revision)));}};
++      return original.promise;}, revoke:async()=>{revision++;active=false;return disabled(String(revision));}};
++  const c=new AgentAndroidBuildPermission();c.bind(api,approval());await c.status();c.acknowledge(true);
++  const allowing=c.allow();assert.equal(received,'0');await c.revoke();assert.equal(c.getState().pending,'allow');
++  c.acknowledge(true);assert.equal(c.canAllow(),false);finish();await allowing;
++  assert.equal(active,false);assert.equal(c.getState().access.enabled,false);assert.equal(c.getState().access.permissionRevision,'1');
++  assert.equal(c.getState().uncertain,false);
++});
++test('signed native original can be observed and stopped but its status never creates GUI Start', async (t) => {
++  const signed=operation({},signedApproval().input);signed.context.operation='android-build-sign';
++  assert.ok(parseAndroidBuildStatus(status(3,signed)));
++  const h=await nativeView(t,status(2,unmarked(terminal({operationId:id('1'),ownerGeneration:id('2')}))));
++  h.emit(status(3,signed));assert.equal(h.controller.getSnapshot().integrityFailed,false);
++  assert.equal(h.controller.getSnapshot().consent,null);await h.controller.start(id('d'),id('e'));assert.equal(h.calls.length,0);
++  assert.equal(h.controller.cancel(),true);await flush();assert.equal(h.calls[0].kind,'cancel');
++});
++
++
++test('a returned Refresh revision consumes old acknowledgement including acknowledgement during its pending call', async () => {
++  for (const acknowledgeDuringRefresh of [false, true]) {
++    const p = port(), originalAllow = p.api.allow, revisions = [];
++    p.api.allow = (input, expectedRevision) => { revisions.push(expectedRevision); return originalAllow(input); };
++    const { controller } = await permission(p); // Actual first Refresh returned revision zero.
++    controller.acknowledge(true);
++    const reading = controller.status();
++    if (acknowledgeDuringRefresh) controller.acknowledge(true);
++    // Another original Desktop Revoke advanced native permission revision.
++    p.calls[0].resolve(disabled('1')); await reading;
++    assert.equal(controller.getState().acknowledged, false);
++    assert.equal(controller.canAllow(), false);
++    await controller.allow(); assert.equal(p.calls.length, 1);
++    assert.deepEqual(revisions, []);
++    controller.acknowledge(true); const allowing = controller.allow();
++    assert.equal(p.calls[1].kind, 'allow'); assert.deepEqual(revisions, ['1']);
++    p.calls[1].resolve(enabled('2')); await allowing;
++    assert.equal(controller.getState().uncertain, false);
++    assert.equal(controller.getState().access.permissionRevision, '2');
++  }
++  for (const originalKind of ['allow', 'revoke']) {
++    const p = port(), originalAllow = p.api.allow, revisions = [];
++    p.api.allow = (input, expectedRevision) => { revisions.push(expectedRevision); return originalAllow(input); };
++    const { controller } = await permission(p);
++    controller.acknowledge(true);
++    const original = controller[originalKind]();
++    assert.equal(p.calls[0].kind, originalKind);
++    controller.acknowledge(true); // Synchronous/controller reentry while the original Promise remains held.
++    p.calls[0].resolve(originalKind === 'allow' ? enabled('1') : disabled('1')); await original;
++    assert.equal(controller.getState().acknowledged, false, originalKind);
++    assert.equal(controller.canAllow(), false, originalKind);
++    await controller.allow(); assert.equal(p.calls.length, 1, originalKind);
++    controller.acknowledge(true); const next = controller.allow();
++    assert.equal(p.calls[1].kind, 'allow'); assert.equal(revisions.at(-1), '1');
++    p.calls[1].resolve(enabled('2')); await next;
++    assert.equal(controller.getState().uncertain, false);
++    assert.equal(controller.getState().access.permissionRevision, '2');
++  }
++});
+diff --git a/desktop/tests/android-build-controller.test.mjs b/desktop/tests/android-build-controller.test.mjs
+--- a/desktop/tests/android-build-controller.test.mjs
++++ b/desktop/tests/android-build-controller.test.mjs
+@@ -1378,3 +1378,17 @@
+   h.controller.cancelToolRegistration();const cancel=h.registrationCalls.at(-1);
+   if(cancel?.kind==='cancel'){h.replyRegistration(cancel,discardedSourceReview({...native,statusRevision:2}));await flush();}
+ });
++
++
++test('agent signed approval reuses actual saved policy and assigned key without GUI Prepare or automatic Start', async (t) => {
++  const h=harness(t,{initialCatalog:readyCatalog({selected:TOOL_A}),initialAssets:signingAssets()});
++  await savedSigningPolicy(h); h.controller.setBuildMode('signed');
++  const approved=h.controller.agentBuildApproval();assert.ok(approved,h.controller.prepareReason());
++  assert.equal(approved.input.artifactValidation.mode,'upload-signature');
++  assert.deepEqual(clone(approved.input.signing.assignments),[{kind:'android-keystore',recordId:OTHER,recordRevision:1,contextRevision:2}]);
++  assert.equal(h.state.consent,null);
++  const changed=signingAssets();changed.status.records[0].revision++;h.setAssets(changed);
++  assert.equal(h.controller.agentBuildApproval(),null);
++  h.setAssets(signingAssets());h.controller.setRetainCandidateInputs(true);
++  assert.equal(h.controller.agentBuildApproval(),null);
++});

@@ -1,0 +1,248 @@
+name: "Bind both saved-check journeys to original XCTest and the same ordinary package"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Bind both saved-check journeys to original XCTest and the same ordinary package"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # Each summary has its own finite one-GiB file limit and original owner phase.
+        ulimit -f 1048576
+        set +e
+        /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+          "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+          "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+          "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+          "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary saved-checks-test.xcresult \
+          > "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.stderr"
+        summary_status=$?
+        set -e
+        printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.status"
+        [[ "$summary_status" == 0 ]] || exit "$summary_status"
+        /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+          "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+          "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+          "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+          "MRK_EXPECTED_SHA=$MRK_EXPECTED_SHA" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+          "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_CHECKS_RESULT'
+        import hashlib, json, os, re, stat
+        from pathlib import Path
+        root = Path(os.environ["MRK_MACOS_WORK"])
+        def read(path, limit):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                        or before.st_mode & 0o022 or not 0 <= before.st_size <= limit):
+                    raise ValueError("saved-checks result input shape refused")
+                with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                                      s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                if (len(data) != before.st_size or identity(before) != identity(os.fstat(fd))
+                        or identity(before) != identity(os.stat(path, follow_symlinks=False))):
+                    raise ValueError("saved-checks result input changed")
+                return data
+            finally: os.close(fd)
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value: raise ValueError("duplicate result field")
+                value[key] = item
+            return value
+        def document(path, limit=65536):
+            return json.loads(read(root / path, limit), object_pairs_hook=unique)
+        source = os.environ["GITHUB_SHA"]
+        if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
+            raise ValueError("saved-checks result source binding differs")
+        build_target = os.environ["MRK_MACOS_TARGET"]
+        platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
+        if build_target not in platforms: raise ValueError("normal-result-target")
+        def normal_ui_descriptor_path(workflow_ref):
+            # Two exact trusted contexts, never an inherited arbitrary path/ref.
+            if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                return "p0-carrier-input/PREVIEW.json"
+            if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                return "preview/PREVIEW.json"
+            raise ValueError("normal-ui-descriptor-workflow-ref")
+        preview = document(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")))
+        if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != source
+                or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                or preview["platform"] != platforms[build_target] or preview["instrumented"] is not False
+                or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+            raise ValueError("saved-checks UI result is not bound to this original normal package")
+        prior_expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+        prior_hashes = {}
+        for name, scope, test, passed in (
+                ("result.json", "normal-app-launch-cancel-navigation-quit-ui-only", "testLaunchCancelAndQuit", "launchRenderCancelNavigationQuitUI"),
+                ("project-result.json", "normal-app-project-config-workflows-text-version-images-ui", "testSyntheticProjectLocalEditsAndImages", "localProjectEditsAndImagesUI"),
+                ("persistence-result.json", "normal-app-synthetic-persistent-credentials-ui", "testSyntheticPersistentCredentials", "syntheticPersistenceCRUDUI"),
+                ("diagnostics-result.json", "ordinary-ui-observed-original-diagnostics-report-and-settled-projection", "testSyntheticProjectBuildToolDiagnostics", "diagnosticsReportAndSettledProjectionUI")):
+            prior_expected_counts = (dict(prior_expected, totalTestCount=2, passedTests=2)
+                                     if name == "project-result.json" else prior_expected)
+            raw = read(root / "normal-ui" / name, 65536)
+            prior = json.loads(raw, object_pairs_hook=unique)
+            if type(prior) is not dict or prior.get("target") != build_target:
+                raise ValueError("normal-prior-target")
+            if (prior["scope"] != scope or prior["applicationSourceCommit"] != source or prior["harnessSourceCommit"] != source
+                    or prior["workflow"] != ".github/workflows/desktop-macos-installed.yml" or prior["platform"] != preview["platform"]
+                    or prior["sourceTree"] != preview["sourceTree"] or prior["runId"] != preview["runId"] or prior["runAttempt"] != preview["runAttempt"]
+                    or prior["packageSha256"] != preview["packageSha256"] or prior["packageSize"] != preview["packageSize"]
+                    or prior["signedAppBinarySha256"] != preview["signedAppBinarySha256"]
+                    or prior["normalBinaryBeforeSigningSha256"] != preview["normalBinaryBeforeSigningSha256"]
+                    or prior["runtimeManifestSha256"] != preview["runtimeManifestSha256"] or prior["installerInventorySha256"] != preview["installerInventorySha256"]
+                    or prior[passed] != "passed" or prior["applicationStateAfterNormalQuit"] != "notRunning"
+                    or prior["cleanExitStatus"] is not None or prior["allWorkerFinality"] != "not-established-by-XCTest-UI-state"
+                    or prior["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/" + test
+                    or type(prior["testCounts"]) is not dict or set(prior["testCounts"]) != set(prior_expected_counts)
+                    or any(type(prior["testCounts"][key]) is not int or prior["testCounts"][key] != value for key, value in prior_expected_counts.items())):
+                raise ValueError("saved-check journeys require the same original accepted basic/project/persistence/diagnostics and normal-Quit gates")
+            prior_hashes[name] = hashlib.sha256(raw).hexdigest()
+        for name in ("build", "saved-checks-test-file-limit", "saved-checks-test-file-budget", "saved-checks-test", "saved-checks-summary"):
+            if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                raise ValueError("original saved-checks native command or file guard did not pass")
+        budget_bytes = read(root / "normal-ui/saved-checks-test-file-budget.json", 4096)
+        budget = json.loads(budget_bytes, object_pairs_hook=unique)
+        expected_budget = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
+                           "sourceCommit": source, "workflowSourceCommit": source,
+                           "runId": preview["runId"], "runAttempt": preview["runAttempt"], "phase": "saved-checks-test",
+                           "expectedBytes": 1073741824, "softBytes": 1073741824, "hardBytes": 1073741824,
+                           "admitted": True, "nativeSuccessInferred": False, "serviceLimitsObserved": False, "productQualified": False}
+        if (type(budget) is not dict or set(budget) != set(expected_budget)
+                or any(type(budget[key]) is not type(value) or budget[key] != value for key, value in expected_budget.items())):
+            raise ValueError("the actual original one-GiB saved-checks file-budget binding differs")
+        expected = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+        summary_bytes = read(root / "normal-ui/saved-checks-summary.raw.json", 262144)
+        summary = json.loads(summary_bytes, object_pairs_hook=unique)
+        if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+            raise ValueError("exact two-pass, zero-failure/skip/expected-failure saved-checks XCTest result required")
+        # Exactly two source-fixed -only-testing selectors and this original two-test result
+        # bind both independent in-test report/readback/normal-Quit assertions. Logs never grant success.
+        facts_bytes = read(root / "normal-ui/saved-checks-safe-facts.json", 65536)
+        facts = json.loads(facts_bytes, object_pairs_hook=unique)
+        if (facts["scope"] != "normal-saved-offline-and-empty-recovery-ui-diagnostics-only" or facts["sourceCommit"] != source
+                or facts["workflowSourceCommit"] != source or facts["runId"] != preview["runId"] or facts["runAttempt"] != preview["runAttempt"]
+                or facts["nativeSuccessInferred"] is not False or facts["rawTextExported"] is not False):
+            raise ValueError("bounded saved-checks facts are not from this original invocation")
+        # A persisted receipt is not finality: the original helper zero status above
+        # also gates its consuming receipt close and final nonrenewable clock check.
+        def checked_admission(name, phase, bundle, seconds, roles):
+            raw = read(root / ("normal-ui/" + name), 32768)
+            value = json.loads(raw, object_pairs_hook=unique)
+            scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+            limit = 32 * 1024**3 if phase == "build" else 1024**3
+            if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                    or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                    or value.get("target") != build_target
+                    or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                    or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                    or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                    or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                    or any(type(n) is not int for n in value["fileLimitBytes"])
+                    or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                raise ValueError("normal original command admission refused")
+            code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+            if type(code) is not int or code != 0:
+                raise ValueError("normal original command did not return zero")
+            clock = value.get("phaseClock")
+            if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                    or clock["postCloseDeadlineRequired"] is not True
+                    or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                           for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                raise ValueError("normal fixed phase clock refused")
+            start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+            if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                raise ValueError("normal phase deadline binding differs")
+            commands = value.get("commands")
+            if type(commands) is not list or len(commands) != len(roles):
+                raise ValueError("normal original command roster refused")
+            for command, (role, cap, output_limit) in zip(commands, roles):
+                if (type(command) is not dict or command.get("role") != role
+                        or type(command.get("returncode")) is not int or command["returncode"] != 0
+                        or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                        or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                        or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                        or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                        or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                        or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                               for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                    raise ValueError("normal original command fact refused")
+            if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                raise ValueError("normal original command role differs")
+            return value, raw
+        roster = ("normal-ui-source-roster", 15, 1048576)
+        build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+            [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+             ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+             ("normal-ui-build", 240, 1048576), roster])
+        runner, runner_bytes = checked_admission("saved-checks-test.runner-admission.json", "test", "saved-checks-test.xcresult", 885,
+            [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+             ("one-admitted-ui-test", 720, 1048576), roster])
+        summary_admission, summary_admission_bytes = checked_admission("saved-checks-summary.command-admission.json", "summary", "saved-checks-test.xcresult", 90,
+            [roster, ("normal-ui-summary", 30, 262144), roster])
+        if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+            raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+        toolchain = {}
+        for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                            ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+            raw = read(root / ("normal-ui/" + name), 4096)
+            query = build["commands"][index]
+            if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                raise ValueError("native tool observation differs from its original owned query")
+            toolchain[key] = raw.decode("ascii", "strict").strip()
+        if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+        result = {"schemaVersion": 1, "scope": "ordinary-ui-observed-saved-offline-and-empty-build-input-inspection",
+                  "applicationSourceCommit": source, "harnessSourceCommit": source, "sourceTree": preview["sourceTree"],
+                  "workflow": ".github/workflows/desktop-macos-installed.yml", "runId": preview["runId"], "runAttempt": preview["runAttempt"],
+                  "target": build_target, "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                  "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                  "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                  "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                  "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                  "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                  "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
+                  "originalCommandStatuses": {"sharedBuild": 0, "savedChecksTestFileLimit": 0, "savedChecksTestFileBudget": 0,
+                                              "savedChecksTest": 0, "savedChecksSummary": 0},
+                  "testIdentifiers": ["MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks",
+                                      "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection"],
+                  "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(), "priorResultSha256": prior_hashes,
+                  "fileBudgetSha256": hashlib.sha256(budget_bytes).hexdigest(), "safeFactsSha256": hashlib.sha256(facts_bytes).hexdigest(),
+                  "journeys": {
+                      "savedOfflineChecks": {
+                          "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks",
+                          "scope": "ordinary-ui-observed-saved-offline-report-and-settled-projection",
+                          "savedOfflineReportAndSettledProjectionUI": "passed", "originalStartProvenance": "acknowledged-current-saved-config",
+                          "coreOutcomeObserved": "complete", "negativeFindingsAssertion": {"missingAtLeast": 2, "skippedAtLeast": 1,
+                                                                                            "moduleWrapperAndEarlyExitObserved": True},
+                          "nativeProjectionObserved": {"phase": "settled", "finality": "settled"},
+                          "fixtureReadback": "unchanged-before-and-after-normal-quit", "applicationStateAfterNormalQuit": "notRunning"},
+                      "emptyBuildInputInspection": {
+                          "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection",
+                          "scope": "ordinary-ui-observed-empty-build-input-inspection-and-settled-projection",
+                          "emptyBuildInputInspectionAndSettledProjectionUI": "passed", "coreOutcomeObserved": "complete", "inspectionStatusObserved": "idle",
+                          "nativeProjectionObserved": {"phase": "settled", "finality": "settled"},
+                          "mutationRecoveryExecuted": False, "projectCleanlinessEstablished": False,
+                          "fixtureReadback": "unchanged-before-and-after-normal-quit", "applicationStateAfterNormalQuit": "notRunning"}},
+                  "applicationStateAfterBothNormalQuits": "notRunning", "cleanExitStatus": None,
+                  "allWorkerFinality": "not-established-by-XCTest-UI-state", "independentOwnerResourceProof": False,
+                  "fullDoctorExecuted": False, "offlinePreflightExecuted": True, "projectRecoveryInspectionExecuted": True, "mutationRecoveryExecuted": False,
+                  "zeroCommandEvidence": False, "networkIsolationEstablished": False, "releaseReadinessEstablished": False,
+                  "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+        data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        if len(data) > 65536: raise ValueError("closed saved-checks result exceeds its finite bound")
+        fd = os.open(root / "normal-ui/saved-checks-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as output:
+                output.write(data); output.flush(); os.fsync(fd)
+        finally: os.close(fd)
+        print("Two ordinary saved-check journeys observed complete negative offline findings and genuine Idle; mutation recovery, readiness and independent all-worker finality remain unproved.")
+        PY_SAVED_CHECKS_RESULT

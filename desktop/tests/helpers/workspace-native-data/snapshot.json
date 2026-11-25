@@ -1,0 +1,248 @@
+{
+  "root": "/inert/approval-fixture",
+  "observedAt": "2026-11-16T14:46:03.976696+00:00",
+  "observationScope": "single-request-non-atomic",
+  "config": {
+    "path": "release/mobile-release.json",
+    "state": "format-valid",
+    "data": {
+      "schemaVersion": 1,
+      "version": {
+        "source": "public/version.properties",
+        "nameKey": "VERSION_NAME",
+        "buildKey": "BUILD_NUMBER"
+      },
+      "source": {
+        "candidateBranch": "main",
+        "productionBranch": "production"
+      },
+      "android": {
+        "enabled": true,
+        "applicationId": "org.mrk.fixture",
+        "identityStatus": "unverified",
+        "module": ":app",
+        "variant": "debug"
+      },
+      "ios": {
+        "enabled": false
+      },
+      "metadata": {
+        "root": "public/store",
+        "androidLocales": [
+          "en-US",
+          "fr-FR"
+        ],
+        "iosLocales": [
+          "en-US"
+        ]
+      },
+      "services": {
+        "androidFirebase": "disabled",
+        "iosFirebase": "disabled"
+      },
+      "projectChecks": {
+        "preflight": [],
+        "androidArtifact": [],
+        "iosArtifact": []
+      }
+    },
+    "content": {
+      "bytes": 767,
+      "sha256": "1587df62157ac6aa34ebb63c2b3716370de3918ac4847bf4bdc257625036e800"
+    },
+    "issues": []
+  },
+  "discovery": {
+    "state": "unverified",
+    "partial": false,
+    "hints": {
+      "versionSource": "public/version.properties",
+      "versionNameKey": "VERSION_NAME",
+      "versionBuildKey": "BUILD_NUMBER",
+      "android": {
+        "module": ":app",
+        "buildFile": "app/build.gradle",
+        "applicationId": "org.mrk.fixture",
+        "namespace": "org.mrk.fixture"
+      }
+    },
+    "scan": {
+      "entries": 19,
+      "sourceFiles": 4,
+      "sourceBytes": 1411,
+      "excludedEntries": 1
+    },
+    "limits": {
+      "maxDepth": 12,
+      "maxEntries": 10000,
+      "maxSourceFiles": 128,
+      "maxSourceFileBytes": 524288,
+      "maxTotalSourceBytes": 8388608,
+      "maxRootBytes": 4096,
+      "maxRelativePathBytes": 512,
+      "maxIssues": 64,
+      "maxHintNodes": 4096,
+      "maxHintStringCharacters": 512,
+      "maxHintItems": 128,
+      "scanSeconds": 5.0,
+      "maxConfigOutputNodes": 8000
+    }
+  },
+  "assurance": {
+    "basis": "static-text",
+    "projectCodeExecuted": false,
+    "toolsProbed": false,
+    "credentialsRead": false,
+    "gitObserved": false,
+    "storeContacted": false,
+    "writesPerformed": false,
+    "releaseReadiness": "unknown"
+  },
+  "issues": [],
+  "setupAnalysis": {
+    "schemaVersion": 1,
+    "scope": "local-setup-guidance",
+    "configurationState": "format-valid",
+    "discoveryPartial": false,
+    "platforms": [
+      "android"
+    ],
+    "requirements": [
+      {
+        "id": "project-layout",
+        "stage": "local",
+        "state": "detected",
+        "field": null,
+        "reference": null,
+        "summary": "Android or Xcode layout hints can guide local setup; confirm the intended app target."
+      },
+      {
+        "id": "release-settings",
+        "stage": "local",
+        "state": "configured",
+        "field": null,
+        "reference": "release/mobile-release.json",
+        "summary": "Saved settings are format-valid. An unverified identity may be used to prepare a local unsigned build; this does not approve Store ownership."
+      },
+      {
+        "id": "version-source",
+        "stage": "local",
+        "state": "configured",
+        "field": "version.source",
+        "reference": "public/version.properties",
+        "summary": "Choose one version source and read its name/build values before building. This analysis only sees the source setting or hint, not those values."
+      },
+      {
+        "id": "android-identity",
+        "stage": "local",
+        "state": "configured",
+        "field": "android.applicationId",
+        "reference": "app/build.gradle",
+        "summary": "Use the actual Application ID, not namespace. Dynamic IDs and multiple variants need explicit review; no source package is renamed."
+      },
+      {
+        "id": "android-module",
+        "stage": "local",
+        "state": "configured",
+        "field": "android.module",
+        "reference": "app/build.gradle",
+        "summary": "Save the explicit Gradle application module before the Desktop build. A static hint does not prove the effective variant or execute Gradle."
+      },
+      {
+        "id": "android-variant",
+        "stage": "local",
+        "state": "configured",
+        "field": "android.variant",
+        "reference": null,
+        "summary": "Choose the intended variant. The build owner's release default is a default, not an observed project variant."
+      },
+      {
+        "id": "android-tools",
+        "stage": "local",
+        "state": "not-checked",
+        "field": null,
+        "reference": null,
+        "summary": "Check a project-compatible JDK, the project Gradle wrapper and required Android SDK components. Reuse compatible installations; none were probed here."
+      },
+      {
+        "id": "android-signing",
+        "stage": "signing",
+        "state": "not-checked",
+        "field": "android.uploadCertificateSha256",
+        "reference": null,
+        "summary": "For a signed build, reuse the app's existing upload key and verify its certificate. Vault presence and a configured fingerprint are not a signing check."
+      },
+      {
+        "id": "android-store",
+        "stage": "store",
+        "state": "deferred",
+        "field": "android.identityStatus",
+        "reference": null,
+        "summary": "Before Google Play operations, verify app ownership and the authorized account. Local unsigned builds do not require this Store setup."
+      },
+      {
+        "id": "android-testing",
+        "stage": "store",
+        "state": "deferred",
+        "field": "android.externalTrack",
+        "reference": null,
+        "summary": "Configure the intended Play testing track when preparing testing delivery. This setting neither creates a track nor verifies access."
+      },
+      {
+        "id": "store-metadata",
+        "stage": "store",
+        "state": "deferred",
+        "field": "metadata.root",
+        "reference": "public/store",
+        "summary": "Prepare localized Store text, images and required policies before delivery. A metadata folder setting does not prove its files are complete."
+      },
+      {
+        "id": "github-automation",
+        "stage": "automation",
+        "state": "deferred",
+        "field": null,
+        "reference": null,
+        "summary": "GitHub automation is optional for local setup. Later, select the account/repository and preview workflow changes; no connection or repository change happened here."
+      }
+    ],
+    "limitations": [
+      "This is setup guidance, not a passed preflight, build, signing check or release approval.",
+      "Static hints do not prove the effective Gradle variant, Xcode target or application identity.",
+      "Native Android/iOS and conventional KMP/CMP platform layouts are covered; framework identity is not inferred from nested build files.",
+      "The separate unsigned Android build and unsigned iOS archive do not require Store account setup; their own tool, input and safety checks still apply.",
+      "Full release preflight has additional Store-policy requirements; local setup or local project checks do not replace it.",
+      "No tool, credential, Store account, metadata file or release version value was inspected by this analysis."
+    ],
+    "assurance": {
+      "basis": "static-text",
+      "projectCodeExecuted": false,
+      "toolsProbed": false,
+      "credentialsRead": false,
+      "gitObserved": false,
+      "storeContacted": false,
+      "writesPerformed": false,
+      "releaseReadiness": "unknown"
+    }
+  },
+  "scriptDiscovery": {
+    "schemaVersion": 1,
+    "scope": "project-script-hints",
+    "coverage": "conventional-paths-only",
+    "sourcePartial": false,
+    "truncated": false,
+    "platforms": [
+      "android"
+    ],
+    "candidates": [],
+    "assurance": {
+      "basis": "static-text",
+      "projectCodeExecuted": false,
+      "toolsProbed": false,
+      "credentialsRead": false,
+      "gitObserved": false,
+      "storeContacted": false,
+      "writesPerformed": false,
+      "releaseReadiness": "unknown"
+    }
+  }
+}

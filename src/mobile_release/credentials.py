@@ -14,7 +14,6 @@ import threading
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from sys import exc_info
 from typing import Any, Callable, Iterable, Mapping
@@ -33,14 +32,18 @@ from .owned_process import ProcessCleanupError, ProcessError, preserve_lifetime_
 from ._lifetime_evidence import ProfileCallEvidence
 from ._profile_callers import consume_profile_evidence, fatal_cancellation_error
 
-STAGES = ("candidate", "external-testing", "production")
-ENVIRONMENT_NAMES = {
-    "candidate": "mobile-candidate",
-    "external-testing": "mobile-external-testing",
-    "production": "mobile-production",
-}
-MAX_PRIVATE_MATERIAL_SIZE = 32 * 1024 * 1024
-SMALL_PRIVATE_MATERIAL_SIZE = 4 * 1024 * 1024
+# Public names remain available here for existing CLI/integration callers.
+from .credential_requirements import (
+    ENVIRONMENT_NAMES, STAGES, Requirement, requirements,
+    _apple_api_requirements, _apple_review_requirements, _google_requirements,
+)
+from .credential_policy import (
+    MAX_PRIVATE_MATERIAL_SIZE, SMALL_PRIVATE_MATERIAL_SIZE,
+    credential_format_error as _shared_credential_format_error,
+    firebase_payload_matches_application as _shared_firebase_payload_matches_application,
+    material_size_limit as _shared_material_size_limit,
+)
+
 PROFILE_UUID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -206,243 +209,6 @@ def artifact_validation_environment(environ: Mapping[str, str]) -> dict[str, str
     return result
 
 
-@dataclass(frozen=True)
-class Requirement:
-    name: str
-    kind: str  # secret, variable, file, or manual
-    stage: str
-    platform: str
-    alternatives: tuple[str, ...] = ()
-    reason: str = ""
-
-
-def requirements(
-    config: ReleaseConfig,
-    stage: str = "all",
-    *,
-    purpose: str = "full",
-    platforms: Iterable[str] | None = None,
-) -> list[Requirement]:
-    if stage != "all" and stage not in STAGES:
-        raise CredentialError(f"unknown credential stage: {stage}")
-    if purpose not in {"full", "signing", "store"}:
-        raise CredentialError(f"unknown credential purpose: {purpose}")
-    stages = STAGES if stage == "all" else (stage,)
-    selected = set(platforms if platforms is not None else config.enabled_platforms)
-    values: list[Requirement] = []
-    for current in stages:
-        if config.platform_enabled("android") and "android" in selected:
-            if current == "candidate" and purpose in {"full", "signing"}:
-                values.extend(
-                    [
-                        Requirement(
-                            "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64",
-                            "secret",
-                            current,
-                            "android",
-                            alternatives=("MOBILE_RELEASE_ANDROID_KEYSTORE_PATH",),
-                            reason="Android release signing key",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
-                            "secret",
-                            current,
-                            "android",
-                            reason="Android keystore password",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_ANDROID_KEY_ALIAS",
-                            "variable",
-                            current,
-                            "android",
-                            reason="Android private-key alias",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
-                            "secret",
-                            current,
-                            "android",
-                            reason="Android private-key password",
-                        ),
-                    ]
-                )
-                if config.section("services").get("androidFirebase") == "required":
-                    values.append(
-                        Requirement(
-                            "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64",
-                            "secret",
-                            current,
-                            "android",
-                            alternatives=("MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_PATH",),
-                            reason="Android Firebase client configuration",
-                        )
-                    )
-            if purpose in {"full", "store"}:
-                values.extend(_google_requirements(current))
-
-        if config.platform_enabled("ios") and "ios" in selected:
-            if current == "candidate" and purpose in {"full", "signing"}:
-                values.extend(
-                    [
-                        Requirement(
-                            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
-                            "secret",
-                            current,
-                            "ios",
-                            alternatives=("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH",),
-                            reason="Apple distribution certificate and private key",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
-                            "secret",
-                            current,
-                            "ios",
-                            reason="Apple P12 password",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
-                            "secret",
-                            current,
-                            "ios",
-                            alternatives=("MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH",),
-                            reason="App Store provisioning profile",
-                        ),
-                    ]
-                )
-                if config.section("services").get("iosFirebase") == "required":
-                    values.append(
-                        Requirement(
-                            "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
-                            "secret",
-                            current,
-                            "ios",
-                            alternatives=("MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_PATH",),
-                            reason="iOS Firebase client configuration",
-                        )
-                    )
-            if purpose in {"full", "store"}:
-                values.extend(_apple_api_requirements(current))
-            if purpose in {"full", "store"} and current in {"external-testing", "production"}:
-                values.extend(_apple_review_requirements(current, config))
-
-        if (
-            current == "candidate"
-            and purpose in {"full", "signing"}
-            and config.section("source").get("projectReadTokenRequired")
-        ):
-            values.append(
-                Requirement(
-                    "MOBILE_RELEASE_PROJECT_READ_TOKEN",
-                    "secret",
-                    current,
-                    "project",
-                    reason="Read-only project dependency access",
-                )
-            )
-    return values
-
-
-def _google_requirements(stage: str) -> list[Requirement]:
-    return [
-        Requirement(
-            "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
-            "variable",
-            stage,
-            "android",
-            reason="Google Workload Identity provider",
-        ),
-        Requirement(
-            "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT",
-            "variable",
-            stage,
-            "android",
-            reason="Least-privileged Google service-account email",
-        ),
-    ]
-
-
-def _apple_api_requirements(stage: str) -> list[Requirement]:
-    return [
-        Requirement(
-            "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
-            "secret",
-            stage,
-            "ios",
-            alternatives=("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH",),
-            reason="App Store Connect API private key",
-        ),
-        Requirement(
-            "MOBILE_RELEASE_ASC_KEY_ID",
-            "variable",
-            stage,
-            "ios",
-            reason="App Store Connect API key ID",
-        ),
-        Requirement(
-            "MOBILE_RELEASE_ASC_ISSUER_ID",
-            "variable",
-            stage,
-            "ios",
-            reason="App Store Connect API issuer ID",
-        ),
-    ]
-
-
-def _apple_review_requirements(stage: str, config: ReleaseConfig) -> list[Requirement]:
-    requirements = [
-        Requirement(
-            name,
-            "secret",
-            stage,
-            "ios",
-            reason="Private App Review contact information",
-        )
-        for name in (
-            "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME",
-            "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME",
-            "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL",
-            "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
-        )
-    ]
-    requirements.extend(
-        [
-            Requirement(
-                "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
-                "secret",
-                stage,
-                "ios",
-                reason="HMAC key binding private Apple review state to recoverable operations",
-            ),
-            Requirement(
-                "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION",
-                "variable",
-                stage,
-                "ios",
-                reason="Version of the retained private-state commitment key",
-            ),
-        ]
-    )
-    if config.section("ios").get("review", {}).get("demoAccountRequired"):
-        requirements.extend(
-            [
-                Requirement(
-                    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME",
-                    "secret",
-                    stage,
-                    "ios",
-                    reason="Private App Review demo-account username",
-                ),
-                Requirement(
-                    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
-                    "secret",
-                    stage,
-                    "ios",
-                    reason="Private App Review demo-account password",
-                ),
-            ]
-        )
-    return requirements
-
 
 def load_credentials_file(
     path: Path, project_root: Path, *, cancellation: _ProfileCancellation | None = None,
@@ -529,6 +295,20 @@ def resolve_credential_values(
     return resolved
 
 
+def _captured_signing_platform(values: Mapping[str, str]) -> str | None:
+    if type(values) is dict:
+        # Environment and credential-file values cannot carry Desktop custody.
+        return None
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    from ._desktop_ios_signing_material import CapturedBuildValues
+
+    if type(values) is CapturedBuildValues:
+        return "ios"
+    if type(values) is CapturedAndroidBuildValues:
+        return "android"
+    return None
+
+
 def credential_values_for_purpose(
     config: ReleaseConfig,
     values: Mapping[str, str],
@@ -536,16 +316,25 @@ def credential_values_for_purpose(
     stage: str,
     purpose: str,
     platforms: Iterable[str],
-) -> dict[str, str]:
+) -> Mapping[str, str]:
     """Select the minimum credential subset for one execution capability."""
 
     allowed: set[str] = set()
     selected = tuple(platforms)
+    captured_platform = _captured_signing_platform(values)
+    if captured_platform == "ios" and (selected != ("ios",) or purpose != "signing"):
+        raise CredentialError("captured iOS material requires its exact iOS signing purpose")
+    if captured_platform == "android" and (selected != ("android",) or purpose != "signing"):
+        raise CredentialError("captured Android material requires its exact Android signing purpose")
     for item in requirements(config, stage, purpose=purpose, platforms=selected):
         allowed.add(item.name)
         allowed.update(item.alternatives)
     if purpose == "store" and "android" in selected:
         allowed.add("GOOGLE_APPLICATION_CREDENTIALS")
+    if captured_platform is not None:
+        # Captured file bytes are not environment/renderer mapping values.
+        # Preserve their original source while applying the SAME core policy.
+        return values.select(allowed)
     return {name: values[name] for name in allowed if values.get(name)}
 
 
@@ -630,43 +419,13 @@ def _value_state(
 
 
 def _material_size_limit(name: str) -> int:
-    if any(token in name for token in ("P8", "PROFILE", "SERVICE", "SERVICES")):
-        return SMALL_PRIVATE_MATERIAL_SIZE
-    return MAX_PRIVATE_MATERIAL_SIZE
+    """Compatibility seam; shared pure policy preserves the existing fallback."""
+    return _shared_material_size_limit(name)
 
 
 def _credential_format_error(name: str, value: str) -> str | None:
-    if name == "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64":
-        try:
-            decoded = base64.b64decode(value, validate=True)
-        except (binascii.Error, ValueError):
-            return "The commitment key must be canonical base64."
-        if len(decoded) != 32:
-            return "The commitment key must decode to exactly 32 bytes."
-    patterns = {
-        "MOBILE_RELEASE_ANDROID_KEY_ALIAS": r"[A-Za-z0-9_.-]{1,255}",
-        "MOBILE_RELEASE_ASC_KEY_ID": r"[A-Z0-9]{10}",
-        "MOBILE_RELEASE_ASC_ISSUER_ID": (
-            r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
-            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
-        ),
-        "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER": (
-            r"projects/[1-9][0-9]*/locations/global/workloadIdentityPools/"
-            r"[A-Za-z0-9_-]+/providers/[A-Za-z0-9_-]+"
-        ),
-        "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT": (
-            r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9-]+\.iam\.gserviceaccount\.com"
-        ),
-        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION": r"[A-Za-z0-9_.-]{1,64}",
-    }
-    pattern = patterns.get(name)
-    if pattern and not re.fullmatch(pattern, value):
-        return "The configured value has an invalid public identifier format."
-    if name == "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL" and not re.fullmatch(
-        r"[^\s@]+@[^\s@]+\.[^\s@]+", value
-    ):
-        return "The configured review contact email has an invalid format."
-    return None
+    """Compatibility seam; admission remains separate from scalar-format policy."""
+    return _shared_credential_format_error(name, value)
 
 
 def credential_findings(
@@ -787,6 +546,8 @@ def _selected_material_bytes(
     project_root: Path, cancellation: _ProfileCancellation | None = None,
 ) -> bytes | None:
     """Select an external source once, never return its filename to consumers."""
+    if _captured_signing_platform(values) is not None:
+        return values.material(base64_name, root=project_root, cancellation=cancellation)
     if values.get(base64_name) and values.get(path_name):
         raise CredentialError("private material has mutually exclusive input sources")
     maximum_size = _material_size_limit(base64_name)
@@ -1508,7 +1269,15 @@ def _temporary_apple_signing_environment(
 
 
 def _fingerprint_from_text(text: str) -> str | None:
-    match = re.search(r"SHA(?:-)?256(?: fingerprint)?:?\s*=*\s*([0-9A-Fa-f:]{64,95})", text)
+    # OpenSSL/LibreSSL use "sha256 Fingerprint=" or "SHA256 Fingerprint=";
+    # keytool uses "SHA256:". Accept their spelling, not a truncated prefix of
+    # an oversized digest or the unrelated signature-algorithm description.
+    match = re.search(
+        r"^[ \t]*SHA-?256(?:[ \t]+fingerprint)?[ \t]*[:=][ \t]*"
+        r"((?:[0-9a-f]{2}:){31}[0-9a-f]{2}|[0-9a-f]{64})[ \t]*\r?$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
     return match.group(1).replace(":", "").lower() if match else None
 
 
@@ -1570,8 +1339,13 @@ def _validate_android_material(
         execution_source=execution_source, cancellation=cancellation,
     )
     scratch.require(keystore)
-    output = result.stdout + result.stderr
-    if result.returncode or "PrivateKeyEntry" not in output:
+    return android_material_finding(config, result.returncode, result.stdout, result.stderr)
+
+
+def android_material_finding(config: ReleaseConfig, returncode: int, stdout: str, stderr: str) -> Finding:
+    """Shared parsed keytool policy; this pure projection grants no tool custody."""
+    output = stdout + stderr
+    if returncode or "PrivateKeyEntry" not in output:
         return Finding(
             "credential-material.android",
             Status.INVALID,
@@ -1651,6 +1425,57 @@ def _validate_p8(
         )
     return _validate_selected_p8(lambda: scratch.require(p8), execution_source=execution_source,
                                  cancellation=cancellation)
+
+
+# Fixed bundled validator: no public-key dump or exception/key text escapes.
+APPLE_P8_CHECK = ("begin; k=OpenSSL::PKey.read(File.binread(ARGV.fetch(0))); "
+    "ok=k.is_a?(OpenSSL::PKey::EC) && k.private? && "
+    "k.group.curve_name=='prime256v1' && k.check_key; exit(ok ? 0 : 1); "
+    "rescue StandardError; exit 1; end")
+
+
+def _validate_installed_p8(material, runtime):
+    from ._store_runtime import StoreRuntimeContext
+    from ._desktop_store_preflight_control import StorePreflightInput
+    guard = material._scratch.cancellation
+    source = guard._store_preflight_source
+    if guard._apple_provisioning_source is not None:
+        from ._desktop_apple_provisioning_control import AppleProvisioningInput
+        from .desktop_apple_provisioning import AppleProvisioningRun
+        source = guard._apple_provisioning_source
+        if type(source) is not AppleProvisioningInput or type(source.require_operation()) is not AppleProvisioningRun:
+            raise CredentialError("Bundled Apple validation lacks its original provisioning input")
+        selected_type = AppleProvisioningInput
+    elif source is None:
+        from ._desktop_store_prepare_control import StorePrepareInput
+        from .local_store_prepare import LocalStorePrepareRun
+        source = guard._local_store_source
+        from ._desktop_store_execute_control import StoreExecuteInput
+        from .local_store_execute import LocalStoreExecuteRun
+        from ._desktop_store_reconcile_control import StoreReconcileInput
+        from .local_store_reconcile import LocalStoreReconcileRun
+        owners={StorePrepareInput:LocalStorePrepareRun,StoreExecuteInput:LocalStoreExecuteRun,StoreReconcileInput:LocalStoreReconcileRun}
+        if (type(source) not in owners or type(source.require_operation()) is not owners[type(source)]
+                or source.initial.context['platform'] != 'ios'):
+            raise CredentialError("Bundled Apple validation lacks its original Prepare input")
+        selected_type = type(source)
+    else:
+        selected_type = StorePreflightInput
+    if (type(source) is not selected_type or type(runtime) is not StoreRuntimeContext
+            or source.guard is not guard or source.require_operation().runtime is not runtime):
+        raise CredentialError("Bundled Apple validation lacks its original Store input")
+    operation = source.require_operation()
+    command = operation.apple_material_command(material)
+    runtime.require(root=material._root, invocation=material._invocation)
+    try:
+        with runtime.command(command, capture=True):
+            result = run_owned(command, environ=runtime.environment(), cwd=runtime.tooling_root,
+                               timeout=30, output_limit=4096, cancellation=guard)
+    finally:
+        material._scratch.require(material._p8)
+        operation._received_post()
+    return Finding("credential-material.apple-p8", Status.PASS if result.returncode == 0 else Status.INVALID,
+                   "Selected Apple key validation completed.", category="credentials")
 
 
 def _validate_selected_p8(
@@ -1943,17 +1768,9 @@ def _firebase_content_matches_application(
             payload = json.loads(content.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError):
             return False
-        if type(payload) is not dict or type(payload.get("client")) is not list:
-            return False
-        matched = False
-        for client in payload["client"]:
-            if type(client) is not dict or type(client.get("client_info")) is not dict:
-                return False
-            info = client["client_info"].get("android_client_info")
-            if type(info) is not dict or type(info.get("package_name")) is not str or not info["package_name"]:
-                return False
-            matched |= info["package_name"] == expected_identity
-        return matched
+        return _shared_firebase_payload_matches_application(
+            payload, platform=platform, expected_identity=expected_identity,
+        )
     if platform != "ios":
         return False
     import plistlib
@@ -1963,8 +1780,9 @@ def _firebase_content_matches_application(
         payload = plistlib.loads(content)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError, RecursionError, ExpatError):
         return False
-    return (type(payload) is dict and type(payload.get("BUNDLE_ID")) is str
-            and payload["BUNDLE_ID"] == expected_identity)
+    return _shared_firebase_payload_matches_application(
+        payload, platform=platform, expected_identity=expected_identity,
+    )
 
 
 def _validate_firebase_material(
@@ -2129,10 +1947,23 @@ class SelectedStoreMaterial:
                 self._p8 = self._scratch.put("asc-p8", self._p8_content)
         self._state = "selected"
 
-    def validate(self, *, execution_source=None) -> tuple[Finding, ...]:
+    def validate(self, *, execution_source=None, runtime_context=None) -> tuple[Finding, ...]:
         self._owner()
         if self._state != "selected":
             raise CredentialError("Store material validation cannot be repeated")
+        if runtime_context is not None:
+            paired = False
+            if self._platforms == ("android", "ios"):
+                from ._desktop_store_preflight_control import StorePreflightInput
+                from .desktop_store_preflight import StorePreflightRun
+                from .paired_store_versions import selected_query
+                source = self._scratch.cancellation._store_preflight_source
+                if type(source) is StorePreflightInput:
+                    operation = source.require_operation()
+                    paired = (type(operation) is StorePreflightRun and selected_query(operation.request.context)
+                              and operation.runtime is runtime_context and operation.invocation is self._invocation)
+            if (self._platforms != ("ios",) and not paired) or execution_source is not None:
+                raise CredentialError("Bundled Apple validation requires its exact access selection")
         self._state = "validating"
         findings: list[Finding] = []
         try:
@@ -2142,10 +1973,15 @@ class SelectedStoreMaterial:
                         "App Store Connect P8 private key is missing.", category="credentials"))
                 else:
                     try:
-                        findings.append(_validate_selected_p8(
-                            lambda: self._scratch.require(self._p8), execution_source=execution_source,
-                            cancellation=self._scratch.cancellation,
-                        ))
+                        if runtime_context is not None:
+                            if execution_source is not None:
+                                raise CredentialError("Bundled Apple validation cannot borrow another execution source")
+                            findings.append(_validate_installed_p8(self, runtime_context))
+                        else:
+                            findings.append(_validate_selected_p8(
+                                lambda: self._scratch.require(self._p8), execution_source=execution_source,
+                                cancellation=self._scratch.cancellation,
+                            ))
                     except ProcessError as error:
                         if error.fatal:
                             raise
@@ -2238,7 +2074,7 @@ class SelectedStoreMaterial:
 def _selected_store_material(
     config: ReleaseConfig, *, values: Mapping[str, str], platforms: Iterable[str],
     invocation: InvocationCustody | None = None, cancellation: _ProfileCancellation | None = None,
-    stage: str = "candidate", lane_evidence=None,
+    stage: str = "candidate", lane_evidence=None, scratch_parent: Path | None = None,
 ):
     if invocation is not None:
         if type(invocation) is not InvocationCustody:
@@ -2251,7 +2087,7 @@ def _selected_store_material(
     elif lane_evidence is not None:
         raise CredentialError("Composite Store selection requires its original invocation")
     with finite_scratch(layout="store-selection", cancellation=cancellation,
-                        lane_evidence=lane_evidence) as scratch:
+                        lane_evidence=lane_evidence, parent=scratch_parent) as scratch:
         selected = SelectedStoreMaterial(config, values, tuple(platforms), scratch, invocation, stage=stage)
         try:
             selected._acquire()
@@ -2374,6 +2210,13 @@ def materialize_build_inputs(
     if (not selected or len(set(selected)) != len(selected)
             or any(platform not in {"android", "ios"} for platform in selected)):
         raise CredentialError("build material requires an exact platform selection")
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    if type(values) is CapturedBuildValues and selected != ("ios",):
+        raise CredentialError("captured iOS material requires its exact iOS-only child")
+    if type(values) is CapturedAndroidBuildValues and (selected != ("android",) or prepare_ios_signing
+                                                       or signing_lease is not None or build_inputs is None):
+        raise CredentialError("captured Android material requires its original Android-only child")
     if (prepare_ios_signing and "ios" in selected and signing_lease is not None
             and signing_lease.active is not None):
         raise CredentialError("this account lease already has an active signing context")
@@ -2405,7 +2248,11 @@ def materialize_build_inputs(
             raise CredentialError("signed iOS material requires its unused original account lease")
     scratch = build_inputs.scratch
     _material_guard(scratch, cancellation)
-    values = dict(values)  # After environment/account/project admission, not before.
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    # After environment/account/project admission, not before. Captured bytes
+    # keep their exact operation binding instead of becoming path/base64 data.
+    values = values.for_invocation(invocation) if type(values) in (CapturedBuildValues, CapturedAndroidBuildValues) else dict(values)
     material: dict[str, InputSnapshot] = {}
     for platform, base64_name, path_name, role in (
         ("android", "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH", "android-keystore"),
@@ -2427,8 +2274,18 @@ def materialize_build_inputs(
             content, platform="android", expected_identity=config.section("android").get("applicationId"),
         ):
             raise CredentialError("Android Firebase client file is missing, malformed, or for another application")
-        module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
-            execution_source=None if signing_lease is None else signing_lease.execution_source()))
+        if type(values) is CapturedAndroidBuildValues:
+            # Same saved module, already admitted under this exact project and
+            # child. No ambient rediscovery/subprocess in the Desktop route.
+            operation = values._original._operation
+            if (operation.invocation is not invocation or operation.inputs.config is not config
+                    or operation.signing.materialization is not build_inputs or signing_lease is not None):
+                raise CredentialError("Android material does not belong to this saved build")
+            operation.check_inputs()
+            module = operation.inputs.saved.configuration.module
+        else:
+            module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
+                execution_source=None if signing_lease is None else signing_lease.execution_source()))
         if not module:
             raise CredentialError("Android Firebase material or application module is unavailable")
         module_relative = module.lstrip(":").replace(":", "/")

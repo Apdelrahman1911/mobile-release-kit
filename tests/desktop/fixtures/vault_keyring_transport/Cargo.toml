@@ -1,0 +1,19 @@
+[package]
+name = "mrk-vault-client-transport-test"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "fixture.rs"
+
+# Only the unchanged wire/clock/data APIs are used. No native operation or
+# helper is entered. The full application and WebKit are outside this graph.
+[dependencies]
+mrk-macos-installed-native = { path = "../../../../desktop/native/macos-installed-native" }
+nix = { version = "=0.30.1", default-features = false, features = ["fs"] }
+zeroize = { version = "=1.9.0", features = ["std"] }
+getrandom = "=0.3.4"
+
+[profile.dev]
+debug = 0

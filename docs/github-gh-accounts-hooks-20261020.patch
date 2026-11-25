@@ -1,0 +1,433 @@
+diff --git a/desktop/src-tauri/src/github_auth_sources_macos.rs b/desktop/src-tauri/src/github_auth_sources_macos.rs
+--- a/desktop/src-tauri/src/github_auth_sources_macos.rs
++++ b/desktop/src-tauri/src/github_auth_sources_macos.rs
+@@ -14,4 +14,5 @@
+ use std::time::Instant;
+ use zeroize::Zeroizing;
++use crate::github_auth_accounts as accounts;
+
+ const SOURCE_LIMIT: usize = 64;
+@@ -26,4 +27,5 @@
+     first: Option<Reason>,
+     native: Option<wire::Native>,
++    accounts: Option<accounts::Witness>,
+     indices: [Option<usize>; 3],
+ }
+@@ -51,4 +53,5 @@
+             first: None,
+             native: None,
++            accounts: None,
+             indices: [None; 3],
+         }
+@@ -75,5 +78,5 @@
+             .checked_add(std::mem::size_of::<Self>())?
+             // Hash scratch + private full config snapshot + finite parser stack.
+-            .checked_add(32768 + wire::CONFIG_LIMIT as usize + 3 * 4096 + 4096)?
++            .checked_add(32768 + wire::CONFIG_LIMIT as usize + 3 * 4096 + 4096 + 16384)?
+             .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
+     }
+@@ -91,5 +94,6 @@
+                     .as_ref()
+                     .map_or(Some(0), wire::Native::retained_bytes)?,
+-            )
++            )?
++            .checked_add(self.accounts.as_ref().map_or(Some(0), accounts::Witness::retained_bytes)?)
+     }
+     fn snapshot(
+@@ -98,4 +102,8 @@
+         stop: &mut dyn FnMut() -> bool,
+     ) -> Result<wire::Snapshot, Reason> {
++        self.snapshot_read(index, stop, false).map(|(snapshot, _)| snapshot)
++    }
++    fn snapshot_read(&self, index: usize, stop: &mut dyn FnMut() -> bool, collect: bool)
++        -> Result<(wire::Snapshot, Option<Vec<String>>), Reason> {
+         checkpoint(stop)?;
+         let actual = stat::fstat(self.book.fd(index)?).map_err(|_| Reason::SourceChanged)?;
+@@ -138,5 +146,5 @@
+         // The same held bytes/hash, never a later path reopen or claimed schema.
+         // Retain no plaintext beyond this bounded native call; parser borrows.
+-        let mut config = if Some(index) == self.indices[1] {
++        let mut config = if Some(index) == self.indices[1] || collect {
+             Some(Zeroizing::new(vec![0u8; id.size as usize]))
+         } else {
+@@ -173,5 +181,5 @@
+             return Err(Reason::SourceChanged);
+         }
+-        if config
++        if Some(index) == self.indices[1] && config
+             .as_ref()
+             .is_some_and(|raw| !wire::config_schema_one(raw))
+@@ -179,8 +187,11 @@
+             return Err(Reason::SourceRefused);
+         }
+-        Ok(wire::Snapshot {
++        let names = if collect {
++            Some(accounts::names(config.as_ref().ok_or(Reason::SourceRefused)?).ok_or(Reason::SourceRefused)?)
++        } else { None };
++        Ok((wire::Snapshot {
+             identity,
+             sha256: hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+-        })
++        }, names))
+     }
+     // Reuse SourceBook's actual reserve/adopt/held descriptor states. No image,
+@@ -307,4 +318,37 @@
+         })();
+         self.remember(result)
++    }
++    // SAME finite SourceBook/account/ACL facet; config-only mode never mints
++    // Native/tool/capture authority and never opens a keyring or gh executable.
++    pub(crate) fn inspect_accounts(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
++        if !self.not_started() { return Err(Reason::CleanupUnknown); }
++        self.started = true;
++        let result = (|| {
++            checkpoint(stop)?; self.account.acquire().map_err(|_| Reason::SourceRefused)?; checkpoint(stop)?;
++            let (home, uid, gid) = self.account.selected().map_err(|_| Reason::SourceChanged)?;
++            let home = PathBuf::from(home); let config = home.join(".config/gh");
++            let config_parts = parts(&config)?;
++            let slots = roster_limit(std::iter::once(config_parts.len()), 2)?;
++            if slots > SOURCE_LIMIT || slots.checked_add(32).is_none_or(|n| n > 256) { return Err(Reason::Capacity); }
++            self.book.begin(slots, 0, 0)?; self.acl_entered = true; self.acl = Some(SnapshotBook::new()); self.book.root(stop)?;
++            let (parents, _) = self.book.chain(&config_parts, false, stop)?;
++            let parent = *parents.last().ok_or(Reason::SourceRefused)?;
++            if self.book.directory(parent)?.uid != uid { return Err(Reason::SourceRefused); }
++            let config_index = self.book.child(parent, b"config.yml", true, stop)?; self.indices[1] = Some(config_index);
++            let hosts_index = self.book.child(parent, b"hosts.yml", true, stop)?; self.indices[2] = Some(hosts_index);
++            let config_snapshot = self.snapshot(config_index, stop)?; // original prelaunch schema guard unchanged
++            let (hosts, logins) = self.snapshot_read(hosts_index, stop, true)?;
++            let witness = accounts::Witness { uid, gid, home: home.to_str().ok_or(Reason::SourceRefused)?.into(),
++                config: config.to_str().ok_or(Reason::SourceRefused)?.into(), files: wire::Files { config: config_snapshot, hosts },
++                logins: logins.ok_or(Reason::SourceRefused)? };
++            if !witness.valid() { return Err(Reason::SourceRefused); }
++            self.accounts = Some(witness); self.post_inner(stop)?;
++            if self.retained_bytes().zip(Self::working_bytes()).is_none_or(|(n, limit)| n > limit) { return Err(Reason::Capacity); }
++            Ok(())
++        })(); self.remember(result)
++    }
++    pub(crate) fn accounts_witness(&self) -> Result<&accounts::Witness, Reason> {
++        if self.finished || self.first.is_some() { return Err(Reason::SourceChanged); }
++        self.accounts.as_ref().ok_or(Reason::SourceRefused)
+     }
+     fn post_inner(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+@@ -368,14 +412,13 @@
+             checkpoint(stop)?;
+         }
+-        let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+-        for (index, expected) in
+-            self.indices
+-                .iter()
+-                .zip([&native.tool, &native.files.config, &native.files.hosts])
+-        {
+-            if &self.snapshot(index.ok_or(Reason::SourceChanged)?, stop)? != expected {
+-                return Err(Reason::SourceChanged);
+-            }
+-        }
++        if let Some(native) = &self.native {
++            for (index, expected) in self.indices.iter().zip([&native.tool, &native.files.config, &native.files.hosts]) {
++                if &self.snapshot(index.ok_or(Reason::SourceChanged)?, stop)? != expected { return Err(Reason::SourceChanged); }
++            }
++        } else if let Some(accounts) = &self.accounts {
++            for (index, expected) in self.indices[1..].iter().zip([&accounts.files.config, &accounts.files.hosts]) {
++                if &self.snapshot(index.ok_or(Reason::SourceChanged)?, stop)? != expected { return Err(Reason::SourceChanged); }
++            }
++        } else { return Err(Reason::SourceChanged); }
+         Ok(())
+     }
+diff --git a/desktop/src-tauri/src/github_auth_entry_protocol.rs b/desktop/src-tauri/src/github_auth_entry_protocol.rs
+--- a/desktop/src-tauri/src/github_auth_entry_protocol.rs
++++ b/desktop/src-tauri/src/github_auth_entry_protocol.rs
+@@ -24,4 +24,5 @@
+     pub(crate) expected_document_revision: u32,
+     pub(crate) expected_connection_revision: u32,
++    pub(crate) accounts_observation_id: Option<String>,
+ }
+ impl Connect {
+@@ -32,4 +33,5 @@
+             && revision(self.expected_document_revision)
+             && revision(self.expected_connection_revision)
++            && self.accounts_observation_id.as_ref().is_none_or(|id| valid_id(id))
+             && self
+                 .project_id
+@@ -37,4 +39,5 @@
+                 .checked_add(self.repository.capacity())
+                 .and_then(|bytes| bytes.checked_add(self.selected_login.capacity()))
++                .and_then(|bytes| bytes.checked_add(self.accounts_observation_id.as_ref().map_or(0, String::capacity)))
+                 .is_some_and(|bytes| bytes <= REQUEST_LIMIT)
+     }
+@@ -91,4 +94,6 @@
+                 "expectedDocumentRevision",
+                 "expectedConnectionRevision",
++            ]) || exact(&[
++                "projectId", "repository", "selectedLogin", "expectedDocumentRevision", "expectedConnectionRevision", "accountsObservationId",
+             ]) =>
+         {
+@@ -109,4 +114,8 @@
+                 expected_document_revision: count("expectedDocumentRevision")?,
+                 expected_connection_revision: count("expectedConnectionRevision")?,
++                accounts_observation_id: if fields.contains_key("accountsObservationId") {
++                    let id = text("accountsObservationId")?;
++                    if !valid_id(id) { return Err(BridgeError::invalid()); } Some(id.into())
++                } else { None },
+             };
+             if !input.bounded() {
+diff --git a/desktop/src-tauri/src/asset_session_gh_auth.rs b/desktop/src-tauri/src/asset_session_gh_auth.rs
+--- a/desktop/src-tauri/src/asset_session_gh_auth.rs
++++ b/desktop/src-tauri/src/asset_session_gh_auth.rs
+@@ -4,4 +4,6 @@
+ //! unavailable without the distinct installed stock nomination/profile.
+ use super::*;
++#[path = "asset_session_gh_auth_accounts.rs"]
++mod accounts;
+ use crate::{
+     github_auth_capture_wire as wire, github_auth_entry_protocol as entry_wire,
+@@ -27,4 +29,6 @@
+     Original(Arc<Registration>),
+     Finished(GitHubAuthStatus),
++    Accounts(Arc<accounts::Read>),
++    AccountsFinished(accounts::Finished),
+ }
+ impl Entry {
+@@ -32,5 +36,5 @@
+         match self {
+             Self::Original(original) => Some(original),
+-            Self::Finished(_) => None,
++            Self::Finished(_) | Self::Accounts(_) | Self::AccountsFinished(_) => None,
+         }
+     }
+@@ -289,4 +293,5 @@
+     root: asset_source::RegisteredRoot,
+     request: GitHubAuthRequest,
++    accounts_witness: Option<crate::github_auth_accounts::Witness>,
+     // Only the actual SAME original GUI may fill this cell, after its native
+     // close/release dispatches join. This is not supplied by the command DTO.
+@@ -869,4 +874,5 @@
+
+ pub(super) fn pending(state: &DocumentState) -> bool {
++    if accounts::pending(state) { return true; }
+     state
+         .gh_auth
+@@ -881,4 +887,5 @@
+ }
+ pub(super) fn can_exit(state: &DocumentState) -> bool {
++    if !accounts::can_exit(state) { return false; }
+     state
+         .gh_auth
+@@ -888,4 +895,5 @@
+ }
+ pub(super) fn stop(state: &DocumentState, cause: GitHubReason) {
++    accounts::stop(state, cause);
+     if let Some(original) = state.gh_auth.as_ref().and_then(Entry::original) {
+         if !original.actual_settled() {
+@@ -898,4 +906,5 @@
+ }
+ pub(super) fn observe_locked(document: &DocumentBinding, state: &mut DocumentState, now: Instant) {
++    accounts::observe(document, state, now);
+     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
+         return;
+@@ -981,4 +990,5 @@
+ /// may discard these originals. Unknown originals are never replaced here.
+ pub(super) fn retire_joined(document: &DocumentBinding, state: &mut DocumentState) {
++    accounts::retire(document, state);
+     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
+         return;
+@@ -1028,5 +1038,6 @@
+     match &state.gh_auth {
+         None => Some(0),
+-        Some(Entry::Original(_)) => None,
++        Some(Entry::Original(_)) | Some(Entry::Accounts(_)) => None,
++        Some(Entry::AccountsFinished(finished)) => finished.retained_bytes(),
+         Some(Entry::Finished(status)) => {
+             std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?)
+@@ -1113,4 +1124,5 @@
+                 return Err(BridgeError::invalid());
+             }
++            let accounts_witness = accounts::selected(self, &mut state, &request)?;
+             let idle_connection_epoch = state
+                 .github
+@@ -1188,4 +1200,5 @@
+                 root,
+                 request,
++                accounts_witness,
+                 physical_executable: Mutex::new(None),
+                 result,
+@@ -1312,5 +1325,5 @@
+             ..status.clone()
+         },
+-        None => GitHubAuthStatus {
++        None | Some(Entry::Accounts(_)) | Some(Entry::AccountsFinished(_)) => GitHubAuthStatus {
+             schema_version: 1,
+             document_revision: state.revision,
+@@ -1419,7 +1432,7 @@
+     any(target_arch = "aarch64", target_arch = "x86_64")
+ ))]
+-pub(super) struct ChildCall {
+-    original: Arc<Registration>,
+-    step: ChildStep,
++pub(super) enum ChildCall {
++    Connect { original: Arc<Registration>, step: ChildStep },
++    Accounts(accounts::ChildCall),
+ }
+ #[cfg(all(
+@@ -1430,5 +1443,5 @@
+ impl ChildCall {
+     pub(super) fn cleanup(&self) -> bool {
+-        self.step == ChildStep::Close
++        match self { Self::Connect { step, .. } => *step == ChildStep::Close, Self::Accounts(call) => call.close }
+     }
+ }
+@@ -1466,5 +1479,8 @@
+ ))]
+ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Result<(), Reason> {
+-    let original = call.original;
++    let (original, step) = match call {
++        ChildCall::Connect { original, step } => (original, step),
++        ChildCall::Accounts(call) => return accounts::execute_child(owner, call),
++    };
+     if !Arc::ptr_eq(owner, &original.original) {
+         return Err(Reason::CleanupUnknown);
+@@ -1476,5 +1492,5 @@
+                 .lock()
+                 .map_err(|_| BridgeError::cleanup_unknown())?;
+-            let entered = match call.step {
++            let entered = match step {
+                 ChildStep::Inspect => &mut facts.source_entered,
+                 ChildStep::BeforeHttp => &mut facts.before_http_entered,
+@@ -1487,5 +1503,5 @@
+             *entered = true;
+         }
+-        if call.step != ChildStep::Close {
++        if step != ChildStep::Close {
+             original.gate().check_current(&original.context)?;
+         } else {
+@@ -1505,5 +1521,5 @@
+             .lock()
+             .map_err(|_| BridgeError::cleanup_unknown())?;
+-        let result = match call.step {
++        let result = match step {
+             ChildStep::Inspect => {
+                 let selected = original
+@@ -1519,5 +1535,10 @@
+                     crate::installed_runtime::GitHubAuthRuntimeSlots::source_runtime_fd_bound(),
+                     &mut || owner.interrupted(),
+-                )
++                ).and_then(|()| {
++                    let native = source.native_snapshot()?;
++                    if original.accounts_witness.as_ref().is_some_and(|w| !w.matches(native, &original.context.login)) {
++                        Err(Reason::SourceChanged)
++                    } else { Ok(()) }
++                })
+             }
+             ChildStep::BeforeHttp | ChildStep::Finish => source.post(&mut || owner.interrupted()),
+@@ -1529,5 +1550,5 @@
+         source_native_failure(&original, source.first_failure());
+         result.map_err(source_error)?;
+-        if call.step == ChildStep::Close && !source.settled() {
++        if step == ChildStep::Close && !source.settled() {
+             return Err(BridgeError::cleanup_unknown());
+         }
+@@ -1537,8 +1558,8 @@
+             .lock()
+             .map_err(|_| BridgeError::cleanup_unknown())?;
+-        if call.step == ChildStep::Inspect {
++        if step == ChildStep::Inspect {
+             facts.source_returned = true;
+         }
+-        if call.step == ChildStep::BeforeHttp {
++        if step == ChildStep::BeforeHttp {
+             facts.before_http_returned = true;
+         }
+@@ -1564,5 +1585,5 @@
+     match child(
+         &original.original,
+-        ChildJob::GitHubAuth(ChildCall {
++        ChildJob::GitHubAuth(ChildCall::Connect {
+             original: original.clone(),
+             step,
+@@ -1887,5 +1908,6 @@
+                 identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+             request: GitHubAuthRequest { project_id: context.project_id.clone(), repository: context.repository.clone(),
+-                selected_login: context.login.clone(), expected_document_revision: 1, expected_connection_revision: 1 },
++                selected_login: context.login.clone(), expected_document_revision: 1, expected_connection_revision: 1, accounts_observation_id: None },
++            accounts_witness: None,
+             physical_executable: Mutex::new(None), result: Arc::new(ResultSlot::new(initial)), context, end,
+             provider: Mutex::new(None), active: Mutex::new(None), http: Mutex::new(None),
+@@ -2013,4 +2035,5 @@
+             expected_document_revision: 1,
+             expected_connection_revision: 1,
++            accounts_observation_id: None,
+         };
+         assert!(request.bounded());
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1812,8 +1812,18 @@
+ }
+ #[tauri::command]
+-async fn github_auth_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::Status, BridgeError> {
++async fn github_auth_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_accounts::PublicStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+     github_auth_command("github_auth_status", &webview, &request)?;
+-    Ok(state.document.github_auth_status())
++    Ok(state.document.github_auth_public_status())
++}
++#[tauri::command]
++async fn github_auth_accounts(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_accounts::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
++    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
++    let tauri::ipc::InvokeBody::Raw(raw) = request.body() else { return Err(BridgeError::invalid()); };
++    let input = crate::github_auth_accounts::decode(raw)?;
++    let observer = state.document.github_auth_accounts(input)?;
++    drop(request); drop(state); drop(webview);
++    observer.returned().await
+ }
+ #[tauri::command]
+@@ -1830,5 +1840,5 @@
+ }
+ #[tauri::command]
+-async fn github_auth_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::Status, BridgeError> {
++async fn github_auth_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_accounts::PublicStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+     let crate::github_auth_entry_protocol::Command::Cancel { operation_id } =
+@@ -1836,5 +1846,5 @@
+         else { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); };
+     // No stale observation revision can make STOP unreachable.
+-    state.document.github_auth_cancel(&operation_id)
++    state.document.github_auth_public_cancel(&operation_id)
+ }
+
+@@ -4468,5 +4478,5 @@
+             project_identity_close, project_identity_status,
+             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+-            github_auth_status, github_auth_connect, github_auth_cancel,
++            github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
+             git_read_status, git_read_start, git_read_cancel,
+             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -277,4 +277,5 @@
+ mod github_auth_native_owner;
+ mod github_auth_entry_protocol;
++mod github_auth_accounts;
+ mod github_connection_session;
+ mod github_preflight_protocol;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -321,5 +321,5 @@
+             "project_identity_close", "project_identity_status",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+-            "github_auth_status", "github_auth_connect", "github_auth_cancel",
++            "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
+             "git_read_status", "git_read_start", "git_read_cancel",
+             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -48,5 +48,5 @@
+     "allow-project-identity-close", "allow-project-identity-status",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+-    "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel",
++    "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
+     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
+     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",

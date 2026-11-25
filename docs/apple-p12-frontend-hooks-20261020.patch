@@ -1,0 +1,487 @@
+diff --git a/desktop/src/assetSessionTypes.ts b/desktop/src/assetSessionTypes.ts
+--- a/desktop/src/assetSessionTypes.ts
++++ b/desktop/src/assetSessionTypes.ts
+@@ -55,7 +55,7 @@
+ export type AssetReason = 'none' | 'closed' | 'unqualified' | 'unsupported-platform' | 'unsupported-filesystem' | 'unsupported-format' | 'invalid-request' | 'busy' | 'source-refused' | 'source-changed' | 'material-limit' | 'parser-limit' | 'project-overlap' | 'exclusion-unconfirmed' | 'capacity' | 'context-stale' | 'user-cancelled' | 'review-expired' | 'deadline' | 'document-lost' | 'shutdown' | 'cleanup-unknown' |
+   'vault-uninitialized' | 'vault-key-missing' | 'vault-keyring-locked' | 'vault-keyring-denied' | 'vault-keyring-unavailable' | 'vault-provider-unsupported' | 'vault-corrupt' | 'vault-interrupted' | 'vault-durability-unknown';
+ export type AssetPhase = 'idle' | 'admitting' | 'picking' | 'capturing' | 'selected' | 'assessing' | 'preview' | 'mutating' | 'stopping' | 'unknown';
+-export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key' | 'recover-upload-key' | 'apple-profile-setup' | 'prepare-apple-distribution-key' | 'use-apple-distribution-key';
++export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key' | 'recover-upload-key' | 'apple-profile-setup' | 'prepare-apple-distribution-key' | 'use-apple-distribution-key' | 'assemble-apple-p12';
+ export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
+ export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token' | 'contactFirstName' | 'contactLastName' | 'contactEmail' | 'contactPhone' | 'demoUsername' | 'demoPassword' | 'keyBase64' | 'version';
+ export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
+diff --git a/desktop/src/assetSessionProtocol.ts b/desktop/src/assetSessionProtocol.ts
+--- a/desktop/src/assetSessionProtocol.ts
++++ b/desktop/src/assetSessionProtocol.ts
+@@ -184,21 +184,21 @@
+     const operation = value.operation;
+     if (operation !== null) {
+       if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview', ...(object(operation) && Object.hasOwn(operation, 'backupDelivered') ? ['backupDelivered'] : [])]) ||
+-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key', 'recover-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'use-apple-distribution-key']) ||
++          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key', 'recover-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'assemble-apple-p12', 'use-apple-distribution-key']) ||
+           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
+           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
+           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
+           (operation.assessment !== null && !assessment(operation.assessment))) return null;
+       const storage = operation.storageOutcome;
+-      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key', 'recover-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'use-apple-distribution-key']))) return null;
+-      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup', 'generate-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key']) ||
++      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key', 'recover-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'assemble-apple-p12', 'use-apple-distribution-key']))) return null;
++      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup', 'generate-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'assemble-apple-p12']) ||
+           !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
+           !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
+       if (operation.operation === 'inspect-installation' && (!one(operation.phase, ['idle', 'admitting', 'capturing', 'stopping', 'unknown']) || storage !== null)) return null;
+       if (operation.operation === 'choose-images' && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown'])) return null;
+-      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup', 'generate-upload-key', 'recover-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'use-apple-distribution-key'].includes(operation.operation as string) &&
++      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup', 'generate-upload-key', 'recover-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'assemble-apple-p12', 'use-apple-distribution-key'].includes(operation.operation as string) &&
+           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
+-      if (['generate-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key'].includes(operation.operation as string) && !one(operation.phase, ['idle', 'admitting', 'mutating', 'stopping', 'unknown'])) return null;
++      if (['generate-upload-key', 'apple-profile-setup', 'prepare-apple-distribution-key', 'assemble-apple-p12'].includes(operation.operation as string) && !one(operation.phase, ['idle', 'admitting', 'mutating', 'stopping', 'unknown'])) return null;
+       if (['recover-upload-key', 'use-apple-distribution-key'].includes(operation.operation as string) && (!one(operation.phase, ['idle', 'admitting', 'stopping', 'unknown']) || storage !== null)) return null;
+       if (isCredentialBackupOperation(operation.operation) && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'mutating', 'stopping', 'unknown'])) return null;
+       if (Object.hasOwn(operation, 'backupDelivered') && (operation.backupDelivered !== true || operation.operation !== 'prepare-backup-export' ||
+diff --git a/desktop/src/appleDistributionKeySetupProtocol.ts b/desktop/src/appleDistributionKeySetupProtocol.ts
+--- a/desktop/src/appleDistributionKeySetupProtocol.ts
++++ b/desktop/src/appleDistributionKeySetupProtocol.ts
+@@ -53,7 +53,7 @@
+
+ export type AppleDistributionKeyInputBase = Omit<PrepareAppleProvisioning,
+   'mode' | 'reference' | 'newApplication' | 'displayName' | 'p12RecordId' | 'p12RecordRevision' | 'keyRecordId' | 'keyRecordRevision'>;
+-function selectedBase(project: LocalStoreProject | null, assets: AssetDisplayState | null, retained: false | 'prepare-apple-distribution-key' | 'use-apple-distribution-key'): AppleDistributionKeyInputBase | null {
++function selectedBase(project: LocalStoreProject | null, assets: AssetDisplayState | null, retained: false | 'prepare-apple-distribution-key' | 'use-apple-distribution-key' | 'assemble-apple-p12'): AppleDistributionKeyInputBase | null {
+   const s = assets?.status, c = s?.context;
+   if (!project || project.inputIssue || project.dirtyDraft || project.snapshotPending || project.versionPending || project.saveRecoveryRequired ||
+       !parseSavedConfigContent(project.savedConfig) || !parseAndroidBuildSavedVersion(project.savedVersion) ||
+@@ -96,6 +96,14 @@
+   return current && sameOfflineData(current, original) ? current : null;
+ }
+
++// Correlate the already-started P12 original by its ACTUAL operation name.
++// No status relabeling, input adoption or new Prepare admission is allowed.
++export function retainedAppleP12KeyInput(project: LocalStoreProject | null, assets: AssetDisplayState | null,
++  original: unknown, operation: 'use-apple-distribution-key' | 'assemble-apple-p12'): AppleDistributionKeyInputBase | null {
++  const current = selectedBase(project, assets, operation);
++  return current && sameOfflineData(current, original) ? current : null;
++}
++
+ export function appleDistributionKeyResultCopy(result: AppleDistributionKeyResult | null, saved: AppleDistributionKeySavedReference | null,
+   outcome: OfflinePreflightOutcome | null): { title: string; detail: string } | null {
+   if (saved) return outcome === 'complete' ? {
+diff --git a/desktop/src/appleProvisioningTypes.ts b/desktop/src/appleProvisioningTypes.ts
+--- a/desktop/src/appleProvisioningTypes.ts
++++ b/desktop/src/appleProvisioningTypes.ts
+@@ -1,13 +1,14 @@
+ // Public comparison/status DATA. Native owns the selected P8, issuer-wide
+ // journal, consent, single provider write and every original cleanup join.
+ import type { AppleDistributionCertificateMode, AppleDistributionCertificateResult, AppleCertificateRecoveryHistory } from './appleDistributionCertificateSetupProtocol.ts';
++import type { AppleP12Mode, AppleP12Result } from './appleP12SetupProtocol.ts';
+ import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
+ import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
+ import type { SavedConfigContent, OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
+
+ import type { AppleDistributionKeyMode, AppleDistributionKeyResult, AppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
+ import type { AppleProfileMode, AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
+-export type AppleProvisioningMode = 'review' | 'register' | 'reconcile' | AppleProfileMode | AppleDistributionKeyMode | AppleDistributionCertificateMode;
++export type AppleProvisioningMode = 'review' | 'register' | 'reconcile' | AppleProfileMode | AppleDistributionKeyMode | AppleDistributionCertificateMode | AppleP12Mode;
+ export interface AppleProvisioningIdentity { operationId: string; ownerGeneration: string }
+ export interface PrepareAppleProvisioning {
+   projectId: string; draftRevision: number; baselineGeneration: number;
+@@ -15,11 +16,11 @@
+   credentialContextRevision: number; recordId: string; recordRevision: number;
+   executionMode: 'local'; platform: 'ios'; mode: AppleProvisioningMode;
+   reference: AppleProvisioningIdentity | null; newApplication: boolean; displayName: string;
+-  p12RecordId?: string; p12RecordRevision?: number;
++  p12RecordId?: string | null; p12RecordRevision?: number | null;
+   keyRecordId?: string; keyRecordRevision?: number;
+ }
+ export interface AppleProvisioningContext extends PrepareAppleProvisioning { operation: 'apple-bundle-provisioning' }
+-export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1' | 'local-ios-certificate-review-v1' | 'local-ios-certificate-create-v1' | 'local-ios-certificate-reconcile-v1';
++export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1' | 'local-ios-certificate-review-v1' | 'local-ios-certificate-create-v1' | 'local-ios-certificate-reconcile-v1' | 'local-ios-p12-review-v1' | 'local-ios-p12-reuse-v1' | 'local-ios-p12-save-v1';
+ export interface StartAppleProvisioning extends AppleProvisioningIdentity { consentVersion: AppleProvisioningConsent }
+ export type AppleProvisioningReason = 'none' | 'cancelled' | 'context-changed' | 'document-lost' | 'shutdown' | 'timed-out' |
+   'protocol-error' | 'runtime-unavailable' | 'intent-expired' | 'stale-intent' | 'saved-source-changed' | 'saved-source-invalid' |
+@@ -56,9 +57,10 @@
+ }
+ export interface AppleProvisioningOperation extends AppleProvisioningIdentity {
+   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
+-  outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | AppleDistributionKeyResult | AppleDistributionCertificateResult | null;
++  outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | AppleDistributionKeyResult | AppleDistributionCertificateResult | AppleP12Result | null;
+   savedProfile?: AppleProfileSavedReference;
+   savedKey?: AppleDistributionKeySavedReference;
++  savedP12?: AppleProfileSavedReference;
+   profileRecovery?: AppleProfileRecoveryHistory;
+   certificateRecovery?: AppleCertificateRecoveryHistory;
+   recovery: AppleRecoveryHistory | null;
+diff --git a/desktop/src/appleProvisioningProtocol.ts b/desktop/src/appleProvisioningProtocol.ts
+--- a/desktop/src/appleProvisioningProtocol.ts
++++ b/desktop/src/appleProvisioningProtocol.ts
+@@ -2,6 +2,7 @@
+ // provider JSON, journal row, issuer override, secret or local path is accepted.
+ import { APPLE_DISTRIBUTION_CERTIFICATE_MODES, isAppleDistributionCertificateMode, parseAppleDistributionCertificateResult,
+   parseAppleCertificateRecoveryHistory, appleCertificateHistoryUnresolved } from './appleDistributionCertificateSetupProtocol.ts';
++import { APPLE_P12_MODES, isAppleP12Mode, parseAppleP12Result, parseAppleP12SavedReference } from './appleP12SetupProtocol.ts';
+ import { parseAppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
+ import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
+ import { APPLE_DISTRIBUTION_KEY_MODES, isAppleDistributionKeyMode, parseAppleDistributionKeyResult, parseAppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
+@@ -17,7 +18,7 @@
+ export type AppleProvisioningCommand = 'prepare_apple_provisioning' | 'start_apple_provisioning' |
+   'apple_provisioning_status' | 'cancel_apple_provisioning';
+ const encoder = new TextEncoder();
+-const modes = ['review', 'register', 'reconcile', ...APPLE_PROFILE_MODES, ...APPLE_DISTRIBUTION_KEY_MODES, ...APPLE_DISTRIBUTION_CERTIFICATE_MODES] as const;
++const modes = ['review', 'register', 'reconcile', ...APPLE_PROFILE_MODES, ...APPLE_DISTRIBUTION_KEY_MODES, ...APPLE_DISTRIBUTION_CERTIFICATE_MODES, ...APPLE_P12_MODES] as const;
+ const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'] as const;
+ const outcomes = ['complete', 'refused', 'cancelled', 'timed-out', 'failed', 'unknown'] as const;
+ const reasons = ['none', 'cancelled', 'context-changed', 'document-lost', 'shutdown', 'timed-out', 'protocol-error',
+@@ -64,15 +65,22 @@
+   } catch { return null; }
+ }
+ export function appleProvisioningConsent(mode: AppleProvisioningMode): AppleProvisioningConsent {
+-  if (isAppleProfileMode(mode) || isAppleDistributionKeyMode(mode) || isAppleDistributionCertificateMode(mode)) return `local-ios-${mode}-v1`;
++  if (isAppleProfileMode(mode) || isAppleDistributionKeyMode(mode) || isAppleDistributionCertificateMode(mode) || isAppleP12Mode(mode)) return `local-ios-${mode}-v1`;
+   return mode === 'register' ? 'local-ios-bundle-register-v1' : mode === 'reconcile' ? 'local-ios-bundle-reconcile-v1' : 'local-ios-bundle-review-v1';
+ }
+ const requestFields = (value: unknown): readonly string[] => {
+   if (value && typeof value === 'object' && 'mode' in value) {
++    if (isAppleP12Mode(value.mode)) return [...fields, 'keyRecordId', 'keyRecordRevision', 'p12RecordId', 'p12RecordRevision'];
+     if (isAppleProfileMode(value.mode)) return [...fields, 'p12RecordId', 'p12RecordRevision'];
+     if (isAppleDistributionCertificateMode(value.mode)) return [...fields, 'keyRecordId', 'keyRecordRevision'];
+   }
+   return fields;
++};
++const contextFields = (value: unknown): readonly string[] => {
++  const names = requestFields(value);
++  return value && typeof value === 'object' && 'mode' in value && isAppleP12Mode(value.mode) &&
++    !Object.hasOwn(value, 'p12RecordId') && !Object.hasOwn(value, 'p12RecordRevision') ?
++    names.filter(name => name !== 'p12RecordId' && name !== 'p12RecordRevision') : names;
+ };
+ function request(value: unknown): value is PrepareAppleProvisioning {
+   if (!keys(value, requestFields(value)) || typeof value.projectId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.projectId) ||
+@@ -81,16 +89,26 @@
+       !token(value.recordId) || !counter(value.recordRevision, 0xfffffffe) || value.recordRevision < 1 || value.executionMode !== 'local' ||
+       value.platform !== 'ios' || !oneOf(value.mode, modes) || !appleDisplayName(value.displayName) || value.newApplication !== (value.mode === 'register')) return false;
+   if (isAppleProfileMode(value.mode) && (!token(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1)) return false;
+-  if (isAppleDistributionCertificateMode(value.mode) && (!token(value.keyRecordId) || value.keyRecordId === '0'.repeat(32) ||
++  if ((isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode)) && (!token(value.keyRecordId) || value.keyRecordId === '0'.repeat(32) ||
+       value.keyRecordId === value.recordId || !counter(value.keyRecordRevision, 0xfffffffe) || value.keyRecordRevision < 1)) return false;
+-  return value.mode === 'review' || value.mode === 'profile-review' || value.mode === 'key-review' || value.mode === 'certificate-review' ?
+-    value.reference === null : identity(value.reference) && (!isAppleDistributionCertificateMode(value.mode) ||
++  if (isAppleP12Mode(value.mode)) {
++    const absent = value.p12RecordId === null && value.p12RecordRevision === null;
++    if (value.recordId === '0'.repeat(32) || !absent && (!token(value.p12RecordId) || value.p12RecordId === '0'.repeat(32) ||
++        [value.recordId, value.keyRecordId].includes(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1) ||
++        value.mode === 'p12-save' && !absent || value.mode === 'p12-reuse' && absent) return false;
++  }
++  return value.mode === 'review' || value.mode === 'profile-review' || value.mode === 'key-review' || value.mode === 'certificate-review' || value.mode === 'p12-review' ?
++    value.reference === null : identity(value.reference) && (!(isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode)) ||
+       value.reference.operationId !== '0'.repeat(32) && value.reference.ownerGeneration !== '0'.repeat(32));
+ }
+ export function parseAppleProvisioningRequest(value: unknown): PrepareAppleProvisioning | null {
+   try { const v = copyBoundedComparisonData(value, 8192); return request(v) ? v : null; } catch { return null; }
+ }
+ export function appleProvisioningContext(value: PrepareAppleProvisioning): AppleProvisioningContext {
++  if (isAppleP12Mode(value.mode) && value.p12RecordId === null && value.p12RecordRevision === null) {
++    const { p12RecordId: _id, p12RecordRevision: _revision, ...context } = value;
++    return { ...context, operation: 'apple-bundle-provisioning' };
++  }
+   return { ...value, operation: 'apple-bundle-provisioning' };
+ }
+ export function encodeAppleProvisioningRequest(command: AppleProvisioningCommand, value: unknown): Uint8Array | null {
+@@ -107,6 +125,7 @@
+   } catch { return null; }
+ }
+ function result(value: unknown, op: Record<string, unknown>, context: AppleProvisioningContext): boolean {
++  if (isAppleP12Mode(context.mode)) return parseAppleP12Result(value, context) !== null;
+   if (isAppleDistributionCertificateMode(context.mode)) return parseAppleDistributionCertificateResult(value, context.mode, op.operationId, context.reference) !== null;
+   if (isAppleDistributionKeyMode(context.mode)) return parseAppleDistributionKeyResult(value, context.mode) !== null;
+   if (isAppleProfileMode(context.mode)) return parseAppleProfileSetupResult(value, context.mode) !== null;
+@@ -139,12 +158,23 @@
+         !oneOf(v.availability, ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified'])) return null;
+     const op = v.operation;
+     if (op === null) return v as unknown as AppleProvisioningStatus;
+-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'profileRecovery') ? ['profileRecovery'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'savedKey') ? ['savedKey'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'certificateRecovery') ? ['certificateRecovery'] : [])]) ||
++    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'profileRecovery') ? ['profileRecovery'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'savedKey') ? ['savedKey'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'certificateRecovery') ? ['certificateRecovery'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'savedP12') ? ['savedP12'] : [])]) ||
+         !token(op.operationId) || !token(op.ownerGeneration) || !oneOf(op.phase, phases) || typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, reasons) ||
+-        !keys(op.context, [...requestFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
++        !keys(op.context, [...contextFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
+     const prepared = { ...op.context }; delete prepared.operation;
++    if (isAppleP12Mode(prepared.mode)) {
++      if (!Object.hasOwn(prepared, 'p12RecordId') && !Object.hasOwn(prepared, 'p12RecordRevision')) {
++        prepared.p12RecordId = null; prepared.p12RecordRevision = null;
++      } else if (prepared.p12RecordId === null || prepared.p12RecordRevision === null) return null;
++    }
+     if (!request(prepared)) return null;
+-    if (isAppleDistributionCertificateMode(prepared.mode) && (op.operationId === '0'.repeat(32) || op.ownerGeneration === '0'.repeat(32))) return null;
++    if ((isAppleDistributionCertificateMode(prepared.mode) || isAppleP12Mode(prepared.mode)) && (op.operationId === '0'.repeat(32) || op.ownerGeneration === '0'.repeat(32))) return null;
++    if (Object.hasOwn(op, 'savedP12')) {
++      const savedP12 = parseAppleP12SavedReference(op.savedP12);
++      if (!savedP12 || [prepared.recordId, prepared.keyRecordId, prepared.p12RecordId].includes(savedP12.recordId) ||
++          prepared.mode !== 'p12-save' || op.phase !== 'terminal' || !oneOf(op.outcome, outcomes) || op.outcome === 'unknown' ||
++          op.reason === 'cleanup-unknown' || op.outcome === 'complete' && parseAppleP12Result(op.result, prepared)?.decision !== 'assembled') return null;
++    }
+     const saved = Object.hasOwn(op, 'savedProfile') ? parseAppleProfileSavedReference(op.savedProfile) : null;
+     if (Object.hasOwn(op, 'savedProfile') && (!saved || saved.revisionCounter !== 1 ||
+         [prepared.recordId, prepared.p12RecordId].includes(saved.recordId) ||
+@@ -209,6 +239,9 @@
+     })() ||
+     before.savedProfile !== undefined && after.savedProfile === undefined && (() => {
+       const { savedProfile: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);
++    })() ||
++    before.savedP12 !== undefined && after.savedP12 === undefined && (() => {
++      const { savedP12: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);
+     })();
+   return (before.intentUsable || !after.intentUsable) && phases.indexOf(after.phase) >= phases.indexOf(before.phase);
+ }
+diff --git a/desktop/src/appleProvisioningController.ts b/desktop/src/appleProvisioningController.ts
+--- a/desktop/src/appleProvisioningController.ts
++++ b/desktop/src/appleProvisioningController.ts
+@@ -1,5 +1,7 @@
+ // App-held UI coordination only. Neither promises, events nor comparison
+ // counters can settle the original native Session or its account-wide journal.
++import { appleP12InputBase, retainedAppleP12Input, isAppleP12Mode } from './appleP12SetupProtocol.ts';
++import type { AppleP12Result } from './appleP12SetupProtocol.ts';
+ import { appleCertificateKeyChoices, appleDistributionCertificateInputBase, retainedAppleDistributionCertificateInput, isAppleDistributionCertificateMode } from './appleDistributionCertificateSetupProtocol.ts';
+ import type { AppleCertificateKeySelection, AppleDistributionCertificateResult, AppleCertificateRecoveryHistory } from './appleDistributionCertificateSetupProtocol.ts';
+ import { appleDistributionKeyInputBase, retainedAppleDistributionKeyInput, isAppleDistributionKeyMode } from './appleDistributionKeySetupProtocol.ts';
+@@ -24,13 +26,13 @@
+   now?(): number;
+ }
+ type Base = Omit<PrepareAppleProvisioning, 'mode' | 'reference' | 'newApplication' | 'displayName'>;
+-type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate';
+-const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
++type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate' | 'p12';
++const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleP12Mode(mode) ? 'p12' : isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
+ interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
+ interface Attempt {
+   request: PrepareAppleProvisioning; witness: Witness; epoch: number; after: number;
+   previous: AppleProvisioningIdentity | null; identity: AppleProvisioningIdentity | null;
+-  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; certificateReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
++  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; certificateReviewExpires: number | null; p12ReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
+   prepareJoined: boolean; startClaimed: boolean; startJoined: boolean; terminalRead: boolean;
+ }
+ interface Reference { identity: AppleProvisioningIdentity; witness: Witness; displayName: string; expires: number | null }
+@@ -47,6 +49,8 @@
+   previousCertificateAttempts: AppleCertificateRecoveryHistory | null; certificateContinueReason: string | null;
+   certificateKeyChoices: readonly AppleCertificateKeySelection[]; certificateKeySelection: AppleCertificateKeySelection | null;
+   certificateResult: AppleDistributionCertificateResult | null; certificateTerminalRead: boolean;
++  p12Result: AppleP12Result | null; savedP12: AppleProfileSavedReference | null; p12TerminalRead: boolean;
++  p12ReviewReference: AppleProvisioningIdentity | null; p12ReviewReason: string | null; p12ReuseReason: string | null; p12SaveReason: string | null;
+   certificateReviewReference: AppleProvisioningIdentity | null; certificateAttemptReference: AppleProvisioningIdentity | null;
+   certificateReviewReason: string | null; certificateCreateReason: string | null; certificateReconcileReason: string | null;
+   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
+@@ -90,6 +94,7 @@
+   private keyReview: Reference | null = null;
+   private certificateKey: AppleCertificateKeySelection | null = null;
+   private certificateReview: Reference | null = null;
++  private p12Review: (Reference & { action: 'p12-reuse' | 'p12-save' }) | null = null;
+   private certificateAttempt: Reference | null = null;
+   private restoredCertificate: Reference | null = null;
+   private inputFamily: InputFamily | null = null;
+@@ -121,7 +126,7 @@
+       if (this.selectionPending) return null;
+       const project = this.source.project(), assets = this.source.assets();
+       const family = requestedFamily ?? (assets?.scope.purpose === 'provisioning' ? 'profile' : 'bundle');
+-      let base = family === 'certificate' ? appleDistributionCertificateInputBase(project, assets, this.certificateKey) : family === 'key' ? appleDistributionKeyInputBase(project, assets) :
++      let base = family === 'p12' ? appleP12InputBase(project, assets, this.certificateKey) : family === 'certificate' ? appleDistributionCertificateInputBase(project, assets, this.certificateKey) : family === 'key' ? appleDistributionKeyInputBase(project, assets) :
+         family === 'profile' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
+       const a = this.attempt;
+       if (!base && family === 'key' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
+@@ -129,6 +134,9 @@
+       }
+       if (!base && family === 'certificate' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionCertificateMode(a.request.mode)) {
+         base = retainedAppleDistributionCertificateInput(project, assets, this.certificateKey, a.witness.base);
++      }
++      if (!base && family === 'p12' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleP12Mode(a.request.mode)) {
++        base = retainedAppleP12Input(project, assets, this.certificateKey, a.witness.base, a.request.mode);
+       }
+       if (!base && family === 'profile' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
+         base = retainedAppleProfileInput(project, assets, a.witness.base);
+@@ -158,6 +166,7 @@
+     const witness = this.capture(family);
+     if (family === 'key' && !witness) return 'Choose the App Store Connect key, unlock encrypted storage, then assess and assign its P8, Key ID and Issuer ID in Set up Apple signing. Save the app settings and read the saved version first. No P12 is needed.';
+     if (family === 'certificate' && !witness) return 'Choose the current encrypted signing key and assign the App Store Connect P8 in Set up Apple signing. Unlock storage and save the app settings/version first. A previous saved-key result is not a current selection.';
++    if (family === 'p12' && !witness) return 'Choose a current saved signing key above, unlock encrypted storage and assign the App Store Connect P8 in Set up Apple signing. To reuse a P12, assess and assign it in that same context first. Save the app settings and read its version.';
+     if (family === 'profile' && !witness?.base.p12RecordId) return 'Choose Set up Apple signing, unlock encrypted storage, then assess and assign the existing P12/password and App Store Connect P8 in that context. Save the app settings and read its saved version first.';
+     if (!witness) return 'Select This Mac → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
+     if (!appleDisplayName(this.displayName)) return 'Enter an explicit Bundle ID display name (1–128 characters, no control characters).';
+@@ -198,6 +207,7 @@
+     const base = this.baseReason(inputFamily(mode)); if (base) return base;
+     if (mode === 'certificate-create' && !this.referenceCurrent(this.certificateReview)) return 'Finish a fresh certificate check for this saved key first. Its separate request review is one-use and expires; an old receipt cannot restore it.';
+     if (mode === 'certificate-reconcile' && !this.certificateReconciliationReference()) return 'Choose a matching earlier certificate request. A read-only check never repeats issuance or clears earlier uncertainty.';
++    if ((mode === 'p12-reuse' || mode === 'p12-save') && (!this.referenceCurrent(this.p12Review) || this.p12Review.action !== mode)) return 'Finish a fresh P12 review for the same saved key and assigned inputs. Only its exact reuse or new-save choice may continue; an old result cannot restore it.';
+     if (mode === 'key-prepare' && !this.referenceCurrent(this.keyReview)) return 'Finish a fresh existing-key check first. Its one-use local-key review expires and cannot be restored from an old result.';
+     if (mode === 'profile-reuse' || mode === 'profile-create') {
+       if (!this.referenceCurrent(this.profileReview) || this.profileReview?.action !== mode) return 'Finish a current signing review first. Only its exact reuse or create choice can continue.';
+@@ -226,6 +236,8 @@
+       !this.issue && isAppleDistributionKeyMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+     const certificateTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
+       !this.issue && isAppleDistributionCertificateMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
++    const p12TerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
++      !this.issue && isAppleP12Mode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+     const cancelId = a?.identity ?? (active(op) ? op : null);
+     return Object.freeze({ native: !!this.original && !this.connectionRetired, visible: this.visible, initialized: this.initialized,
+       listening: !!this.off, reading: !!this.read, pending: this.action?.kind ?? null, requestPending: !!this.action && !this.action.joined,
+@@ -237,6 +249,10 @@
+       result: readResult?.scope === 'local-ios-bundle-provisioning' ? readResult : null,
+       profileResult: readResult?.scope === 'local-ios-profile-setup' ? readResult : null,
+       certificateResult: certificateTerminalRead && readResult?.scope === 'local-ios-distribution-certificate' ? readResult : null, certificateTerminalRead,
++      p12Result: p12TerminalRead && readResult?.scope === 'local-ios-p12-setup' ? readResult : null,
++      savedP12: p12TerminalRead ? op?.savedP12 ?? null : null, p12TerminalRead,
++      p12ReviewReference: this.referenceCurrent(this.p12Review) ? this.p12Review.identity : null,
++      p12ReviewReason: this.reason('p12-review'), p12ReuseReason: this.reason('p12-reuse'), p12SaveReason: this.reason('p12-save'),
+       certificateKeyChoices: appleCertificateKeyChoices(this.source.project(), this.source.assets()), certificateKeySelection: this.certificateKey,
+       certificateReviewReference: this.referenceCurrent(this.certificateReview) ? this.certificateReview.identity : null,
+       certificateAttemptReference: this.restoredCertificate?.identity ?? this.certificateAttempt?.identity ?? null,
+@@ -261,13 +277,14 @@
+       retained: this.ownerReason() !== null, cancelRequested: this.cancelRequested });
+   }
+   private publish(): void { this.state = this.projected(); if (!this.disposed) for (const listener of this.listeners) listener(); }
++  private clearP12Review(): void { this.p12Review = null; }
+   private clearCertificateReview(): void { this.certificateReview = null; this.restoredCertificate = null; }
+   private clearConsent(): void {
+     this.acknowledged = false; this.consentUntil = null;
+     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
+   }
+   private fail(issue: Issue = 'unconfirmed'): void {
+-    this.issue ??= issue; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
++    this.issue ??= issue; this.clearConsent(); this.clearCertificateReview(); this.clearP12Review(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
+     if (this.attempt) this.attempt.retired = true;
+     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
+   }
+@@ -279,7 +296,7 @@
+     this.publish();
+   };
+   invalidate = (): void => {
+-    this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
++    this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.clearP12Review(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
+     if (this.attempt) this.attempt.retired = true;
+     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
+     this.publish();
+@@ -327,7 +344,7 @@
+       try { this.off?.(); } catch { this.fail(); return; }
+     }
+     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
+-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.clearCertificateReview(); this.certificateAttempt = null; this.certificateKey = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
++    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.clearCertificateReview(); this.clearP12Review(); this.certificateAttempt = null; this.certificateKey = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+     if (!api) return;
+     const pending = (async () => {
+       try {
+@@ -377,6 +394,12 @@
+           this.now() < a.startedAt + 300000) {
+         this.certificateReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+       }
++      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'p12-review' && op.outcome === 'complete' &&
++          op.result?.scope === 'local-ios-p12-setup' && ['assemble-review', 'reuse-review'].includes(op.result.decision) &&
++          this.now() < a.startedAt + 300000) {
++        this.p12Review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000,
++          action: op.result.decision === 'reuse-review' ? 'p12-reuse' : 'p12-save' });
++      }
+       if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'profile-review' && op.outcome === 'complete' &&
+           op.result?.scope === 'local-ios-profile-setup' && ['reuse-available', 'create-available'].includes(op.result.decision) &&
+           this.now() < a.startedAt + 300000) {
+@@ -464,7 +487,7 @@
+     // old comparison locally before publishing; no pending original is replaced.
+     if (this.inputFamily !== family) {
+       if (continuation || this.ownerReason()) return Promise.resolve();
+-      this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null;
++      this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.clearP12Review(); this.review = null; this.restored = null;
+       this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
+       this.declaredNew = false; if (this.attempt) this.attempt.retired = true;
+       this.inputFamily = family; this.witness = target;
+@@ -477,7 +500,8 @@
+         !sameWitness(target, this.witness) || !sameWitness(target, this.capture(family)) ||
+         continuation && (this.original !== continuation.api || this.witness !== continuation.witness || this.epoch !== continuation.epoch) ||
+         this.disposed || !this.visible || this.reason(mode) || !this.witness || !this.status) return Promise.resolve();
+-    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' ? null :
++    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' || mode === 'p12-review' ? null :
++      mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.identity :
+       mode === 'certificate-create' ? this.certificateReview?.identity : mode === 'certificate-reconcile' ? this.certificateReconciliationReference()?.identity : mode === 'key-prepare' ? this.keyReview?.identity :
+       mode === 'register' ? this.review?.identity : mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity :
+       mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
+@@ -486,8 +510,10 @@
+     const a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
+       previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null, keyReviewExpires: mode === 'key-prepare' ? this.keyReview?.expires ?? null : null,
+       certificateReviewExpires: mode === 'certificate-create' ? this.certificateReview?.expires ?? null : null,
++      p12ReviewExpires: mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.expires ?? null : null,
+       retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false };
+     this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
++    if (isAppleP12Mode(mode)) this.clearP12Review(); // An uncertain Prepare never restores save/reuse consent.
+     if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
+     if (isAppleDistributionCertificateMode(mode)) this.certificateReview = null; // Lost Prepare never restores issuance review.
+     if (mode === 'register') this.review = null; // Consumed once, including failed/lost Prepare.
+@@ -505,7 +531,7 @@
+         if (this.action === slot) this.action = null;
+         const op = this.status?.operation;
+         if (!this.issue && this.current(a) && a.prepareAccepted && sameAppleIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable) {
+-          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity); this.acknowledged = false;
++          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity, a.p12ReviewExpires ?? Infinity); this.acknowledged = false;
+           if (this.now() >= this.consentUntil) this.invalidate();
+           else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed) this.invalidate(); }, this.consentUntil - this.now());
+         }
+diff --git a/desktop/src/components/AppleBundleRegistration.tsx b/desktop/src/components/AppleBundleRegistration.tsx
+--- a/desktop/src/components/AppleBundleRegistration.tsx
++++ b/desktop/src/components/AppleBundleRegistration.tsx
+@@ -1,3 +1,5 @@
++import { AppleP12Setup } from './AppleP12Setup.tsx';
++import { isAppleP12Mode } from '../appleP12SetupProtocol.ts';
+ import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
+ import { AppleDistributionCertificateSetup } from './AppleDistributionCertificateSetup.tsx';
+ import { isAppleDistributionCertificateMode } from '../appleDistributionCertificateSetupProtocol.ts';
+@@ -14,7 +16,7 @@
+   // Display-only saved-configuration labels, not account/team authority.
+   savedBundleId?: string | null; configuredTeamId?: string | null;
+ }
+-const modeLabel: Record<AppleProvisioningMode, string> = { review: 'reuse-first review', register: 'Bundle ID registration', reconcile: 'read-only reconciliation', 'profile-review': 'signing setup check', 'profile-reuse': 'reuse and save profile', 'profile-create': 'create and save profile', 'profile-reconcile': 'read-only profile check', 'key-review': 'existing-key check', 'key-prepare': 'create and save local key', 'certificate-review': 'existing-certificate check', 'certificate-create': 'one certificate request', 'certificate-reconcile': 'earlier certificate check' };
++const modeLabel: Record<AppleProvisioningMode, string> = { review: 'reuse-first review', register: 'Bundle ID registration', reconcile: 'read-only reconciliation', 'profile-review': 'signing setup check', 'profile-reuse': 'reuse and save profile', 'profile-create': 'create and save profile', 'profile-reconcile': 'read-only profile check', 'key-review': 'existing-key check', 'key-prepare': 'create and save local key', 'certificate-review': 'existing-certificate check', 'certificate-create': 'one certificate request', 'certificate-reconcile': 'earlier certificate check', 'p12-review': 'P12 setup check', 'p12-reuse': 'existing P12 check', 'p12-save': 'new encrypted P12 save' };
+ const consent: Record<'review' | 'register' | 'reconcile', string> = {
+   review: 'Read Bundle ID registration visible to my selected App Store Connect key. Prepare or upgrade MRK’s private provisioning journal if needed. No registration write is authorized.',
+   register: 'For this declared new app, recheck existing Bundle IDs, durably record the attempt, and send at most one registration request if still needed. Do not retry an uncertain write. No certificate, profile, build or release is authorized.',
+@@ -54,7 +56,7 @@
+   return <section className="card" aria-labelledby="apple-bundle-registration-title">
+     <h2 id="apple-bundle-registration-title">Apple setup</h2>
+     <p>Reuse first. Review the saved Bundle ID with the selected API key before considering one new-app registration.</p>
+-    <p><strong>Separate steps:</strong> Bundle ID registration, existing-profile setup, local-key preparation and certificate requests each need their own confirmation below. None starts a build or release.</p>
++    <p><strong>Separate steps:</strong> Bundle ID registration, existing-profile setup, local-key preparation, certificate requests and P12 setup each need their own confirmation below. None starts a build or release.</p>
+     {(savedBundleId || configuredTeamId) && <p>Saved Bundle ID: <code>{savedBundleId ?? 'not available'}</code> · Configured team (not verified): <code>{configuredTeamId ?? 'not available'}</code></p>}
+     <p>Prepare is an explicit local action: it may initialize or reuse MRK’s private state. It does not grant external agents access. Apple requests require the separate confirmation below.</p>
+     <label>Apple setup display name
+@@ -75,7 +77,7 @@
+       <button disabled={!state.ios || !!state.registerReason} onClick={() => void controller.prepare('register')}>Prepare one registration</button>
+       {state.registerReason && <p className="save-note">{state.registerReason}</p>}
+     </details>
+-    {state.consent && !isAppleProfileMode(state.consent.mode) && !isAppleDistributionKeyMode(state.consent.mode) && !isAppleDistributionCertificateMode(state.consent.mode) && <div className="notice">
++    {state.consent && !isAppleProfileMode(state.consent.mode) && !isAppleDistributionKeyMode(state.consent.mode) && !isAppleDistributionCertificateMode(state.consent.mode) && !isAppleP12Mode(state.consent.mode) && <div className="notice">
+       <h3>Confirm {modeLabel[state.consent.mode]}</h3>
+       <p>{consent[state.consent.mode as 'review' | 'register' | 'reconcile']}</p>
+       <p>Apple may log or rate-limit requests. Cancel cannot undo a request already sent. The native operation keeps uncertain outcomes for read-only reconciliation.</p>
+@@ -116,6 +118,7 @@
+     <AppleSigningSetup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
+     <AppleDistributionKeySetup controller={controller} state={state} onKeyCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
+     <AppleDistributionCertificateSetup controller={controller} state={state} onKeyCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
++    <AppleP12Setup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
+     <details open={!!state.registrationReference}>
+       <summary>Read back a prior registration without retrying</summary>
+       <p>This checks the selected prior attempt without repeating its write. Missing history or uncertain cleanup never means it is safe to register again.</p>
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -2122,7 +2122,7 @@
+               navigate('credentials');
+             }}
+             onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
+-          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
++          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.p12Result?.decision === 'assembled' && appleProvisioningState.savedP12 === null || appleProvisioningState.p12Result?.decision === 'blocked' && appleProvisioningState.p12Result.reason === 'account-pending' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+           initializationState={initializationState} versionEditState={versionEditState}
+           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
+           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} /></>}
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {

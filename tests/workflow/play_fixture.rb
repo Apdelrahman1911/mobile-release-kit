@@ -13,7 +13,7 @@ require "net/http"
 
 class PlayFixture
   attr_reader :service, :supply_client, :requests, :edits, :image_bytes
-  attr_accessor :state, :before_request, :after_request, :persist_bundles_outside_edit
+  attr_accessor :state, :before_request, :after_request, :persist_bundles_outside_edit, :user
 
   def initialize(code: 200)
     @code = code
@@ -21,6 +21,8 @@ class PlayFixture
     @image_sequence = 0
     @requests = []
     @edits = {}
+    @edit_users = {}
+    @user = :original
     @image_bytes = {}
     @state = { "tracks" => {}, "bundles" => [], "listings" => {}, "images" => {}, "mappings" => {} }
     @service = Google::Apis::AndroidpublisherV3::AndroidPublisherService.new
@@ -79,6 +81,7 @@ class PlayFixture
     upload = command.respond_to?(:upload_source) && command.upload_source
     entry = {
       method: command.method, path: path, body: body, params: clone(command.params),
+      user: @user,
       command_class: command.class.name,
       query: clone(command.query), retries: command.options.retries,
       upload_sha256: upload && Digest::SHA256.hexdigest(upload_bytes(upload)),
@@ -93,9 +96,14 @@ class PlayFixture
     resource = path.delete_prefix(prefix)
     method = command.method
     data = if resource.empty? && method == :post
+             # Publisher's transaction contract: one edit per user; a commit
+             # invalidates every other user's edits too. This is not a process
+             # or HTTP-finality model (developers.google.com/android-publisher/edits).
+             @edit_users.select { |_id, user| user == @user }.each_key { |old| @edits.delete(old); @edit_users.delete(old) }
              @sequence += 1
              id = "edit-#{@sequence}"
              @edits[id] = clone(state)
+             @edit_users[id] = @user
              { "id" => id }
            else
              respond_edit(method, resource, body, upload)
@@ -108,20 +116,22 @@ class PlayFixture
     id, suffix = resource.delete_prefix("/").split("/", 2)
     if id.end_with?(":commit")
       edit_id = id.delete_suffix(":commit")
-      @state = clone(@edits.fetch(edit_id))
-      @edits.delete(edit_id)
+      @state = clone(current_edit(edit_id))
+      @edits.clear
+      @edit_users.clear
       return { "id" => edit_id }
     end
     if id.end_with?(":validate")
       edit_id = id.delete_suffix(":validate")
-      @edits.fetch(edit_id)
+      current_edit(edit_id)
       return { "id" => edit_id }
     end
     if method == :delete && suffix.nil?
       @edits.delete(id)
+      @edit_users.delete(id)
       return {}
     end
-    pending = @edits.fetch(id)
+    pending = current_edit(id)
     segments = suffix.to_s.split("/")
     if segments == ["bundles"]
       return { "bundles" => clone(pending.fetch("bundles")) } if method == :get
@@ -174,6 +184,13 @@ class PlayFixture
       return { "image" => add_image(language, type, File.binread(upload), store: pending) }
     end
     raise "Unexpected Publisher fixture operation #{method} #{resource}"
+  end
+
+  def current_edit(id)
+    unless @edits.key?(id) && @edit_users[id] == @user
+      raise Google::Apis::ClientError.new("invalidated synthetic edit", status_code: 400)
+    end
+    @edits.fetch(id)
   end
 
   def image_connection(host, port, proxy)

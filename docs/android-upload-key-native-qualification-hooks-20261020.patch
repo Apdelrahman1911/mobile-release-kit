@@ -1,0 +1,928 @@
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -6747,14 +6747,14 @@
+     /// receipts or custody owners. Slots are never removed or reused. Keeping
+     /// the original work book does not retain its retired private payloads.
+     pub(super) struct SessionBook {
+-        originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
++        pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
+         // A distinct one-use instrumented P2 admission, never an asset/iOS
+         // session grant. The same existing history retains actual originals.
+         pub(super) project_fields: Option<Arc<crate::shell::installed_observation::project_fields::Control>>,
+         // Historical Case returned by the original one-use registration. It
+         // does not confer native/private-input availability or a live permit.
+         input_case: Option<crate::shell::installed_observation::ios::Case>,
+-        vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
++        pub(super) vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
+     }
+     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
+         match (project_fields, input_case) {
+@@ -7049,6 +7049,11 @@
+                     (2..=7, None) => true,
+                     _ => false,
+                 };
++                let expected = if matches!(control.case,crate::shell::installed_observation::vault::Case::UploadKey(_)) {
++                    matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,Some(Operation::OpenVault))
++                        |(3,Some(Operation::PrepareInitialize))|(4,Some(Operation::Initialize))|(5,Some(Operation::GenerateUploadKey))
++                        |(6,Some(Operation::OpenVault))|(7,Some(Operation::Unlock))|(8,Some(Operation::Prepare))|(2..=9,None))
++                }else{expected};
+                 if !expected || !control.bound(&self.inner.session_identity) { return Err(AssetError::new(Reason::Unqualified)); }
+             }
+             // Closed original-registration bound: Android input journey18,
+@@ -9459,3 +9464,6 @@
+     state.github.reconcile_setup(now,GitHubReason::None,None);
+     assert_eq!(state.github.setup_status(false,now,GitHubReason::None).reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+ }
++
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample};
+diff --git a/desktop/src-tauri/src/asset_session_vault.rs b/desktop/src-tauri/src/asset_session_vault.rs
+--- a/desktop/src-tauri/src/asset_session_vault.rs
++++ b/desktop/src-tauri/src/asset_session_vault.rs
+@@ -7,6 +7,8 @@
+ mod assignment_native;
+ use assignment_native::upload_key;
+ pub(crate) use upload_key::controls as upload_key_controls;
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) use upload_key::observation as installed_upload_observation;
+ pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
+ pub(super) use upload_key::parent_stop as upload_key_parent_stop;
+ #[path = "credential_backup_native.rs"]
+diff --git a/desktop/src-tauri/src/credential_upload_key.rs b/desktop/src-tauri/src/credential_upload_key.rs
+--- a/desktop/src-tauri/src/credential_upload_key.rs
++++ b/desktop/src-tauri/src/credential_upload_key.rs
+@@ -18,6 +18,9 @@
+ const NATIVE_UPLOAD_KEY_QUALIFIED: bool = false;
+ #[path = "credential_upload_key_controls.rs"]
+ pub(crate) mod controls;
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++#[path = "credential_upload_key_observation.rs"]
++pub(crate) mod observation;
+ // The generated container is fixed and small. Reserving the entire remaining
+ // vault allowance before the real inspector returns would spuriously deny a
+ // normal measured native graph. This smaller, source-derived workspace grants
+@@ -703,6 +706,8 @@
+             // This is after actual private disposal AND every original job,
+             // including final journal readback/publication. No token-first cycle.
+             if !controls::retire_use(held) { return false; }
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            if observation::disposed(held).is_err(){return false;}
+             let clock = held.clock.clone();
+             self.inner = None; // Actual zeroizing private Fields/candidate holding dropped first.
+                                // Only the same-original publication + all-join disposal proof can
+@@ -875,6 +880,8 @@
+             if !self.preparation.current() || owner.interrupted() {
+                 return Err(Reason::ContextStale);
+             }
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            observation::checkpoint(&held,observation::Cut::BeforeGo)?;
+             Ok(PreparedGenerationGo {
+                 gate: self.clone(),
+                 consumed: false,
+@@ -906,7 +913,7 @@
+         native_availability: wire::Availability,
+         consent: controls::Consent,
+     ) -> Result<AssetStatus, AssetError> {
+-        if !available(self) || native_availability != wire::Availability::Available {
++        if !consent.qualified(self) || native_availability != wire::Availability::Available {
+             return Err(AssetError::new(Reason::Unqualified));
+         }
+         self.reconcile();
+@@ -1572,6 +1579,8 @@
+         let state = document.lock();
+         rematch(document, &state, owner, held, false)?;
+     }
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    observation::bind(held)?;
+     controls::begin_use(held)?; // SAME original coordinator, before any journal/private work.
+     controls::check_use(held)?;
+     held.progress()?
+@@ -1732,6 +1741,8 @@
+         let state = document.lock();
+         rematch(document, &state, owner, held, true)?;
+     }
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    { observation::stored(held)?; observation::checkpoint(held,observation::Cut::AfterNew)?; }
+     let (reference, certificate) = {
+         let mut p = held.progress()?;
+         p.enter(ProgressPhase::Stored, ProgressPhase::Recording)?;
+diff --git a/desktop/src-tauri/src/credential_upload_key_controls.rs b/desktop/src-tauri/src/credential_upload_key_controls.rs
+--- a/desktop/src-tauri/src/credential_upload_key_controls.rs
++++ b/desktop/src-tauri/src/credential_upload_key_controls.rs
+@@ -5,6 +5,53 @@
+ use super::*;
+ use crate::application_service_host::{NativeProject, NativeStateLease, NativeStateReady};
+ use crate::edit_owner::SavedEditStamp;
++
++// Nonshipping selector is consumed INSIDE the same bodies. Registration alone
++// cannot enable renderer status/prepare/create; ordinary qualification is unchanged.
++#[cfg(feature = "desktop-shell")]
++pub(in crate::asset_session) enum Qualification {
++    Ordinary,
++    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    Installed(crate::shell::installed_observation::vault::upload_key::Selection),
++}
++#[derive(Default)]
++struct Admission {
++    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    installed: Option<Arc<crate::shell::installed_observation::vault::Control>>,
++}
++#[cfg(feature = "desktop-shell")]
++#[derive(Clone,Copy)]
++pub(in crate::asset_session) enum SelectedAction { Prepare, Create }
++impl Admission {
++    fn qualified(&self, document: &DocumentBinding) -> bool {
++        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        if let Some(control)=&self.installed {return control.permits(&document.inner.session_identity);}
++        available(document)
++    }
++    fn same(&self, other: &Self) -> bool {
++        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        { return match (&self.installed,&other.installed) {(None,None)=>true,(Some(a),Some(b))=>Arc::ptr_eq(a,b),_=>false}; }
++        #[allow(unreachable_code)]
++        { let _=other; true }
++    }
++}
++#[cfg(feature = "desktop-shell")]
++impl Qualification {
++    fn admit(self, document:&DocumentBinding, action:SelectedAction, path:Option<&std::path::Path>) -> Result<Admission,AssetError> {
++        match self {
++            Self::Ordinary if available(document) => Ok(Admission::default()),
++            Self::Ordinary => Err(AssetError::new(Reason::Unqualified)),
++            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::Installed(selection) => {
++                use crate::shell::installed_observation::vault::upload_key::Action;
++                if !matches!((action,selection.action()),(SelectedAction::Prepare,Action::Prepare))
++                    && !(matches!(action,SelectedAction::Create) && selection.action().creates()) {return Err(AssetError::invalid());}
++                let control=document.installed_upload_consume(selection,path)?;
++                Ok(Admission{installed:Some(control)})
++            },
++        }
++    }
++}
+
+ const DECLARATION: &str = "new-application-no-existing-upload-key";
+
+@@ -80,6 +127,7 @@
+     }
+ }
+ pub(in crate::asset_session) struct PreparedSetup {
++    admission: Admission,
+     flight: Arc<SetupFlight>,
+     ready: Arc<NativeStateReady>,
+     preference: persistence::PreferenceSnapshot,
+@@ -101,6 +149,8 @@
+     }
+ }
+ impl PreparedSetup {
++    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    pub(super) fn installed_control(&self) -> Option<&Arc<crate::shell::installed_observation::vault::Control>> {self.admission.installed.as_ref()}
+     pub(super) fn retained_bytes(&self) -> Option<usize> {
+         // Preference is bounded reference DATA. Count its actual strings rather
+         // than treating a serialized reference as a credential loan.
+@@ -156,8 +206,10 @@
+ pub(in crate::asset_session) struct Consent {
+     prepared: Arc<PreparedSetup>,
+     revision: u32,
++    admission: Admission,
+ }
+ impl Consent {
++    pub(super) fn qualified(&self,document:&DocumentBinding)->bool {self.admission.qualified(document) && self.admission.same(&self.prepared.admission)}
+     pub(super) fn preparation(&self) -> &Arc<PreparedSetup> {
+         &self.prepared
+     }
+@@ -920,9 +972,11 @@
+         request: ContextRequest,
+         app_data: &std::path::Path,
+     ) -> Result<UploadKeyStatus, AssetError> {
+-        if !available(self) {
+-            return Err(AssetError::new(Reason::Unqualified));
+-        }
++        self.prepare_upload_key_setup_selected(request,app_data,Qualification::Ordinary).await
++    }
++    pub(in crate::asset_session) async fn prepare_upload_key_setup_selected(&self,
++        request:ContextRequest,app_data:&std::path::Path,selection:Qualification) -> Result<UploadKeyStatus,AssetError> {
++        let admission=selection.admit(self,SelectedAction::Prepare,Some(app_data))?;
+         self.reconcile();
+         let (flight, ticket) = {
+             let mut state = self.lock();
+@@ -1056,6 +1110,7 @@
+                 .with(|observation| setup::classify(observation, preference.preference.as_ref()))
+                 .map_err(data_error)?;
+             let prepared = Arc::new(PreparedSetup {
++                admission,
+                 flight: flight.clone(),
+                 ready,
+                 preference,
+@@ -1116,9 +1171,10 @@
+         &self,
+         request: CreateRequest,
+     ) -> Result<UploadKeyStatus, AssetError> {
+-        if !available(self) {
+-            return Err(AssetError::new(Reason::Unqualified));
+-        }
++        self.create_upload_key_selected(request,Qualification::Ordinary)
++    }
++    pub(in crate::asset_session) fn create_upload_key_selected(&self,request:CreateRequest,selection:Qualification)->Result<UploadKeyStatus,AssetError> {
++        let admission=selection.admit(self,SelectedAction::Create,None)?;
+         let (consent, service, tools) = {
+             let mut state = self.lock();
+             self.expire(&mut state, Instant::now());
+@@ -1137,6 +1193,7 @@
+                 .as_ref()
+                 .and_then(|vault| vault.upload_key_setup.ready.clone())
+                 .ok_or_else(|| AssetError::new(Reason::ContextStale))?;
++            if !admission.same(&prepared.admission) {return Err(AssetError::new(Reason::Unqualified));}
+             current_prepared(self, &state, &prepared)?;
+             let original = self
+                 .service_allow_current_locked(
+@@ -1167,6 +1224,7 @@
+             }
+             (
+                 Consent {
++                    admission,
+                     prepared,
+                     revision: request.expected_revision,
+                 },
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos.rs b/desktop/src-tauri/src/installed_shell_observation_macos.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos.rs
+@@ -81,7 +81,7 @@
+     "session-request-contract", "session-result-contract", "session-original-contract", "session-dom-contract",
+     "project-fields-request-contract", "project-fields-result-contract", "project-fields-original-contract",
+     "project-fields-fixture-contract", "project-fields-dom-contract",
+-    "vault-request-contract", "vault-result-contract", "vault-original-contract", "vault-finality-contract",
++    "vault-request-contract", "vault-result-contract", "vault-original-contract", "vault-finality-contract", "upload-key-original-contract", "upload-key-expected-retention",
+     "installation-request-contract", "installation-status-contract", "installation-first-read-contract",
+     "installation-original-contract", "installation-finality-contract",
+     "bootstrap-attach-thread", "bootstrap-attach-duplicate", "bootstrap-window-result",
+@@ -304,7 +304,7 @@
+     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
+     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
+     PickerPending, Reload, Lost,
+-    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step),
++    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step),
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ struct DomDispatch { step: Step, sequence: u16 }
+@@ -875,7 +875,7 @@
+                 config: fixture.file("release/mobile-release.json"), release: fixture.dir("release"),
+                 ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, written: false, mutated: false });
+         }
+-        let saved = case == Case::NoopStale;
++        let saved = case == Case::NoopStale || matches!(case,Case::Vault(vault::Case::UploadKey(_)));
+         let root_identity = directory(&root, uid, 0o700, if saved {
+             &[".gitignore", "app", "keep.txt", "release", "version.properties"]
+         } else { &[".gitignore", "app", "keep.txt", "version.properties"] })?;
+@@ -976,6 +976,7 @@
+     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
+     bootstrap_failure: Option<BootstrapSample>,
+     vault_failure: Option<vault::FailureSample>,
++    upload_failure: Option<vault::upload_key::FailureSample>,
+     last_project_chooser: Option<ProjectChooserSample>,
+     original_window: Option<OriginalWindowSample>,
+     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
+@@ -1091,6 +1092,7 @@
+     input_body_admission: Option<Option<bool>>,
+     bootstrap: Option<BootstrapSample>,
+     vault: Option<vault::FailureSample>,
++    upload: Option<vault::upload_key::FailureSample>,
+     dom: Option<(u16, Option<ProjectChooserSample>)>,
+     original_window: Option<OriginalWindowSample>,
+     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
+@@ -1101,7 +1103,7 @@
+ impl FailureSnapshot {
+     fn from_record(r: &Record) -> Self {
+         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch, input_body_admission: None,
+-            bootstrap: r.bootstrap_failure, vault: r.vault_failure,
++            bootstrap: r.bootstrap_failure, vault: r.vault_failure, upload: r.upload_failure,
+             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
+             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
+             project_selection: r.project_selection, completion_selection: r.completion_selection,
+@@ -1119,6 +1121,7 @@
+         self.input_body_admission = None;
+         self.dom = None; // No fresh DOM/counter observation at this cached expiry.
+         self.bootstrap = None; // A pre-arm cache is not the first failure's Record sample.
++        self.upload = None;
+         self.vault = None; // Never attach a later original vault sample to an earlier cache.
+         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
+         self.completion_selection = None;
+@@ -1163,6 +1166,7 @@
+         if self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason)) { return None; }
+         if self.vault.is_some_and(|sample| self.source != "record" || reason != "vault-finality-contract"
+             || self.step != Step::Vault(sample.step)) { return None; }
++        if self.upload.is_some() && (self.source != "record" || reason != "upload-key-expected-retention" || !matches!(self.step,Step::UploadKey(_))) {return None;}
+         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
+         let tail = b"\nMRK_MACOS_AQUA=failed\n";
+         let context = bounded_failure_context(failure_context(&self), self.press_timing(), frame.len().checked_add(tail.len())?)?;
+@@ -1225,6 +1229,7 @@
+     // context still describes the later report snapshot, not that earlier time.
+     if let Some(sample) = r.bootstrap { value["bootstrap"] = sample.value(); }
+     if let Some(sample) = r.vault { value["vault"] = sample.value(); }
++    if let Some(sample) = r.upload { value["uploadKey"] = sample.value(); }
+     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
+     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
+     if let Some(admitted) = r.input_body_admission { value["inputBodyAdmission"] = json!(admitted); }
+@@ -1309,7 +1314,7 @@
+         let local_config=if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
+         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
+         let started = Instant::now();
+-        let end = started + Duration::from_secs(if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
++        let end = started + Duration::from_secs(if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
+         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
+         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
+@@ -1319,7 +1324,7 @@
+         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
+         let record = Mutex::new(Record {
+                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
+-                bootstrap_failure: None, vault_failure: None,
++                bootstrap_failure: None, vault_failure: None, upload_failure: None,
+                 last_project_chooser: None, original_window: None,
+                 native_dispatch: None, last_panel: None, native_action: None,
+                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
+@@ -1604,7 +1609,7 @@
+     }
+     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
+         let Some(mut r) = self.record() else { return; };
+-        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_)) || r.snapshot_requests == 2;
++        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_) | Case::Vault(vault::Case::UploadKey(_))) || r.snapshot_requests == 2;
+         let failure = match result {
+             Ok(value) => if let Case::Checks(case)=self.case {
+                     match checks::config(case){Ok(bytes)=>snapshot_value_failure_bytes(value,&self.project_path,true,&self.base,&bytes),Err(())=>Some("snapshot-config-content")}
+@@ -3213,7 +3218,7 @@
+             // Same completed originals/normal Quit and bounded fixture DATA
+             // must survive the real final readback outside this Record guard.
+             if !installation_readback.as_ref()?.matches(&r) { return None; }
+-        } else if r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields)).is_err() { return None; }
++        } else if r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields|Case::Vault(vault::Case::UploadKey(_)))).is_err() { return None; }
+         let sessions: Vec<_> = r.sessions.iter().map(|s| {
+             let f = s.finality.as_ref()?; let p = s.projection.prepared.as_ref()?;
+             Some(json!({"draftRevision":p.draft_revision,"baselineGeneration":p.baseline_generation,
+@@ -3819,7 +3824,8 @@
+     let expected = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
+     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
+     let uid = mrk_macos_installed_native::real_user().ok()?;
+-    let suffix = if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
++    let upload_suffix;
++    let suffix = if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
+     let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
+     if matches!(case,Case::Checks(_)){
+@@ -3830,6 +3836,8 @@
+         if case == ios::Case::AndroidInputs { directory(&root,uid,0o700,ANDROID_INPUT_ROSTER).ok()?; }
+         else if case == ios::Case::RecoveryPending { directory(&root,uid,0o700,PENDING_ACCOUNT_ROSTER).ok()?; }
+         else { directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None).ok()?; }
++    } else if let Case::Vault(vault::Case::UploadKey(case))=case {
++        directory(&root,uid,0o700,&[case.name(),"state"]).ok()?;
+     } else if matches!(case,Case::Vault(_)) {
+         directory(&root,uid,0o700,&["vault-helper-roundtrip","vault-helper-stop-before-go","vault-helper-stop-after-add","state"]).ok()?;
+     } else if case == Case::ProjectFields {
+@@ -3882,7 +3890,7 @@
+         parent_references_panel: Some(true), panel_references_parent: Some(true), panel_visible: Some(true),
+         directory_bound: true, directory_returned: true, directory_ready: true, directory_readiness: "ready", wait_location: None };
+     let snapshot = FailureSnapshot { source: "record", step: Step::OpenProject, pending: None, native_dispatch: Some(native),
+-        input_body_admission: None, bootstrap: None, vault: None, dom: None, original_window: None, last_panel: Some(panel),
++        input_body_admission: None, bootstrap: None, vault: None, upload:None, dom: None, original_window: None, last_panel: Some(panel),
+         native_action: None, accessibility: Some(failed), identity_binding: Some(identity),
+         completion_selection: None, project_selection: None, field_preparation: None };
+     if snapshot.press_timing() != Some(timing) || snapshot.frame("native-default-input").is_none() { return false; }
+@@ -4074,7 +4082,7 @@
+     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
+     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
+     let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None, input_body_admission: None,
+-        bootstrap: Some(sample), vault: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
++        bootstrap: Some(sample), vault: None, upload:None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
+     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
+         || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs b/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs
+@@ -5,17 +5,19 @@
+ use serde_json::{json, Value};
+ use crate::{asset_session::{DocumentBinding, InstalledMacVaultSnapshot}, error::BridgeError};
+ use super::{Case as OuterCase, Observation};
++#[path = "installed_shell_observation_macos_upload_key.rs"]
++pub(crate) mod upload_key;
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub(crate) enum Case { RoundTrip, StopBeforeGo, StopAfterAdd }
++pub(crate) enum Case { RoundTrip, StopBeforeGo, StopAfterAdd, UploadKey(upload_key::Case) }
+ impl Case {
+     pub(super) const ALL: [Self; 3] = [Self::RoundTrip, Self::StopBeforeGo, Self::StopAfterAdd];
+     pub(super) fn name(self) -> &'static str { match self {
+         Self::RoundTrip => "vault-helper-roundtrip", Self::StopBeforeGo => "vault-helper-stop-before-go",
+-        Self::StopAfterAdd => "vault-helper-stop-after-add",
++        Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
+     } }
+-    pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())) }
+-    pub(crate) fn maximum_original(self) -> u32 { if self == Self::RoundTrip { 7 } else { 5 } }
++    pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
++    pub(crate) fn maximum_original(self) -> u32 { if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
+ }
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -59,14 +61,17 @@
+     original: OnceLock<Weak<Observation>>, document: OnceLock<Weak<()>>,
+     claimed: AtomicBool, returned: AtomicBool, next: AtomicU8, checkpoint: AtomicBool,
+     complete: AtomicBool, quit: AtomicU8,
++    pub(crate) upload: upload_key::Flow,
+ }
+ fn fixture_root(home: &Path, source: &str, run: &str, attempt: &str, case: Case) -> Option<PathBuf> {
+     let decimal = |v: &str| !v.is_empty() && v.len() <= 20 && !v.starts_with('0') && v.bytes().all(|b| b.is_ascii_digit());
+     if !crate::asset_session::installed_macos_selection_path_bounded(home) || home == Path::new("/")
+         || source.len() != 40 || !source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+         || !decimal(run) || !decimal(attempt) { return None; }
++    let namespace=if let Case::UploadKey(case)=case {format!("mrk-macos-aqua-upload-key-{source}-{run}-{attempt}-{}",case.name())}
++        else{format!("mrk-macos-aqua-vault-{source}-{run}-{attempt}")};
+     Some(home.join("Library/Application Support")
+-        .join(format!("mrk-macos-aqua-vault-{source}-{run}-{attempt}"))
++        .join(namespace)
+         .join(case.name()).join("dev.mobile-release-kit.desktop"))
+ }
+ impl Control {
+@@ -79,7 +84,7 @@
+             option_env!("GITHUB_RUN_ID").ok_or(())?, option_env!("GITHUB_RUN_ATTEMPT").ok_or(())?, case).ok_or(())?;
+         Ok(Arc::new(Self { case, root, project: project.to_path_buf(), original: OnceLock::new(), document: OnceLock::new(),
+             claimed: AtomicBool::new(false), returned: AtomicBool::new(false), next: AtomicU8::new(0),
+-            checkpoint: AtomicBool::new(false), complete: AtomicBool::new(false), quit: AtomicU8::new(case.maximum_original() as u8) }))
++            checkpoint: AtomicBool::new(false), complete: AtomicBool::new(false), quit: AtomicU8::new(case.maximum_original() as u8), upload:upload_key::Flow::default() }))
+     }
+     fn observation(&self) -> Option<Arc<Observation>> {
+         self.original.get()?.upgrade().filter(|q| q.case == OuterCase::Vault(self.case)
+@@ -114,6 +119,10 @@
+     pub(crate) fn quit_id(&self) -> u32 { u32::from(self.quit.load(Ordering::SeqCst)) }
+     pub(crate) fn completed(&self) -> bool { self.complete.load(Ordering::SeqCst) }
+     fn finish(&self, originals: usize) -> bool {
++        if matches!(self.case, Case::UploadKey(_)) && self.upload.finished(originals) {
++            if self.complete.swap(true,Ordering::SeqCst){return false;}
++            self.quit.store((originals+1) as u8,Ordering::SeqCst);return true;
++        }
+         let expected = if originals == 6 { 7 } else if originals == 4 { 5 } else { return false; };
+         if self.next.load(Ordering::SeqCst) != if originals == 6 { 7 } else { 4 }
+             || expected == 7 && self.case != Case::RoundTrip || self.complete.swap(true, Ordering::SeqCst) { return false; }
+@@ -163,6 +172,7 @@
+     opened: bool, preview_consumed: bool, initialized: bool, locked: bool, reopened: bool, unlocked: bool,
+     relocked: bool, not_executed: bool, original_count: usize, final_originals: bool,
+     initialization: Option<Value>, lookup: Option<Value>, storage: Option<Value>,
++    upload: upload_key::Record,
+ }
+
+ impl Observation {
+@@ -213,7 +223,7 @@
+                 record.initialization = Some(helper.value()); record.storage = Some(storage.value());
+                 if !record.preview_consumed || !helper.final_settlement() || !storage.reservation_durable() { self.fail_with("vault-result-contract"); return; }
+                 let stopped = control.stopped_at_checkpoint();
+-                if control.case == Case::RoundTrip && helper.successful_consumption()
++                if matches!(control.case,Case::RoundTrip|Case::UploadKey(_)) && helper.successful_consumption()
+                     && snapshot.state == Some("unlocked") && snapshot.key_present && storage.header_durable() {
+                     record.initialized = true;
+                 } else if control.case != Case::RoundTrip && stopped && helper.stopped_without_application_candidate()
+@@ -228,6 +238,9 @@
+                     // is a genuine negative, NOT a positive shipping-helper pass.
+                     record.not_executed = true;
+                 } else { self.fail_with("vault-result-contract"); return; }
++                if matches!(control.case,Case::UploadKey(_)) && record.initialized {
++                    r.step=super::Step::UploadKey(upload_key::Step::Context);return;
++                }
+                 Some(Step::Lock)
+             },
+             Step::Locked if snapshot.originals == 4 && snapshot.empty => {
+@@ -249,7 +262,7 @@
+         };
+         if let Some(next) = next { r.step = super::Step::Vault(next); }
+         else {
+-            if !control.finish(snapshot.originals) || r.fixture.verify(false).is_err() { self.fail_with("vault-finality-contract"); return; }
++            if !control.finish(snapshot.originals) || r.fixture.verify(matches!(control.case,Case::UploadKey(_))).is_err() { self.fail_with("vault-finality-contract"); return; }
+             r.file_readback = true; r.step = super::Step::Close;
+         }
+     }
+@@ -261,6 +274,7 @@
+         self.final_originals = true; true
+     }
+     pub(super) fn report(&self, control: &Control) -> Option<Value> {
++        if matches!(control.case,Case::UploadKey(_)){return upload_key::report(self,control);}
+         if !self.final_originals || !self.opened || !self.preview_consumed || !self.locked
+             || !control.completed() || self.initialization.is_none() || self.storage.is_none()
+             || control.case == Case::RoundTrip && !self.not_executed && !(self.initialized && self.reopened && self.unlocked && self.relocked && self.lookup.is_some()) { return None; }
+@@ -270,7 +284,7 @@
+             "normalPersistenceEnabled":crate::runtime::INSTALLED_MAC_PERSISTENCE_QUALIFIED,
+             "execution":if self.not_executed {"not-executed-provider-prerequisite"} else {"executed"},
+             "testResult":if self.not_executed {"not-executed"} else if control.case == Case::RoundTrip {"positive"} else {"expected-stop"},
+-            "checkpoint":match control.case {Case::RoundTrip=>"none",Case::StopBeforeGo=>"before-helper-go",Case::StopAfterAdd=>"successful-add-terminal-before-application-candidate"},
++            "checkpoint":match control.case {Case::RoundTrip=>"none",Case::StopBeforeGo=>"before-helper-go",Case::StopAfterAdd=>"successful-add-terminal-before-application-candidate",Case::UploadKey(_)=>return None},
+             "checkpointObserved":control.stopped_at_checkpoint(),
+             "nativeLookupMayAlreadyHaveConsumed":control.case == Case::StopAfterAdd,
+             "openedEmpty":self.opened,"previewConsumedOnce":self.preview_consumed,
+@@ -294,7 +308,7 @@
+     let root = fixture_root(Path::new("/Users/runner"), source, "1", "2", Case::RoundTrip).unwrap();
+     let inert = |case: Case, next: u8| Arc::new(Control { case,root:root.clone(),project:PathBuf::from("/private/tmp/fixed-project"),
+         original:OnceLock::new(),document:OnceLock::new(),claimed:AtomicBool::new(false),returned:AtomicBool::new(false),
+-        next:AtomicU8::new(next),checkpoint:AtomicBool::new(false),complete:AtomicBool::new(false),quit:AtomicU8::new(case.maximum_original() as u8) });
++        next:AtomicU8::new(next),checkpoint:AtomicBool::new(false),complete:AtomicBool::new(false),quit:AtomicU8::new(case.maximum_original() as u8),upload:upload_key::Flow::default() });
+     let document=Arc::new(());let other=Arc::new(());let control=inert(Case::RoundTrip,1);
+     let selection=Selection {control:control.clone(),document:Arc::downgrade(&document),action:Action::Open,serial:1,spent:AtomicBool::new(false)};
+     if control.permits(&document) // An unregistered/inert owner can never use core methods.
+@@ -341,5 +355,5 @@
+     let roundtrip=inert(Case::RoundTrip,7);
+     roundtrip.finish(6) && roundtrip.quit_id()==7 && crate::vault_keyring_macos::qualification_data_checks()
+         && Action::Open.previous_original() == 1 && Action::Initialize.previous_original() == 3
+-        && Action::Reopen.previous_original() == 4 && Action::LockUnlocked.previous_original() == 6
+-}
++        && Action::Reopen.previous_original() == 4 && Action::LockUnlocked.previous_original() == 6 && upload_key::data_checks()
++}
+diff --git a/desktop/src-tauri/src/saved_command_upload_key.rs b/desktop/src-tauri/src/saved_command_upload_key.rs
+--- a/desktop/src-tauri/src/saved_command_upload_key.rs
++++ b/desktop/src-tauri/src/saved_command_upload_key.rs
+@@ -7,6 +7,9 @@
+
+ #[path = "saved_command_upload_key_private.rs"]
+ mod private;
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++#[path = "saved_command_upload_key_observation.rs"]
++mod installed_observation;
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+ pub(crate) use private::GeneratedUploadCandidate;
+ #[cfg(all(
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2589,7 +2589,10 @@
+                 let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status);
+             }
+             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+-            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.tick(&app); }
++            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() {
++                #[cfg(target_os="macos")] q.tick_original(&app).await;
++                #[cfg(not(target_os="macos"))] q.tick(&app);
++            }
+             if let Ok(status) = edits.workflow_status() {
+                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+                 if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.workflow_status(&status, &edits); }
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -1,5 +1,7 @@
+ //! Actual process main, not a libtest worker or a shipping automation switch.
+ #![forbid(unsafe_code)]
++// Same finite Send/Sync traversal limit as the accepted current shipping lib.
++#![recursion_limit = "256"]
+ #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+     not(feature = "macos-android-registration-helper"),
+@@ -8,6 +10,54 @@
+         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation",
+             not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))))]
+ compile_error!("installed-shell observation requires debug test + desktop-shell + custom-protocol on Linux x86_64 GNU, observed Mac ARM64/Intel LP64 or observed Windows x86_64 MSVC, without development-runtime, publisher or installer");
++// SAME current application module graph, still the original nonshipping
++// observer executable. No library duplicate owner, helper/publisher/CLI entry.
++#[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
++#[path = "../src/service_protocol.rs"] mod service_protocol;
++#[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
++#[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/version_allocation_state_native.rs"] mod version_allocation_state_native;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/application_state_store.rs"] mod application_state_store;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/apple_provisioning_journal.rs"] mod apple_provisioning_journal;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/application_service.rs"] mod application_service;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/application_service_host.rs"] mod application_service_host;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/installed_cli_ipc.rs"] mod installed_cli_ipc;
++#[path = "../src/tool_preparation.rs"] mod tool_preparation;
++#[path = "../src/tool_acquisition_protocol.rs"] mod tool_acquisition_protocol;
++#[path = "../src/tool_preparation_adapters.rs"] mod tool_preparation_adapters;
++#[path = "../src/tool_preparation_protocol.rs"] mod tool_preparation_protocol;
++#[path = "../src/local_release_history_protocol.rs"] mod local_release_history_protocol;
++#[path = "../src/local_release_history_owner.rs"] mod local_release_history_owner;
++#[path = "../src/apple_provisioning_protocol.rs"] mod apple_provisioning_protocol;
++#[path = "../src/local_store_preflight_protocol.rs"] mod local_store_preflight_protocol;
++#[path = "../src/local_store_preflight_owner.rs"] mod local_store_preflight_owner;
++#[path = "../src/local_store_prepare_protocol.rs"] mod local_store_prepare_protocol;
++#[path = "../src/local_store_execute_protocol.rs"] mod local_store_execute_protocol;
++#[path = "../src/local_store_reconcile_protocol.rs"] mod local_store_reconcile_protocol;
++#[path = "../src/local_store_prepare_owner.rs"] mod local_store_prepare_owner;
++#[path = "../src/local_store_execute_owner.rs"] mod local_store_execute_owner;
++#[path = "../src/local_store_reconcile_owner.rs"] mod local_store_reconcile_owner;
++#[path = "../src/android_upload_key_protocol.rs"] mod android_upload_key_protocol;
++#[path = "../src/macos_store_runtime.rs"] mod macos_store_runtime;
++#[path = "../src/macos_history_inventory.rs"] mod macos_history_inventory;
++#[path = "../src/macos_applications_launcher.rs"] mod macos_applications_launcher;
++#[path = "../src/macos_remove_record.rs"] mod macos_remove_record;
++#[path = "../src/project_identity_commands.rs"] mod project_identity_commands;
++#[path = "../src/project_identity_edit_protocol.rs"] mod project_identity_edit_protocol;
++#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
++    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++#[path = "../src/credential_setup.rs"] mod credential_setup;
++#[path = "../src/github_auth_capture_wire.rs"] mod github_auth_capture_wire;
++#[path = "../src/github_auth_nomination.rs"] mod github_auth_nomination;
++#[path = "../src/github_auth_native_owner.rs"] mod github_auth_native_owner;
++#[path = "../src/github_auth_entry_protocol.rs"] mod github_auth_entry_protocol;
++#[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
+ #[path = "../src/error.rs"] mod error;
+ #[path = "../src/protocol.rs"] mod protocol;
+ #[path = "../src/environment.rs"] mod environment;
+diff --git a/desktop/tools/macos_aqua_qualification.py b/desktop/tools/macos_aqua_qualification.py
+--- a/desktop/tools/macos_aqua_qualification.py
++++ b/desktop/tools/macos_aqua_qualification.py
+@@ -12,6 +12,7 @@
+ from dataclasses import dataclass
+ import hashlib
+ from importlib.machinery import ModuleSpec
++from importlib.util import spec_from_file_location, module_from_spec
+ import json
+ import os
+ from pathlib import Path
+@@ -20,6 +21,14 @@
+ import subprocess
+ import sys
+ from types import FunctionType, ModuleType
++
++# Fixed sibling DATA/fixture extension works under the existing isolated -I -S
++# interpreter. No user module/path or core process owner is imported here.
++_upload_spec = spec_from_file_location("mrk_macos_upload_key_observation", Path(__file__).with_name("macos_upload_key_observation.py"))
++if _upload_spec is None or _upload_spec.loader is None:
++    raise RuntimeError("upload-key-data-module-unavailable")
++UPLOAD = module_from_spec(_upload_spec)
++_upload_spec.loader.exec_module(UPLOAD)
+
+ # Fixed synthetic literals only. The reviewed project producer body is kept
+ # unchanged inside a module-level diagnostic try; no historical runner is imported.
+@@ -1068,7 +1077,7 @@
+ )
+ PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
+                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
+-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES
++ALL_CASES = UPLOAD.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES
+ EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
+ REPOSITORY = "Apdelrahman1911/mobile-release-kit"
+ REF = "refs/heads/verify/desktop-macos-aqua"
+@@ -1121,8 +1130,10 @@
+     "StartCancelled WaitFirstRead Cancel WaitCancelled StartMatching WaitMatching"
+ ).split())
+ FAILURE_STEPS |= frozenset(f"Recovery({name})" for name in ("Navigate Ready Inspect WaitInspect ReadInspect Review ReadReview Acknowledge ReadChecked Start WaitRecover ReadFinal").split())
++FAILURE_STEPS |= frozenset(f"UploadKey({step})" for step in (
++    "Context Refresh Refreshed Recovered Saved Prepare Create Running Repeat Lock Locked Reopen Reopened Unlock Unlocked Recontext Read Readback Relock Relocked Missing MissingLocked").split())
+ FAILURE_REASONS = frozenset((
+-    "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
++    "upload-key-original-contract upload-key-expected-retention observer-invariant observer-deadline observer-record-unavailable observer-data-check "
+     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
+     "dom-callback-object dom-callback-state picker-unexpected-result dom-evaluation-budget dom-project-chooser-data "
+     "native-wrong-thread native-step native-pending-custody native-original-id native-kind native-not-started "
+@@ -1650,11 +1661,12 @@
+         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
+         return self
+
+-    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False, local_edits=False, local_checks=False):
++    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False, local_edits=False, local_checks=False, upload_key=None):
+         self.checked()
+         flags = (project_fields, vault_helper, installation_inspection, recovery, local_edits, local_checks)
+-        need(all(type(flag) is bool for flag in flags) and sum(flags) <= 1, "scope-not-supported")
+-        suffix = ("-project-fields" if project_fields else "-vault-helper" if vault_helper
++        need(all(type(flag) is bool for flag in flags) and sum(flags) + (upload_key is not None) <= 1
++             and (upload_key is None or type(upload_key) is str and upload_key in UPLOAD.CASES), "scope-not-supported")
++        suffix = ("-" + upload_key if upload_key is not None else "-project-fields" if project_fields else "-vault-helper" if vault_helper
+                   else "-installation-inspection" if installation_inspection else "-project-recovery" if recovery else "-local-edits" if local_edits else "-doctor-preflight" if local_checks else "")
+         return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
+
+@@ -1686,11 +1698,13 @@
+
+
+ def selected_cases(scope=None):
+-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE), "scope-not-supported")
++    need(scope in (*UPLOAD.CASES, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE), "scope-not-supported")
+     if scope == LOCAL_CHECK_SCOPE:
+         return LOCAL_CHECK_CASES
+     if scope == LOCAL_EDITS_SCOPE:
+         return LOCAL_EDIT_CASES
++    if scope in UPLOAD.CASES:
++        return (scope,)
+     if scope == VAULT_HELPER_SCOPE:
+         return VAULT_HELPER_CASES
+     if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE):
+@@ -1707,6 +1721,7 @@
+                                or argv == ["--scope", PROJECT_FIELDS_CASE]
+                                or argv == ["--scope", ANDROID_INPUT_CASE]
+                                or argv == ["--scope", VAULT_HELPER_SCOPE]
++                               or any(argv == ["--scope", case] for case in UPLOAD.CASES)
+                                or argv == ["--scope", INSTALLATION_INSPECTION_CASE]
+                                or argv == ["--scope", RECOVERY_CASE]
+                                or argv == ["--scope", IOS_ACCOUNT_CASE]
+@@ -1732,7 +1747,7 @@
+         return (105, 1875)[LOCAL_CHECK_CASES.index(case)]
+     if case in LOCAL_EDIT_CASES:
+         return (135, 105, 195)[LOCAL_EDIT_CASES.index(case)]
+-    return 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
++    return UPLOAD.TIMEOUT if case in UPLOAD.CASES else 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
+
+
+ def ios_config(case):
+@@ -2470,6 +2485,20 @@
+     return value
+
+
++def _upload_report(value, case):
++    UPLOAD.report(value, case)
++    storage=value["storage"]
++    need(set(storage)=={"reservation","header","durability"}
++         and all(type(v) is list and len(v)==2 and all(type(b) is bool for b in v) for v in storage.values())
++         and storage["reservation"]==[True,True]
++         and storage["header"] in ([False,False],[True,True])
++         and storage["durability"]==[True,storage["header"][0]], "upload-key-storage")
++    initialized=storage["header"]==[True,True]
++    _vault_helper_original(value["initializeHelper"],"initialize",negative=not initialized)
++    need(value["testResult"]=="not-executed" or initialized, "upload-key-storage")
++    return value
++
++
+ def expected_result(binding, case):
+     binding.checked()
+     need(case in ALL_CASES, "case-binding")
+@@ -2479,7 +2508,7 @@
+         value["native"]["panelAttachments"] = [False, True, False, False]
+         value["reload"] = dict.fromkeys(value["reload"], False)
+         return value
+-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES:
++    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES:
+         value = expected_result(binding, "noop-stale")
+         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
+         if case in LOCAL_CHECK_CASES:
+@@ -2496,6 +2525,8 @@
+             value["projectFields"] = _expected_project_fields()
+         if case in VAULT_HELPER_CASES:
+             value["vaultHelper"] = _expected_vault_helper(case)
++        if case in UPLOAD.CASES:
++            value["vaultHelper"] = None  # Never synthesize native generation facts.
+         value["native"]["projectOpenBinding"]["case"] = case
+         value["native"]["projectCompletionSelection"]["case"] = case
+         if case == PROJECT_FIELDS_CASE:
+@@ -2742,6 +2773,9 @@
+         expected["installationInspection"] = _installation_report(value["installationInspection"])
+     if case == PROJECT_FIELDS_CASE:
+         _project_field_selection_histories(value, expected)
++    if case in UPLOAD.CASES:
++        need(type(value) is dict and "vaultHelper" in value,"upload-key-report")
++        expected["vaultHelper"]=_upload_report(value["vaultHelper"],case)
+     if case in VAULT_HELPER_CASES:
+         need(type(value) is dict and "vaultHelper" in value, "vault-helper-report")
+         expected["vaultHelper"] = _vault_helper_report(value["vaultHelper"], case)
+@@ -2871,6 +2905,8 @@
+             spec = ("quit-confirm", "quit", (3,), 16) if value["step"] == "Quit" else None
+         elif value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
+             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
++        elif value["step"] == "Quit" and case in UPLOAD.CASES:
++            spec = ("quit-confirm", "quit", (5,9), 16)
+         elif value["step"] == "Quit" and case in VAULT_HELPER_CASES:
+             spec = ("quit-confirm", "quit", (5, 7) if case == VAULT_HELPER_CASES[0] else (5,), 16)
+         elif value["step"] == "Session(Native(6))" and case in ("ios-signing-inputs", ANDROID_INPUT_CASE):
+@@ -3846,7 +3882,7 @@
+
+
+ def _vault_failure_context(value, source, step, reason, case):
+-    need(source == "record" and case in VAULT_HELPER_CASES and reason == "vault-finality-contract"
++    need(source == "record" and (case in VAULT_HELPER_CASES or case in UPLOAD.CASES) and reason == "vault-finality-contract"
+          and type(step) is str and step in FAILURE_STEPS and step.startswith("Vault(")
+          and type(value) is dict and set(value) == {"source", "step", "observationOnly", "snapshot"}
+          and value["source"] == "first-original-vault-snapshot" and value["step"] == step
+@@ -3859,7 +3895,7 @@
+     need(type(snapshot) is dict and set(snapshot) == flags | fields
+          and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
+          and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
+-         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
++         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
+     phases = {"idle", "admitting", "picking", "capturing", "selected", "assessing", "preview", "mutating", "stopping", "unknown"}
+     reasons = {"none", "closed", "unqualified", "unsupported-platform", "unsupported-filesystem", "unsupported-format",
+                "invalid-request", "busy", "source-refused", "source-changed", "material-limit", "parser-limit", "project-overlap",
+@@ -3900,7 +3936,7 @@
+     try:
+         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
+                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
+-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "inputBodyAdmission"} in (
++        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission"} in (
+             {"pending", "nativeHandler", "lastPanel"},
+             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
+             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
+@@ -3915,6 +3951,11 @@
+         if "bootstrap" in value:
+             value["bootstrap"] = _bootstrap_failure_context(value["bootstrap"], value.get("snapshotSource"),
+                                                             failure_step(stdout, stderr), failure_reason(stdout, stderr))
++        if "uploadKey" in value:
++            need(case in UPLOAD.CASES[1:] and value.get("snapshotSource")=="record"
++                 and failure_reason(stdout,stderr)=="upload-key-expected-retention"
++                 and failure_step(stdout,stderr)=="UploadKey(Running)","failure-context")
++            value["uploadKey"]=UPLOAD.retained_stop(value["uploadKey"],case)
+         if "vault" in value:
+             value["vault"] = _vault_failure_context(value["vault"], value.get("snapshotSource"),
+                                                     failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
+@@ -4330,7 +4371,7 @@
+             "app": (0o700, ("build.gradle.kts",)), "inputs": (0o700, ("VERSION", "kind-input", "link-input")),
+             "ios": (0o700, ("Example.xcodeproj", "Example.xcworkspace")), "ios/Example.xcodeproj": (0o700, ()),
+             "ios/Example.xcworkspace": (0o700, ()), "metadata": (0o700, ()), "release": (0o755, ("mobile-release.json",))}
+-    saved = case == "noop-stale" or final and case == "first-save"
++    saved = case in UPLOAD.CASES or case == "noop-stale" or final and case == "first-save"
+     files = {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
+              ".gitignore": IGNORE_PREFIX + (IGNORE_RULES if saved else b"") + (STALE if final and case == "noop-stale" else b"")}
+     directories = {".": (0o700, (".gitignore", "app", "keep.txt", "version.properties")),
+@@ -4474,7 +4515,8 @@
+         self.cases = selected_cases(scope)
+         self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+-                                 local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE))
++                                 local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
++                                 upload_key=scope if scope in UPLOAD.CASES else None)
+         self.fds = set()
+         self.close_errors = 0
+         self.first_close_error = None
+@@ -4636,7 +4678,7 @@
+             else:
+                 self.originals[case] = self._capture(case, False)
+         self._namespace()
+-        if self.cases == VAULT_HELPER_CASES:
++        if self.cases == VAULT_HELPER_CASES or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES:
+             self._prepare_vault_parents()
+         if self.cases == (IOS_ACCOUNT_CASE,):
+             self._prepare_account()
+@@ -4793,7 +4835,7 @@
+                      else ("account-baseline.json", "home", "tmp") if case == IOS_ACCOUNT_CASE
+                      else ("home", "tmp"), "fresh-state-roster")
+         self._inputs_unchanged(case)
+-        if case in VAULT_HELPER_CASES:
++        if case in VAULT_HELPER_CASES or case in UPLOAD.CASES:
+             self._vault_namespace_current()
+             need(case not in self.vault_completed, "vault-case-reused")
+             self._roster(self.vault_parents[case], (), "vault-application-collision")
+@@ -5333,7 +5375,8 @@
+         # TMPDIR still isolate unrelated app state but cannot redirect Keychain.
+         account = pwd.getpwuid(self.uid)
+         need(account.pw_uid == self.uid and self.uid > 0, "vault-native-user")
+-        self.vault_paths = {case: vault_fixture_path(self.binding, account.pw_dir, case) for case in self.cases}
++        self.vault_paths = {case: (UPLOAD.fixture_path(self.binding, account.pw_dir, case) if case in UPLOAD.CASES
++                                 else vault_fixture_path(self.binding, account.pw_dir, case)) for case in self.cases}
+         support = self.vault_paths[self.cases[0]].parents[2]
+         root = self._open("/", directory=True)
+         current = root
+@@ -5358,7 +5401,7 @@
+         self._vault_namespace_current()
+
+     def _vault_namespace_current(self):
+-        need(self.cases == VAULT_HELPER_CASES and self.vault_namespace is not None
++        need((self.cases == VAULT_HELPER_CASES or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES) and self.vault_namespace is not None
+              and self.vault_support is not None and self.vault_ancestors, "vault-fixture-custody")
+         for parent, name, fd, original in self.vault_ancestors:
+             need(signature(os.fstat(fd))[:5] == original
+@@ -5371,6 +5414,19 @@
+             self._named(self.vault_namespace, case, self.vault_parents[case], 0o700)
+             self._roster(self.vault_parents[case], ("dev.mobile-release-kit.desktop",)
+                          if case in self.vault_completed else (), "vault-case-roster")
++
++    # Fixed metadata-only accessors on this existing finite original FD owner.
++    # New helper never opens a name/path supplied by a report.
++    def _upload_signature(self, fd):
++        return signature(os.fstat(fd))
++
++    def _upload_named_signature(self, parent, name):
++        return signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
++
++    def _upload_names(self, fd):
++        names=tuple(sorted(os.listdir(fd)))
++        need(len(names)<=8 and all(type(n) is str and len(n)<=64 for n in names),"upload-key-private-roster")
++        return names
+
+     def readback_vault(self, case, report):
+         need(case in VAULT_HELPER_CASES and case in self.cases and case not in self.vault_completed
+@@ -5595,7 +5651,8 @@
+         fixtures.before_call(case)
+         state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+-                                 local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE)) / "state" / case
++                                 local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
++                                 upload_key=scope if scope in UPLOAD.CASES else None) / "state" / case
+         argv = [EXECUTABLE, case]
+         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
+         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
+@@ -5642,6 +5699,9 @@
+             readback = fixtures.readback_account(report["iosArchive"])
+         elif case == RECOVERY_CASE:
+             readback = fixtures.readback_recovery(report["projectRecovery"])
++        elif case in UPLOAD.CASES:
++            readback = UPLOAD.readback(fixtures,case,report["vaultHelper"])
++            if report["vaultHelper"]["testResult"]=="not-executed": not_executed.append(case)
+         elif case in VAULT_HELPER_CASES:
+             readback = fixtures.readback_vault(case, report["vaultHelper"])
+             if report["vaultHelper"]["testResult"] == "not-executed":
+@@ -6671,6 +6731,10 @@
+             complete.update(shippingGateControl=shipping_gate, notExecutedCases=list(not_executed), focusedCasesPassed=not not_executed,
+                             normalPersistenceEnabled=True, privateFixturesRetained=True,
+                             syntheticKeychainRowRetirement="disposable-hosted-account-only")
++        if scope in UPLOAD.CASES:
++            complete.update(notExecutedCases=list(not_executed),focusedCasesPassed=not not_executed,
++                            normalGenerationEnabled=False, privateFixturesRetained=True,
++                            syntheticKeychainRowRetirement="disposable-hosted-account-only")
+         emit_record(complete, sys.stdout)
+     except BaseException:
+         return 1

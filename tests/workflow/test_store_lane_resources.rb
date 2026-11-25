@@ -421,7 +421,7 @@ class StoreLaneResourcesTest < Minitest::Test
     end
   end
 
-  def with_bridge_models(expires: "2099-01-01T00:00:00Z", force_package: false)
+  def with_bridge_models(expires: "2099-01-01T00:00:00Z", force_package: false, local: nil)
     # Dependencies are inert local types; do not import Fastlane or invoke a
     # transport command. Restore any prior module after this single model.
     previous = Object.const_get(:FastlaneCore, false) if Object.const_defined?(:FastlaneCore, false)
@@ -455,7 +455,8 @@ class StoreLaneResourcesTest < Minitest::Test
       def self.hide_transporter_output?
         true
       end
-      def initialize(executor)
+      def initialize(executor=nil,password=nil,use_shell_script=false,provider_short_name=nil,jwt=nil,
+        altool_compatible_command:false,api_key:nil,provider_public_id:nil)
         @transporter_executor = executor
         @api_key = {key_id: "KEY123", issuer_id: "synthetic-issuer", key: "synthetic non-credential bytes"}
         @jwt = "synthetic non-credential token"
@@ -476,8 +477,22 @@ class StoreLaneResourcesTest < Minitest::Test
     runtime.define_singleton_method(:xml_template) { '<package><%= @data[:ipa_path] %></package>' }
     runtime.define_singleton_method(:require_active!) { invocation.require_upload_continuation! }
     runtime.define_singleton_method(:mark_unknown!) { |error, cleanup: false| invocation.mark_unknown!(error, cleanup: cleanup) }
-    bind_original_ios_validation(expires)
-    bridge.stub(:runtime!, runtime) { yield executor.new, transporter, builder.new }
+    if local
+      @invocation.instance_variable_set(:@local_execution,nil)
+      bind_original_ios_validation(expires)
+      @invocation.instance_variable_set(:@local_execution,local)
+      @resources.bind_local_transport!(local)
+      runtime.define_singleton_method(:local_ios_transport!) { owner.check_local_transport!;local.fetch(:transport_tools) }
+      runtime.define_singleton_method(:local_ios_key!) do |key|
+        unless key[:key_id]=='KEY123' && key[:issuer_id]=='synthetic-issuer' && key[:key]=='synthetic non-credential bytes'
+          raise MobileReleaseKit::StoreLaneRuntime::Error.new(:local_key)
+        end
+        key
+      end
+    else
+      bind_original_ios_validation(expires)
+    end
+    bridge.stub(:runtime!, runtime) { yield executor.new, transporter, builder.new, runtime }
   ensure
     Object.send(:remove_const, :FastlaneCore) if defined?(core) && Object.const_defined?(:FastlaneCore, false) && Object.const_get(:FastlaneCore, false).equal?(core)
     Object.const_set(:FastlaneCore, previous) if previous
@@ -579,4 +594,124 @@ class StoreLaneResourcesTest < Minitest::Test
       end
     end
   end
+
+  def with_original_local_tools
+    scenario(macos:true)
+    app=File.join(@base,'Xcode_Test.app');developer=File.join(app,'Contents/Developer')
+    altool=File.join(app,'Contents/Support/altool');xcrun=File.join(@base,'xcrun')
+    FileUtils.mkdir_p([developer,File.dirname(altool)])
+    [altool,xcrun].each { |p| File.binwrite(p,'inert never executed');File.chmod(0o555,p) }
+    original_open,original_lstat=File.method(:open),File.method(:lstat)
+    # Only native root-owned protection is modeled. Same actual original File
+    # instances/inodes/times/bytes/positive closes remain real and observable.
+    protect=lambda do |stat|
+      stat.define_singleton_method(:uid) { 0 }
+      mode=stat.mode
+      stat.define_singleton_method(:mode) { mode & ~0o7022 }
+      stat
+    end
+    opened=lambda do |path,*args,**kwargs|
+      actual=path=='/usr/bin/xcrun' ? xcrun : path
+      file=original_open.call(actual,*args,**kwargs);old=file.method(:stat)
+      file.define_singleton_method(:stat) { protect.call(old.call) } unless actual==@lane || actual.start_with?(@lane+'/')
+      file
+    end
+    named=lambda do |path|
+      stat=original_lstat.call(path=='/usr/bin/xcrun' ? xcrun : path)
+      path==@lane || path.start_with?(@lane+'/') ? stat : protect.call(stat)
+    end
+    File.stub(:open,opened) do
+      File.stub(:lstat,named) do
+        identity=lambda { |p,leaf| @resources.send(:transport_identity,File.lstat(p),leaf) }
+        selection={'schemaVersion'=>1,'developerDirectory'=>developer,'appIdentity'=>identity.call(app,false),
+          'developerIdentity'=>identity.call(developer,false),'xcrun'=>identity.call('/usr/bin/xcrun',true)}
+        context={payload:{'platform'=>'ios'},transport_tools:{'selection'=>selection,'altoolPath'=>altool,'altoolIdentity'=>identity.call(altool,true)}}
+        @invocation.instance_variable_set(:@local_execution,context) # Native admission model, no Document grant.
+        yield context,altool
+      end
+    end
+  end
+  def test_local_transport_holds_actual_originals_but_never_publishes_or_deletes_tools
+    with_original_local_tools do |context,path|
+      @resources.bind_local_transport!(context)
+      nodes=@resources.instance_variable_get(:@local_tools)
+      assert nodes.length>5;assert nodes.all? { |n| n.fetch(:slot).open? }
+      assert @resources.check_local_transport!
+      rows=completed_inventory
+      assert_empty rows;assert File.file?(path)
+      assert nodes.all? { |n| n.fetch(:slot).retired? }
+      assert_raises(Resources::Error) { @resources.bind_local_transport!(context) }
+    end
+  end
+  def test_local_transport_changed_leaf_and_lost_original_close_preserve_unknown
+    with_original_local_tools do |context,path|
+      @resources.bind_local_transport!(context)
+      File.chmod(0o600,path);File.binwrite(path,'changed-original');File.chmod(0o555,path)
+      assert_raises(Resources::Error) { @resources.check_local_transport! }
+      assert @invocation.unknown?;refute @resources.sealed_and_retired?
+    end
+    with_original_local_tools do |context,_|
+      @resources.bind_local_transport!(context)
+      slot=@resources.instance_variable_get(:@local_tools).last.fetch(:slot);original=slot.io.method(:close);calls=0
+      slot.io.define_singleton_method(:close) { calls+=1;original.call;raise IOError,'lost original consuming close return' }
+      assert_raises(Lifetime::LifetimeError) { completed_inventory }
+      @resources.close_independent!
+      assert_equal 1,calls;assert @invocation.unknown?;refute @resources.sealed_and_retired?
+    end
+  end
+  def test_local_transport_quote_and_foreign_context_refuse_before_any_new_open
+    with_original_local_tools do |context,_|
+      before=@resources.instance_variable_get(:@handles).length
+      assert_raises(Resources::Error) { @resources.bind_local_transport!(context.dup) }
+      assert_equal before,@resources.instance_variable_get(:@handles).length
+      # Conservatively retained slots cannot be erased or credited as future closes.
+      @resources.instance_variable_get(:@handles).concat(Array.new(130) { Resources::FileSlot.new })
+      count=@resources.instance_variable_get(:@handles).length
+      assert_raises(Resources::Error) { @resources.bind_local_transport!(context) }
+      assert_equal count,@resources.instance_variable_get(:@handles).length
+    end
+  end
+
+  def test_local_constructor_key_and_upload_use_existing_resources_without_ambient_executor_selection
+    with_original_local_tools do |context,path|
+      with_bridge_models(local:context) do |executor,transporter,builder,runtime|
+        key={key_id:'KEY123',issuer_id:'synthetic-issuer',key:'synthetic non-credential bytes'}
+        MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) do
+          # The existing local constructor must not delegate to the model's
+          # ordinary positional constructor or query any Helper/Xcode API.
+          FastlaneCore::AltoolTransporterExecutor.stub(:new,executor) do
+            current=transporter.new(nil,nil,false,nil,nil,altool_compatible_command:true,api_key:key)
+            assert_same executor,current.instance_variable_get(:@transporter_executor)
+            assert_nil current.instance_variable_get(:@jwt)
+            pilot=@resources.create_pilot_root!
+            package=builder.generate(app_id:'12345',ipa_path:@artifact,package_path:pilot,platform:'ios',
+              app_identifier:'fixture.app',short_version:'1.0.0',bundle_version:'1')
+            executor.define_singleton_method(:build_upload_command) { |*| raise 'ambient command builder entered' }
+            calls=0
+            executor.behavior=lambda do
+              calls+=1
+              request=@invocation.instance_variable_get(:@local_spawn)
+              assert_equal path,request[1][0]
+              assert_equal @resources.instance_variable_get(:@entries).fetch('upload-asset').fetch(:path),request[1][9]
+              assert @resources.check_local_transport!
+              true
+            end
+            assert current.upload(package_path:package,asset_path:@artifact,platform:'ios')
+            assert_equal 1,calls
+            assert completed_inventory.any? { |row| row.fetch('role')=='key' }
+          end
+        end
+      end
+    end
+    with_original_local_tools do |context,_|
+      with_bridge_models(local:context) do |_,transporter,_,runtime|
+        bad={key_id:'KEY123',issuer_id:'foreign-issuer',key:'synthetic non-credential bytes'}
+        assert_raises(MobileReleaseKit::StoreLaneRuntime::Error) do
+          transporter.new(nil,nil,false,nil,nil,altool_compatible_command:true,api_key:bad)
+        end
+        assert_empty @resources.instance_variable_get(:@entries)
+      end
+    end
+  end
+
 end

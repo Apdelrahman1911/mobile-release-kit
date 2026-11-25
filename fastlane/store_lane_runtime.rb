@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "base64"
 require_relative "store_document"
 require_relative "store_lane_resources"
 require_relative "native_process_spawn"
@@ -14,6 +15,10 @@ module MobileReleaseKit
                ios_testflight_internal ios_testflight_external ios_app_store_submit].freeze
     PREFIX = "MOBILE_RELEASE_STORE_LANE_"
     PRIVATE_KEYS = %w[NONCE ROOT ROOT_ID CLOCK RUN_DEADLINE_NS HARD_DEADLINE_NS].map { |key| PREFIX + key }.freeze
+    LOCAL_EXECUTE_KEY = PREFIX + "LOCAL_EXECUTE"
+    LOCAL_RECONCILE_KEY = PREFIX + "LOCAL_RECONCILE"
+    LOCAL_STAGE_KEY = PREFIX + "LOCAL_STAGE"
+    LOCAL_READINESS_KEY = PREFIX + "LOCAL_READINESS"
     MAX_TIME = (1 << 63) - 1
     MAX_ID = (1 << 64) - 1
     RUN_NS = 3_600_000_000_000
@@ -34,7 +39,7 @@ module MobileReleaseKit
       def initialize
         @pid, @thread = Process.pid, Thread.current
         @exit = Process.method(:exit!)
-        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == "3.3.12" &&
+        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == NativeProcessSpawn.expected_ruby_release &&
                @exit.receiver.equal?(Process) && @exit.owner.equal?(Process.singleton_class) &&
                @exit.name == :exit! && @exit.source_location.nil? && @exit.arity == -1
           raise Error.new(:exit_api)
@@ -67,6 +72,30 @@ module MobileReleaseKit
       raise Error.new(:runtime_missing) unless @runtime
       @runtime.origin!
       @runtime
+    end
+
+    # Ordinary lanes keep their exact default. Merely setting a private key
+    # outside the original admitted Runtime cannot choose a local decoder.
+    def self.local_execution_context
+      unless @runtime
+        raise Error.new(:local_outside_runtime) if [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].any? { |key| ENV.key?(key) }
+        return nil
+      end
+      @runtime.local_execution_context
+    end
+
+    def self.local_stage_context
+      unless @runtime
+        raise Error.new(:local_outside_runtime) if [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].any? { |key| ENV.key?(key) }
+        return nil
+      end
+      @runtime.local_stage_context
+    end
+
+    def self.local_readiness_context
+      context = local_execution_context # Same original Runtime/environment gate.
+      return nil unless context && context[:readiness]
+      current_runtime!.local_readiness_context!
     end
 
     def self.run_upload!(lane, &body)
@@ -118,6 +147,67 @@ module MobileReleaseKit
         origin!
         raise Error.new(:bridges_not_admitted) unless @bridges_installed && @xml_template
         @xml_template
+      end
+
+      def local_admission_context
+        origin!
+        raise Error.new(:local_admission) unless @state == :admitting && @local_execution && @resources
+        @local_execution
+      end
+      def local_execution_context
+        require_active!
+        @local_execution
+      end
+
+      def local_stage_admission_context
+        origin!
+        raise Error.new(:local_stage_admission) unless @state == :admitting && @local_stage && @resources
+        @local_stage
+      end
+      def local_stage_context
+        require_active!
+        @local_stage
+      end
+      def local_stage_execution_context!(stage)
+        context = local_stage_context
+        raise Error.new(:local_stage_execution) unless context && context.equal?(@local_execution) &&
+          @binding.fetch("mode") == "execute" && context.fetch(:stage) == stage &&
+          context.fetch(:authority).fetch("purpose") == "execute"
+        context
+      end
+      def local_readiness_context!
+        context = local_stage_context
+        raise Error.new(:local_readiness) unless context && context.equal?(@local_execution) && context[:readiness] == true &&
+          @binding.fetch("mode") == "execute" && @binding.fetch("lane") == "ios_testflight_external" &&
+          context.fetch(:stage) == "external-testing" && context.fetch(:platform) == "ios" &&
+          context.fetch(:authority).fetch("purpose") == "external-readiness"
+        context
+      end
+      def local_metadata_root!
+        context = local_stage_context
+        raise Error.new(:local_metadata) unless context
+        @resources.local_metadata_root!(context)
+      end
+
+      # Only this original admitted local iOS lane can consume the native/core
+      # tool nomination. B's validation-only tuple never authorizes dispatch.
+      def local_ios_transport!
+        context=local_execution_context
+        raise Error.new(:local_transport) unless context && context.fetch(:payload).fetch("platform")=="ios" &&
+          context.fetch(:authority).fetch("purpose")=="execute" && context[:transport_tools]
+        @resources.check_local_transport!
+        context.fetch(:transport_tools)
+      end
+      def local_ios_key!(key)
+        local_ios_transport!
+        expected=Base64.strict_decode64(@environment.fetch("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"))
+        raise Error.new(:local_key) unless key.instance_of?(Hash) &&
+          key[:key_id]==@environment.fetch("MOBILE_RELEASE_ASC_KEY_ID") &&
+          key[:issuer_id]==@environment.fetch("MOBILE_RELEASE_ASC_ISSUER_ID") &&
+          key[:key].instance_of?(String) && key[:key].b==expected && !expected.empty? && expected.bytesize<=16384
+        key
+      rescue ArgumentError,KeyError
+        raise Error.new(:local_key),cause:nil
       end
 
       def secondary_errors
@@ -243,6 +333,16 @@ module MobileReleaseKit
         end
       end
 
+      # Original PipeAdapter is already retained, so ordinary continuation
+      # correctly refuses here. Check this one exact active adapter, not a new
+      # continuation permission or a guessed settled adapter.
+      def local_ios_inflight!(invocation,adapter)
+        origin!
+        raise Error.new(:local_inflight) unless invocation.equal?(@invocation) &&
+          invocation.local_inflight_adapter?(adapter) && @state==:running && @bridges_installed && !@unknown
+        check_environment!;require_time!;@resources.check_local_transport!
+      end
+
       def require_time!
         raise Error.new(:deadline) unless NativeProcessSpawn.monotonic_ns < @binding.fetch("run_deadline_ns")
       end
@@ -267,7 +367,10 @@ module MobileReleaseKit
         raise Error.new(:lane) unless lane.instance_of?(String) && LANES.include?(lane)
         @environment = ENV.to_h.transform_values { |value| value.dup.freeze }.freeze
         env = @environment
-        unless env.keys.select { |key| key.start_with?(PREFIX) }.sort == PRIVATE_KEYS.sort &&
+        local_keys = [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].select { |key| env.key?(key) }
+        raise Error.new(:environment) if local_keys.length > 1
+        private_keys = PRIVATE_KEYS + local_keys
+        unless env.keys.select { |key| key.start_with?(PREFIX) }.sort == private_keys.sort &&
                env["MOBILE_RELEASE_OPERATION"] == lane && %w[prepare execute].include?(env["MOBILE_RELEASE_STORE_MODE"])
           raise Error.new(:environment)
         end
@@ -289,7 +392,7 @@ module MobileReleaseKit
         tmp = File.join(root, "tmp")
         raise Error.new(:temporary_scope) unless %w[TMPDIR TMP TEMP].all? { |key| env[key] == tmp }
         raise Error.new(:cwd) unless Dir.pwd == File.join(root, "runner") && File.realpath(Dir.pwd) == Dir.pwd
-        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == "3.3.12" &&
+        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == NativeProcessSpawn.expected_ruby_release &&
                File.const_defined?(:NOFOLLOW) && File.const_defined?(:NONBLOCK) && Dir.respond_to?(:fchdir)
           raise Error.new(:runtime_api)
         end
@@ -313,11 +416,181 @@ module MobileReleaseKit
         @resources = StoreLaneResources::Inventory.new(invocation: @invocation, binding: @binding)
         @invocation.bind_resources!(@resources)
         @resources.admit!
+        if env.key?(LOCAL_STAGE_KEY)
+          admit_local_stage_prepare!
+        elsif env.key?(LOCAL_EXECUTE_KEY) || env.key?(LOCAL_RECONCILE_KEY) || env.key?(LOCAL_READINESS_KEY)
+          admit_local_execution!
+        end
+      end
+
+      def admit_local_execution!
+        raise Error.new(:local_reused) if @local_execution || @local_stage || @binding.fetch("mode") != "execute"
+        require_relative "release_support"
+        # Exact private transport, never authority selected from a decoded
+        # purpose or an ambient fallback. Execute keeps its original grammar.
+        keys=[LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].select { |key| @environment.key?(key) }
+        raise Error.new(:local_shape) unless keys.length == 1
+        recover=keys.first == LOCAL_RECONCILE_KEY
+        readiness=keys.first == LOCAL_READINESS_KEY
+        raise Error.new(:local_shape) if keys.first == LOCAL_STAGE_KEY
+        platform,stage = local_lane_pair!
+        later = stage != "candidate"
+        raise Error.new(:local_shape) if later && recover
+        raise Error.new(:local_readiness) if readiness && [platform,stage] != ["ios","external-testing"]
+        raw=@environment.fetch(keys.first)
+        raise Error.new(:local_size) unless raw.bytesize <= 16*1024
+        value=MobileReleaseKit.strict_json(raw,label:"local execution context")
+        fields = %w[authority expectedIntentSha256]
+        fields += ["executionReceiptSha256"] if readiness
+        fields += later ? ["metadataInputs"] : [platform == "ios" ? "signingTools" : "toolchain"] unless recover
+        transport = !later && !recover && platform=="ios" && value.instance_of?(Hash) && value.key?("transportTools")
+        fields += ["transportTools"] if transport
+        raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort == fields.sort
+        path=MobileReleaseKit.safe_path(@environment.fetch("MOBILE_RELEASE_APP_ROOT"),@environment.fetch("MOBILE_RELEASE_OPERATION_INTENT_PATH"))
+        raise Error.new(:local_intent) unless File.file?(path) && !File.symlink?(path) && File.size(path) <= 2*1024*1024
+        body=File.binread(path,2*1024*1024+1)
+        payload,digest=MobileReleaseKit.local_operation_intent(body,expected_sha256:value.fetch("expectedIntentSha256"),platform:platform,stage:stage)
+        authority = if readiness
+          MobileReleaseKit.local_readiness_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
+            intent_content:body,expected_intent_sha256:digest,execution_receipt_sha256:value.fetch("executionReceiptSha256"))
+        else
+          MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
+            intent_content:body,expected_intent_sha256:digest,purpose:recover ? "recover" : "execute",platform:platform,stage:stage)
+        end
+        raise Error.new(:local_binding) unless payload.fetch("confirmation") == @environment.fetch("MOBILE_RELEASE_CONFIRMATION") &&
+          payload.fetch("application").fetch("id") == @environment.fetch("MOBILE_RELEASE_APP_IDENTITY") &&
+          payload.fetch("version").fetch("marketing") == @environment.fetch("MOBILE_RELEASE_MARKETING_VERSION") &&
+          payload.fetch("version").fetch("build").to_s == @environment.fetch("MOBILE_RELEASE_BUILD_NUMBER")
+        # This tuple was emitted only by the exact typed native-backed Python
+        # owner and sealed with ALL command environment bytes. It is comparison
+        # DATA, not a new provider/consent grant or a caller runtime factory.
+        context={payload:payload,digest:digest,authority:authority}
+        context.merge!(readiness:true,execution_receipt_sha256:value.fetch("executionReceiptSha256")) if readiness
+        if platform == "ios"
+          raise Error.new(:local_binding) unless payload.fetch("application").fetch("storeAppId") == @environment.fetch("MOBILE_RELEASE_ASC_APP_ID")
+        end
+        if !later && !recover && platform == "ios"
+          tools=value.fetch("signingTools")
+          raise Error.new(:local_shape) unless tools.instance_of?(Hash) && tools.keys.sort == %w[codesign openssl security] &&
+            tools.values.all? { |tool| local_signing_tool?(tool) }
+          raise Error.new(:local_binding) unless payload.fetch("application").fetch("storeAppId") == @environment.fetch("MOBILE_RELEASE_ASC_APP_ID")
+          context[:signing_tools]=tools
+          if transport
+            selected=value.fetch("transportTools")
+            raise Error.new(:local_transport) unless local_transport?(selected)
+            selection=selected.fetch("selection")
+            raise Error.new(:local_transport) unless @environment["DEVELOPER_DIR"]==selection.fetch("developerDirectory") &&
+              %w[DELIVER_ALTOOL_ADDITIONAL_UPLOAD_PARAMETERS DELIVER_ITMSTRANSPORTER_ADDITIONAL_UPLOAD_PARAMETERS
+                FASTLANE_ITUNES_TRANSPORTER_USE_SHELL_SCRIPT FASTLANE_ITUNES_TRANSPORTER_PATH
+                ITMSTRANSPORTER_FORCE_ITMS_PACKAGE_UPLOAD MOBILE_RELEASE_RECOVERY_RUN_ID
+                MOBILE_RELEASE_RECOVERY_CONFIRMATION API_PRIVATE_KEYS_DIR].all? { |name| @environment[name].to_s.empty? }
+            context[:transport_tools]=selected
+          end
+        elsif !later && !recover
+          context[:toolchain]=value.fetch("toolchain")
+        end
+        if later
+          metadata=local_metadata_data!(value.fetch("metadataInputs"))
+          raise Error.new(:local_metadata) unless metadata.fetch("metadataSha256")==payload.fetch("configuration").fetch("metadataSha256")
+          context.merge!(stage:stage,platform:platform,metadata:metadata)
+        end
+        freeze_local(context);@local_execution=context
+        @local_stage=context if later
+        @invocation.bind_local_execution!(self,context)
+        if later
+          @invocation.bind_local_stage!(self,context)
+          @resources.bind_local_metadata!(context)
+        end
+        @resources.bind_local_transport!(context) if context[:transport_tools]
+      end
+      def local_lane_pair!
+        require_relative "release_support"
+        pair=MobileReleaseKit::LOCAL_STAGE_LANES.key(@binding.fetch("lane"))
+        raise Error.new(:local_lane) unless pair
+        pair
+      end
+      def admit_local_stage_prepare!
+        raise Error.new(:local_reused) unless !@local_execution && !@local_stage && @binding.fetch("mode")=="prepare"
+        platform,stage=local_lane_pair!
+        raise Error.new(:local_stage) if stage=="candidate"
+        raw=@environment.fetch(LOCAL_STAGE_KEY)
+        raise Error.new(:local_size) unless raw.bytesize<=16*1024
+        value=MobileReleaseKit.strict_json(raw,label:"local stage context")
+        raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort==%w[metadataInputs platform stage] &&
+          value["stage"]==stage && value["platform"]==platform
+        context={stage:stage,platform:platform,metadata:local_metadata_data!(value.fetch("metadataInputs"))}
+        freeze_local(context);@local_stage=context
+        @invocation.bind_local_stage!(self,context)
+        @resources.bind_local_metadata!(context)
+      end
+      def local_metadata_data!(value)
+        raise Error.new(:local_metadata) unless value.instance_of?(Hash) &&
+          value.keys.sort==%w[metadataSha256 root rootIdentity rosterSha256 schemaVersion] &&
+          value["schemaVersion"].instance_of?(Integer) && value["schemaVersion"]==1 &&
+          %w[metadataSha256 rosterSha256].all? { |key| value[key].instance_of?(String) && value[key].match?(/\A[0-9a-f]{64}\z/) }
+        root=absolute!(value.fetch("root"));identity=value.fetch("rootIdentity")
+        raise Error.new(:local_metadata) unless File.basename(root)=="metadata-tree" &&
+          identity.instance_of?(Hash) && identity.keys.sort==%w[device gid inode mode uid] &&
+          %w[device inode].all? { |key| identity[key].instance_of?(String) && identity[key].match?(/\A(?:0|[1-9][0-9]{0,19})\z/) && identity[key].to_i<=MAX_ID } &&
+          identity["inode"]!="0" && %w[mode uid gid].all? { |key| identity[key].instance_of?(Integer) && identity[key].between?(0,2**32-1) } &&
+          identity["uid"]==Process.euid && identity["mode"]==0040700
+        value
+      end
+      def local_signing_tool?(tool)
+        tool.instance_of?(Hash) && tool.keys.sort == %w[ctimeNs device gid inode links mode mtimeNs size uid] &&
+          %w[device inode mtimeNs ctimeNs].all? { |name| tool[name].instance_of?(String) && tool[name].match?(/\A(?:0|[1-9][0-9]{0,19})\z/) && tool[name].to_i <= 2**64-1 } &&
+          tool['inode'] != '0' && %w[mode uid gid].all? { |name| tool[name].instance_of?(Integer) && tool[name].between?(0,2**32-1) } &&
+          tool['uid'] == 0 && tool['mode'] & 0170000 == 0100000 && tool['mode'] & 07022 == 0 && tool['mode'] & 0111 != 0 &&
+          tool['links'].instance_of?(Integer) && tool['links'] == 1 && tool['size'].instance_of?(Integer) && tool['size'].between?(1,64*1024*1024)
+      end
+      def local_root_identity?(value)
+        value.instance_of?(Hash) && value.keys.sort==%w[device gid inode mode uid] &&
+          %w[device inode].all? { |n| value[n].instance_of?(String) && value[n].match?(/\A(?:0|[1-9][0-9]{0,19})\z/) && value[n].to_i<=MAX_ID } &&
+          value['inode']!='0' && %w[mode uid gid].all? { |n| value[n].instance_of?(Integer) && value[n].between?(0,2**32-1) } &&
+          value['uid']==0 && value['mode'] & 0170000==0040000 && value['mode'] & 07022==0
+      end
+      def local_transport?(value)
+        return false unless value.instance_of?(Hash) && value.keys.sort==%w[altoolIdentity altoolPath selection]
+        selection=value['selection']
+        return false unless selection.instance_of?(Hash) && selection.keys.sort==%w[appIdentity developerDirectory developerIdentity schemaVersion xcrun] &&
+          selection['schemaVersion'].instance_of?(Integer) && selection['schemaVersion']==1 &&
+          local_root_identity?(selection['appIdentity']) && local_root_identity?(selection['developerIdentity']) &&
+          local_signing_tool?(selection['xcrun']) && local_signing_tool?(value['altoolIdentity'])
+        developer=selection['developerDirectory'];tool=value['altoolPath']
+        return false unless developer.instance_of?(String) &&
+          (developer == '/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer' ||
+           developer.match?(%r{\A/Applications/Xcode[A-Za-z0-9_.+-]*\.app/Contents/Developer\z}))
+        app=developer.delete_suffix('/Contents/Developer')
+        tool.instance_of?(String) && tool.bytesize<=4096 && tool.start_with?(app+'/Contents/') &&
+          tool.end_with?('/altool','/altoolShim') && tool.split('/').length<=32 &&
+          tool.split('/').drop(1).all? { |part| !part.empty? && !%w[. ..].include?(part) && part.bytesize<=255 && !part.match?(/[\x00-\x1f\x7f\\:]/) }
+      end
+      def freeze_local(value)
+        value.each { |k,v| freeze_local(k);freeze_local(v) } if value.instance_of?(Hash)
+        value.each { |v| freeze_local(v) } if value.instance_of?(Array)
+        value.freeze
       end
 
       def check_environment!
-        keys = PRIVATE_KEYS + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
+        keys = PRIVATE_KEYS + [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY] + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
           MOBILE_RELEASE_ASC_APP_ID MOBILE_RELEASE_ASC_KEY_ID MOBILE_RELEASE_IOS_IPA_PATH TMPDIR TMP TEMP HOME]
+        if @local_execution || @local_stage
+          keys += %w[MOBILE_RELEASE_OPERATION_INTENT_PATH MOBILE_RELEASE_APP_ROOT MOBILE_RELEASE_CONFIG_PATH
+            MOBILE_RELEASE_APP_IDENTITY MOBILE_RELEASE_MARKETING_VERSION MOBILE_RELEASE_BUILD_NUMBER MOBILE_RELEASE_CONFIRMATION
+            JAVA_HOME MOBILE_RELEASE_BUNDLETOOL_JAR DEVELOPER_DIR MOBILE_RELEASE_ASC_ISSUER_ID
+            MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_IOS_ARCHIVE_PATH
+            DELIVER_ALTOOL_ADDITIONAL_UPLOAD_PARAMETERS DELIVER_ITMSTRANSPORTER_ADDITIONAL_UPLOAD_PARAMETERS
+            FASTLANE_ITUNES_TRANSPORTER_USE_SHELL_SCRIPT FASTLANE_ITUNES_TRANSPORTER_PATH
+            ITMSTRANSPORTER_FORCE_ITMS_PACKAGE_UPLOAD MOBILE_RELEASE_RECOVERY_RUN_ID MOBILE_RELEASE_RECOVERY_CONFIRMATION API_PRIVATE_KEYS_DIR]
+        end
+        if @local_stage
+          keys += %w[MOBILE_RELEASE_PLATFORM MOBILE_RELEASE_APPLE_STATE_PATH MOBILE_RELEASE_PLAY_STATE_PATH
+            MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME
+            MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL
+            MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME
+            MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64
+            MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION]
+        end
         raise Error.new(:environment_changed) unless keys.all? { |key| ENV[key] == @environment[key] }
       end
 

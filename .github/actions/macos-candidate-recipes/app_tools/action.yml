@@ -1,0 +1,20 @@
+name: "Project current signed tools without executing either program"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Project current signed tools without executing either program"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        case "$HISTORY_ENABLED" in
+          true) "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py project-history-provider --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/history-provider-result.json" ;;
+          false) ;; *) exit 1 ;;
+        esac
+        case "$SEAL_ENABLED" in
+          true) "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py project-github-seal --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/github-seal-result.json" ;;
+          false) ;; *) exit 1 ;;
+        esac

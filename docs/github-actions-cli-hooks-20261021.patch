@@ -1,0 +1,1679 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -8,11 +8,12 @@
+     "node": ">=22.12.0"
+   },
+   "scripts": {
++    "test:agent-github-actions": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-github-actions.test.mjs",
+     "test:agent-store-release": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-release.test.mjs",
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1,3 +1,6 @@
++import { AgentGithubActionAccessController } from './agentGithubActionAccessController.ts';
++import type { GithubActionSelection } from './agentGithubActionAccess.ts';
++import { AgentGithubActionAccess } from './components/AgentGithubActionAccess.tsx';
+ import { AgentUploadKeyAccessController } from './agentUploadKeyAccessController.ts';
+ import { AgentUploadKeyAccess } from './components/AgentUploadKeyAccess.tsx';
+ import { ServiceConfigurationAccess } from './components/ServiceConfigurationAccess.tsx';
+@@ -280,6 +283,9 @@
+   // Both counter owners participate in every existing admission. Each one's
+   // own callback below excludes only itself, never its peer or the editor.
+   const versionEnrollmentBusy = useCallback(() => versionEnrollmentRef.current?.ownerReason() ?? versionReserveRef.current?.ownerReason() ?? null, []);
++  const agentGithubActionRef=useRef<AgentGithubActionAccessController|null>(null);
++  const agentGithubActionAdmission=useRef<()=>string|null>(()=>'Wait for the native service.');
++  const agentGithubActionBusy=useCallback(()=>agentGithubActionRef.current?.ownerReason()??null,[]);
+   const repositoryCreateRef = useRef<GitHubRepositoryCreateController | null>(null);
+   const repositoryCreateAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+   const repositoryCreateBusy = useCallback(() => repositoryCreateRef.current?.ownerReason() ?? null, []);
+@@ -400,7 +406,7 @@
+   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
+   // Existing reciprocal admission callbacks also retain the original path
+   // picker, even after its display eligibility was retired by a local edit.
+-  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
++  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false, excludeGithubAction = false) => (excludeGithubAction?null:agentGithubActionBusy()) ?? localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+     (excludeHistory ? null : historyBusy()) ??
+     (excludeRepositoryCreate ? null : repositoryCreateBusy()) ??
+     (excludeActivity ? null : activityBusy()) ??
+@@ -413,7 +419,7 @@
+     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
+     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
+     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
+-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy, playCleanupBusy]);
++    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy, playCleanupBusy, agentGithubActionBusy]);
+   // Tools excludes only itself. Existing peers, passive observation and every
+   // ordinary mutation admission include the original tool operation below.
+   const savedOwnersBusy = useCallback((...args: Parameters<typeof savedOwnersWithoutToolsBusy>) =>
+@@ -610,6 +616,20 @@
+     }, () => actionsRetryAdmission.current()));
+   actionsRetryRef.current = githubActionsRetry;
+   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
++  const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
++    syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();},
++    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:r.kind==='draft-pr-create'?pullRequestRef.current?.delegatePrepared(r)??null:actionsRetryRef.current?.delegatePrepared(r)??null,
++    current:()=>{const service=pathService.current;return {
++      port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
++      projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
++      reviews:[repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection()].filter((r):r is GithubActionSelection=>!!r),
++      blockedReason:agentGithubActionAdmission.current(),
++    };},
++  }));
++  agentGithubActionRef.current=agentGithubAction;
++  useSyncExternalStore(agentGithubAction.subscribe,agentGithubAction.getSnapshot,agentGithubAction.getSnapshot);
++  useEffect(()=>{agentGithubAction.syncContext();});
++  useEffect(()=>()=>agentGithubAction.dispose(),[agentGithubAction]);
+   const [githubPlayCleanup] = useState(() => new GitHubPlayCleanupController(
+     githubConnection.getSnapshot, () => {
+       const current = workspaceRef.current, id = current.selectedId;
+@@ -913,6 +933,19 @@
+     return selected && current?.session?.projectId === selected && connection.context?.projectId === selected &&
+       current.account.state === 'observed' && current.repository.state === 'observed'
+       ? null : 'Connect the intended GitHub repository and account first.';
++  };
++  agentGithubActionAdmission.current=()=>{
++    const selected=agentGithubActionRef.current?.peerSelection()??null;
++    const repository=!!selected&&selected.kind==='repository-create'&&repositoryCreateRef.current?.agentSelected(selected)===true;
++    const pr=!!selected&&selected.kind==='draft-pr-create'&&pullRequestRef.current?.agentSelected(selected)===true;
++    const retry=!!selected&&selected.kind==='failed-jobs-retry'&&actionsRetryRef.current?.agentSelected(selected)===true;
++    const blocked=savedCommandBusy(false,false,false,false,false,false,false,false,repository,false,pr,retry,false,true)??
++      savedOwnersPrerequisiteReason(false,false,undefined,false,true);
++    if(blocked)return blocked;
++    if(githubPreflight.getSnapshot().status?.prepared||githubRelease.getSnapshot().status?.prepared)return 'Finish the other prepared GitHub release review first.';
++    const connection=githubConnection.getSnapshot(),project=workspaceRef.current.selectedId,current=connection.status;
++    return current?.session?.state==='connected'&&current.session.projectId===project&&connection.context?.projectId===project&&current.account.state==='observed'&&
++      (repository||current.repository.state==='observed')?null:'Connect the exact reviewed GitHub account and project first.';
+   };
+   // The fixed cleanup review shares this selected Connection and excludes
+   // only its own original calls. No release/candidate/Store grant comes from UI.
+@@ -2362,6 +2395,7 @@
+               originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} /><GitHubDeviceConnection controller={githubDevice} /></>} />
+             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
+             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
++            <AgentGithubActionAccess controller={agentGithubAction} />
+             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+             localActions={gitRepository ? <>
+               <GitInitialization controller={gitLocal} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -1,3 +1,4 @@
++import { createAgentGithubActionPort } from './agentGithubActionAccess.ts';
+ import { createConfigurationApi } from './serviceConfigurationProtocol.ts';
+ import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
+ import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
+@@ -431,6 +432,7 @@
+     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
++    agentGithubAction: mode === 'native' ? createAgentGithubActionPort((command,bytes)=>invoke<unknown>(command,bytes)) : null,
+     agentAppleProvisioning: mode === 'native' ? createAppleCliPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+diff --git a/desktop/src/githubActionsRetryController.ts b/desktop/src/githubActionsRetryController.ts
+--- a/desktop/src/githubActionsRetryController.ts
++++ b/desktop/src/githubActionsRetryController.ts
+@@ -1,3 +1,5 @@
++import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
++import type { GithubActionSelection, GithubActionStatus, GithubActionDelegate } from './agentGithubActionAccess.ts';
+ // One presentation coordinator for the original native connection operation.
+ // No HTTP, token, timer, automatic creation, Git mutation or new execution owner.
+ import { sameConnectionData as same } from './githubConnectionProtocol.ts';
+@@ -9,10 +11,11 @@
+ 
+ interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; repositoryId: string }
+ interface Original { port: ActionsRetryPort; live: boolean; unlisten: (() => void) | null; status: ActionsRetryStatus | null; fresh: boolean; closeCheck: object | null }
+-interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean; promise: Promise<unknown> | null }
++interface Work { agentCheck?:{delegate:Delegated;status:ActionsRetryStatus|null}; owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean; promise: Promise<unknown> | null }
+ interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: ActionsRetryKind; picked: ActionsRetryActivitySource | null; target: ActionsRetryTarget | null; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
+   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: ActionsRetryConsent | null }
+ interface Review { owner: Original; context: Context; epoch: object; consent: ActionsRetryConsent; picked: ActionsRetryActivitySource }
++interface Delegated {prepareId:string;review:Review;selection:GithubActionSelection;allowReturned:boolean;noAllow:boolean;unused:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
+ export interface ActionsRetryView {
+   native: boolean; status: ActionsRetryStatus | null;
+   confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean;
+@@ -61,6 +64,7 @@
+   private work = new Set<Work>();
+   private attempt: Attempt | null = null;
+   private review: Review | null = null;
++  private delegated:Delegated|null=null;
+   private current: Context | null = null;
+   private epoch: object = {};
+   private approval: object = {};
+@@ -93,7 +97,7 @@
+   };
+   setConfirmed(value:boolean):void { if(!this.disposed){this.approval={};this.update({confirmed:value===true&&this.currentConsent()!==null});} }
+   private owns(o: Original): boolean {
+-    return this.unknown || o.closeCheck !== null || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
++    return this.delegated?.review.owner === o || this.unknown || o.closeCheck !== null || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
+       !!o.status?.operation && o.status.operation.phase !== 'settled';
+   }
+   private maintain(): void {
+@@ -125,7 +129,8 @@
+     this.desired = port; this.syncContext(); this.invalidate(); this.update({ native: port !== null }); this.maintain();
+   }
+   private latch(owner: Original, kind: Work['kind']): Work { const w: Work = { owner, kind, ended: false, promise: null }; this.work.add(w); this.update(); return w; }
+-  private finish(w: Work): void { w.ended = true; w.promise=null; this.work.delete(w); this.settle(); this.update(); this.maintain(); }
++  private finish(w: Work): void { w.ended = true; w.promise=null; this.work.delete(w); this.settle(); this.settleDelegated(w); this.update(); this.maintain();
++    if(w.kind==='discard'&&this.delegated?.noAllow&&!this.unknown)this.checkStatus(); }
+   private origin(a: Attempt, s: ActionsRetryStatus): boolean {
+     const o = s.operation;
+     return a.sent && s.revision > a.revision && s.sessionId === a.context.sessionId && !!o && o.id !== a.previousId &&
+@@ -180,11 +185,14 @@
+     if (!o?.live || this.disposed && !this.owns(o) || [...this.work].some((w) => w.owner === o && ['status', 'subscribe'].includes(w.kind))) return;
+     const closeCheck = o.closeCheck;
+     const w = this.latch(o, 'status');
++    const delegated=this.delegated;
++    if(delegated&&(delegated.allowReturned||delegated.noAllow)&&(delegated.unused||delegated.terminal?.settlement==='settled'))w.agentCheck={delegate:delegated,status:null};
+     const failed = () => { o.fresh = false; if (this.attempt || o.status?.operation && o.status.operation.phase !== 'settled') this.update({ uncertain: true, error: 'response-invalid' });
+       else this.update({ error: 'response-invalid' }); };
+     try { const promise = o.port.status(); if (!(promise instanceof Promise)) throw new Error('No original status promise'); w.promise=promise;
+       void promise.then((v) => {
+         const accepted = this.receive(o, v);
++        if(w.agentCheck)w.agentCheck.status=accepted;
+         // Only a Check started after this exact known refusal can restore
+         // freshness. Old polls/events cannot reopen Close or replace its owner.
+         if (accepted && !this.unknown && o === this.original && o.live && closeCheck !== null &&
+@@ -201,6 +209,7 @@
+       same(c, r.context) && same(o.status?.consent, r.consent) && r.picked!==null && sameSelection(r.consent.prepared.target,r.picked) ? r.consent : null;
+   }
+   ownerReason(): string | null {
++    if(this.delegated)return 'The original GitHub review is delegated to a local CLI. Check or revoke that permission; original Check/Stop/Close remain available.';
+     if (this.unknown) return ACTIONS_RETRY_HELP['cleanup-unknown'];
+     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
+       return 'The original Actions retry task is still active. Check status or Stop it before starting another task.';
+@@ -209,6 +218,7 @@
+     return null;
+   }
+   private startReason(): string | null {
++    if(this.delegated)return 'This exact review was delegated. Ordinary Create/Retry cannot consume it, including after a lost Allow reply.';
+     const o = this.original, c = context(this.connection()), s = o?.status;
+     if (this.disposed || !o?.live || o.port !== this.desired || !o.unlisten) return ACTIONS_RETRY_HELP['runtime-unavailable'];
+     if (this.unknown) return ACTIONS_RETRY_HELP['cleanup-unknown'];
+@@ -343,5 +353,55 @@
+       void promise.then((v) => { this.receive(o, v); if (o.status?.consent?.id === consent.id) this.fail('response-invalid'); }, (e) => failed(e, false)).finally(() => this.finish(w));
+     } catch (e) { failed(e, true); this.finish(w); }
+   }
++  // Eligibility comes only from the SAME private review, minted after the
++  // original Prepare promise returned; a public status/selection cannot mint it.
++  agentSelection():GithubActionSelection|null {
++    const r=this.review,s=this.original?.status;
++    return !this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
++      Object.freeze({kind:'failed-jobs-retry',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
++  }
++  agentSelected(selection:GithubActionSelection):boolean {
++    const d=this.delegated;
++    if(d)return sameGithubActionSelection(d.selection,selection)&&this.delegatedCurrent(d);
++    return sameGithubActionSelection(this.agentSelection(),selection);
++  }
++  private delegatedCurrent(d:Delegated):boolean {
++    return this.delegated===d&&!d.unknown&&!this.unknown&&!this.disposed&&!this.attempt&&!this.work.size&&
++      this.review===d.review&&this.currentConsent()===d.review.consent&&d.review.owner===this.original&&d.review.owner.live&&
++      this.original.status?.revision===d.selection.expectedRevision;
++  }
++  delegatePrepared(selection:GithubActionSelection):GithubActionDelegate|null {
++    if(!sameGithubActionSelection(this.agentSelection(),selection)||!this.review)return null;
++    const d:Delegated={prepareId:this.original!.status!.operation!.id,review:this.review,selection:Object.freeze({...selection}),allowReturned:false,noAllow:false,unused:false,terminal:null,unknown:false,released:false};
++    this.delegated=d;this.update({confirmed:false}); // latch BEFORE listeners; never rearm this Review.
++    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
++    return Object.freeze({
++      current:()=>this.delegatedCurrent(d),released:()=>d.released,
++      allowReturned:()=>{if(this.delegated===d&&!d.unknown){d.allowReturned=true;this.update();}},
++      observe:(raw:GithubActionStatus)=>{
++        const value=parseGithubActionStatus(raw);
++        if(this.delegated!==d||d.unknown)return;
++        if(!value||!sameGithubActionSelection(value.review,d.selection)||value.settlement==='unknown'){uncertain();return;}
++        if(value.settlement==='settled'){d.terminal=value;this.checkStatus();}
++      },
++      unusedReturned:()=>{if(this.delegated===d&&!d.unknown){d.unused=true;this.checkStatus();}},
++      notSubmitted:()=>{if(this.delegated!==d||d.unknown)return;d.noAllow=true;d.unused=true;
++        if(this.canDiscard())this.discardReview();else this.checkStatus();},
++      uncertain,
++    });
++  }
++  private settleDelegated(w:Work):void {
++    const d=this.delegated,s=w.agentCheck?.status;
++    if(!d||w.agentCheck?.delegate!==d||!w.ended||!s||d.unknown||this.unknown||!(d.allowReturned||d.noAllow)||
++      this.original!==d.review.owner||!d.review.owner.live||this.work.size||!same(s,d.review.owner.status)||s.sessionId!==d.selection.sessionId||
++      s.consent!==null||s.operation?.phase!=='settled'||s.operation.projectId!==d.review.context.projectId)return;
++    const final=d.terminal,op=s.operation;
++    const originalTarget=d.review.consent.prepared.target;
++    if(!same(op.target,originalTarget))return;
++    if(final?.settlement==='settled'&&!final.neverAdmitted){if(op.kind!=='retry'||op.id!==final.operationId)return;}
++    else if(d.unused||final?.neverAdmitted){if(op.kind!=='prepare'||op.id!==d.prepareId||s.revision<d.selection.expectedRevision)return;}
++    else return;
++    d.released=true;this.delegated=null;this.review=null;this.epoch={};
++  }
+   dispose(): void { this.disposed = true; this.desired = null; this.invalidate(); this.maintain(); }
+ }
+diff --git a/desktop/src/githubPullRequestController.ts b/desktop/src/githubPullRequestController.ts
+--- a/desktop/src/githubPullRequestController.ts
++++ b/desktop/src/githubPullRequestController.ts
+@@ -1,3 +1,5 @@
++import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
++import type { GithubActionSelection, GithubActionStatus, GithubActionDelegate } from './agentGithubActionAccess.ts';
+ // One presentation coordinator for the original native connection operation.
+ // No HTTP, token, timer, automatic creation, Git mutation or new execution owner.
+ import { browserRequestReturned, browserFailure, BROWSER_HELP } from './githubPullRequestManagement.ts';
+@@ -10,10 +12,11 @@
+ 
+ interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; repositoryId: string }
+ interface Original { port: PullRequestPort; live: boolean; unlisten: (() => void) | null; status: PullRequestStatus | null; fresh: boolean; closeCheck: object | null }
+-interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard' | 'browser'; ended: boolean; promise: Promise<unknown> | null }
++interface Work { agentCheck?:{delegate:Delegated;status:PullRequestStatus|null}; owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard' | 'browser'; ended: boolean; promise: Promise<unknown> | null }
+ interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: PullRequestKind; draft: PullRequestDraft; target: PullRequestTarget | null; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
+   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: PullRequestConsent | null }
+ interface Review { owner: Original; context: Context; epoch: object; consent: PullRequestConsent; draft: PullRequestDraft }
++interface Delegated {prepareId:string;review:Review;selection:GithubActionSelection;allowReturned:boolean;noAllow:boolean;unused:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
+ export interface PullRequestCompletion { readonly context:Context; readonly status:PullRequestStatus }
+ interface Completion {owner:Original;epoch:object;value:PullRequestCompletion}
+ export interface PullRequestView {
+@@ -57,6 +60,7 @@
+   private work = new Set<Work>();
+   private attempt: Attempt | null = null;
+   private review: Review | null = null;
++  private delegated:Delegated|null=null;
+   private completion:Completion|null=null;
+   private browserToken:object|null=null;
+   private current: Context | null = null;
+@@ -96,7 +100,7 @@
+   }
+   setConfirmed(value:boolean):void { if(!this.disposed){this.approval={};this.update({confirmed:value===true&&this.currentConsent()!==null});} }
+   private owns(o: Original): boolean {
+-    return this.unknown || o.closeCheck !== null || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
++    return this.delegated?.review.owner === o || this.unknown || o.closeCheck !== null || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
+       !!o.status?.operation && o.status.operation.phase !== 'settled';
+   }
+   private maintain(): void {
+@@ -128,7 +132,8 @@
+     this.desired = port; this.syncContext(); this.invalidate(); this.update({ native: port !== null }); this.maintain();
+   }
+   private latch(owner: Original, kind: Work['kind']): Work { const w: Work = { owner, kind, ended: false, promise: null }; this.work.add(w); this.update(); return w; }
+-  private finish(w: Work): void { w.ended = true; w.promise=null; this.work.delete(w); this.settle(); this.update(); this.maintain(); }
++  private finish(w: Work): void { w.ended = true; w.promise=null; this.work.delete(w); this.settle(); this.settleDelegated(w); this.update(); this.maintain();
++    if(w.kind==='discard'&&this.delegated?.noAllow&&!this.unknown)this.checkStatus(); }
+   private origin(a: Attempt, s: PullRequestStatus): boolean {
+     const o = s.operation;
+     return a.sent && s.revision > a.revision && s.sessionId === a.context.sessionId && !!o && o.id !== a.previousId &&
+@@ -185,11 +190,14 @@
+     if (!o?.live || this.disposed && !this.owns(o) || [...this.work].some((w) => w.owner === o && ['status', 'subscribe'].includes(w.kind))) return;
+     const closeCheck = o.closeCheck;
+     const w = this.latch(o, 'status');
++    const delegated=this.delegated;
++    if(delegated&&(delegated.allowReturned||delegated.noAllow)&&(delegated.unused||delegated.terminal?.settlement==='settled'))w.agentCheck={delegate:delegated,status:null};
+     const failed = () => { o.fresh = false; if (this.attempt || o.status?.operation && o.status.operation.phase !== 'settled') this.update({ uncertain: true, error: 'response-invalid' });
+       else this.update({ error: 'response-invalid' }); };
+     try { const promise = o.port.status(); if (!(promise instanceof Promise)) throw new Error('No original status promise'); w.promise=promise;
+       void promise.then((v) => {
+         const accepted = this.receive(o, v);
++        if(w.agentCheck)w.agentCheck.status=accepted;
+         // Only a Check started after this exact known refusal can restore
+         // freshness. Old polls/events cannot reopen Close or replace its owner.
+         if (accepted && !this.unknown && o === this.original && o.live && closeCheck !== null &&
+@@ -248,6 +256,7 @@
+     }catch(e){failed(e);this.finish(w);}
+   }
+   ownerReason(): string | null {
++    if(this.delegated)return 'The original GitHub review is delegated to a local CLI. Check or revoke that permission; original Check/Stop/Close remain available.';
+     if (this.unknown) return PULL_REQUEST_HELP['cleanup-unknown'];
+     if([...this.work].some(w=>w.kind==='browser'))return 'The original browser request is still returning. Other tasks wait for that same call.';
+     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
+@@ -257,6 +266,7 @@
+     return null;
+   }
+   private startReason(): string | null {
++    if(this.delegated)return 'This exact review was delegated. Ordinary Create/Retry cannot consume it, including after a lost Allow reply.';
+     const o = this.original, c = context(this.connection()), s = o?.status;
+     if (this.disposed || !o?.live || o.port !== this.desired || !o.unlisten) return PULL_REQUEST_HELP['runtime-unavailable'];
+     if (this.unknown) return PULL_REQUEST_HELP['cleanup-unknown'];
+@@ -374,5 +384,55 @@
+       void promise.then((v) => { this.receive(o, v); if (o.status?.consent?.id === consent.id) this.fail('response-invalid'); }, (e) => failed(e, false)).finally(() => this.finish(w));
+     } catch (e) { failed(e, true); this.finish(w); }
+   }
++  // Eligibility comes only from the SAME private review, minted after the
++  // original Prepare promise returned; a public status/selection cannot mint it.
++  agentSelection():GithubActionSelection|null {
++    const r=this.review,s=this.original?.status;
++    return !this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
++      Object.freeze({kind:'draft-pr-create',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
++  }
++  agentSelected(selection:GithubActionSelection):boolean {
++    const d=this.delegated;
++    if(d)return sameGithubActionSelection(d.selection,selection)&&this.delegatedCurrent(d);
++    return sameGithubActionSelection(this.agentSelection(),selection);
++  }
++  private delegatedCurrent(d:Delegated):boolean {
++    return this.delegated===d&&!d.unknown&&!this.unknown&&!this.disposed&&!this.attempt&&!this.work.size&&
++      this.review===d.review&&this.currentConsent()===d.review.consent&&d.review.owner===this.original&&d.review.owner.live&&
++      this.original.status?.revision===d.selection.expectedRevision;
++  }
++  delegatePrepared(selection:GithubActionSelection):GithubActionDelegate|null {
++    if(!sameGithubActionSelection(this.agentSelection(),selection)||!this.review)return null;
++    const d:Delegated={prepareId:this.original!.status!.operation!.id,review:this.review,selection:Object.freeze({...selection}),allowReturned:false,noAllow:false,unused:false,terminal:null,unknown:false,released:false};
++    this.delegated=d;this.update({confirmed:false}); // latch BEFORE listeners; never rearm this Review.
++    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
++    return Object.freeze({
++      current:()=>this.delegatedCurrent(d),released:()=>d.released,
++      allowReturned:()=>{if(this.delegated===d&&!d.unknown){d.allowReturned=true;this.update();}},
++      observe:(raw:GithubActionStatus)=>{
++        const value=parseGithubActionStatus(raw);
++        if(this.delegated!==d||d.unknown)return;
++        if(!value||!sameGithubActionSelection(value.review,d.selection)||value.settlement==='unknown'){uncertain();return;}
++        if(value.settlement==='settled'){d.terminal=value;this.checkStatus();}
++      },
++      unusedReturned:()=>{if(this.delegated===d&&!d.unknown){d.unused=true;this.checkStatus();}},
++      notSubmitted:()=>{if(this.delegated!==d||d.unknown)return;d.noAllow=true;d.unused=true;
++        if(this.canDiscard())this.discardReview();else this.checkStatus();},
++      uncertain,
++    });
++  }
++  private settleDelegated(w:Work):void {
++    const d=this.delegated,s=w.agentCheck?.status;
++    if(!d||w.agentCheck?.delegate!==d||!w.ended||!s||d.unknown||this.unknown||!(d.allowReturned||d.noAllow)||
++      this.original!==d.review.owner||!d.review.owner.live||this.work.size||!same(s,d.review.owner.status)||s.sessionId!==d.selection.sessionId||
++      s.consent!==null||s.operation?.phase!=='settled'||s.operation.projectId!==d.review.context.projectId)return;
++    const final=d.terminal,op=s.operation;
++    const originalTarget=d.review.consent.prepared.target;
++    if(!same(op.target,originalTarget))return;
++    if(final?.settlement==='settled'&&!final.neverAdmitted){if(op.kind!=='create'||op.id!==final.operationId)return;}
++    else if(d.unused||final?.neverAdmitted){if(op.kind!=='prepare'||op.id!==d.prepareId||s.revision<d.selection.expectedRevision)return;}
++    else return;
++    d.released=true;this.delegated=null;this.review=null;this.epoch={};
++  }
+   dispose(): void { this.disposed = true; this.desired = null; this.invalidate(); this.maintain(); }
+ }
+diff --git a/desktop/src/githubRepositoryCreateController.ts b/desktop/src/githubRepositoryCreateController.ts
+--- a/desktop/src/githubRepositoryCreateController.ts
++++ b/desktop/src/githubRepositoryCreateController.ts
+@@ -1,3 +1,5 @@
++import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
++import type { GithubActionSelection, GithubActionStatus, GithubActionDelegate } from './agentGithubActionAccess.ts';
+ // One presentation coordinator for the original native connection operation.
+ // No HTTP, token, timer, automatic creation, Git mutation or new execution owner.
+ import { sameConnectionData as same } from './githubConnectionProtocol.ts';
+@@ -8,11 +10,12 @@
+ 
+ interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; accountLogin: string }
+ interface Original { port: RepositoryCreatePort; live: boolean; unlisten: (() => void) | null; status: RepositoryCreateStatus | null; fresh: boolean }
+-interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean }
++interface Work { agentCheck?:{delegate:Delegated;status:RepositoryCreateStatus|null}; owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean }
+ interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: RepositoryCreateKind; ownerKind: RepositoryOwnerKind;
+   visibility: RepositoryVisibility; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
+   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: RepositoryCreateConsent | null }
+ interface Review { owner: Original; context: Context; epoch: object; consent: RepositoryCreateConsent }
++interface Delegated {prepareId:string;review:Review;selection:GithubActionSelection;allowReturned:boolean;noAllow:boolean;unused:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
+ export interface RepositoryCreateView {
+   native: boolean; status: RepositoryCreateStatus | null; ownerKind: RepositoryOwnerKind; visibility: RepositoryVisibility;
+   confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean;
+@@ -52,6 +55,7 @@
+   private work = new Set<Work>();
+   private attempt: Attempt | null = null;
+   private review: Review | null = null;
++  private delegated:Delegated|null=null;
+   private current: Context | null = null;
+   private epoch: object = {};
+   private unknown = false;
+@@ -66,7 +70,7 @@
+     this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null,
+       observing: [...this.work].some((w) => w.kind === 'status' || w.kind === 'subscribe'), cancelling: [...this.work].some((w) => w.kind === 'cancel'),
+       discarding: [...this.work].some((w) => w.kind === 'discard') });
+-    this.listeners.forEach((f) => f());
++    for(const f of [...this.listeners]){try{f();}catch{/* Rendering cannot disown an original invocation. */}}
+   }
+   private fail(reason: RepositoryCreateReason): void { this.unknown = true; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
+   private invalidate(): void {
+@@ -88,7 +92,7 @@
+   }
+   setConfirmed(value: boolean): void { if (!this.disposed) this.update({ confirmed: value === true && this.currentConsent() !== null }); }
+   private owns(o: Original): boolean {
+-    return this.unknown || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
++    return this.delegated?.review.owner === o || this.unknown || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
+       !!o.status?.operation && o.status.operation.phase !== 'settled';
+   }
+   private maintain(): void {
+@@ -120,7 +124,8 @@
+     this.desired = port; this.syncContext(); this.invalidate(); this.update({ native: port !== null }); this.maintain();
+   }
+   private latch(owner: Original, kind: Work['kind']): Work { const w: Work = { owner, kind, ended: false }; this.work.add(w); this.update(); return w; }
+-  private finish(w: Work): void { w.ended = true; this.work.delete(w); this.settle(); this.update(); this.maintain(); }
++  private finish(w: Work): void { w.ended = true; this.work.delete(w); this.settle(); this.settleDelegated(w); this.update(); this.maintain();
++    if(w.kind==='discard'&&this.delegated?.noAllow&&!this.unknown)this.checkStatus(); }
+   private origin(a: Attempt, s: RepositoryCreateStatus): boolean {
+     const o = s.operation;
+     return a.sent && s.revision > a.revision && s.sessionId === a.context.sessionId && !!o && o.id !== a.previousId &&
+@@ -173,10 +178,12 @@
+     const o = this.original;
+     if (!o?.live || this.disposed && !this.owns(o) || [...this.work].some((w) => w.owner === o && ['status', 'subscribe'].includes(w.kind))) return;
+     const w = this.latch(o, 'status');
++    const delegated=this.delegated;
++    if(delegated&&(delegated.allowReturned||delegated.noAllow)&&(delegated.unused||delegated.terminal?.settlement==='settled'))w.agentCheck={delegate:delegated,status:null};
+     const failed = () => { o.fresh = false; if (this.attempt || o.status?.operation && o.status.operation.phase !== 'settled') this.update({ uncertain: true, error: 'response-invalid' });
+       else this.update({ error: 'response-invalid' }); };
+     try { const promise = o.port.status(); if (!(promise instanceof Promise)) throw new Error('No original status promise');
+-      void promise.then((v) => { this.receive(o, v); }, failed).finally(() => this.finish(w));
++      void promise.then((v) => { const accepted=this.receive(o, v);if(w.agentCheck)w.agentCheck.status=accepted; }, failed).finally(() => this.finish(w));
+     } catch { failed(); this.finish(w); }
+   }
+   currentConsent(): RepositoryCreateConsent | null {
+@@ -186,6 +193,7 @@
+       r.consent.prepared.target.visibility === this.state.visibility ? r.consent : null;
+   }
+   ownerReason(): string | null {
++    if(this.delegated)return 'The original GitHub review is delegated to a local CLI. Check or revoke that permission; original Check/Stop/Close remain available.';
+     if (this.unknown) return REPOSITORY_CREATE_HELP['cleanup-unknown'];
+     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
+       return 'The original GitHub repository task is still active. Check status or Stop it before starting another task.';
+@@ -193,6 +201,7 @@
+     return null;
+   }
+   private startReason(): string | null {
++    if(this.delegated)return 'This exact review was delegated. Ordinary Create/Retry cannot consume it, including after a lost Allow reply.';
+     const o = this.original, c = context(this.connection()), s = o?.status;
+     if (this.disposed || !o?.live || o.port !== this.desired || !o.unlisten) return REPOSITORY_CREATE_HELP['runtime-unavailable'];
+     if (this.unknown) return REPOSITORY_CREATE_HELP['cleanup-unknown'];
+@@ -300,5 +309,55 @@
+       void promise.then((v) => { this.receive(o, v); if (o.status?.consent?.id === consent.id) this.fail('response-invalid'); }, () => this.fail('response-invalid')).finally(() => this.finish(w));
+     } catch { this.fail('response-invalid'); this.finish(w); }
+   }
++  // Eligibility comes only from the SAME private review, minted after the
++  // original Prepare promise returned; a public status/selection cannot mint it.
++  agentSelection():GithubActionSelection|null {
++    const r=this.review,s=this.original?.status;
++    return !this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
++      Object.freeze({kind:'repository-create',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
++  }
++  agentSelected(selection:GithubActionSelection):boolean {
++    const d=this.delegated;
++    if(d)return sameGithubActionSelection(d.selection,selection)&&this.delegatedCurrent(d);
++    return sameGithubActionSelection(this.agentSelection(),selection);
++  }
++  private delegatedCurrent(d:Delegated):boolean {
++    return this.delegated===d&&!d.unknown&&!this.unknown&&!this.disposed&&!this.attempt&&!this.work.size&&
++      this.review===d.review&&this.currentConsent()===d.review.consent&&d.review.owner===this.original&&d.review.owner.live&&
++      this.original.status?.revision===d.selection.expectedRevision;
++  }
++  delegatePrepared(selection:GithubActionSelection):GithubActionDelegate|null {
++    if(!sameGithubActionSelection(this.agentSelection(),selection)||!this.review)return null;
++    const d:Delegated={prepareId:this.original!.status!.operation!.id,review:this.review,selection:Object.freeze({...selection}),allowReturned:false,noAllow:false,unused:false,terminal:null,unknown:false,released:false};
++    this.delegated=d;this.update({confirmed:false}); // latch BEFORE listeners; never rearm this Review.
++    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
++    return Object.freeze({
++      current:()=>this.delegatedCurrent(d),released:()=>d.released,
++      allowReturned:()=>{if(this.delegated===d&&!d.unknown){d.allowReturned=true;this.update();}},
++      observe:(raw:GithubActionStatus)=>{
++        const value=parseGithubActionStatus(raw);
++        if(this.delegated!==d||d.unknown)return;
++        if(!value||!sameGithubActionSelection(value.review,d.selection)||value.settlement==='unknown'){uncertain();return;}
++        if(value.settlement==='settled'){d.terminal=value;this.checkStatus();}
++      },
++      unusedReturned:()=>{if(this.delegated===d&&!d.unknown){d.unused=true;this.checkStatus();}},
++      notSubmitted:()=>{if(this.delegated!==d||d.unknown)return;d.noAllow=true;d.unused=true;
++        if(this.canDiscard())this.discardReview();else this.checkStatus();},
++      uncertain,
++    });
++  }
++  private settleDelegated(w:Work):void {
++    const d=this.delegated,s=w.agentCheck?.status;
++    if(!d||w.agentCheck?.delegate!==d||!w.ended||!s||d.unknown||this.unknown||!(d.allowReturned||d.noAllow)||
++      this.original!==d.review.owner||!d.review.owner.live||this.work.size||!same(s,d.review.owner.status)||s.sessionId!==d.selection.sessionId||
++      s.consent!==null||s.operation?.phase!=='settled'||s.operation.projectId!==d.review.context.projectId)return;
++    const final=d.terminal,op=s.operation;
++    const originalTarget=d.review.consent.prepared.target;
++    if(!same(op.target,originalTarget))return;
++    if(final?.settlement==='settled'&&!final.neverAdmitted){if(op.kind!=='create'||op.id!==final.operationId)return;}
++    else if(d.unused||final?.neverAdmitted){if(op.kind!=='prepare'||op.id!==d.prepareId||s.revision<d.selection.expectedRevision)return;}
++    else return;
++    d.released=true;this.delegated=null;this.review=null;this.epoch={};
++  }
+   dispose(): void { this.disposed = true; this.desired = null; this.invalidate(); this.maintain(); }
+ }
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -439,6 +439,7 @@
+   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
+   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
++  readonly agentGithubAction?: import('./agentGithubActionAccess.ts').AgentGithubActionPort | null;
+   readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
+   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -292,6 +292,7 @@
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
+     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+     "agent_store_access", "allow_agent_store", "revoke_agent_store",
++    "agent_github_action_access", "allow_agent_github_action", "revoke_agent_github_action", "agent_github_action_request_status",
+     "agent_apple_provisioning_access","allow_agent_apple_provisioning","revoke_agent_apple_provisioning","agent_apple_provisioning_request_status",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -16,6 +16,7 @@
+     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
+     "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
+     "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
++    "allow-agent-github-action-access", "allow-allow-agent-github-action", "allow-revoke-agent-github-action", "allow-agent-github-action-request-status",
+     "allow-agent-apple-provisioning-access","allow-allow-agent-apple-provisioning","allow-revoke-agent-apple-provisioning","allow-agent-apple-provisioning-request-status",
+     "allow-agent-git-index-access",
+     "allow-allow-agent-git-index",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -93,6 +93,8 @@
+ mod agent_configuration;
+ #[path="service_version_reserve_application.rs"]
+ mod agent_version_reserve;
++#[path="service_github_action_application.rs"]
++mod agent_github_action;
+ #[path="service_play_cleanup_application.rs"]
+ mod agent_play_cleanup;
+ #[path="application_service_upload_key_requests.rs"]
+@@ -105,6 +107,7 @@
+     store_requests: Arc<crate::service_store_requests::Inbox>,
+     apple_provisioning_requests:Arc<crate::service_apple_provisioning_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
++    github_action_requests: Arc<crate::service_github_action_requests::Inbox>,
+     upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
+     configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+@@ -143,13 +146,14 @@
+         let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
+         let apple_provisioning_requests=Arc::new(crate::service_apple_provisioning_requests::Inbox::new(instance.clone()));
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
++        let github_action_requests=Arc::new(crate::service_github_action_requests::Inbox::new(instance.clone()));
+         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
+         let upload_key_requests = Arc::new(crate::service_upload_key_requests::Inbox::new(instance.clone()));
+         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, github_action_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -202,7 +206,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.github_action_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -448,6 +452,9 @@
+                 p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
+                 p::RequestBody::AppleProvisioningCancel(q)=>return self.service_apple_provisioning_query(client,q,true),
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
++                p::RequestBody::GitHubActionSubmit(v)=>return self.service_github_action_submit(client,v.clone()),
++                p::RequestBody::GitHubActionStatus(q)=>return self.service_github_action_query(client,q,false),
++                p::RequestBody::GitHubActionCancel(q)=>return self.service_github_action_query(client,q,true),
+                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
+                 p::RequestBody::PlayCleanupCancel(q)=>return self.service_play_cleanup_query(client,q,true),
+@@ -509,6 +516,7 @@
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
++                p::RequestBody::GitHubActionSubmit(_) | p::RequestBody::GitHubActionStatus(_) | p::RequestBody::GitHubActionCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+                 | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
+@@ -557,7 +565,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at);self.github_action_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -63,6 +63,7 @@
+         additional_requests.extend(self.configuration_requests.catalogue(project)?);
+         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
++        additional_requests.extend(self.github_action_requests.catalogue_requests(&self.instance,project)?);
+         additional_requests.extend(self.version_edit_requests.catalogue(project)?.into_iter().map(|request_id|data::AdditionalRequest{family:data::AdditionalFamily::VersionEdit,request_id}));
+         additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|(purpose, request_id)| data::AdditionalRequest {family:match purpose {crate::service_play_cleanup_protocol::Purpose::PlayCleanup => data::AdditionalFamily::PlayCleanup, crate::service_play_cleanup_protocol::Purpose::VersionTag => data::AdditionalFamily::VersionTag},request_id}));
+         let view = data::Catalogue {
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -174,6 +174,9 @@
+ mod play_cleanup;
+ pub(crate) use play_cleanup::GitHubPlayCleanupGoGate;
+ #[cfg(any(target_os="linux",target_os="macos"))]
++#[path="service_github_action_native.rs"]
++pub(crate) mod agent_github_action;
++#[cfg(any(target_os="linux",target_os="macos"))]
+ #[path="service_play_cleanup_native.rs"]
+ mod agent_play_cleanup;
+ pub(crate) use github_variable::GitHubVariableMaterial;
+@@ -1185,6 +1188,12 @@
+     agent_store_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_apple_service:std::sync::OnceLock<std::sync::Weak<crate::application_service::ApplicationService>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_github_action_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_github_action_revoke_epoch:std::sync::atomic::AtomicU64,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_github_action_allow_pending:std::sync::atomic::AtomicBool,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_store_revoke_epoch:std::sync::atomic::AtomicU64,
+     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
+@@ -2200,6 +2209,7 @@
+             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
++            self.add(crate::service_github_action_protocol::DOCUMENT_BACKING)?; // ONE complete three-kind inbox + scopes/8 replies, never per-kind credit.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_upload_key_requests::DOCUMENT_BACKING)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -2999,6 +3009,12 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_apple_service:std::sync::OnceLock::new(),
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_github_action_service:std::sync::OnceLock::new(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_github_action_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_github_action_allow_pending:std::sync::atomic::AtomicBool::new(false),
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_store_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             installed_session: Mutex::new(None),
+@@ -3699,6 +3715,8 @@
+         self.agent_store_relay_lost();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.agent_apple_relay_lost();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.github_action_agent_relay_closed();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.git_index_relay_lost();
+         // Loss retires consent/STOP under the same gate. It is not settlement,
+diff --git a/desktop/src-tauri/src/asset_session_github_actions_retry.rs b/desktop/src-tauri/src/asset_session_github_actions_retry.rs
+--- a/desktop/src-tauri/src/asset_session_github_actions_retry.rs
++++ b/desktop/src-tauri/src/asset_session_github_actions_retry.rs
+@@ -3,9 +3,13 @@
+ use crate::{github_actions_retry_protocol as p, github_connection_session::actions_retry as s};
+ 
+ pub(crate) struct GitHubActionsRetryGoGate {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     inner: Weak<Inner>,
+ }
+ impl GitHubActionsRetryGoGate {
++    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
++    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
++
+     pub(crate) fn claim(
+         &self,
+         id: &str,
+@@ -65,6 +69,7 @@
+             })?;
+         // No lock gap before one-use original GO. The caller supplies no token,
+         // source path/identity, raw config, JSON body or alternate edit witness.
++        if let Some(e)=&self.agent { e.current(true).map_err(application_service::public_error)?; }
+         state.github.actions_retry_go(
+             id,
+             digest,
+@@ -73,7 +78,7 @@
+             &root,
+             &edit,
+             Instant::now(),
+-            claim,
++            || { let granted=claim(); if granted { if let Some(e)=&self.agent { if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; } } } granted },
+         )
+     }
+ }
+@@ -135,6 +140,9 @@
+     ) -> Result<p::Status, BridgeError> {
+         let command =
+             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
++        self.actions_retry_execute(command,None)
++    }
++    pub(super) fn actions_retry_execute(&self, command:p::Command, agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<p::Status,BridgeError>{
+         if matches!(command, p::Command::Status) {
+             return Ok(self.actions_retry_status());
+         }
+@@ -198,6 +206,7 @@
+                 })
+             })?;
+         let gate = GitHubActionsRetryGoGate {
++            agent,
+             inner: Arc::downgrade(&self.inner),
+         };
+         let supervisor = &self.inner.bridge.supervisor;
+diff --git a/desktop/src-tauri/src/asset_session_github_pull_request.rs b/desktop/src-tauri/src/asset_session_github_pull_request.rs
+--- a/desktop/src-tauri/src/asset_session_github_pull_request.rs
++++ b/desktop/src-tauri/src/asset_session_github_pull_request.rs
+@@ -3,9 +3,13 @@
+ use crate::{github_connection_session::pull_request as s, github_pull_request_protocol as p};
+ 
+ pub(crate) struct GitHubPullRequestGoGate {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     inner: Weak<Inner>,
+ }
+ impl GitHubPullRequestGoGate {
++    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
++    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
++
+     pub(crate) fn claim(
+         &self,
+         id: &str,
+@@ -65,6 +69,7 @@
+             })?;
+         // No lock gap before one-use original GO. The caller supplies no token,
+         // source path/identity, raw config, JSON body or alternate edit witness.
++        if let Some(e)=&self.agent { e.current(true).map_err(application_service::public_error)?; }
+         state.github.pull_request_go(
+             id,
+             digest,
+@@ -73,7 +78,7 @@
+             &root,
+             &edit,
+             Instant::now(),
+-            claim,
++            || { let granted=claim(); if granted { if let Some(e)=&self.agent { if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; } } } granted },
+         )
+     }
+ }
+@@ -135,6 +140,9 @@
+     ) -> Result<p::Status, BridgeError> {
+         let command =
+             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
++        self.pull_request_execute(command,None)
++    }
++    pub(super) fn pull_request_execute(&self, command:p::Command, agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<p::Status,BridgeError>{
+         if matches!(command, p::Command::Status) {
+             return Ok(self.pull_request_status());
+         }
+@@ -198,6 +206,7 @@
+                 })
+             })?;
+         let gate = GitHubPullRequestGoGate {
++            agent,
+             inner: Arc::downgrade(&self.inner),
+         };
+         let supervisor = &self.inner.bridge.supervisor;
+diff --git a/desktop/src-tauri/src/asset_session_repository_create.rs b/desktop/src-tauri/src/asset_session_repository_create.rs
+--- a/desktop/src-tauri/src/asset_session_repository_create.rs
++++ b/desktop/src-tauri/src/asset_session_repository_create.rs
+@@ -5,9 +5,13 @@
+ };
+ 
+ pub(crate) struct RepositoryCreateGoGate {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     inner: Weak<Inner>,
+ }
+ impl RepositoryCreateGoGate {
++    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
++    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
++
+     pub(crate) fn claim(
+         &self,
+         id: &str,
+@@ -67,6 +71,7 @@
+             })?;
+         // No lock gap before one-use original GO. The caller supplies no token,
+         // source path/identity, raw config, JSON body or alternate edit witness.
++        if let Some(e)=&self.agent { e.current(true).map_err(application_service::public_error)?; }
+         state.github.repository_create_go(
+             id,
+             digest,
+@@ -75,7 +80,7 @@
+             &root,
+             &edit,
+             Instant::now(),
+-            claim,
++            || { let granted=claim(); if granted { if let Some(e)=&self.agent { if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; } } } granted },
+         )
+     }
+ }
+@@ -141,6 +146,9 @@
+     ) -> Result<p::Status, BridgeError> {
+         let command =
+             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
++        self.repository_create_execute(command,None)
++    }
++    pub(super) fn repository_create_execute(&self, command:p::Command, agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<p::Status,BridgeError>{
+         if matches!(command, p::Command::Status) {
+             return Ok(self.repository_create_status());
+         }
+@@ -204,6 +212,7 @@
+                 })
+             })?;
+         let gate = RepositoryCreateGoGate {
++            agent,
+             inner: Arc::downgrade(&self.inner),
+         };
+         let supervisor = &self.inner.bridge.supervisor;
+diff --git a/desktop/src-tauri/src/github_actions_retry_session.rs b/desktop/src-tauri/src/github_actions_retry_session.rs
+--- a/desktop/src-tauri/src/github_actions_retry_session.rs
++++ b/desktop/src-tauri/src/github_actions_retry_session.rs
+@@ -1,5 +1,6 @@
+ //! Explicit failed/dependent-job retry in the SAME authenticated connection and original Supervisor.
+ use super::*;
++use std::sync::{Arc, Weak};
+ use crate::{
+     asset_source::RegisteredRoot,
+     edit_owner::{SavedEditGuard, SavedEditStamp},
+@@ -87,6 +88,7 @@
+         .unwrap_or_else(|| connection_reason(outcome_error(e)))
+ }
+ struct Active {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     ticket: GitHubActionsRetryTicket,
+     request: p::Request,
+     session_id: String,
+@@ -98,6 +100,8 @@
+     consent_end: Option<Instant>,
+ }
+ struct Consent {
++    identity: Arc<()>,
++    agent: Option<Weak<crate::service_github_action_requests::NativeScope>>,
+     id: String,
+     prepared: p::Prepared,
+     end: Instant,
+@@ -152,6 +156,7 @@
+         }
+     }
+     pub(super) fn revoke_consent(&mut self) {
++        action_delegation::revoke(&self.consent.as_ref().and_then(|c| c.agent.clone()));
+         self.consent = None;
+         self.view.consent = None;
+     }
+@@ -182,6 +187,7 @@
+         self.observe_go();
+     }
+     fn unknown(&mut self) {
++        if let Some(a) = &self.active { action_delegation::unknown(&a.agent); }
+         self.stop();
+         self.view.available = false;
+         self.view.reason = p::Reason::CleanupUnknown;
+@@ -456,6 +462,8 @@
+             return Err(refused(p::Reason::ResourcesUnavailable));
+         }
+         let before = self.actions_retry.view.clone();
++        let agent = gate.agent().cloned();
++        gate.agent_entering()?;
+         let ticket = supervisor
+             .start_actions_retry(request.clone(), gate, end)
+             .map_err(|e| refused(error_reason(&e)))?;
+@@ -491,6 +499,7 @@
+             },
+         });
+         self.actions_retry.active = Some(Active {
++            agent,
+             ticket,
+             request,
+             session_id: session_id.clone(),
+@@ -632,7 +641,8 @@
+             old.selection.clone(),
+             now,
+         )?;
+-        if !a.confirm
++        if !action_delegation::origin(&self.actions_retry.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent())
++            || !a.confirm
+             || !self.actions_retry.consent.as_ref().is_some_and(|c| {
+                 c.id == a.consent_id
+                     && c.session_id == a.session_id
+@@ -917,6 +927,8 @@
+             self.unknown_inner();
+             return;
+         };
++        let agent = a.agent.clone();
++        let agent_id = a.ticket.operation_id().to_owned();
+         let mut effect = if a.request.kind == p::Kind::Retry {
+             if a.ticket.go_claimed() {
+                 p::Effect::PotentiallyApplied
+@@ -954,6 +966,7 @@
+             self.retire_inner(Reason::Expired, false);
+         }
+         if self.unknown || reason == p::Reason::CleanupUnknown {
++            action_delegation::unknown(&agent);
+             self.actions_retry.active = Some(a);
+             self.unknown_inner();
+             if let Some(o) = &mut self.actions_retry.view.operation {
+@@ -1016,6 +1029,7 @@
+                             prepared: prepared.clone(),
+                         });
+                         self.actions_retry.consent = Some(Consent {
++                            identity: Arc::new(()), agent: None,
+                             id: a.consent_id,
+                             prepared,
+                             end,
+@@ -1073,6 +1087,9 @@
+             self.retire_inner(r, false);
+         }
+         self.actions_retry_finish_retirement();
++        if let Some(o)=&self.actions_retry.view.operation {
++            if o.id==agent_id && o.phase==p::Phase::Settled { action_delegation::accepted(&agent,&agent_id,self.actions_retry.view.reason,o.effect); } else { action_delegation::unknown(&agent); }
++        } else { action_delegation::unknown(&agent); }
+     }
+     fn actions_retry_finish_retirement(&mut self) {
+         // A settled Prepare/Retry is not a request to disconnect. The shared
+@@ -1087,3 +1104,18 @@
+         }
+     }
+ }
++
++impl ConnectionState {
++    pub(crate) fn actions_retry_agent_review(&self, a: &action_delegation::Selection, g:u32, root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<action_delegation::Review,BridgeError> {
++        let c=self.actions_retry.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
++        if a.kind!=crate::service_github_action_protocol::Kind::FailedJobsRetry || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.actions_retry.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.actions_retry.active.is_some() || self.actions_retry.exhausted {return Err(refused(p::Reason::ConsentExpired))}
++        action_delegation::review(a.kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
++    }
++    pub(crate) fn actions_retry_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
++        let c=self.actions_retry.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;
++        if !Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
++    }
++    pub(crate) fn actions_retry_agent_revoke(&mut self, scope:&Arc<crate::service_github_action_requests::NativeScope>){
++        if self.actions_retry.consent.as_ref().and_then(|c|c.agent.as_ref()).and_then(Weak::upgrade).is_some_and(|s|Arc::ptr_eq(&s,scope)){let before=self.actions_retry.view.clone();self.actions_retry.revoke_consent();self.actions_retry.finish(before);}
++    }
++}
+diff --git a/desktop/src-tauri/src/github_connection_session.rs b/desktop/src-tauri/src/github_connection_session.rs
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -2145,3 +2145,6 @@
+         assert_eq!(state.status.operation.as_ref().unwrap().phase, Phase::Running);
+     }
+ }
++
++#[path="github_action_delegation.rs"]
++pub(crate) mod action_delegation;
+diff --git a/desktop/src-tauri/src/github_pull_request_session.rs b/desktop/src-tauri/src/github_pull_request_session.rs
+--- a/desktop/src-tauri/src/github_pull_request_session.rs
++++ b/desktop/src-tauri/src/github_pull_request_session.rs
+@@ -1,5 +1,6 @@
+ //! Explicit same-repository draft PR creation in the SAME authenticated connection and original Supervisor.
+ use super::*;
++use std::sync::{Arc, Weak};
+ use crate::{
+     asset_source::RegisteredRoot,
+     edit_owner::{SavedEditGuard, SavedEditStamp},
+@@ -34,6 +35,7 @@
+         .unwrap_or_else(|| connection_reason(outcome_error(e)))
+ }
+ struct Active {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     ticket: GitHubPullRequestTicket,
+     request: p::Request,
+     session_id: String,
+@@ -45,6 +47,8 @@
+     consent_end: Option<Instant>,
+ }
+ struct Consent {
++    identity: Arc<()>,
++    agent: Option<Weak<crate::service_github_action_requests::NativeScope>>,
+     draft: p::Draft,
+     id: String,
+     prepared: p::Prepared,
+@@ -100,6 +104,7 @@
+         }
+     }
+     pub(super) fn revoke_consent(&mut self) {
++        action_delegation::revoke(&self.consent.as_ref().and_then(|c| c.agent.clone()));
+         self.consent = None;
+         self.view.consent = None;
+     }
+@@ -130,6 +135,7 @@
+         self.observe_go();
+     }
+     fn unknown(&mut self) {
++        if let Some(a) = &self.active { action_delegation::unknown(&a.agent); }
+         self.stop();
+         self.view.available = false;
+         self.view.reason = p::Reason::CleanupUnknown;
+@@ -414,6 +420,8 @@
+             return Err(refused(p::Reason::ResourcesUnavailable));
+         }
+         let before = self.pull_request.view.clone();
++        let agent = gate.agent().cloned();
++        gate.agent_entering()?;
+         let ticket = supervisor
+             .start_pull_request(request.clone(), gate, end)
+             .map_err(|e| refused(error_reason(&e)))?;
+@@ -449,6 +457,7 @@
+             },
+         });
+         self.pull_request.active = Some(Active {
++            agent,
+             ticket,
+             request,
+             session_id: session_id.clone(),
+@@ -571,7 +580,8 @@
+             old.intent.clone(),
+             now,
+         )?;
+-        if !a.confirm
++        if !action_delegation::origin(&self.pull_request.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent())
++            || !a.confirm
+             || !self.pull_request.consent.as_ref().is_some_and(|c| {
+                 c.id == a.consent_id
+                     && c.session_id == a.session_id
+@@ -858,6 +868,8 @@
+             self.unknown_inner();
+             return;
+         };
++        let agent = a.agent.clone();
++        let agent_id = a.ticket.operation_id().to_owned();
+         let mut effect = if a.request.kind == p::Kind::Create {
+             if a.ticket.go_claimed() {
+                 p::Effect::PotentiallyApplied
+@@ -895,6 +907,7 @@
+             self.retire_inner(Reason::Expired, false);
+         }
+         if self.unknown || reason == p::Reason::CleanupUnknown {
++            action_delegation::unknown(&agent);
+             self.pull_request.active = Some(a);
+             self.unknown_inner();
+             if let Some(o) = &mut self.pull_request.view.operation {
+@@ -967,6 +980,7 @@
+                             prepared: prepared.clone(),
+                         });
+                         self.pull_request.consent = Some(Consent {
++                            identity: Arc::new(()), agent: None,
+                             draft,
+                             id: a.consent_id,
+                             prepared,
+@@ -1025,6 +1039,9 @@
+             self.retire_inner(r, false);
+         }
+         self.pull_request_finish_retirement();
++        if let Some(o)=&self.pull_request.view.operation {
++            if o.id==agent_id && o.phase==p::Phase::Settled { action_delegation::accepted(&agent,&agent_id,self.pull_request.view.reason,o.effect); } else { action_delegation::unknown(&agent); }
++        } else { action_delegation::unknown(&agent); }
+     }
+     fn pull_request_finish_retirement(&mut self) {
+         // A settled Prepare/Create is not a request to disconnect. The shared
+@@ -1077,3 +1094,18 @@
+         assert!(c.private.as_ref().unwrap().token.is_none());
+     }
+ }
++
++impl ConnectionState {
++    pub(crate) fn pull_request_agent_review(&self, a: &action_delegation::Selection, g:u32, root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<action_delegation::Review,BridgeError> {
++        let c=self.pull_request.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
++        if a.kind!=crate::service_github_action_protocol::Kind::DraftPrCreate || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.pull_request.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.pull_request.active.is_some() || self.pull_request.exhausted {return Err(refused(p::Reason::ConsentExpired))}
++        action_delegation::review(a.kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
++    }
++    pub(crate) fn pull_request_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
++        let c=self.pull_request.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;
++        if !Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
++    }
++    pub(crate) fn pull_request_agent_revoke(&mut self, scope:&Arc<crate::service_github_action_requests::NativeScope>){
++        if self.pull_request.consent.as_ref().and_then(|c|c.agent.as_ref()).and_then(Weak::upgrade).is_some_and(|s|Arc::ptr_eq(&s,scope)){let before=self.pull_request.view.clone();self.pull_request.revoke_consent();self.pull_request.finish(before);}
++    }
++}
+diff --git a/desktop/src-tauri/src/github_repository_create_session.rs b/desktop/src-tauri/src/github_repository_create_session.rs
+--- a/desktop/src-tauri/src/github_repository_create_session.rs
++++ b/desktop/src-tauri/src/github_repository_create_session.rs
+@@ -1,5 +1,6 @@
+ //! Remote creation in the SAME authenticated connection and original Supervisor.
+ use super::*;
++use std::sync::{Arc, Weak};
+ use crate::{
+     asset_source::RegisteredRoot,
+     edit_owner::{SavedEditGuard, SavedEditStamp},
+@@ -34,6 +35,7 @@
+         .unwrap_or_else(|| connection_reason(outcome_error(e)))
+ }
+ struct Active {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     ticket: RepositoryCreateTicket,
+     request: p::Request,
+     session_id: String,
+@@ -45,6 +47,8 @@
+     consent_end: Option<Instant>,
+ }
+ struct Consent {
++    identity: Arc<()>,
++    agent: Option<Weak<crate::service_github_action_requests::NativeScope>>,
+     id: String,
+     prepared: p::Prepared,
+     end: Instant,
+@@ -97,6 +101,7 @@
+         }
+     }
+     pub(super) fn revoke_consent(&mut self) {
++        action_delegation::revoke(&self.consent.as_ref().and_then(|c| c.agent.clone()));
+         self.consent = None;
+         self.view.consent = None;
+     }
+@@ -125,6 +130,7 @@
+         self.observe_go();
+     }
+     fn unknown(&mut self) {
++        if let Some(a) = &self.active { action_delegation::unknown(&a.agent); }
+         self.stop();
+         self.view.available = false;
+         self.view.reason = p::Reason::CleanupUnknown;
+@@ -396,6 +402,8 @@
+             return Err(refused(p::Reason::ResourcesUnavailable));
+         }
+         let before = self.repository_create.view.clone();
++        let agent = gate.agent().cloned();
++        gate.agent_entering()?;
+         let ticket = supervisor
+             .start_repository_create(request.clone(), gate, end)
+             .map_err(|e| refused(error_reason(&e)))?;
+@@ -429,6 +437,7 @@
+             },
+         });
+         self.repository_create.active = Some(Active {
++            agent,
+             ticket,
+             request,
+             session_id: session_id.clone(),
+@@ -575,7 +584,8 @@
+             old.marker,
+             now,
+         )?;
+-        if !a.confirm
++        if !action_delegation::origin(&self.repository_create.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent())
++            || !a.confirm
+             || !self.repository_create.consent.as_ref().is_some_and(|c| {
+                 c.id == a.consent_id
+                     && c.session_id == a.session_id
+@@ -840,6 +850,8 @@
+             self.unknown_inner();
+             return;
+         };
++        let agent = a.agent.clone();
++        let agent_id = a.ticket.operation_id().to_owned();
+         let mut effect = if a.request.kind == p::Kind::Create {
+             if a.ticket.go_claimed() {
+                 p::Effect::PotentiallyApplied
+@@ -877,6 +889,7 @@
+             self.retire_inner(Reason::Expired, false);
+         }
+         if was_unknown || self.unknown || reason == p::Reason::CleanupUnknown {
++            action_delegation::unknown(&agent);
+             self.unknown_inner();
+             if let Some(o) = &mut self.repository_create.view.operation {
+                 o.phase = p::Phase::CleanupUnknown;
+@@ -930,6 +943,7 @@
+                             prepared: prepared.clone(),
+                         });
+                         self.repository_create.consent = Some(Consent {
++                            identity: Arc::new(()), agent: None,
+                             id: a.consent_id,
+                             prepared,
+                             end,
+@@ -970,6 +984,9 @@
+             self.retire_inner(r, false);
+         }
+         self.repository_create_finish_retirement();
++        if let Some(o)=&self.repository_create.view.operation {
++            if o.id==agent_id && o.phase==p::Phase::Settled { action_delegation::accepted(&agent,&agent_id,self.repository_create.view.reason,o.effect); } else { action_delegation::unknown(&agent); }
++        } else { action_delegation::unknown(&agent); }
+     }
+     fn repository_create_finish_retirement(&mut self) {
+         // A settled Prepare/Create is not a request to disconnect. The shared
+@@ -1038,3 +1055,18 @@
+         assert!(reset.session_id.is_none() && reset.operation.is_none());
+     }
+ }
++
++impl ConnectionState {
++    pub(crate) fn repository_create_agent_review(&self, a: &action_delegation::Selection, g:u32, root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<action_delegation::Review,BridgeError> {
++        let c=self.repository_create.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
++        if a.kind!=crate::service_github_action_protocol::Kind::RepositoryCreate || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.repository_create.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.repository_create.active.is_some() || self.repository_create.exhausted {return Err(refused(p::Reason::ConsentExpired))}
++        action_delegation::review(a.kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
++    }
++    pub(crate) fn repository_create_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
++        let c=self.repository_create.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;
++        if !Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
++    }
++    pub(crate) fn repository_create_agent_revoke(&mut self, scope:&Arc<crate::service_github_action_requests::NativeScope>){
++        if self.repository_create.consent.as_ref().and_then(|c|c.agent.as_ref()).and_then(Weak::upgrade).is_some_and(|s|Arc::ptr_eq(&s,scope)){let before=self.repository_create.view.clone();self.repository_create.revoke_consent();self.repository_create.finish(before);}
++    }
++}
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -35,6 +35,8 @@
+ mod store;
+ #[path="installed_cli_apple_provisioning.rs"]
+ mod apple_provisioning;
++#[path="installed_cli_github_action.rs"]
++mod github_action;
+ #[path="installed_cli_play_cleanup.rs"]
+ mod play_cleanup;
+ 
+@@ -51,6 +53,9 @@
+   mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+   mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk github-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
++  mrk github-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk github-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+   mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -290,6 +295,11 @@
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
+                 "dispatchAcknowledgementIsTagReceipt":false,"nativeAvailabilityChecked":false},
++            "githubActions":{"scope":"one-existing-desktop-prepared-github-action","commands":github_action::COMMANDS,
++                "kinds":["repository-create","draft-pr-create","failed-jobs-retry"],"defaultEnabled":false,"oneUse":true,
++                "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresExactDesktopConsent":true,
++                "mutating":true,"cliPrepare":false,"privateArguments":false,"readGrantAuthorizesWrites":false,
++                "normalPrCreation":false,"merge":false,"workflowDispatch":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
+@@ -365,6 +375,7 @@
+         text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion editing delegates only one existing Desktop-prepared review. No CLI Open/Prepare or automatic allocation.\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
++        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop review for empty repository creation, draft PR or failed-job retry. No token/URL/CLI Prepare; uncertain requests must not be replayed.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+@@ -465,6 +476,7 @@
+         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
++        p::ResponseBody::GitHubActionRequest(_) => "Use github-status with the retained original IDs; never replay an unconfirmed GitHub action.\n".into(),
+         p::ResponseBody::PlayCleanupRequest(value) => match value.origin.purpose {
+             crate::service_play_cleanup_protocol::Purpose::PlayCleanup => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+             crate::service_play_cleanup_protocol::Purpose::VersionTag => "Use version-tag-status with the same original request IDs; dispatch is not tag-creation confirmation.\n".into(),
+@@ -506,6 +518,7 @@
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+     if store::recognizes(&args){return store::run(args);}
+     if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
++    if github_action::recognizes(&args){return github_action::run(args);}
+     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+     if git_index::recognizes(&args) { return git_index::run(args); }
+     if git_commit::recognizes(&args) { return git_commit::run(args); }
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -255,6 +255,7 @@
+     let response = service.dispatch(&client, request);
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
++        p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -17,6 +17,10 @@
+ mod service_store_protocol;
+ #[path="service_store_requests.rs"]
+ mod service_store_requests;
++#[path="service_github_action_protocol.rs"]
++mod service_github_action_protocol;
++#[path="service_github_action_requests.rs"]
++mod service_github_action_requests;
+ #[path="service_apple_provisioning_protocol.rs"]
+ mod service_apple_provisioning_protocol;
+ #[path="service_apple_provisioning_requests.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -133,6 +133,10 @@
+ mod service_store_protocol;
+ #[path="service_store_requests.rs"]
+ mod service_store_requests;
++#[path="service_github_action_protocol.rs"]
++mod service_github_action_protocol;
++#[path="service_github_action_requests.rs"]
++mod service_github_action_requests;
+ #[path="service_apple_provisioning_protocol.rs"]
+ mod service_apple_provisioning_protocol;
+ #[path="service_apple_provisioning_requests.rs"]
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -96,7 +96,7 @@
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+-    ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
++    ObserveProject, EditConfiguration, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubFailedJobsRetry, GitStage, GitUnstage,
+     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+ }
+ 
+@@ -206,6 +206,9 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "method", content = "params", deny_unknown_fields)]
+ pub enum RequestBody {
++    #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
++    #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
++    #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
+     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
+     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
+     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
+@@ -290,6 +293,7 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
++    GitHubActionRequest(crate::service_github_action_protocol::Status),
+     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
+     UploadKeyAccess(crate::service_upload_key_protocol::Access),
+     UploadKeyRequest(crate::service_upload_key_protocol::Status),
+@@ -349,6 +353,7 @@
+     nesting(bytes)?;
+     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
++    if matches!(&request.request,RequestBody::GitHubActionSubmit(_)|RequestBody::GitHubActionStatus(_)|RequestBody::GitHubActionCancel(_)) && bytes.len()>crate::service_github_action_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
+         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
+@@ -421,6 +426,10 @@
+     }
+     if response.version != VERSION { return Err(Error::InvalidRequest); }
+     match &response.response {
++        ResponseBody::GitHubActionRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_github_action_protocol::STATUS_LIMIT {return Err(Error::InvalidRequest);}
++        },
+         ResponseBody::PlayCleanupRequest(row)=>{
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_play_cleanup_protocol::STATUS_LIMIT {
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -16,7 +16,8 @@
+     + crate::service_store_protocol::REQUEST_LIMIT
+     + crate::service_play_cleanup_protocol::REQUEST_LIMIT
+     + crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+-    + crate::service_version_edit_protocol::REQUEST_LIMIT;
++    + crate::service_version_edit_protocol::REQUEST_LIMIT
++    + crate::service_github_action_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -179,6 +180,7 @@
+     PlayCleanup,
+     AppleProvisioning,
+     VersionEdit,
++    GitHubAction,
+     VersionTag,
+ }
+ impl AdditionalFamily {
+@@ -193,6 +195,7 @@
+             Self::PlayCleanup | Self::VersionTag => 6,
+             Self::AppleProvisioning=>7,
+             Self::VersionEdit=>8,
++            Self::GitHubAction => 9,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -209,6 +212,7 @@
+             Self::PlayCleanup => "play-cleanup-status",
+             Self::AppleProvisioning=>"apple-provisioning-status",
+             Self::VersionEdit=>"version-edit-status",
++            Self::GitHubAction => "github-status",
+             Self::VersionTag => "version-tag-status",
+         }
+     }
+@@ -271,7 +275,7 @@
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 9];
++        let mut counts = [0usize; 10];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -290,6 +294,7 @@
+             || counts[6] > crate::service_play_cleanup_protocol::REQUEST_LIMIT
+             || counts[7] > crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+             || counts[8] > crate::service_version_edit_protocol::REQUEST_LIMIT
++            || counts[9] > crate::service_github_action_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+@@ -500,12 +505,14 @@
+         }
+         fullest.schema_version = 2;
+         fullest.additional_requests = Some(
+-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit]
++            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit, AdditionalFamily::GitHubAction]
+                 .into_iter()
+                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
+                 .collect(),
+         );
+         fullest.validate().unwrap();
++        assert_eq!(LIMIT,384); // 64 detailed + TEN original32-row namespaces.
++        assert_eq!(AdditionalFamily::GitHubAction.namespace(),9);
+         let response = crate::service_protocol::Response {
+             version: crate::service_protocol::VERSION,
+             request_id: id(10),
+@@ -514,6 +521,11 @@
+             session_id: id(12),
+             response: crate::service_protocol::ResponseBody::Requests(fullest),
+         };
++        let mut aliased = response.clone();
++        if let crate::service_protocol::ResponseBody::Requests(v) = &mut aliased.response {
++            for row in v.additional_requests.as_mut().unwrap() {if row.family==AdditionalFamily::PlayCleanup {row.family=AdditionalFamily::VersionTag;}}
++        }
++        assert!(crate::service_protocol::encode_response(&aliased).unwrap().len()<=VIEW_BYTES);
+         let encoded = crate::service_protocol::encode_response(&response).unwrap();
+         assert!(encoded.len() <= VIEW_BYTES);
+         assert!(DOCUMENT_BACKING < 1024 * 1024);
+@@ -560,12 +572,13 @@
+             AdditionalRequest { family: AdditionalFamily::PlayCleanup, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::AppleProvisioning, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::VersionEdit, request_id: id(3) },
++            AdditionalRequest { family: AdditionalFamily::GitHubAction, request_id: id(3) },
+         ]);
+         current.validate().unwrap();
+         let text = human(&current);
+         assert!(!text.contains("No requests retained"));
+         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
+-            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3)] {
++            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3), ("github-status",3)] {
+             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
+         }
+         let encoded = serde_json::to_value(&current).unwrap();
+@@ -580,7 +593,7 @@
+         assert!(!accepted(changed));
+         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
+         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
+-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit] {
++        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit, AdditionalFamily::GitHubAction] {
+             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
+             assert!(current.validate().is_err());
+             current.additional_requests = Some(vec![AdditionalRequest { family, request_id: id(3) }; 2]);
+@@ -648,7 +661,7 @@
+     fn future_tag_discovery_shares_cleanup_namespace_and_routes_exact_status() {
+         let mut v=view(vec![]);v.schema_version=2;
+         v.additional_requests=Some(vec![AdditionalRequest {family:AdditionalFamily::VersionTag,request_id:id(3)}]);
+-        v.validate().unwrap();assert_eq!(LIMIT,352); // Apple and VersionEdit namespaces remain separately counted.
++        v.validate().unwrap(); // VersionTag remains the ONE Cleanup6 pool; capacity is tested above.
+         assert!(human(&v).contains("mrk version-tag-status"));assert!(!human(&v).contains("mrk version-tag-submit"));
+         v.additional_requests.as_mut().unwrap().push(AdditionalRequest {family:AdditionalFamily::PlayCleanup,request_id:id(3)});
+         assert!(v.validate().is_err()); // same ID cannot appear through a family alias.
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1858,6 +1858,46 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_github_action_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))] {
++        let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_github_action_access(window)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))] {
++        let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.allow_agent_github_action(window,args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))] {
++        let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_github_action(window)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))] {
++        let args:crate::service_github_action_protocol::Query=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_github_action_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+ }
+ #[tauri::command]
+ async fn agent_store_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -3425,6 +3465,10 @@
+ impl Drop for VersionReserveRelayGuard {fn drop(&mut self){if !self.closed {self.slot.lost(&self.document);}}}
+ 
+ #[cfg(any(target_os="linux",target_os="macos"))]
++struct GitHubActionRelayGuard {document:DocumentBinding,closed:bool}
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for GitHubActionRelayGuard {fn drop(&mut self){if !self.closed {self.document.github_action_agent_relay_closed();}}}
++#[cfg(any(target_os="linux",target_os="macos"))]
+ struct PlayCleanupRelayGuard {document:DocumentBinding,closed:bool}
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl Drop for PlayCleanupRelayGuard {fn drop(&mut self){if !self.closed {self.document.play_cleanup_agent_relay_closed();}}}
+@@ -3446,6 +3490,8 @@
+     let reserve_guard=VersionReserveRelayGuard {document:document.clone(),slot:reserve.clone(),closed:false};
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let play_cleanup_guard=PlayCleanupRelayGuard{document:document.clone(),closed:false};
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let github_action_guard=GitHubActionRelayGuard{document:document.clone(),closed:false};
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let upload_key_guard=UploadKeyRelayGuard {document:document.clone(),slot:upload_key.clone(),closed:false};
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3497,6 +3543,8 @@
+         let mut reserve_guard=reserve_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut play_cleanup_guard=play_cleanup_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut github_action_guard=github_action_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut upload_key_guard=upload_key_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -3576,7 +3624,7 @@
+         loop {
+             if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; document.github_action_agent_relay_closed();github_action_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
+                 }
+@@ -3604,6 +3652,8 @@
+             document.service_identity_actions_tick();
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             document.play_cleanup_agent_tick();
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            document.github_action_agent_tick();
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             upload_key.tick(&document, &app).await;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -3968,7 +4018,7 @@
+                 biased;
+                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; document.github_action_agent_relay_closed();github_action_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
+                 }
+@@ -5554,6 +5604,7 @@
+             agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+             agent_store_access, allow_agent_store, revoke_agent_store,
++            agent_github_action_access, allow_agent_github_action, revoke_agent_github_action, agent_github_action_request_status,
+             agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
+             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -1025,6 +1025,7 @@
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, GitHubPlayCleanupReceipt::Pending) { *receipt = GitHubPlayCleanupReceipt::RetainedUnknown; }
+         }
++        github_action_delegation::unknown(self);
+         play_cleanup::native_unknown(self); // Original state/receipt locks are released above.
+         if let Some(receipt) = &self.github_activity_receipt {
+             let mut receipt = lock(receipt);
+@@ -1052,6 +1053,7 @@
+         self.changed.notify_waiters();
+     }
+     fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
++        github_action_delegation::observe(self, inner);
+         play_cleanup::observe_agent(self, inner, now); // Same original watchdog/management, no Doc lock.
+         let mut state = lock(&self.state);
+         if state.terminal { return None; }
+@@ -1069,7 +1071,7 @@
+             if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),self.endpoint());}
+             self.stop.send_replace(true); self.changed.notify_waiters(); }
+         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
+-        if expired { None } else { Some(play_cleanup::check_deadline(self,now,endpoint)) }
++        if expired { None } else { Some(github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint))) }
+     }
+     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
+         // The same original management observer must join final journal CAS,
+@@ -1726,6 +1728,7 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             if let Some(local) = &owner.git_local { local.gate.agent_arm(&owner.id)?; }
+             if let Some(gate)=&owner.play_cleanup_gate { gate.agent_arm(&owner.id)?; }
++            github_action_delegation::arm(&owner)?;
+             owners.insert(key, owner.clone());
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+@@ -7413,3 +7416,6 @@
+         installed_native_fixture::report(&resources.native_snapshots);
+     }
+ }
++
++#[path="supervisor_github_action_delegation.rs"]
++mod github_action_delegation;
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -44,6 +44,10 @@
+ mod service_store_protocol;
+ #[path="../src/service_store_requests.rs"]
+ mod service_store_requests;
++#[path="../src/service_github_action_protocol.rs"]
++mod service_github_action_protocol;
++#[path="../src/service_github_action_requests.rs"]
++mod service_github_action_requests;
+ #[path="../src/service_apple_provisioning_protocol.rs"]
+ mod service_apple_provisioning_protocol;
+ #[path="../src/service_apple_provisioning_requests.rs"]

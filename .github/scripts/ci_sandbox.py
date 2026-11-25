@@ -3185,7 +3185,9 @@ class Session:
         if path in state["files"] and state["files"][path] != record:
             raise SessionError("native authority immutable file binding changed")
         state["files"][path] = record
-        if len(state["files"]) > 1024 or sum(row["identity"][6] for row in state["files"].values()) > 128 * MiB:
+        # The subject receives two separately bounded immutable trees. The
+        # current package and test trees contain 1,059 files together.
+        if len(state["files"]) > 1152 or sum(row["identity"][6] for row in state["files"].values()) > 128 * MiB:
             raise SessionError("native authority immutable input inventory exceeds fixed bounds")
         return raw
 
@@ -3489,6 +3491,12 @@ class Session:
             self._fail("native authority preparation failed")
             errors = self._native_close_pins(state)
             self.cleanup_errors.extend(errors)
+            if state["control_seen"]:
+                case = state["control_seen"][-1]
+                observed = state["control_notes"].get(case, {})
+                note["last_native_control"] = {"case": case, "returned": case in state["control_notes"],
+                                               "returncode": observed.get("returncode"),
+                                               "waited": observed.get("waited")}
             note.update({"exceptions": _exception_notes(original), "cleanup_errors": len(errors)})
             if errors:
                 raise BaseExceptionGroup("native authority preparation/owned close failed",
