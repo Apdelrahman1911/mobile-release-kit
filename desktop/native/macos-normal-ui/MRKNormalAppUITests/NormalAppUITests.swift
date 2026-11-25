@@ -6426,6 +6426,22 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
+    @MainActor private func recordCliAccessObservation(_ renderer: XCUIElement) {
+        try? checkInstalledCliStatus(nil)
+        for (kind, label) in [
+            ("off", "Off at last check"), ("granted", "1 project was allowed at last check"), ("checking", "Checking access…"),
+            ("allowing", "Allowing the selected project…"), ("revoking", "Turning off access…"), ("unknown", "Access is not confirmed"),
+            ("retired", "Finishing an earlier access request…"), ("unchecked", "Access not checked"),
+            ("needs-check", "Access needs another check"),
+        ] {
+            guard let caseClock, let journeyDeadline,
+                  caseClock.observationAllowed(ProcessInfo.processInfo.systemUptime, before: journeyDeadline) else { break }
+            let observation = renderer.staticTexts.matching(NSPredicate(format: "label == %@ OR title == %@ OR value == %@",
+                                                                          label, label, label))
+            if observation.count != 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)") }
+        }
+    }
+
     @MainActor func testCurrentGuidedWorkspaceAndCli() throws {
         projectRequireDiagnosticMethod = .guidedWorkspace
         defer { projectRequireDiagnosticMethod = nil }
@@ -6465,25 +6481,20 @@ final class NormalAppUITests: XCTestCase {
                 try checkInstalledCliStatus(0)
                 _ = try waitElement(granted, in: renderer, failures: ["Access is not confirmed"])
             } catch {
-                try? checkInstalledCliStatus(nil)
-                for (kind, label) in [
-                    ("off", "Off at last check"), ("granted", "1 project was allowed at last check"), ("checking", "Checking access…"),
-                    ("allowing", "Allowing the selected project…"), ("unknown", "Access is not confirmed"),
-                    ("retired", "Finishing an earlier access request…"), ("unchecked", "Access not checked"),
-                    ("needs-check", "Access needs another check"),
-                ] {
-                    guard let caseClock, let journeyDeadline,
-                          caseClock.observationAllowed(ProcessInfo.processInfo.systemUptime, before: journeyDeadline) else { break }
-                    let observation = renderer.staticTexts.matching(NSPredicate(format: "label == %@ OR title == %@ OR value == %@",
-                                                                                 label, label, label))
-                    if observation.count != 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)") }
-                }
+                recordCliAccessObservation(renderer)
                 throw error
             }
         }
         try stage("cli-revoke") {
             try press(renderer, "Turn off access", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Off at last check"), in: renderer)
+            print("MRK_RELEASE_CLI_REVOKE_CUT=click-returned")
+            do {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "Off at last check"), in: renderer)
+            } catch {
+                recordCliAccessObservation(renderer)
+                throw error
+            }
+            print("MRK_RELEASE_CLI_REVOKE_CUT=off-visible")
             // The ordinary service is still running, so its revoked handshake
             // returns access_denied (4). The unopened service returned 3.
             try checkInstalledCliStatus(4)

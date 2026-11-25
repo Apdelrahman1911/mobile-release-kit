@@ -2741,6 +2741,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         (evidence / "workspace-resources.json").write_text(json.dumps(resource_samples) + "\n")
     result["cliAccessFacts"] = re.findall(
         r"(?m)^MRK_RELEASE_CLI_ACCESS_STATE=([a-z-]{2,24})$", transcript)
+    result["cliRevokeCuts"] = re.findall(r"(?m)^MRK_RELEASE_CLI_REVOKE_CUT=(click-returned|off-visible)$", transcript)
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
     for field, pattern in (
