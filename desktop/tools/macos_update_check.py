@@ -562,17 +562,13 @@ class BootstrapJournal:
             self.record("marker-reader-error", error=type(error).__name__)
 
 
-def capture_durable_contention(journal, finished):
-    if not journal.app_info.wait(35) or finished.is_set():
-        journal.record("pressure-no-app-info")
-        return
-    pids = payload_pids()
-    if len(pids) != 1:
-        journal.record("pressure-payload-unconfirmed")
+def capture_durable_contention(journal, ready, finished):
+    # Demand real scheduled CPU work before the first LaunchServices request.
+    if finished.is_set():
         return
     load = []
     benchmark = ("import hashlib,time\nblock=bytes(32*1024*1024)\n"
-                 "until=time.monotonic()+13\n"
+                 "until=time.monotonic()+28\n"
                  "while time.monotonic()<until: hashlib.sha256(block).digest()\n")
     try:
         for _ in range(max(1, min(os.cpu_count() or 2, 4))):
@@ -581,7 +577,7 @@ def capture_durable_contention(journal, finished):
                                          stderr=subprocess.DEVNULL))
         journal.record("pressure-started", workers=len(load))
         process_list = ",".join(str(worker.pid) for worker in load)
-        for _ in range(8):
+        for _ in range(12):
             if finished.wait(0.25):
                 break
             sample, _ = run(["/bin/ps", "-o", "time=", "-p", process_list], 3)
@@ -589,9 +585,10 @@ def capture_durable_contention(journal, finished):
             active = sum(any(digit in "123456789" for digit in elapsed) for elapsed in times)
             if sample.returncode == 0 and active == len(load):
                 journal.record("pressure-cpu-observed", activeWorkers=active)
+                ready.set()
                 break
         for child in load:
-            child.wait(timeout=15)
+            child.wait(timeout=31)
         journal.record("pressure-finished", workerExits=[child.returncode for child in load])
     except (OSError, subprocess.TimeoutExpired) as error:
         journal.record("pressure-error", error=type(error).__name__)
@@ -613,10 +610,13 @@ def durable_bootstrap(work, evidence, label):
         reader = threading.Thread(target=journal.read_markers, args=(trace, stop), daemon=True)
         reader.start()
         pressure = None
+        ready = threading.Event()
         if os.environ.get("MRK_COLD_RUNTIME_SAMPLE", "").startswith("contention"):
-            pressure = threading.Thread(target=capture_durable_contention, args=(journal, stop), daemon=True)
+            pressure = threading.Thread(target=capture_durable_contention, args=(journal, ready, stop), daemon=True)
             pressure.start()
         try:
+            if pressure is not None:
+                need(ready.wait(7), "cold-contention-not-ready-before-open")
             yield trace, journal
         except subprocess.TimeoutExpired as error:
             journal.record("launch-observation-timeout", limitSeconds=error.timeout)
@@ -628,8 +628,7 @@ def durable_bootstrap(work, evidence, label):
             stop.set()
             reader.join(timeout=3)
             if pressure is not None:
-                journal.app_info.set()
-                pressure.join(timeout=23)
+                pressure.join(timeout=37)
             journal.record("capture-finished", readerDrained=not reader.is_alive(),
                            pressureDrained=pressure is None or not pressure.is_alive())
 
@@ -929,6 +928,12 @@ def main():
             ), "release-qualification-selection")
             result["hostOs"] = run(["/usr/bin/sw_vers", "-productVersion"], 20)[0].stdout.strip()
             result["hostArchitecture"] = run(["/usr/bin/uname", "-m"], 20)[0].stdout.strip()
+        if os.environ.get("MRK_SIGNED_INTERMITTENTS") == "true":
+            chosen = selection["next"]
+            need((chosen["packageVersion"], chosen["release"], chosen["runId"])
+                 == ("0.2.11", "macos26-arm64-desktop-17", "45556678054"), "signed-intermittent-selection")
+            result["hostOs"] = run(["/usr/bin/sw_vers", "-productVersion"], 20)[0].stdout.strip()
+            result["hostArchitecture"] = run(["/usr/bin/uname", "-m"], 20)[0].stdout.strip()
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
@@ -1030,6 +1035,8 @@ def fresh_check(selection, work, evidence, steps, result):
                                        "e8db6d235daecfd3648852dfd143c4717e72dcae"),
             "macos26-arm64-desktop-16": ("6bde41073ab878ab83f1e70ac46bfac7d0b7c185",
                                        "410f788d127278fa8041417c4dba039596714141"),
+            "macos26-arm64-desktop-17": ("c7f5b2a2a6a41a3b930ff0d937198cd25abcb48d",
+                                       "526b16a692a2df7a8ed29028d84c76f60050cb3e"),
         }.get(row["release"])
         need((origin["source"], origin["tree"]) == expected, "cold-diagnostic-exact-source")
     need(install("next", folder, steps, evidence=evidence) == 0, "fresh-install-returned-nonzero")
@@ -1069,12 +1076,26 @@ def fresh_check(selection, work, evidence, steps, result):
             records = [json.loads(line) for line in journal]
             need(any(row["event"] == "MRK_DESKTOP_CAPABILITIES=available" for row in records)
                  and records[-1].get("readerDrained") is True, "cold-bootstrap-evidence-incomplete")
+            stages = {entry["event"]: entry for entry in records}
+            if os.environ.get("MRK_SIGNED_INTERMITTENTS") == "true":
+                ordered = ("open-request", "MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter",
+                           "MRKDBG_DESKTOP_BOOTSTRAP=capabilities-inspection-enter",
+                           "MRKDBG_DESKTOP_BOOTSTRAP=capabilities-inspection-joined",
+                           "MRKDBG_DESKTOP_BOOTSTRAP=capabilities-child-acquired",
+                           "MRK_DESKTOP_CAPABILITIES=available")
+                need(all(stage in stages for stage in ordered), "cold-bootstrap-stage-missing")
+                need(sum(row["event"] == "MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter" for row in records) == 1,
+                     "cold-bootstrap-request-count")
+                times = [stages[stage]["elapsedSeconds"] for stage in ordered]
+                need(times == sorted(times), "cold-bootstrap-stage-order")
+                result["firstLaunchBootstrapSeconds"] = dict(zip(ordered, times))
             if os.environ.get("MRK_COLD_RUNTIME_SAMPLE", "").startswith("contention"):
-                stages = {entry["event"]: entry for entry in records}
                 active = stages.get("pressure-cpu-observed", {})
                 completed = stages.get("pressure-finished", {})
                 available = stages["MRK_DESKTOP_CAPABILITIES=available"]["elapsedSeconds"]
-                need(active.get("elapsedSeconds", float("inf")) < available
+                opened = stages["open-request"]["elapsedSeconds"]
+                need(active.get("elapsedSeconds", float("inf")) <= opened < available
+                     <= completed.get("elapsedSeconds", float("-inf"))
                      and active.get("activeWorkers") == stages["pressure-started"]["workers"]
                      and completed.get("workerExits") and all(code == 0 for code in completed["workerExits"])
                      and records[-1]["pressureDrained"], "cold-contention-evidence-incomplete")
