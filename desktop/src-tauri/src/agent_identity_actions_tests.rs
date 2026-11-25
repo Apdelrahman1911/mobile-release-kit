@@ -4,6 +4,8 @@ use super::*;
 fn id(n: u32) -> Id {
     Id::parse(&format!("{n:032x}")).unwrap()
 }
+// The live inbox only grants identity actions for POSIX project registrations.
+#[cfg(unix)]
 struct Fixture {
     inbox: Inbox,
     entry: Arc<Entry>,
@@ -11,6 +13,7 @@ struct Fixture {
     _marker: Arc<()>,
     stopped: tokio::sync::watch::Receiver<bool>,
 }
+#[cfg(unix)]
 impl Fixture {
     fn new(allow: bool) -> Self {
         let inbox = Inbox::new(id(1));
@@ -20,7 +23,7 @@ impl Fixture {
             .allow(NativeScope {
                 project_id: id(2),
                 runtime_id: "project-1".into(),
-                root: PathBuf::from(crate::test_absolute_path!("/synthetic-project")),
+                root: "/synthetic-project".into(),
                 device: 1,
                 inode: 2,
                 registration: 1,
@@ -33,15 +36,7 @@ impl Fixture {
             project_id: id(2),
             intent_id: id(3),
             expected_observation_revision: 1,
-            change: Change {
-                selection: Selection {
-                    platform: Platform::Android,
-                    target: ":app".into(),
-                    project: None,
-                },
-                desired_identity: "com.example.next".into(),
-                identity_intent: IdentityIntent::NewApplication,
-            },
+            change: change(),
         };
         inbox
             .submit(
@@ -54,7 +49,7 @@ impl Fixture {
                 &SavedPoint {
                     project_id: id(2),
                     runtime_id: "project-1".into(),
-                    root: PathBuf::from(crate::test_absolute_path!("/synthetic-project")),
+                    root: "/synthetic-project".into(),
                     device: 1,
                     inode: 2,
                     revision: 1,
@@ -116,6 +111,17 @@ fn original() -> Original {
         revision: id(6),
     }
 }
+fn change() -> Change {
+    Change {
+        selection: Selection {
+            platform: Platform::Android,
+            target: ":app".into(),
+            project: None,
+        },
+        desired_identity: "com.example.next".into(),
+        identity_intent: IdentityIntent::NewApplication,
+    }
+}
 fn review() -> Review {
     Review {
         plan_token: id(7),
@@ -152,6 +158,7 @@ fn observation(revision: u32, state: OperationState, settlement: Settlement) -> 
         journal: None,
     }
 }
+#[cfg(unix)]
 fn start() -> Start {
     Start {
         origin: query(),
@@ -161,6 +168,7 @@ fn start() -> Start {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn proposal_permission_and_original_link_do_not_authorize_cli_prepare() {
     let f = Fixture::new(false);
@@ -171,6 +179,7 @@ fn proposal_permission_and_original_link_do_not_authorize_cli_prepare() {
     assert!(f.inbox.claim_identity_action().unwrap().is_none());
     assert!(f.entry.actions().is_none());
 }
+#[cfg(unix)]
 #[test]
 fn same_two_claims_are_consumed_before_send_and_never_replayed() {
     let f = Fixture::new(true);
@@ -201,6 +210,7 @@ fn same_two_claims_are_consumed_before_send_and_never_replayed() {
         .allow_actions(original(), Instant::now() + Duration::from_secs(60), stop)
         .is_err());
 }
+#[cfg(unix)]
 #[test]
 fn start_requires_exact_original_revision_plan_and_explicit_review() {
     let f = Fixture::new(true);
@@ -221,6 +231,7 @@ fn start_requires_exact_original_revision_plan_and_explicit_review() {
     }
     assert!(f.inbox.claim_identity_action().unwrap().is_none());
 }
+#[cfg(unix)]
 #[test]
 fn lost_ack_retains_claim_and_cancel_does_not_claim_native_settlement() {
     let f = Fixture::new(true);
@@ -240,6 +251,7 @@ fn lost_ack_retains_claim_and_cancel_does_not_claim_native_settlement() {
         .unwrap();
     assert!(f.inbox.claim_identity_action().unwrap().is_none());
 }
+#[cfg(unix)]
 #[test]
 fn returned_preclaim_refusal_is_not_unknown_or_an_edit_result() {
     let f = Fixture::new(true);
@@ -252,6 +264,7 @@ fn returned_preclaim_refusal_is_not_unknown_or_an_edit_result() {
     assert!(*f.stopped.borrow());
     assert!(f.inbox.claim_identity_action().unwrap().is_none());
 }
+#[cfg(unix)]
 #[test]
 fn revocation_expiry_and_foreign_query_cannot_rearm_same_original() {
     let f = Fixture::new(true);
@@ -281,6 +294,7 @@ fn revocation_expiry_and_foreign_query_cannot_rearm_same_original() {
     assert!(g.inbox.identity_action(&foreign, None, None, true).is_err());
     assert!(!*g.stopped.borrow());
 }
+#[cfg(unix)]
 #[test]
 fn exact_cancel_fences_pending_allow_without_revoking_shared_proposal_lease() {
     let f = Fixture::new(false);
@@ -300,6 +314,7 @@ fn exact_cancel_fences_pending_allow_without_revoking_shared_proposal_lease() {
     assert!(!g.entry.lease.revoked.load(Ordering::Acquire));
     assert!(*g.stopped.borrow());
 }
+#[cfg(unix)]
 #[test]
 fn permission_cannot_outlive_original_review_or_turn_settlement_into_a_new_allow() {
     let f = Fixture::new(false);
@@ -315,6 +330,7 @@ fn permission_cannot_outlive_original_review_or_turn_settlement_into_a_new_allow
         .unwrap();
     assert!(!f.entry.action_status().unwrap().permission_live);
 }
+#[cfg(unix)]
 #[test]
 fn original_unknown_and_recovery_are_not_success_and_lost_weak_is_not_finality() {
     let f = Fixture::new(true);
@@ -368,11 +384,34 @@ fn original_unknown_and_recovery_are_not_success_and_lost_weak_is_not_finality()
     );
     assert!(!g.entry.action_occupies());
 }
+// Wire validation also applies on targets without live identity registration.
+fn status(observation: Option<Observation>) -> Status {
+    Status {
+        origin: query(),
+        change: change(),
+        original: original(),
+        prepare: if observation.is_some() {
+            Step::Submitted
+        } else {
+            Step::NotRequested
+        },
+        start: Step::NotRequested,
+        permission_live: true,
+        remaining_ms: 1000,
+        cancel_requested: false,
+        unconfirmed: false,
+        observation,
+        do_not_replay: true,
+        history_must_be_queried: true,
+    }
+}
 #[test]
 fn bounded_public_review_refuses_extra_authority_and_false_success() {
-    let f = Fixture::new(true);
-    f.prepared();
-    let status = f.entry.action_status().unwrap();
+    let status = status(Some(observation(
+        10,
+        OperationState::Prepared,
+        Settlement::Pending,
+    )));
     status.validate().unwrap();
     let mut bad = status.clone();
     bad.observation.as_mut().unwrap().state = OperationState::Succeeded;
@@ -413,8 +452,7 @@ fn bounded_public_review_refuses_extra_authority_and_false_success() {
 }
 #[test]
 fn required_nullable_fields_are_typed_and_never_default_missing() {
-    let f = Fixture::new(true);
-    let mut empty = serde_json::to_value(f.entry.action_status().unwrap()).unwrap();
+    let mut empty = serde_json::to_value(status(None)).unwrap();
     assert!(empty["observation"].is_null());
     assert!(serde_json::from_value::<Status>(empty.clone())
         .unwrap()
@@ -423,8 +461,12 @@ fn required_nullable_fields_are_typed_and_never_default_missing() {
     empty.as_object_mut().unwrap().remove("observation");
     assert!(serde_json::from_value::<Status>(empty).is_err());
 
-    f.prepared();
-    let mut typed = serde_json::to_value(f.entry.action_status().unwrap()).unwrap();
+    let prepared = status(Some(observation(
+        10,
+        OperationState::Prepared,
+        Settlement::Pending,
+    )));
+    let mut typed = serde_json::to_value(prepared).unwrap();
     typed["observation"]["effect"] = serde_json::json!("not_started");
     typed["observation"]["journal"] = serde_json::json!("not_created");
     let decoded = serde_json::from_value::<Status>(typed.clone()).unwrap();
@@ -459,8 +501,7 @@ fn required_nullable_fields_are_typed_and_never_default_missing() {
 }
 #[test]
 fn original_noop_has_no_journal_and_remains_a_valid_settled_result() {
-    let f = Fixture::new(true);
-    let mut s = f.entry.action_status().unwrap();
+    let mut s = status(None);
     s.change.desired_identity = "com.example.old".into();
     s.prepare = Step::Submitted;
     s.start = Step::Submitted;
