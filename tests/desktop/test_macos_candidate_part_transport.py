@@ -100,6 +100,32 @@ class CandidatePartTransportTests(unittest.TestCase):
                                  'MRK_MACOS_SIGNED_PAYLOAD_SHA256': T.P.sha(bodies[T.S.APP_BINARY])})
         self.assertFalse(manifest['nativeAuthority'] or manifest['installed'] or manifest['productReady'])
 
+    def test_vault_helper_exports_both_compiler_pins_from_the_restored_original(self):
+        self.assertEqual(T.vault_helper_bindings(self.work), {})
+        helper = self.work / 'vault-helper-target' / T.P.TARGET / 'release' / 'mrk-vault-keychain'
+        helper.parent.mkdir(parents=True, mode=0o700)
+        body = b'inert original vault helper\n'
+        T.write(helper, body, 0o755)
+        self.assertEqual(T.vault_helper_bindings(self.work), {
+            'MRK_MACOS_VAULT_HELPER_SHA256': T.P.sha(body),
+            'MRK_MACOS_VAULT_HELPER_BYTES': str(len(body)),
+        })
+
+    def test_vault_helper_rejects_empty_oversized_and_substituted_originals(self):
+        helper = self.work / 'vault-helper-target' / T.P.TARGET / 'release' / 'mrk-vault-keychain'
+        helper.parent.mkdir(parents=True, mode=0o700)
+        T.write(helper, b'', 0o755)
+        with self.assertRaisesRegex(ValueError, 'part-vault-helper-size'):
+            T.vault_helper_bindings(self.work)
+        with helper.open('r+b') as stream:
+            stream.truncate(32 * 1024 * 1024 + 1)
+        with self.assertRaisesRegex(ValueError, 'part-original-policy'):
+            T.vault_helper_bindings(self.work)
+        helper.unlink()
+        helper.symlink_to('/dev/null')
+        with self.assertRaisesRegex(ValueError, 'part-original-policy'):
+            T.vault_helper_bindings(self.work)
+
     def test_original_app_constructor_and_writer_keep_signed_originals_0755(self):
         S = T.S
         bodies = {name: (name + ' inert bytes\n').encode() for name in

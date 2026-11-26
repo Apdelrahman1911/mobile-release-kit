@@ -506,6 +506,18 @@ def freeze(part, work, workspace):
         out.write('artifact-name=' + P.artifact_name(part, origin) + '\narchive=' + str(path) + '\n')
 
 
+def vault_helper_bindings(work):
+    helper = work / 'vault-helper-target' / P.TARGET / 'release' / 'mrk-vault-keychain'
+    if not os.path.lexists(helper):
+        return {}
+    # The installed runtime requires both compile-time pins. Derive them from
+    # the same authenticated original restored from the vault predecessor.
+    with original(helper, 32 * 1024 * 1024) as (stream, info):
+        need(info.st_size > 0, 'part-vault-helper-size')
+        return {'MRK_MACOS_VAULT_HELPER_SHA256': hashlib.file_digest(stream, 'sha256').hexdigest(),
+                'MRK_MACOS_VAULT_HELPER_BYTES': str(info.st_size)}
+
+
 def restore(part, work, workspace):
     origin = current(part, work)
     run = api_json('repos/' + P.REPOSITORY + '/actions/runs/' + origin['runId'])
@@ -559,12 +571,11 @@ def restore(part, work, workspace):
             finally: S.close_once(fd)
     write(work / 'part-dependencies.json', P.canonical([records[p] for p in P.ancestors(part, origin)]), 0o444)
     # Only immutable bindings/data are exported; no origin process environment.
-    values = {}
+    values = vault_helper_bindings(work)
     for env, path in (('MRK_MACOS_ANDROID_HELPER_SHA256', 'mrk-android-register'),
                       ('MRK_MACOS_DESKTOP_FACADE_SHA256', 'mobile-release-kit-desktop'),
                       ('MRK_MACOS_ENTRY_SHA256', 'mrk-macos-entry'),
                       ('MRK_MACOS_RESIDENT_IMAGE_SHA256', 'libmrk_resident_image.dylib'),
-                      ('MRK_MACOS_VAULT_HELPER_SHA256', 'vault-helper-target/' + P.TARGET + '/release/mrk-vault-keychain'),
                       ('MRK_MACOS_REMOVER_SHA256', 'remover-target/' + P.TARGET + '/release/mrk-macos-remove'),
                       ('MRK_MACOS_INSTALLED_CLI_SHA256', 'installed-cli-target/' + P.TARGET + '/release/mrk')):
         if os.path.lexists(work / path):

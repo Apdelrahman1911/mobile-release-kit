@@ -115,6 +115,14 @@ jobs:
           done
           unset GH_TOKEN
           python -I -B desktop/tools/macos_release_ui.py install "$media" "$work"
+      - name: Launch the signed app before connecting the UI driver
+        run: |
+          set -euo pipefail
+          /usr/sbin/screencapture -x "$MRK_UI_WORK/evidence/before-app-launch.png"
+          date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MRK_UI_WORK/evidence/app-launch-at.txt"
+          /usr/bin/open -a '/Applications/Mobile Release Kit.app'
+          sleep 6
+          /usr/sbin/screencapture -x "$MRK_UI_WORK/evidence/before-ui-driver.png"
       - name: Start the same-runner observer with a one-time bearer
         id: observer
         run: |
@@ -144,11 +152,14 @@ jobs:
           token-sha256: ${{ steps.observer.outputs.token-digest }}
           duration-minutes: '15'
           startup-timeout-seconds: '180'
-          launch: /usr/bin/open -a "/Applications/Mobile Release Kit.app"
       - name: Require the original UI observer result
-        if: ${{ !cancelled() && env.MRK_UI_WORK != '' }}
+        if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
         run: |
           set -euo pipefail
+          for ((waited=0; waited<10; waited++)); do
+            [[ ! -f "$MRK_UI_WORK/observer-status" ]] || break
+            sleep 1
+          done
           [[ -f "$MRK_UI_WORK/observer-status" ]]
           [[ "$(cat "$MRK_UI_WORK/observer-status")" == 0 ]]
           jq -e '.scenarios | length > 0 and all(.[]; .status == "Passed")' "$MRK_UI_WORK/evidence/RESULT.json"
