@@ -111,6 +111,11 @@ with open(os.environ["GITHUB_ENV"], "a") as stream:
 PY_BUILD
 printf 'MRK_MACOS_BUILD_PHASE=observer-artifact-returned\n' >&2 2>/dev/null || :
 else
+[[ "${MRK_MACOS_VAULT_HELPER_SHA256-}" =~ ^[0-9a-f]{64}$ && "${MRK_MACOS_VAULT_HELPER_BYTES-}" =~ ^[1-9][0-9]{0,7}$ ]] &&
+  (( MRK_MACOS_VAULT_HELPER_BYTES <= 32 * 1024 * 1024 )) || {
+  printf 'The ordinary Desktop image requires the restored vault helper digest and byte count.\n' >&2
+  exit 1
+}
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup DYLD_FALLBACK_LIBRARY_PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/lib" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
   --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
