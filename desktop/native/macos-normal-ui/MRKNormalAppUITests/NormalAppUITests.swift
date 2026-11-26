@@ -6796,14 +6796,12 @@ final class NormalAppUITests: XCTestCase {
         @MainActor func settings(_ tab: String) throws {
             try press(renderer, "Project settings", renderer: renderer)
             if guidedProductSurface {
-                let groups = try waitElement(named(renderer, "Configuration groups"), in: renderer)
-                let inputs = groups.buttons.matching(NSPredicate(format: "label IN %@ OR identifier IN %@",
-                    ["Version & build", "2 Version & build"], ["Version & build", "2 Version & build"]))
-                let group = try waitElement(inputs, in: groups, enabled: true)
-                try reveal(group, in: renderer)
-                group.click()
-                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@",
-                    "2. Point to the app’s build inputs")), in: renderer)
+                let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@",
+                    "2. Point to the app’s build inputs"))
+                if heading.count == 0 {
+                    try press(renderer, "Next: Version & build", renderer: renderer)
+                }
+                _ = try waitElement(heading, in: renderer)
                 return
             }
             let tabs = try waitElement(named(renderer, "Settings section"), in: renderer)
@@ -8210,8 +8208,9 @@ final class NormalAppUITests: XCTestCase {
         try press(renderer, "Environment", renderer: renderer)
         try select(renderer, label: "Release platform", value: "iOS", renderer: renderer)
         try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer)
+        let action = guidedProductSurface ? "Check this computer" : "Check build tools"
         let panel = try waitElement(named(renderer, "Observed build-tool checks")
-            .containing(.button, identifier: "Check build tools"), in: renderer)
+            .containing(.button, identifier: action), in: renderer)
         let failures = ["Original finality or status integrity is unknown", "Diagnostics status needs attention",
                         "Start reply unconfirmed", "Earlier / stale tool observations", "Phase: retained-unknown",
                         "Outcome: partial", "Outcome: failed", "Outcome: cancelled", "Outcome: timed-out", "Outcome: unavailable"]
@@ -8219,7 +8218,7 @@ final class NormalAppUITests: XCTestCase {
                     && panel.staticTexts.matching(identifier: "Earlier / stale tool observations").count == 0,
                     "a previous diagnostics report cannot supply the iOS archive journey")
         // Availability permits only the click, never a tool or native result.
-        let start = try waitElement(panel.buttons.matching(identifier: "Check build tools"), in: panel,
+        let start = try waitElement(panel.buttons.matching(identifier: action), in: panel,
                                     enabled: true, timeout: 10, failures: failures)
         try reveal(start, in: renderer)
         guard let wholeDeadline = journeyDeadline, let clock = caseClock else {
