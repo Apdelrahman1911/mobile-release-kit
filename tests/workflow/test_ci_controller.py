@@ -2391,22 +2391,27 @@ class CICoordinatorResultTests(unittest.TestCase):
         controller = controller_module()
         gates = ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel")
 
-        def gate_fixture(gate, healthy_count=1316):
+        def gate_fixture(gate, healthy_count=3251):
             python = gate in gates[:2]
             names = ((*controller.PYTHON_SINGLETON_PARTITIONS, "healthy") if python else
                      ("authority", "ordinary", *controller.PYTHON_SINGLETON_PARTITIONS))
             partitions = []
             for name in names:
                 count = healthy_count if name == "healthy" else 5 if name == "authority" else 180 if name == "ordinary" else 1
-                ids = [f"workflow.synthetic_{name.replace('-', '_')}.PublicationContract."
+                ids = [f"workflow.synthetic_{name.replace('-', '_')}.PublicationContract{number // 12:03d}."
                        f"test_preserves_original_completion_and_lifecycle_evidence_{number:04d}" for number in range(count)]
+                if name == "healthy":
+                    ids[-1] = "zzz_synthetic_undotted_id"
                 part = {"partition": name, "status": "PASS", "tests": count, "completed": ids,
                         "capture": {"synthetic": True, "returncode": 0, "waited": True, "stdout_eof": True,
                                     "stderr_eof": True, "domain_finality": True, "persisted": [73, 47], "seconds": 0.01}}
                 if name == "healthy":
+                    results = [{"id": identifier, "outcome": "skip" if number % 100 == 0 else "ok"}
+                               for number, identifier in reversed(list(enumerate(ids)))]
+                    if count > 24:
+                        results.insert(24, results.pop(1))
                     part["summary"] = {"check": gate, "ok": True,
-                        "tests": [{"id": identifier, "outcome": "skip" if number % 100 == 0 else "ok"}
-                                  for number, identifier in reversed(list(enumerate(ids)))],
+                        "tests": results,
                         "details": {"failure_callbacks": [], "storage_profile": {"synthetic": True},
                                     "source_provenance": {"synthetic": True, "digest": "a" * 64}}}
                 else:
@@ -2460,17 +2465,18 @@ class CICoordinatorResultTests(unittest.TestCase):
 
             report = report_fixture()
             report.update(finality=True, persisted_capture_bytes=480, seconds=0.25)
-            report["rows"].extend(gate_fixture(gate) for gate in gates)
+            report["rows"].extend(gate_fixture(gate, healthy_count=741 if gate == "python-wheel" else 3251)
+                                  for gate in gates)
             original = copy.deepcopy(report)
-            # Synthetic ordinary-sized full/wheel summaries; no copied private
-            # report, actual test execution, or Linux substitute for native proof.
-            for row in report["rows"][1:3]:
-                self.assertLess(len(json.dumps(row["details"]["partitions"][-1]["summary"])), 256 * 1024)
+            # Approximate the current full and wheel inventories without using
+            # a copied report or claiming any executions.
+            for row, minimum in zip(report["rows"][1:3], (400, 90)):
+                self.assertGreater(len(json.dumps(row["details"]["partitions"][-1]["summary"])), minimum * 1024)
             for separators in ((", ", ": "), (",", ":")):
                 self.assertGreater(len(json.dumps(report, sort_keys=True, ensure_ascii=True, allow_nan=False,
                                                   separators=separators).encode("ascii")), 768 * 1024)
             public = publish(report, "large")
-            self.assertEqual(public["schema"], 2)
+            self.assertEqual(public["schema"], 3)
             reconstructed = copy.deepcopy(public)
             reconstructed["schema"] = 1
             for row in reconstructed["rows"][1:]:
@@ -2480,8 +2486,14 @@ class CICoordinatorResultTests(unittest.TestCase):
                 for part in details["partitions"]:
                     if part["partition"] == "healthy":
                         self.assertNotIn("completed", part)
-                        self.assertEqual(part.pop("completed_from"), "summary.tests")
-                        part["completed"] = sorted(test["id"] for test in part["summary"]["tests"])
+                        self.assertEqual(part.pop("completed_from"), "summary.test_groups")
+                        summary = part["summary"]
+                        ids = [prefix + suffix for prefix, suffixes in summary.pop("test_groups")
+                               for suffix in suffixes]
+                        skipped = set(summary.pop("skipped"))
+                        summary["tests"] = [{"id": identifier, "outcome": "skip" if index in skipped else "ok"}
+                                            for index, identifier in enumerate(ids)]
+                        part["completed"] = sorted(ids)
                     else:
                         self.assertNotIn("completed_from", part)
                     self.assertEqual(part["tests"], len(part["completed"]))
@@ -2508,7 +2520,7 @@ class CICoordinatorResultTests(unittest.TestCase):
                 {"id": "fixture-unrelated", "status": "PASS", "details": {
                     "stage": "complete", "tests": 1, "completed": ["unrelated"], "capture": {"synthetic": True}}}]
             failed_original = copy.deepcopy(failed)
-            self.assertEqual(publish(failed, "failed"), dict(failed_original, schema=2))
+            self.assertEqual(publish(failed, "failed"), dict(failed_original, schema=3))
             self.assertEqual(failed, failed_original)
 
             small = report_fixture()
@@ -2526,7 +2538,7 @@ class CICoordinatorResultTests(unittest.TestCase):
                 ("healthy_count", (*healthy_path, "tests"), 3),
                 ("partition_count_type", (*detail_path, "partitions", 0, "tests"), True),
                 ("healthy_ids", (*healthy_path, "completed"), ["synthetic.a", "synthetic.b"]),
-                ("healthy_reference", (*healthy_path, "completed_from"), "summary.tests"),
+                ("healthy_reference", (*healthy_path, "completed_from"), "summary.test_groups"),
                 ("gate_reference", (*detail_path, "completed_from"), "partitions"),
                 ("gate_duplicate", (*detail_path, "completed"), [completion[0], *completion[:-1]]),
                 ("gate_union", (*detail_path, "completed"), [*completion[:-1], "zzz.synthetic.other"]),
@@ -2535,6 +2547,7 @@ class CICoordinatorResultTests(unittest.TestCase):
                 ("partition_inventory", (*detail_path, "partitions", 0, "partition"), "unknown"),
                 ("gate_state", (*detail_path, "stage"), "union"),
                 ("already_projected", ("schema",), 2),
+                ("already_compacted", ("schema",), 3),
                 ("duplicate_gate", ("rows",), [small["rows"][0], small["rows"][0]]),
             )
             for name, keys, value in mutations:

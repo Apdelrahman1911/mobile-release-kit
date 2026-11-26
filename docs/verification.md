@@ -1036,19 +1036,19 @@ attempt, not transferable execution permissions. Retain the workflow/run URL and
 actual Actions job outcome; a late publication failure invalidates an earlier
 success-shaped summary. Later gates after failure stay `UNEXECUTED`.
 
-Public reports use schema 2 without changing the original in-memory gate records.
-Successful Python/native gates omit only exactly checked duplicate completion
-lists: `completed_from: summary.tests` expands to the sorted IDs of that
-partition's retained test/outcome records; `completed_from: partitions` expands
-to the duplicate-free sorted union of its partitions' completion IDs (expanding
-the first reference where present). Counts must match, every partition must have
-passed, and delegated matrix obligations remain separate. Every observed test ID
-and outcome, original capture/finality result, failure diagnostic and source
-binding remains present. Failed and unexecuted rows are not abbreviated. These
-references are lossless presentation, not new validation authority or permission
-to reuse another run's evidence. Compact JSON retains the unchanged 768 KiB public
-bound; inconsistent references, excess nonredundant output or a publication error
-still fail the job. A gate-start log line alone is never a passing gate result.
+Public reports use schema 3. In a successful Python summary, each
+`test_groups` entry contains a shared ID prefix and the ordered suffixes that
+follow it. Concatenate each prefix and suffix in list order, then mark entries
+at the zero-based `skipped` positions as `skip` and every other entry as `ok`.
+`completed_from: summary.test_groups` expands to the sorted IDs in that
+partition. `completed_from: partitions` expands to the duplicate-free sorted
+union of a gate's partition completions. Counts and completion IDs must match
+the original in-memory records before publication, and delegated matrix
+obligations remain separate. The projection preserves test order and outcomes,
+capture and finality evidence, and source binding. Failed and unexecuted rows
+retain their original fields. Inconsistent references, output above 768 KiB,
+or a publication error still fail the job. A gate-start log line alone does not
+establish a passing result.
 
 Failure diagnostics may identify the fixed ACL attribute or whitelisted Ruby
 startup tokens from already captured stderr. They disclose no raw ACL entries,

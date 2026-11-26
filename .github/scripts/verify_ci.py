@@ -5944,11 +5944,12 @@ def error_details(exc: BaseException) -> dict:
 
 
 def public_summary_projection(report: dict) -> dict:
-    """Schema2 removes only checked, redundant completion lists; schema1 stays intact.
+    """Project schema 1 to a lossless, compact public schema 3.
 
-    ``summary.tests`` expands to sorted test IDs, and ``partitions`` expands to
-    their duplicate-free sorted completion union. Delegated obligations are not
-    executed completions. This presentation step never grants a passing result.
+    Successful Python summaries retain their original test order as contiguous
+    prefix groups and zero-based skip positions. Partition completion IDs are
+    the sorted expanded IDs, and gate completions are their duplicate-free
+    sorted union. This presentation step never grants a passing result.
     """
     if (type(report) is not dict or type(report.get("schema")) is not int or report["schema"] != 1
             or type(report.get("rows")) is not list):
@@ -6007,9 +6008,20 @@ def public_summary_projection(report: dict) -> dict:
                 summary_ids = [test["id"] for test in summary["tests"]]
                 if len(summary_ids) != len(set(summary_ids)) or ids != sorted(summary_ids):
                     raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+                groups, skipped = [], []
+                for index, test in enumerate(summary["tests"]):
+                    prefix, separator, method = test["id"].rpartition(".")
+                    prefix += separator
+                    if not groups or groups[-1][0] != prefix:
+                        groups.append((prefix, []))
+                    groups[-1][1].append(method)
+                    if test["outcome"] == "skip":
+                        skipped.append(index)
+                summary = dict(summary, test_groups=groups, skipped=skipped)
+                del summary["tests"]
                 part = dict(part)
                 del part["completed"]
-                part["completed_from"] = "summary.tests"
+                part.update(summary=summary, completed_from="summary.test_groups")
             projected.append(part)
         if len(joined) != len(set(joined)) or completed(details) != sorted(joined):
             raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
@@ -6017,7 +6029,7 @@ def public_summary_projection(report: dict) -> dict:
         del details["completed"]
         details["completed_from"] = "partitions"
         rows.append(dict(row, details=details))
-    return dict(report, schema=2, rows=rows)
+    return dict(report, schema=3, rows=rows)
 
 
 def publish_summary(path: Path, report: dict, *, runner_temp: Path, deadline: float) -> None:
