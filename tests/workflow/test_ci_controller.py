@@ -2152,7 +2152,7 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-local-store-intent": ("test_local_store_intent.rb", {"LocalStoreIntentContractTest"}, 14),
             "ruby-local-store-execution-runtime": ("test_local_store_execution_runtime.rb",
                                                     {"LocalStoreExecutionRuntimeTest"}, 21),
-            "ruby-workflow-yaml": ("test_workflow_yaml.rb", {"WorkflowYamlStructureTest"}, 1),
+            "ruby-workflow-yaml": ("test_workflow_yaml.rb", {"WorkflowYamlStructureTest"}, 2),
             "ruby-packaged-capture-source": ("test_installed_ruby_capture.rb", {"PackagedRubyCaptureTest"}, 6),
             "ruby-packaged-capture-wheel": ("test_installed_ruby_capture.rb",
                                               {"PackagedRubyCaptureTest", "InstalledRubyCaptureMissingHelperTest"}, 8),

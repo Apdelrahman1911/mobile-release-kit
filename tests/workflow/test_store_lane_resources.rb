@@ -690,9 +690,16 @@ class StoreLaneResourcesTest < Minitest::Test
             calls=0
             executor.behavior=lambda do
               calls+=1
-              request=@invocation.instance_variable_get(:@local_spawn)
-              assert_equal path,request[1][0]
-              assert_equal @resources.instance_variable_get(:@entries).fetch('upload-asset').fetch(:path),request[1][9]
+              env,argv=@invocation.instance_variable_get(:@local_spawn)
+              entries=@resources.instance_variable_get(:@entries)
+              asset=entries.fetch('upload-asset').fetch(:path)
+              assert_equal ['/usr/bin/xcrun','--no-cache','--run','altool','--upload-app','--apiKey','KEY123',
+                '--apiIssuer','synthetic-issuer','-t','ios','-f',asset,'-k','100000'],argv
+              assert_equal context.fetch(:transport_tools).fetch('selection').fetch('developerDirectory'),env.fetch('DEVELOPER_DIR')
+              assert_equal File.dirname(entries.fetch('key').fetch(:path)),env.fetch('API_PRIVATE_KEYS_DIR')
+              nodes=@resources.instance_variable_get(:@local_tools)
+              assert_equal ['/usr/bin/xcrun',path].sort,nodes.select { |node| node.fetch(:leaf) }.map { |node| node.fetch(:path) }.sort
+              assert nodes.all? { |node| node.fetch(:slot).open? }
               assert @resources.check_local_transport!
               true
             end
