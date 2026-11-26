@@ -7885,6 +7885,32 @@ sys.exit(status)
         for change in (dict(source="a"*40), dict(imageSourceCommit="b"*40), dict(runId="124")):
             with self.subTest(receiptChange=change), self.assertRaises(TOOL.Refused):
                 TOOL.removal_package_receipt_data(TOOL.canonical(dict(split, **change)), **split_args)
+        # The hosted main carrier validates the Remove owner from its own run,
+        # even though the Install package was made in a different main run.
+        main_context = dict(context, GITHUB_REF="refs/heads/main", GITHUB_REF_PROTECTED="true",
+                            GITHUB_WORKFLOW_REF=TOOL._MAIN_FINAL_IMAGE_WORKFLOW,
+                            GITHUB_SHA="a"*40, GITHUB_WORKFLOW_SHA="a"*40, MRK_MACOS_PREPARED_RESUME="true")
+        main_consumer = dict(prepared_consumer, source="a"*40)
+        main_binding = prepared.PreparedBinding(prepared._SEAL, product, main_consumer, {})
+        main_args = dict(arguments, expected_workflow=TOOL._MAIN_FINAL_IMAGE_WORKFLOW,
+                         binding=main_consumer, environment=main_context, prepared_removal=main_binding)
+        main_owner = dict(successful, workflow=TOOL._MAIN_FINAL_IMAGE_WORKFLOW)
+        self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(main_owner), **main_args),
+                         main_owner["removalDistribution"])
+        for changes in (dict(GITHUB_REF_PROTECTED="false"), dict(GITHUB_EVENT_NAME="push"),
+                        dict(MRK_MACOS_PREPARED_RESUME="false"), dict(GITHUB_WORKFLOW_SHA="b"*40),
+                        dict(GITHUB_RUN_ID="456"), dict(GITHUB_RUN_ATTEMPT="2")):
+            with self.subTest(mainContext=changes), self.assertRaises((TOOL.Refused, ValueError)):
+                TOOL.removal_package_receipt_data(TOOL.canonical(main_owner),
+                                                  **dict(main_args, environment=dict(main_context, **changes)))
+        for changes in (dict(prepared_removal=None), dict(prepared_removal=admitted),
+                        dict(binding=dict(main_consumer, tree="d"*40))):
+            with self.subTest(mainBinding=changes), self.assertRaises(TOOL.Refused):
+                TOOL.removal_package_receipt_data(TOOL.canonical(main_owner), **dict(main_args, **changes))
+        for changes in (dict(runId="41"), dict(runAttempt="2"), dict(imageSourceCommit="b"*40),
+                        dict(workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW)):
+            with self.subTest(mainReceipt=changes), self.assertRaises(TOOL.Refused):
+                TOOL.removal_package_receipt_data(TOOL.canonical(dict(main_owner, **changes)), **main_args)
         for mutation in ("old-source", "other-run", "install-phase", "pending", "close", "role", "return-bool", "credential", "context", "false-completion", "image-name", "extra"):
             changed = copy.deepcopy(successful)
             if mutation == "old-source": changed["imageSourceCommit"] = "b" * 40

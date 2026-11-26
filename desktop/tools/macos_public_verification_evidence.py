@@ -112,6 +112,7 @@ FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-ex
 
 FINAL_IMAGE_INPUT_STAGES = (
     'final-image-original-inputs',
+    'final-image-removal-owner',
     'final-image-package-owner',
     'final-image-original-readback',
     'final-image-package-audit',
@@ -155,6 +156,9 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
     'producer-emitter-original',
     'producer-emitter-package-binding',
     'producer-emitter-summary',
+    'prepared-main-remove-owner-binding',
+    'remove-owner-current-source',
+    'remove-owner-workflow',
     'registration-reservation-creation-incomplete',
     'registration-reservation-not-predecessor-creation',
     'registration-reservation-parent-not-settled',

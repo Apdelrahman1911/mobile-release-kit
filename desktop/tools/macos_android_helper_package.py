@@ -1649,6 +1649,7 @@ FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-ex
 
 FINAL_IMAGE_INPUT_STAGES = (
     'final-image-original-inputs',
+    'final-image-removal-owner',
     'final-image-package-owner',
     'final-image-original-readback',
     'final-image-package-audit',
@@ -1692,6 +1693,9 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
     'producer-emitter-original',
     'producer-emitter-package-binding',
     'producer-emitter-summary',
+    'prepared-main-remove-owner-binding',
+    'remove-owner-current-source',
+    'remove-owner-workflow',
     'registration-reservation-creation-incomplete',
     'registration-reservation-not-predecessor-creation',
     'registration-reservation-parent-not-settled',
@@ -5502,6 +5506,7 @@ class Operation:
 
     def final_removal_image_input(self):
         """Only Remove inputs; never fabricate the separate Install readback witnesses."""
+        self.stage = "final-image-original-inputs"
         selection = self.stager.BuildSelection(self.target,
             self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
         def retained(parent, name, limit, modes=(0o444, 0o600, 0o644, 0o400)):
@@ -5539,6 +5544,7 @@ class Operation:
         need(input_values["remove-descriptor-input.json"] == expected == descriptor
              and digest(input_values["install-inventory.json"]) == self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
              and digest(input_values[self.stager.REMOVER_NAME]) == self.environment.get("MRK_MACOS_REMOVER_SHA256"), "final-removal-source-originals")
+        self.stage = "final-image-removal-owner"
         _, owner_body = retained(self.work_entry, "android-helper-package-remove.json", 16384, (0o600,))
         prepared = self.cross_source_removal()
         reader = self.stager
@@ -5548,6 +5554,9 @@ class Operation:
             selection = reader.BuildSelection(selection.target, selection.package_version, selection.release)
             binding = prepared.consumer
             context = {"prepared_removal": prepared, "environment": self.environment}
+        elif self.main_desktop_carrier:
+            binding = self.prepared_binding.consumer
+            context = {"prepared_removal": self.prepared_binding, "environment": self.environment}
         elif self.candidate_removal_context is not None:
             binding = self.candidate_removal_binding()
         else:
