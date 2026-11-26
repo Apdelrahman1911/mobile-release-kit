@@ -145,8 +145,8 @@ def observe(route, deny_direct_network):
 
 
 if __name__ == "__main__":
-    if sys.platform != "darwin" or os.uname().machine != "arm64" or os.getuid() == 0:
-        raise RuntimeError("requires the fixed nonroot hosted Apple Silicon account")
+    if sys.platform != "darwin" or os.uname().machine != "x86_64" or os.getuid() == 0:
+        raise RuntimeError("requires the fixed nonroot hosted Intel macOS account")
     if len(sys.argv) == 5 and sys.argv[1] == "evaluate":
         evaluate(sys.argv[2], int(sys.argv[3]), float(sys.argv[4]))
     elif len(sys.argv) == 1:
