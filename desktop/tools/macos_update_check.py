@@ -2908,6 +2908,8 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
                                           transcript)[-60:]
     for field, pattern in (
         ("xctestRequireLine", r"MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + r";line=([0-9]{1,5});check="),
+        ("xctestPackagedRequire", r"(?m)^MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=([0-9]{1,5});check=([a-z-]{1,20})$"),
+        ("xctestProjectSelection", r"(?m)^MRK_GUIDED_PROJECT_SELECTION=v1;([a-z-]{1,30})=([0-5])$"),
         ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),
         ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
         ("xctestWait", r"MRK_NORMAL_WAIT=v1;line=([0-9]{1,5});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5])"),

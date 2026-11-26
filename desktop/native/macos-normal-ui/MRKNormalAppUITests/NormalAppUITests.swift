@@ -5408,8 +5408,21 @@ final class NormalAppUITests: XCTestCase {
             let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", title))
             _ = try waitElement(heading, in: renderer, failures: failures)
             try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: path), in: renderer,
-                                timeout: 24, failures: failures)
+            do {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: path), in: renderer,
+                                    timeout: 24, failures: failures)
+            } catch {
+                let facts = ["selected-heading": heading.count,
+                    "folder-caption": renderer.staticTexts.matching(identifier: "Selected project folder").count,
+                    "unselected": renderer.staticTexts.matching(identifier: "No folder selected").count,
+                    "path-by-value": renderer.staticTexts.matching(NSPredicate(format: "value == %@", path)).count,
+                    "path-by-title": renderer.staticTexts.matching(NSPredicate(format: "title == %@", path)).count,
+                    "path-by-label": renderer.staticTexts.matching(NSPredicate(format: "label == %@", path)).count]
+                for (key, count) in facts.sorted(by: { $0.key < $1.key }) {
+                    print("MRK_GUIDED_PROJECT_SELECTION=v1;\(key)=\(min(count, 5))")
+                }
+                throw error
+            }
         } else {
             let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready."))
             _ = try waitElement(heading, in: renderer, failures: failures)
@@ -6142,7 +6155,8 @@ final class NormalAppUITests: XCTestCase {
             try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected persistence project differs")
             try press(renderer, "Credentials", renderer: renderer)
-            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+            let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
+            let storage = try waitElement(named(renderer, storageLabel), in: renderer)
             selectedStorage = storage
             try select(storage, label: "Platform", value: "iOS", renderer: renderer)
             try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
@@ -6265,7 +6279,8 @@ final class NormalAppUITests: XCTestCase {
             try observeSelectedProject(restartedRenderer, path: fixture.projectPath)
             _ = try unique(restartedRenderer.staticTexts.matching(identifier: fixture.projectPath), "restarted persistence project differs")
             try press(restartedRenderer, "Credentials", renderer: restartedRenderer)
-            let storage = try waitElement(named(restartedRenderer, "Private-input storage controls"), in: restartedRenderer)
+            let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
+            let storage = try waitElement(named(restartedRenderer, storageLabel), in: restartedRenderer)
             restartedStorage = storage
             _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
                                 failures: Self.privateInputFailures)
@@ -6346,14 +6361,14 @@ final class NormalAppUITests: XCTestCase {
                 if let name = chosen {
                     // WebKit may expose the strong text separately or coalesce
                     // that one paragraph. Both comparisons name the exact leaf.
-                    _ = try waitStaticText(group, matching: .equalOrContains(name,
-                        "Selected folder: " + name + " · folder selection only."), timeout: 48)
+                    let caption = guidedProductSurface ? "Selected: " + name : "Selected folder: " + name + " · folder selection only."
+                    _ = try waitStaticText(group, matching: .equalOrContains(name, caption), timeout: 48)
                 } else {
                     // The unselected paragraph has only these two complete
                     // renderings (separate conditional text or coalesced text).
                     // Exact native equality avoids scanning every AX attribute
                     // under the original five-second observation allowance.
-                    let captions = ["No folder selected for this project.",
+                    let captions = guidedProductSurface ? ["Not selected yet."] : ["No folder selected for this project.",
                                     "Required before registering Android tools. No folder selected for this project."]
                     _ = try waitElement(group.staticTexts.matching(NSPredicate(
                         format: "value IN %@ OR label IN %@ OR title IN %@",
@@ -6392,7 +6407,7 @@ final class NormalAppUITests: XCTestCase {
                     try androidStatus("Folder selection could not be used",
                         reason: "Choose a real, readable local folder, not an alias or archive. This check does not inspect the tools inside it.")
                 } else {
-                    try androidStatus("Original folder selection retained",
+                    try androidStatus(guidedProductSurface ? "Folder selection retained" : "Original folder selection retained",
                         reason: "Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status.")
                     guard let name = relative.split(separator: "/").last else {
                         throw Refusal.condition("fixed Android source leaf is absent")
@@ -8291,7 +8306,22 @@ final class NormalAppUITests: XCTestCase {
                 try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
                 try observeSelectedProject(renderer, path: fixture.projectPath)
                 _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "iOS selected fixture differs")
-                _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
+                let identity = renderer.staticTexts.matching(identifier: "org.example.mrk.observed")
+                if guidedProductSurface {
+                    let configured = renderer.staticTexts.matching(identifier: "Configured iOS bundle ID")
+                    let label = try waitElement(configured, in: renderer)
+                    let expandedCount = identity.count
+                    let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                        label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
+                    try reveal(details, in: renderer)
+                    details.click()
+                    try waitGone(label)
+                    let collapsedCount = identity.count
+                    try require(collapsedCount <= 1 && expandedCount == collapsedCount + 1,
+                                "the current project details did not display exactly one matching configured iOS identity")
+                } else {
+                    _ = try waitForSnapshotIdentity(identity, in: renderer)
+                }
                 try fixture.assertUnchanged()
                 try observeIOSToolDiagnostics(renderer)
                 try fixture.assertUnchanged()
