@@ -1,4 +1,4 @@
-name: Compare synthetic issuer addresses on macOS 26
+name: Compare synthetic issuer trust policies on macOS 26
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  issuer-address:
+  issuer-policy:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
@@ -39,4 +39,4 @@ jobs:
           printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "$ImageVersion"
           umask 077
           env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C \
-            python -I -B .github/scripts/aia-address-probe.py
+            python -I -B .github/scripts/aia-policy-probe.py
