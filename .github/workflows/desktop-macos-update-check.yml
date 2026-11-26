@@ -52,7 +52,7 @@ permissions:
   attestations: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ github.ref == 'refs/heads/verify/macos-0213-recovery-project' && format('-{0}', inputs.additional_ui) || '' }}
   cancel-in-progress: false
 
 jobs:

@@ -329,6 +329,11 @@ def observe(work, action, media):
     def versions():
         ui.page("Overview")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
+        ui.edit("Build number", "x")
+        ui.node("Enter a marketing-version string", contains=True)
+        _, refused = ui.node("Validate and review values", category="button")
+        need(not refused["enabled"] and file_hash(project / VERSION_FILE) == original[VERSION_FILE],
+             "invalid-build-input-was-admitted")
         ui.edit("Marketing version", "1.0.1")
         ui.edit("Build number", "2")
         ui.click("Validate and review values", category="button")
@@ -390,10 +395,10 @@ def observe(work, action, media):
     def window_layouts():
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
         width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 75, 740)
-        if width < 960 or height < 620:
+        if width < 980 or height < 690:
             raise Blocked("The synthetic console is too small for two readable window sizes")
         results["windowBounds"] = []
-        for width, height in ((width - 48, height - 30), (width, height)):
+        for width, height in ((width - 40, height - 20), (width, height)):
             results["windowBounds"].append(ui.resize(width, height))
             ui.page("Overview")
             ui.page("Project settings")

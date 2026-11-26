@@ -6780,6 +6780,17 @@ final class NormalAppUITests: XCTestCase {
 
         @MainActor func settings(_ tab: String) throws {
             try press(renderer, "Project settings", renderer: renderer)
+            if guidedProductSurface {
+                let groups = try waitElement(named(renderer, "Configuration groups"), in: renderer)
+                let inputs = groups.buttons.matching(NSPredicate(format: "label IN %@ OR identifier IN %@",
+                    ["Version & build", "2 Version & build"], ["Version & build", "2 Version & build"]))
+                let group = try waitElement(inputs, in: groups, enabled: true)
+                try reveal(group, in: renderer)
+                group.click()
+                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@",
+                    "2. Point to the app’s build inputs")), in: renderer)
+                return
+            }
             let tabs = try waitElement(named(renderer, "Settings section"), in: renderer)
             try settingsTab(tabs, tab, renderer: renderer)
         }
@@ -8288,6 +8299,13 @@ final class NormalAppUITests: XCTestCase {
             let failures = ["No new iOS archive outcome was confirmed", "Cleanup needs attention"]
             try stage("ios-unsigned-review") {
                 try press(renderer, "Releases", renderer: renderer)
+                if guidedProductSurface {
+                    let tabs = try waitElement(named(renderer, "Release tasks"), in: renderer)
+                    let archive = try waitElement(controls(tabs, [.radioButton, .button, .other], label: "iOS build"),
+                                                  in: tabs, enabled: true)
+                    try reveal(archive, in: renderer)
+                    archive.click()
+                }
                 let panel = try waitElement(named(renderer, "Review the current saved inputs")
                     .containing(.button, identifier: "Review saved iOS inputs"), in: renderer)
                 selected = panel
