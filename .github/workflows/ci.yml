@@ -1,4 +1,4 @@
-name: Compare byte-identical synthetic issuer chains
+name: Compare synthetic issuer settings on macOS 26
 
 on:
   workflow_dispatch:
@@ -12,15 +12,13 @@ permissions:
   contents: read
 
 jobs:
-  fixture:
+  issuer-settings:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
       inputs.verification_target == 'macos'
     runs-on: macos-26
-    timeout-minutes: 8
-    outputs:
-      sha256: ${{ steps.generate.outputs.sha256 }}
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -29,8 +27,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Generate only public synthetic fixture files
-        id: generate
+      - name: Read bounded observations from the synthetic issuer comparison
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
@@ -39,57 +36,7 @@ jobs:
           [[ "$(sw_vers -productVersion)" == 26.* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ -z "$(git status --porcelain)" ]]
           [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
+          printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "$ImageVersion"
           umask 077
-          mkdir "$RUNNER_TEMP/mrk-aia-fixture"
-          file="$RUNNER_TEMP/mrk-aia-fixture/capsule.json"
           env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C \
-            python -I -B .github/scripts/aia-loopback-comparison.py generate >"$file"
-          digest="$(shasum -a 256 "$file")"
-          printf 'sha256=%s\n' "${digest%% *}" >>"$GITHUB_OUTPUT"
-      - name: Upload the public DER fixture capsule
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: same-der-synthetic-issuer
-          path: ${{ runner.temp }}/mrk-aia-fixture/capsule.json
-          retention-days: 1
-          if-no-files-found: error
-
-  replay:
-    needs: fixture
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-26
-            major: '26'
-          - runner: xcode-27
-            major: '27'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 8
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.11'
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: same-der-synthetic-issuer
-          path: ${{ runner.temp }}/mrk-aia-fixture
-      - name: Evaluate the same bytes under fixed client network denial
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          EXPECTED_OS_MAJOR: ${{ matrix.major }}
-          MRK_FIXTURE_SHA256: ${{ needs.fixture.outputs.sha256 }}
-        run: |
-          set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
-          [[ "$(sw_vers -productVersion)" == "$EXPECTED_OS_MAJOR".* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ -z "$(git status --porcelain)" ]]
-          [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
-          printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "${ImageVersion:-unknown}"
-          umask 077
-          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C MRK_FIXTURE_SHA256="$MRK_FIXTURE_SHA256" \
-            python -I -B .github/scripts/aia-loopback-comparison.py replay
+            python -I -B .github/scripts/aia-settings-probe.py
