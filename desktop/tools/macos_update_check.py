@@ -961,10 +961,10 @@ def main():
             ref = os.environ.get("GITHUB_REF")
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
                           and args.mode in ("recovery-xctest", *ADDITIONAL_FROZEN_UI)
-                          and frozen["sourceCommit"] == "8dead1a987215fe7c5fe7bec4a08ec5e449b8aea"
-                          and frozen["sourceTree"] == "e76ca3400eb87d42fcaab0b0a65e88bb419a6f8e"
+                          and frozen["sourceCommit"] == "4e821384cd912562dd5e30b195e87c113bd2d09f"
+                          and frozen["sourceTree"] == "50393070e54b402a5ac1bac63e411fa1fbd1ad14"
                           and (frozen["buildRun"], frozen["carrierRun"], frozen["carrierAttempt"])
-                          == ("45866692352", "45878823446", "1"))
+                          == ("45904194634", os.environ.get("MRK_FROZEN_CARRIER_RUN"), "1"))
             need((ref == "refs/heads/main" or diagnostic)
                  and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             result["frozenRelease"] = {key: frozen[key] for key in

@@ -63,8 +63,8 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
-        inputs.expected_sha == '8dead1a987215fe7c5fe7bec4a08ec5e449b8aea' &&
-        inputs.build_run == '45866692352' && inputs.carrier_run == '45878823446' && inputs.carrier_attempt == '1'))
+        inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' &&
+        inputs.build_run == '45904194634' && inputs.carrier_attempt == '1'))
     runs-on: macos-26
     timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 55 }}
     strategy:
@@ -83,6 +83,23 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
           [[ "$(sw_vers -productVersion)" == 26.* && "$(uname -m)" == arm64 && "$(id -u)" != 0 ]]
           [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
+      - name: Require the successful protected-main carrier for this supplemental lane
+        if: github.ref == 'refs/heads/verify/macos-0213-recovery-project'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ inputs.expected_sha }}
+          CARRIER_RUN: ${{ inputs.carrier_run }}
+        run: |
+          set -euo pipefail
+          [[ "$CARRIER_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CARRIER_RUN" |
+            jq -e --arg sha "$RELEASE_SOURCE" '
+              .head_sha == $sha and .head_branch == "main" and
+              .head_commit.tree_id == "50393070e54b402a5ac1bac63e411fa1fbd1ad14" and
+              .display_title == "macOS / local-desktop-carrier / main" and
+              .path == ".github/workflows/desktop-macos-installed.yml" and
+              .event == "workflow_dispatch" and .run_attempt == 1 and .conclusion == "success"
+            ' >/dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -108,7 +125,7 @@ jobs:
           printf 'MRK_FROZEN_RELEASE_MEDIA=%s\n' "$MRK_FROZEN_RELEASE_MEDIA" >> "$GITHUB_ENV"
           release_tree="$(git rev-parse 'HEAD^{tree}')"
           if [[ "$GITHUB_REF" == refs/heads/verify/macos-0213-recovery-project ]]; then
-            release_tree=e76ca3400eb87d42fcaab0b0a65e88bb419a6f8e
+            release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14
           fi
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
             --source "$RELEASE_SOURCE" --tree "$release_tree" \
@@ -124,6 +141,7 @@ jobs:
       - name: Execute the production lifecycle or original installed XCTest
         env:
           GH_TOKEN: ${{ github.token }}
+          MRK_FROZEN_CARRIER_RUN: ${{ inputs.carrier_run }}
           MRK_CHECK_REFRESHED_RUNTIME: ${{ matrix.mode == 'fresh' }}
           MRK_CHECK_QUARANTINED_REMOVE_MEDIA: ${{ matrix.mode == 'uninstaller' }}
         run: |

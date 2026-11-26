@@ -5400,7 +5400,7 @@ final class NormalAppUITests: XCTestCase {
     private var guidedProductSurface: Bool {
         let context = ProcessInfo.processInfo.environment
         return context["MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] == "exact-0.2.13-frozen-ui"
-            && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == "8dead1a987215fe7c5fe7bec4a08ec5e449b8aea"
+            && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == "4e821384cd912562dd5e30b195e87c113bd2d09f"
     }
     @MainActor private func observeSelectedProject(_ renderer: XCUIElement, path: String) throws {
         let failures = ["Static observation unavailable", "Only a partial static observation is available"]
@@ -5442,8 +5442,11 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func guidedTaskTab(_ label: String, group: String, renderer: XCUIElement) throws {
         guard guidedProductSurface else { return }
         let tabs = try waitElement(named(renderer, group), in: renderer)
-        let item = try waitElement(controls(tabs, [.radioButton, .button, .other], label: label, prefix: true),
-                                   in: tabs, enabled: true)
+        let captions = [label, label + " Needs attention", label + " Running"]
+        let query = tabs.descendants(matching: .any).matching(NSPredicate(
+            format: "elementType != %@ AND (identifier IN %@ OR label IN %@ OR title IN %@)",
+            NSNumber(value: XCUIElement.ElementType.staticText.rawValue), captions, captions, captions))
+        let item = try waitElement(query, in: tabs, enabled: true)
         try reveal(item, in: renderer)
         item.click()
     }
@@ -6204,10 +6207,12 @@ final class NormalAppUITests: XCTestCase {
             try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboardOptions: platforms)
             try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
             try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
-            try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
-            try privateStatus(storage, action: "open-vault")
-            _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
-                                failures: Self.privateInputFailures)
+            try stage("persistence-open-vault") {
+                try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+                try privateStatus(storage, action: "open-vault")
+                _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
+                                    failures: Self.privateInputFailures)
+            }
             try fixture.assertDefaultVaultAbsent()
             try privateRecordCount(storage, count: 0, assigned: 0)
             try press(storage, "Review vault initialization…", renderer: renderer, failures: Self.privateInputFailures)
@@ -6991,7 +6996,10 @@ final class NormalAppUITests: XCTestCase {
             try click(sheet.buttons.matching(identifier: "Cancel"), "native folder Cancel unavailable")
             try waitGone(sheet)
             if guidedProductSurface {
-                _ = try waitElement(renderer.staticTexts.matching(identifier: "Get your app ready."), in: renderer)
+                let choose = renderer.buttons.matching(identifier: "Choose project folder")
+                _ = try waitElement(choose, in: renderer, enabled: true)
+                try require(renderer.staticTexts.matching(identifier: "Get your app ready.").count > 0,
+                            "the original empty Overview did not return after Cancel")
             } else {
                 try dashboard(renderer)
             }
@@ -7447,7 +7455,10 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
         try stage("evidence-shared-navigation") {
-            try press(renderer, "Releases", renderer: renderer); try currentDocuments()
+            try press(renderer, "Releases", renderer: renderer)
+            try guidedTaskTab("Results", group: "Release tasks", renderer: renderer)
+            try currentDocuments()
+            try guidedTaskTab("GitHub release", group: "Release tasks", renderer: renderer)
             try select(renderer, label: "Release step", value: "External testing · reuse candidate", renderer: renderer)
             try select(renderer, label: "Release platform", value: "Android · Google Play", renderer: renderer)
             _ = try waitStaticText(renderer, matching: .contains("Promote the original candidate to the configured external testing track without rebuilding it."))
@@ -7462,6 +7473,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("evidence-stage-and-cancel") {
             try press(renderer, "Releases", renderer: renderer)
+            try guidedTaskTab("Results", group: "Release tasks", renderer: renderer)
             try select(renderer, label: "Evidence stage", value: "External testing", renderer: renderer)
             try currentDocuments() // Stage choice alone does not stale the existing result.
             let inspect = try unique(renderer.buttons.matching(identifier: "Inspect documents"), "Inspect control missing")
@@ -7471,7 +7483,9 @@ final class NormalAppUITests: XCTestCase {
             try click(sheet.buttons.matching(identifier: "Cancel"), "replacement evidence Cancel unavailable")
             try waitGone(sheet)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "Original operation cancelled and settled. No new result was accepted."), in: renderer, failures: failures)
-            try staleDocuments(); try releaseSeparation()
+            try staleDocuments()
+            try guidedTaskTab("GitHub release", group: "Release tasks", renderer: renderer)
+            try releaseSeparation()
             try press(renderer, "Artifacts", renderer: renderer); try staleDocuments()
             try press(renderer, "Recovery", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "No current saved-document guidance. Project recovery remains unassessed."), in: renderer)
