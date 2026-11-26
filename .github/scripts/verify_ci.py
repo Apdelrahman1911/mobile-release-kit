@@ -1258,7 +1258,8 @@ def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platf
     workflow_paths = sorted((paths.source / ".github/workflows").glob("*.yml"))
     workflow_paths += sorted((paths.source / "templates/workflows").glob("*.yml"))
     command("actionlint", (paths.inputs / "actionlint/actionlint", "-no-color", "-ignore",
-            'property "workflow_(repository|sha|ref)" is not defined in object type', *workflow_paths))
+            'property "workflow_(repository|sha|ref)" is not defined in object type',
+            "-config-file", paths.source / ".github/actionlint.yaml", *workflow_paths), cwd=paths.source)
     check("jdk-signers", paths.source_python, seconds=600)
     command("wheel-build", python(paths.source_python, "-m", "pip", "wheel", "--no-index",
             "--find-links", paths.inputs / "python", "--no-deps", "--wheel-dir", paths.work / "wheels",

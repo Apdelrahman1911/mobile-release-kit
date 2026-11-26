@@ -527,6 +527,7 @@ jobs:
       MRK_DESKTOP_HOSTED_CHECKS: windows-installed-native-v1
       MRK_DESKTOP_DISPATCH_SCOPE: ${{ inputs.scope }}
       MRK_DESKTOP_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    # An outcome is available only after the corresponding step has run.
     steps:
       - name: Require the fixed disposable Windows source envelope
         shell: bash
@@ -734,8 +735,8 @@ jobs:
           MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-prerequisite-finalize.outcome }}
           MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256: ${{ steps.ui-prerequisite-preflight.outputs.requestSha256 }}
           MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256: ${{ steps.ui-prerequisite-finalize.outputs.finalizerSha256 }}
-          MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-setup-acquire.outcome }}
-          MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME: ${{ steps.ui-setup-compile.outcome }}
+          MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-acquire'
       - name: Compile distinct runtime-only setup and normal publisher; retain the original cheap UI owner
         id: ui-setup-compile
@@ -753,7 +754,7 @@ jobs:
           MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256: ${{ steps.ui-prerequisite-preflight.outputs.requestSha256 }}
           MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256: ${{ steps.ui-prerequisite-finalize.outputs.finalizerSha256 }}
           MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-setup-acquire.outcome }}
-          MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME: ${{ steps.ui-setup-compile.outcome }}
+          MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-compile'
       - name: Bind the runtime-only precheck without claiming an app or GUI build
         id: ui-setup-preflight
@@ -791,12 +792,12 @@ jobs:
           MRK_WINDOWS_SOURCE_TREE: ${{ steps.ui-setup-preflight.outputs.sourceTree }}
           MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256: ${{ steps.ui-setup-preflight.outputs.precheckSha256 }}
           MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-setup-preflight.outcome }}
-          MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ${{ steps.ui-setup-stage.outcome }}
-          MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_SETUP_ARTIFACT: ${{ steps.ui-setup-preflight.outputs.artifact }}
           MRK_WINDOWS_SETUP_ARTIFACT_SHA256: ${{ steps.ui-setup-preflight.outputs.artifactSha256 }}
@@ -879,11 +880,11 @@ jobs:
           MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256: ${{ steps.ui-setup-preflight.outputs.precheckSha256 }}
           MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-setup-preflight.outcome }}
           MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ${{ steps.ui-setup-stage.outcome }}
-          MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-stage-finalize'
@@ -907,10 +908,10 @@ jobs:
           MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-setup-preflight.outcome }}
           MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ${{ steps.ui-setup-stage.outcome }}
           MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_SETUP_ARTIFACT: ${{ steps.ui-setup-preflight.outputs.helperArtifact }}
           MRK_WINDOWS_SETUP_ARTIFACT_SHA256: ${{ steps.ui-setup-preflight.outputs.helperArtifactSha256 }}
@@ -994,9 +995,9 @@ jobs:
           MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ${{ steps.ui-setup-stage.outcome }}
           MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
           MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-publish-finalize'
@@ -1022,8 +1023,8 @@ jobs:
           MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
           MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
           MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_SETUP_ARTIFACT: ${{ steps.ui-setup-preflight.outputs.artifact }}
           MRK_WINDOWS_SETUP_ARTIFACT_SHA256: ${{ steps.ui-setup-preflight.outputs.artifactSha256 }}
@@ -1113,7 +1114,7 @@ jobs:
           MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
           MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
           MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
-          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-publication-finalize'
@@ -1149,20 +1150,20 @@ jobs:
           MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
           MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
           MRK_WINDOWS_UI_NODE_STEP_OUTCOME: ${{ steps.ui-node.outcome }}
-          MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-gui-acquire.outcome }}
-          MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ${{ steps.ui-gui-compile.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-gui-acquire'
       - name: Run inert scalar then build observer and normal last with static loader and singleton provenance
         id: ui-gui-compile
@@ -1191,19 +1192,19 @@ jobs:
           MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
           MRK_WINDOWS_UI_NODE_STEP_OUTCOME: ${{ steps.ui-node.outcome }}
           MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-gui-acquire.outcome }}
-          MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ${{ steps.ui-gui-compile.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-gui-compile'
       - name: Bind normal-smoke to its exact original compiler and preceding closed ACL epoch
         id: ui-normal-smoke-preflight
@@ -1233,18 +1234,18 @@ jobs:
           MRK_WINDOWS_UI_NODE_STEP_OUTCOME: ${{ steps.ui-node.outcome }}
           MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-gui-acquire.outcome }}
           MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ${{ steps.ui-gui-compile.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-normal-smoke-preflight'
       - name: Own one normal-smoke application and settle its original ordinary-account resources
         id: ui-normal-smoke-owner
@@ -1340,16 +1341,16 @@ jobs:
           MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ${{ steps.ui-gui-compile.outcome }}
           MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
           MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
-          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-normal-smoke-finalize'
       - name: Bind project-draft to its exact original compiler and preceding closed ACL epoch
         id: ui-project-draft-preflight
@@ -1382,15 +1383,15 @@ jobs:
           MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
           MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
           MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-project-draft-preflight'
       - name: Own one project-draft application and settle its original ordinary-account resources
         id: ui-project-draft-owner
@@ -1489,13 +1490,13 @@ jobs:
           MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
           MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
           MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
-          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-project-draft-finalize'
       - name: Bind quit-passive to its exact original compiler and preceding closed ACL epoch
         id: ui-quit-passive-preflight
@@ -1531,12 +1532,12 @@ jobs:
           MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
           MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
           MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-quit-passive-preflight'
       - name: Own one quit-passive application and settle its original ordinary-account resources
         id: ui-quit-passive-owner
@@ -1638,10 +1639,10 @@ jobs:
           MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
           MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
           MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
-          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-quit-passive-finalize'
       - name: Bind document-loss to its exact original compiler and preceding closed ACL epoch
         id: ui-document-loss-preflight
@@ -1680,9 +1681,9 @@ jobs:
           MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
           MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
           MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ''
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-document-loss-preflight'
       - name: Own one document-loss application and settle its original ordinary-account resources
         id: ui-document-loss-owner
@@ -1787,7 +1788,7 @@ jobs:
           MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
           MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
           MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
-          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ''
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-document-loss-finalize'
       - name: Stage the fresh passive runtime input with the existing original native owner
         id: passive-stage
@@ -1799,12 +1800,12 @@ jobs:
           MRK_WINDOWS_SOURCE_TREE: ${{ steps.ordinary-preflight.outputs.sourceTree }}
           MRK_WINDOWS_PRECHECK_SHA256: ${{ steps.ordinary-preflight.outputs.precheckSha256 }}
           MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
-          MRK_WINDOWS_PASSIVE_STAGE_STEP_OUTCOME: ${{ steps.passive-stage.outcome }}
-          MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.passive-stage-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ${{ steps.passive-publish.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publish-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ${{ steps.passive-publication.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publication-finalize.outcome }}
+          MRK_WINDOWS_PASSIVE_STAGE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_SETUP_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}
           MRK_WINDOWS_SETUP_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}
@@ -1875,11 +1876,11 @@ jobs:
           MRK_WINDOWS_PRECHECK_SHA256: ${{ steps.ordinary-preflight.outputs.precheckSha256 }}
           MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
           MRK_WINDOWS_PASSIVE_STAGE_STEP_OUTCOME: ${{ steps.passive-stage.outcome }}
-          MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.passive-stage-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ${{ steps.passive-publish.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publish-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ${{ steps.passive-publication.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publication-finalize.outcome }}
+          MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-passive-stage-finalize'
@@ -1895,10 +1896,10 @@ jobs:
           MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
           MRK_WINDOWS_PASSIVE_STAGE_STEP_OUTCOME: ${{ steps.passive-stage.outcome }}
           MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.passive-stage-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ${{ steps.passive-publish.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publish-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ${{ steps.passive-publication.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publication-finalize.outcome }}
+          MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_SETUP_ARTIFACT: ${{ steps.ordinary-preflight.outputs.helperArtifact }}
           MRK_WINDOWS_SETUP_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.helperArtifactSha256 }}
@@ -1970,9 +1971,9 @@ jobs:
           MRK_WINDOWS_PASSIVE_STAGE_STEP_OUTCOME: ${{ steps.passive-stage.outcome }}
           MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.passive-stage-finalize.outcome }}
           MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ${{ steps.passive-publish.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publish-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ${{ steps.passive-publication.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publication-finalize.outcome }}
+          MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-passive-publish-finalize'
@@ -1990,8 +1991,8 @@ jobs:
           MRK_WINDOWS_PASSIVE_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.passive-stage-finalize.outcome }}
           MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ${{ steps.passive-publish.outcome }}
           MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publish-finalize.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ${{ steps.passive-publication.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publication-finalize.outcome }}
+          MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ''
+          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_SETUP_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}
           MRK_WINDOWS_SETUP_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}
@@ -2069,7 +2070,7 @@ jobs:
           MRK_WINDOWS_PASSIVE_PUBLISH_STEP_OUTCOME: ${{ steps.passive-publish.outcome }}
           MRK_WINDOWS_PASSIVE_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publish-finalize.outcome }}
           MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME: ${{ steps.passive-publication.outcome }}
-          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.passive-publication-finalize.outcome }}
+          MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME: ''
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-passive-publication-finalize'

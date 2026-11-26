@@ -284,9 +284,11 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(lock["actionlint"]["version"], "1.7.12")
         self.assertEqual(lock["actionlint"]["sha256"], "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8")
         lint = gates["actionlint"].argv
-        self.assertEqual(lint[:4], (str(paths.inputs / "actionlint/actionlint"), "-no-color", "-ignore",
-                                  'property "workflow_(repository|sha|ref)" is not defined in object type'))
-        self.assertEqual(lint[4:], tuple(map(str, sorted(WORKFLOWS.glob("*.yml")) + sorted(TEMPLATES.glob("*.yml")))))
+        self.assertEqual(lint[:6], (str(paths.inputs / "actionlint/actionlint"), "-no-color", "-ignore",
+                                  'property "workflow_(repository|sha|ref)" is not defined in object type',
+                                  "-config-file", str(ROOT / ".github/actionlint.yaml")))
+        self.assertEqual(gates["actionlint"].cwd, ROOT)
+        self.assertEqual(lint[6:], tuple(map(str, sorted(WORKFLOWS.glob("*.yml")) + sorted(TEMPLATES.glob("*.yml")))))
         build = gates["wheel-build"]
         self.assertEqual(build.argv, (str(paths.source_python), "-I", "-B", "-m", "pip", "wheel", "--no-index",
                                      "--find-links", str(paths.inputs / "python"), "--no-deps", "--wheel-dir",
@@ -982,6 +984,24 @@ class CallerTemplateContractTests(unittest.TestCase):
                                          reserve["env"][secret])
                         self.assertEqual(f"${{{{ secrets.{secret} }}}}", cleanup["env"][secret])
                         self.assertEqual(2, text.count(f"secrets.{secret}"))
+
+    def test_candidate_lint_exceptions_match_only_protected_environment_secrets(self) -> None:
+        config = load_workflow(ROOT / ".github/actionlint.yaml")
+        workflows = load_workflow(REUSABLE["candidate"])
+        expected = ENVIRONMENT_SECRETS["candidate"]
+        self.assertEqual(config["paths"], {
+            ".github/workflows/reusable-candidate.yml": {
+                "ignore": [
+                    f'^property "{secret}" is not defined in object type'
+                    for secret in sorted(name.lower() for name in expected)
+                ],
+            },
+        })
+        for name, job in workflows["jobs"].items():
+            references = set(re.findall(r"(?i)secrets\.([a-z0-9_]+)", json.dumps(job)))
+            if {reference.upper() for reference in references} & expected:
+                with self.subTest(job=name):
+                    self.assertEqual(job.get("environment"), "mobile-candidate")
 
     def test_templates_pin_uses_and_tooling_sha_to_same_placeholder(self) -> None:
         placeholder = "__MOBILE_RELEASE_KIT_SHA__"

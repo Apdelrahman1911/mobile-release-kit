@@ -4,3 +4,21 @@
 self-hosted-runner:
   labels:
     - xcode-27
+paths:
+  .github/workflows/reusable-candidate.yml:
+    # When workflow_call declares caller secrets, actionlint 1.7.12 omits job
+    # environment secrets from its type model. Contract tests check these
+    # exact names and require the mobile-candidate environment on their jobs.
+    ignore:
+      - '^property "mobile_release_android_google_services_json_base64" is not defined in object type'
+      - '^property "mobile_release_android_key_password" is not defined in object type'
+      - '^property "mobile_release_android_keystore_base64" is not defined in object type'
+      - '^property "mobile_release_android_keystore_password" is not defined in object type'
+      - '^property "mobile_release_apple_distribution_p12_base64" is not defined in object type'
+      - '^property "mobile_release_apple_distribution_p12_password" is not defined in object type'
+      - '^property "mobile_release_apple_provisioning_profile_base64" is not defined in object type'
+      - '^property "mobile_release_asc_private_key_p8_base64" is not defined in object type'
+      - '^property "mobile_release_ios_google_service_info_plist_base64" is not defined in object type'
+      - '^property "mobile_release_play_edit_recovery_key_base64" is not defined in object type'
+      - '^property "mobile_release_play_service_account_json_base64" is not defined in object type'
+      - '^property "mobile_release_project_read_token" is not defined in object type'
