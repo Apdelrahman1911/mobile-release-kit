@@ -5451,7 +5451,7 @@ final class NormalAppUITests: XCTestCase {
         try require(input.value as? String == text, "typed synthetic field did not retain its exact value")
     }
     @MainActor private func select(_ root: XCUIElement, label: String, value: String,
-                                  renderer: XCUIElement, keyboard: Bool = false, line: UInt = #line) throws {
+                                  renderer: XCUIElement, keyboardOptions: [String] = [], line: UInt = #line) throws {
         var phase = "control"
         defer {
             if guidedProductSurface && phase != "settled" {
@@ -5460,7 +5460,8 @@ final class NormalAppUITests: XCTestCase {
         }
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
                                      in: root, enabled: true, line: line)
-        if keyboard && control.value as? String == value {
+        let previous = control.value as? String
+        if guidedProductSurface && previous == value {
             phase = "settled"
             return
         }
@@ -5472,9 +5473,15 @@ final class NormalAppUITests: XCTestCase {
         let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         control.click()
         phase = "item"
-        if keyboard {
-            guard let first = value.first else { throw Refusal.condition("credential menu choice is empty") }
-            app.typeKey(String(first).lowercased(), modifierFlags: [])
+        if !keyboardOptions.isEmpty {
+            guard let previous, let from = keyboardOptions.firstIndex(of: previous),
+                  let destination = keyboardOptions.firstIndex(of: value) else {
+                throw Refusal.condition("the menu's current value or intended choice is unknown")
+            }
+            let direction = destination > from ? XCUIKeyboardKey.downArrow : XCUIKeyboardKey.upArrow
+            for _ in 0..<abs(destination - from) {
+                app.typeKey(direction.rawValue, modifierFlags: [])
+            }
             app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
             phase = "written-value"
             let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: control)
@@ -6183,9 +6190,11 @@ final class NormalAppUITests: XCTestCase {
             let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
             let storage = try waitElement(named(renderer, storageLabel), in: renderer)
             selectedStorage = storage
-            try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboard: guidedProductSurface)
-            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer, keyboard: guidedProductSurface)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Platform", value: "iOS", renderer: renderer,
+                       keyboardOptions: guidedProductSurface ? ["Android", "iOS", "Project dependency access"] : [])
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer,
+                       keyboardOptions: guidedProductSurface ? ["All selected input roles", "Build / signing only", "Store access only"] : [])
             try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
             try privateStatus(storage, action: "open-vault")
             _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
@@ -8250,9 +8259,13 @@ final class NormalAppUITests: XCTestCase {
     // One ordinary iOS diagnostics invocation before archive consent. This
     // observes the global developer selection, not managed-Xcode admission.
     @MainActor private func observeIOSToolDiagnostics(_ renderer: XCUIElement) throws {
-        try press(renderer, "Environment", renderer: renderer)
-        try select(renderer, label: "Release platform", value: "iOS", renderer: renderer)
-        try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer)
+        try stage("ios-tools-page") { try press(renderer, "Environment", renderer: renderer) }
+        try stage("ios-tools-context") {
+            try select(renderer, label: "Release platform", value: "iOS", renderer: renderer,
+                       keyboardOptions: guidedProductSurface ? ["Android", "iOS"] : [])
+            try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer,
+                       keyboardOptions: guidedProductSurface ? ["Build / archive", "Validate an existing artifact"] : [])
+        }
         let action = guidedProductSurface ? "Check this computer" : "Check build tools"
         let panel = try waitElement(named(renderer, "Observed build-tool checks")
             .containing(.button, identifier: action), in: renderer)
