@@ -31,6 +31,10 @@ on:
         description: Original successful main carrier attempt
         type: string
         required: true
+      additional_ui:
+        description: Run only the credential-free installed XCTest coverage on the verification branch
+        type: boolean
+        default: false
   push:
     branches:
       - verify/desktop-macos-update-check
@@ -54,7 +58,7 @@ jobs:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.event_name == 'workflow_dispatch' &&
-      ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha) ||
+      ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && !inputs.additional_ui) ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
         inputs.expected_sha == '8dead1a987215fe7c5fe7bec4a08ec5e449b8aea' &&
         inputs.build_run == '45866692352' && inputs.carrier_run == '45878823446' && inputs.carrier_attempt == '1'))
@@ -63,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ github.ref == 'refs/heads/main' && fromJSON('["fresh","update-credentials","archived-upgrade","post-reinstall-prepare","uninstaller","delete-data","workspace-xctest","recovery-xctest","core-recovery","performance-long"]') || fromJSON('["recovery-xctest"]') }}
+        mode: ${{ github.ref == 'refs/heads/main' && fromJSON('["fresh","update-credentials","archived-upgrade","post-reinstall-prepare","uninstaller","delete-data","workspace-xctest","recovery-xctest","core-recovery","performance-long"]') || (inputs.additional_ui && fromJSON('["project-paths-xctest","project-edits-xctest","persistence-xctest","offline-checks-xctest","workflow-refusal-xctest","release-evidence-xctest","android-inputs-xctest","unsigned-ios-xctest"]')) || fromJSON('["recovery-xctest"]') }}
     env:
       BASH_ENV: ''
       ENV: ''

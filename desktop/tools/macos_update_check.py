@@ -925,6 +925,18 @@ def install_log_excerpt(evidence):
     (evidence / "install-log-excerpt.txt").write_text("\n".join(line.replace(home, "~") for line in keep[-600:]) + "\n")
 
 
+ADDITIONAL_FROZEN_UI = {
+    "project-paths-xctest": ("testSyntheticProjectPathFields", "project-test", "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI"),
+    "project-edits-xctest": ("testSyntheticProjectLocalEditsAndImages", "project-test", "MRK_MACOS_NORMAL_PROJECT_UI"),
+    "persistence-xctest": ("testSyntheticPersistentCredentials", "persistence-test", "MRK_MACOS_NORMAL_PERSISTENCE_UI"),
+    "offline-checks-xctest": ("testSyntheticProjectSavedOfflineChecks", "saved-checks-test", "MRK_MACOS_NORMAL_OFFLINE_UI"),
+    "workflow-refusal-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI"),
+    "release-evidence-xctest": ("testSyntheticProjectSavedReleaseEvidence", "release-evidence-test", "MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI"),
+    "android-inputs-xctest": ("testSyntheticProjectAndroidSourceSelection", "project-test", "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI"),
+    "unsigned-ios-xctest": ("testSyntheticProjectUnsignedIOSArchive", "ios-unsigned-archive-test", "MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI"),
+}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
@@ -934,7 +946,8 @@ def main():
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
                                            "recovery-xctest", "retained-transition", "retained-prepare",
-                                           "macl-journal-recovery", "post-reinstall-prepare", "archived-upgrade"), default="update")
+                                           "macl-journal-recovery", "post-reinstall-prepare", "archived-upgrade",
+                                           *ADDITIONAL_FROZEN_UI), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -946,7 +959,8 @@ def main():
             manifest_path = Path(os.environ["MRK_FROZEN_RELEASE_MEDIA"]) / "RELEASE-MANIFEST.json"
             frozen = json.loads(manifest_path.read_bytes())
             ref = os.environ.get("GITHUB_REF")
-            diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project" and args.mode == "recovery-xctest"
+            diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
+                          and args.mode in ("recovery-xctest", *ADDITIONAL_FROZEN_UI)
                           and frozen["sourceCommit"] == "8dead1a987215fe7c5fe7bec4a08ec5e449b8aea"
                           and frozen["sourceTree"] == "e76ca3400eb87d42fcaab0b0a65e88bb419a6f8e"
                           and (frozen["buildRun"], frozen["carrierRun"], frozen["carrierAttempt"])
@@ -960,6 +974,8 @@ def main():
                                            removeSha256=frozen["packages"]["Remove.pkg"]["sha256"])
             if args.mode == "archived-upgrade":
                 selection.update(recoveryInstall=selection["previous"], recoveryRemoval=selection["previousRemoval"])
+        if args.mode in ADDITIONAL_FROZEN_UI:
+            need("frozenRelease" in result and diagnostic, "additional-ui-frozen-route")
         result["selection"] = selection
         if os.environ.get("MRK_RELEASE_QUALIFICATION") == "true":
             chosen = selection["next"]
@@ -991,7 +1007,8 @@ def main():
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
-             "core-recovery": core_recovery_check, "recovery-xctest": workspace_xctest}[args.mode](
+             "core-recovery": core_recovery_check, "recovery-xctest": workspace_xctest,
+             **dict.fromkeys(ADDITIONAL_FROZEN_UI, workspace_xctest)}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -2817,6 +2834,10 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
            "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": source, "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": harness,
            "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY": "current-candidate-ordinary-only-v1"}
+    ios = mode == "unsigned-ios-xctest"
+    if ios:
+        del env["TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY"]
+        env["TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] = "current-candidate-ios-tools-only-v1"
     if same_frozen_source:
         env["TEST_RUNNER_MRK_NORMAL_UI_SAME_FROZEN_SOURCE"] = "true"
     project = Path(__file__).resolve().parents[2] / "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
@@ -2834,15 +2855,20 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
          "workspace-xctest-single-original-manifest")
     prepare = mode == "prepare-xctest"
     recovery = mode == "recovery-xctest"
-    method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
-              "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]
+    extra = ADDITIONAL_FROZEN_UI.get(mode)
+    if extra:
+        method, bundle_stem, completion_marker = extra
+    else:
+        method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
+                  "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]
+        bundle_stem = "project-test"
     if recovery:
         project_path, baseline = seed_signed_gui_recovery(row, folder, work, env, result)
-    bundle = work / "project-test.xcresult"
+    bundle = work / (bundle_stem + ".xcresult")
     before_crashes = set(recent_crashes())
     resource_samples, stop_sampling = [], threading.Event()
     sampler = None
-    if not (prepare or recovery):
+    if mode == "workspace-xctest":
         sampler = threading.Thread(target=workspace_resource_observations, args=(stop_sampling, resource_samples),
                                    daemon=True)
         sampler.start()
@@ -2852,9 +2878,9 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
                                  "-resultBundlePath", str(bundle), "-disableAutomaticPackageResolution",
                                  "-only-testing:MRKNormalAppUITests/NormalAppUITests/" + method,
                                  "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
-                                 "-default-test-execution-time-allowance", "300",
-                                 "-maximum-test-execution-time-allowance", "300"],
-                                env=env, capture_output=True, text=True, timeout=600)
+                                 "-default-test-execution-time-allowance", "900" if ios else "300",
+                                 "-maximum-test-execution-time-allowance", "900" if ios else "300"],
+                                env=env, capture_output=True, text=True, timeout=1200 if ios else 600)
     finally:
         stop_sampling.set()
         if sampler is not None:
@@ -2918,6 +2944,10 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
         result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
         observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]
+    elif extra:
+        facts = re.findall(r"(?m)^" + completion_marker + r"=([^\r\n]{1,16384})$", transcript)
+        result["scenarioFacts"] = facts
+        observed = len(facts) == 1
     else:
         result["workspaceFixtureObserved"] = "MRK_RELEASE_WORKSPACE=selected-saved-identity-files-unchanged" in transcript
         result["cliGrantAndRevokeObserved"] = "MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked" in transcript
