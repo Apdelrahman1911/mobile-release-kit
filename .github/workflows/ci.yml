@@ -1,4 +1,4 @@
-name: Disposable macOS issuer trust decision comparison
+name: Disposable Intel macOS 26 issuer comparison
 
 on:
   workflow_dispatch:
@@ -20,15 +20,7 @@ jobs:
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
       inputs.verification_target == 'macos'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-26
-            os-major: '26'
-          - runner: xcode-27
-            os-major: '27'
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26-intel
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -41,10 +33,10 @@ jobs:
       - name: Observe trustd while evaluating the same synthetic issuer controls
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          EXPECTED_OS_MAJOR: ${{ matrix.os-major }}
+          EXPECTED_OS_MAJOR: '26'
         run: |
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == X64 && "$(id -u)" != 0 ]]
           [[ "$(sw_vers -productVersion)" == "$EXPECTED_OS_MAJOR".* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ -z "$(git status --porcelain)" ]]
           [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
