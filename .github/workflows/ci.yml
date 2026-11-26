@@ -1,4 +1,4 @@
-name: Isolate the evaluation order and timestamp on macOS 26 loopback
+name: Correlate macOS 26 issuer scheduling with loopback packets and replies
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  issuer-order:
+  issuer-correlation:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Compare loopback fetch with and without a preceding offline evaluation
+      - name: Capture exact trustd URL, transport and responder evidence
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
@@ -39,4 +39,4 @@ jobs:
           printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "$ImageVersion"
           umask 077
           env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C \
-            python -I -B .github/scripts/aia-ordered-probe.py
+            python -I -B .github/scripts/aia-correlated-probe.py
