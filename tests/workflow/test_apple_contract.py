@@ -13,6 +13,7 @@ from unittest.mock import patch
 from mobile_release import stores as stores_module
 from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.provenance import (
+    canonical_sha256,
     validate_create_retry_inventory,
     validate_receipt_chain,
     validate_receipt_raw_binding,
@@ -177,8 +178,24 @@ class AppleContractTests(unittest.TestCase):
             self.fail("the required Ruby/Python/schema contract gate requires jsonschema")
         for name, value in documents.items():
             with self.subTest(case=name), patch.dict(os.environ, {}, clear=True):
+                lane_intent = samples[name]["intent"]
+                original_raw = samples[name]["receipt"]
+                stage = lane_intent["stage"]
+                self.assertEqual(lane_intent["application"], {"id": original_raw["appIdentity"],
+                                                              "storeAppId": original_raw["appStoreAppId"]})
+                self.assertEqual(lane_intent["version"], {"marketing": original_raw["marketingVersion"],
+                                                          "build": original_raw["buildNumber"]})
+                self.assertEqual(lane_intent["confirmation"],
+                                 f"{stage}:ios:{original_raw['marketingVersion']}:{original_raw['buildNumber']}")
+                original_digest = canonical_sha256({key: val for key, val in lane_intent.items() if key != "integrity"})
+                self.assertEqual(lane_intent["integrity"], {"algorithm": "sha256", "sha256": original_digest})
+                self.assertEqual(original_raw["operationIntentSha256"], original_digest)
+                if "createRetry" in original_raw:
+                    retry = original_raw["createRetry"]
+                    self.assertEqual(retry["inventory"]["operationIntentSha256"], original_digest)
+                    self.assertEqual(retry["inventorySha256"], canonical_sha256(retry["inventory"]))
                 receipt, intent, candidate = value["receipt"], value["intent"], value["candidate"]
-                stage = receipt["stage"]
+                self.assertEqual(receipt["stage"], stage)
                 validate_receipt_raw_binding(receipt, store_receipt=value["raw"], operation_intent=intent, candidate_manifest=candidate)
                 validate_receipt_chain(
                     candidate_manifest=candidate,
@@ -191,9 +208,9 @@ class AppleContractTests(unittest.TestCase):
                     platform="ios", config=config,
                 )
                 if jsonschema is not None:
+                    jsonschema.Draft202012Validator(schemas["intent"]).validate(lane_intent)
                     for kind, schema in schemas.items():
                         jsonschema.Draft202012Validator(schema).validate(value[kind])
-                original_raw = samples[name]["receipt"]
                 self.assertEqual(original_raw["schemaVersion"], 3)
                 # The envelope helper must not rewrite observed state to fit the
                 # Python consumer. Only synthetic outer intent hashes change.

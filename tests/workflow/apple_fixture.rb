@@ -6,6 +6,7 @@
 require "bundler/setup"
 require "fastlane"
 require "spaceship"
+require "digest"
 require "json"
 require "uri"
 require_relative "../../fastlane/apple_store"
@@ -15,6 +16,48 @@ class AppleFixture
 
   Token = Struct.new(:in_house, :text) do
     def expired? = false
+  end
+
+  def self.ci_intent_payload(root, stage, precondition, authority)
+    ci_stage, ios_fixture = {
+      "candidate" => ["candidate", "local-intent-ios-candidate-valid"],
+      "external-testing" => ["external", "local-ios-external-testing-intent"],
+      "production-submit" => ["production", "local-ios-production-submit-intent"],
+    }.fetch(stage)
+    ci = JSON.parse(File.read(File.expand_path("../fixtures/intent-#{ci_stage}-valid.json", __dir__)))
+    ios = JSON.parse(File.read(File.expand_path("../fixtures/#{ios_fixture}.json", __dir__)))
+    marketing, build = precondition.values_at("marketingVersion", "buildNumber")
+    config = ci.fetch("configuration")
+    ci.slice("documentType", "schemaVersion", "tooling", "repository", "candidateSource", "operationSource", "createdAt")
+      .merge(ios.slice("destination", "signing", "predecessors"))
+      .merge("stage" => stage, "platform" => "ios", "authorizedBy" => authority.dup,
+             "confirmation" => "#{stage}:ios:#{marketing}:#{build}",
+             "application" => { "id" => precondition.fetch("appIdentity"), "storeAppId" => precondition.fetch("snapshot").fetch("appStoreAppId") },
+             "version" => { "marketing" => marketing, "build" => build },
+             "configuration" => config.merge("sha256" => Digest::SHA256.file(File.join(root, config.fetch("path"))).hexdigest),
+             "artifacts" => ci_artifacts(root, ios.fetch("artifacts"), stage),
+             "storePrecondition" => precondition,
+             "privateStateCommitments" => precondition.fetch("snapshot").fetch("privateStateCommitments", {}))
+  end
+
+  def self.ci_artifacts(root, rows, stage)
+    by_name = rows.to_h { |row| [row.fetch("logicalName"), row] }
+    ipa = by_name.fetch("ios-ipa").merge("fileName" => "candidate.ipa")
+    original_archive = by_name.fetch("ios-archive")
+    archive = original_archive.slice("logicalName", "platform", "kind", "sha256").merge(
+      "fileName" => "archive.zip", "size" => original_archive.fetch("bytes"), "architectures" => ["arm64"],
+    )
+    ios = [ipa, archive]
+    # Production observes a retained candidate and must not build another IPA.
+    unless stage == "production-submit"
+      ios << { "logicalName" => "ios-dsyms", "platform" => "ios", "kind" => "dsym",
+               "fileName" => "dsyms.zip", "architectures" => [] }
+      ios = ios.map do |row|
+        path = File.join(root, row.fetch("fileName"))
+        row.merge("size" => File.size(path), "sha256" => Digest::SHA256.file(path).hexdigest)
+      end
+    end
+    ios + by_name.values_at("store-metadata", "validation-report")
   end
 
   attr_reader :requests, :resources, :client
