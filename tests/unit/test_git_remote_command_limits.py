@@ -17,7 +17,9 @@ from mobile_release import _command_process as command
 from mobile_release import _git_remote_command_channel as channel
 from mobile_release import _git_remote_command_limits as limits
 from mobile_release import _native_process as native
+from mobile_release import cancellation
 from test_git_remote_command_channel import _Returns, NONCE, STAMP
+from unit.test_lifetime_evidence import fork_registry_model
 
 
 class _ExecReached(BaseException):
@@ -26,6 +28,8 @@ class _ExecReached(BaseException):
 
 class GitRemoteCommandLimitTests(unittest.TestCase):
     def setUp(self):
+        self.real_fork_resources = cancellation._FORK_RESOURCES
+        self.model_fork_resources = self.enterContext(fork_registry_model())
         self.world = _Returns().installed(self)
         self.enterContext(patch.object(command.time, "monotonic_ns", return_value=1))
         self.enterContext(patch.object(os, "getuid", return_value=STAMP[0]))
@@ -93,6 +97,8 @@ class GitRemoteCommandLimitTests(unittest.TestCase):
 
     def test_actual_worker_owns_fixed_lowering_and_readbacks_once(self):
         w, endpoint = self.worker()
+        self.assertIn(w.ctx, self.model_fork_resources)
+        self.assertNotIn(w.ctx, self.real_fork_resources)
         clocks = w.ctx.run, w.ctx.hard, w.ctx.failure_cutoff, w.ctx.cleanup_cutoff
         self.assertFalse(w.git_remote_limits_entered)
         self.apply(w, endpoint)
