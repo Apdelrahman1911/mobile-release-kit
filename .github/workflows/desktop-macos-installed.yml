@@ -616,7 +616,7 @@ jobs:
           [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$(/usr/bin/id -u)" != 0 ]] || exit 1
           # Same pinned compiler/cache/target directory; no GUI or credential call.
           # The real host check establishes this runner only, not unobserved macOS 27.
-          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --jobs 1 --target "$MRK_MACOS_TARGET" \
             --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
             tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts \
@@ -1147,7 +1147,7 @@ jobs:
           set -o noclobber
           umask 077
           set +e
-          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
             --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
             --target "$MRK_MACOS_TARGET" --message-format=json \
             > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
@@ -1424,7 +1424,7 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer-fixture \
+            PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer-fixture \
               --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
           )
           installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"
@@ -1493,8 +1493,10 @@ jobs:
           cursor_status=$?
           printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-fixture-log-cursor.status"
           cursor_status_saved=$?
-          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR \
-            > "$MRK_MACOS_WORK/installer-fixture-output.txt" 2>&1
+          # Keep the diagnostic capture owned by the runner.
+          {
+            sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR
+          } > "$MRK_MACOS_WORK/installer-fixture-output.txt" 2>&1
           installer_status=$?
           printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-fixture-output.status"
           installer_status_saved=$?
@@ -1534,7 +1536,7 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
+            PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
               --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
           )
       - name: Build the fixed one-shot root Installer and scripts-only package
@@ -3123,7 +3125,7 @@ jobs:
             cd desktop/src-tauri || exit
             PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
             RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" \
-            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_AUTO_INSTALL=0 \
             CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
             CARGO_TARGET_DIR="$MRK_MACOS_WORK/xcode-setup-target" \
               /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 -u MRK_MACOS_STORE_RUNTIME \

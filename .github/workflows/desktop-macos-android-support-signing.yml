@@ -53,7 +53,7 @@ jobs:
           [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit && "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
           [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
-          tree=$(/usr/bin/git rev-parse HEAD^{tree})
+          tree=$(/usr/bin/git rev-parse 'HEAD^{tree}')
           [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-android-support-signing.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"

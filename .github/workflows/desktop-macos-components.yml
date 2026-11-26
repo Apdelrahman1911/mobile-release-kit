@@ -927,6 +927,8 @@ jobs:
               temp_root="$(cd -P -- "$RUNNER_TEMP" && pwd -P)"
               fixture="$(mktemp -d "$temp_root/mrk-backup-component.XXXXXX")"
               fixture_identity=''
+              # ShellCheck cannot see this function's invocation through the EXIT trap.
+              # shellcheck disable=SC2317,SC2329
               cleanup_backup_fixture() {
                 status=$?
                 trap - EXIT
