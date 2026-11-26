@@ -147,6 +147,7 @@ _PYTHON_POISON_FIXTURES = (
 _PYTHON_FRESH_FIXTURES = (
     ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
     ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+    ("fresh-native-fd-maps", "unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps"),
 )
 _PYTHON_SINGLETON_FIXTURES = _PYTHON_POISON_FIXTURES + _PYTHON_FRESH_FIXTURES
 HOSTED_GUARD = '''set -euo pipefail

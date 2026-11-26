@@ -115,6 +115,7 @@ POISON_PARTITIONS = (
 FRESH_PARTITIONS = (
     ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
     ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+    ("fresh-native-fd-maps", "unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps"),
 )
 SINGLETON_PARTITIONS = POISON_PARTITIONS + FRESH_PARTITIONS
 ISOLATED_PROFILE_PRODUCTS = frozenset({

@@ -683,6 +683,7 @@ PYTHON_POISON_PARTITIONS = (
 PYTHON_FRESH_PARTITIONS = (
     "fresh-command-account-prepared",
     "fresh-model-command-bridge",
+    "fresh-native-fd-maps",
 )
 PYTHON_SINGLETON_PARTITIONS = PYTHON_POISON_PARTITIONS + PYTHON_FRESH_PARTITIONS
 RUBY_OWNER_POISON_PARTITIONS = (
