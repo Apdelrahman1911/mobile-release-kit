@@ -8,6 +8,8 @@ from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import socket
 import stat
 import subprocess
@@ -147,6 +149,10 @@ def annotate(result, events):
     for row in result["rows"]:
         messages = [message for stamp, message in events if row["start"] <= stamp <= row["end"] + 0.05]
         uri = row.pop("url")
+        row["ssrfLogMessages"] = [
+            re.sub(r"/mrk-aia/[0-9a-f]{32}/", "/mrk-aia/{fixture}/", message)[:400]
+            for message in messages if "ssrf" in message
+        ]
         row["exactSchedules"] = sum(uri in message and "request for uri:" in message for message in messages)
         tokens = {
             "ssrf": "ssrf",
@@ -198,7 +204,13 @@ def run():
             code = collector.wait(timeout=28)
         require(code == 0, "trustd log collector failed")
         events = list(logs(stream))
-    result = {"localhostAddresses": sorted(addresses), "capturedLogEvents": len(events),
+    security_info = Path("/System/Library/Frameworks/Security.framework/Resources/Info.plist")
+    security_version = plistlib.loads(security_info.read_bytes()).get("CFBundleVersion")
+    native_strings = subprocess.check_output(["/usr/bin/strings", "/usr/libexec/trustd"], timeout=5)
+    policy_markers = [key for key in ("UseSSRFLiteralEnforcement", "UseSSRFPortEnforcement")
+                      if key.encode("ascii") in native_strings]
+    result = {"securityBundleVersion": security_version, "nativePolicyMarkers": policy_markers,
+              "localhostAddresses": sorted(addresses), "capturedLogEvents": len(events),
               "probes": [annotate(probe, events) for probe in probes]}
     print("MRK_AIA_PORT_POLICY=" + json.dumps(result, sort_keys=True))
 
