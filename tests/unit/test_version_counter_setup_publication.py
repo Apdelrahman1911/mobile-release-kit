@@ -61,7 +61,17 @@ class CounterRuntimeTests(unittest.TestCase):
   for path,raw in ((old.CONFIG_PATH,CONFIG+b' '),('release/version.properties',VERSION+b'\n')):
    original=(self.root/path).read_bytes();(self.root/path).write_bytes(raw);self.reader.calls=[]
    self.assertEqual(self.run_original('prepare')['reason'],'source-changed');self.assertEqual(self.reader.calls,[]);(self.root/path).write_bytes(original)
-  (self.root/'release/VERSION.properties').write_bytes(VERSION);self.reader.calls=[]
+  version=self.root/'release/version.properties'
+  alias=version.with_name('VERSION.properties')
+  if alias.exists():
+   # On case-insensitive volumes, writing the alias would overwrite the
+   # exact-name file. Rename via a distinct entry to change its stored name.
+   intermediate=version.with_name('version-temporary.properties')
+   version.rename(intermediate)
+   intermediate.rename(alias)
+  else:
+   alias.write_bytes(VERSION)
+  self.reader.calls=[]
   self.assertEqual(self.run_original('prepare')['reason'],'configuration-changed');self.assertEqual(self.reader.calls,[])
  def test_same_source_budget_negative_finality_and_no_other_read_grants(self):
   self.assertEqual(source._counter_open_attempts(1),323)
@@ -87,16 +97,23 @@ class CounterRuntimeTests(unittest.TestCase):
   self.assertEqual(sum(c.method=='POST' for c in self.reader.calls),2)
  def test_ordinary_open_cap_exhaustion_is_not_bypassed_and_counter_keeps_all_checks(self):
   observed=source.observe_publication_configuration
+  budgets=[]
   from contextlib import contextmanager
   @contextmanager
   def old_cap(*args,**kwargs):
    with observed(*args,**kwargs) as v:
     v._budget.max_opens=128  # Inert reproduction of the inherited one-file cap.
+    budgets.append(v._budget)
     yield v
   prepared=self.run_original('prepare')['prepared'];self.reader.calls=[]
   with patch.object(runtime,'observe_publication_configuration',old_cap):
    failed=self.run_original('publish',prepared)
-  self.assertEqual((failed['reason'],len(self.reader.calls)),('resources-unavailable',13))
+  self.assertEqual(failed['reason'],'resources-unavailable')
+  budget,=budgets
+  self.assertEqual((budget.opens,budget.live,budget.closed),(128,0,True))
+  posts=[request.path.rsplit('/',1)[-1] for request in self.reader.calls if request.method=='POST']
+  self.assertEqual(posts,['trees','commits'])  # No counter branch write after exhaustion.
+  self.assertIsNone(failed['publication']['counter'])
   self.assertEqual(failed['publication']['effect'],'potentially-applied')
  def test_private_unresolved_project_requires_exact_native_go_before_review(self):
   from mobile_release import version_counter_setup as counter

@@ -43,6 +43,12 @@ from test_version_allocation import COMMIT, NOW, initial, observations, request
 from test_version_allocation_state import LOCAL_PROJECT, NativePortFixture
 
 
+def fixed_tool_platform(platform):
+    # Only the synthetic CLT tool uses these flags. Real project file reads
+    # must continue to use the host's filesystem rules.
+    return patch.object(provider, "sys", SimpleNamespace(platform=platform, exc_info=sys.exc_info))
+
+
 class SourceFixture:
     CONTROL, OUTPUT = 3000, 3001  # Inert numbers; never opened, read or closed.
     TOOL_FIRST = 4000
@@ -891,7 +897,7 @@ class VersionAllocationSourceTests(unittest.TestCase):
     def test_fixed_tool_flags_match_native_masks_without_granting_write_access(self):
         def info(flags, *, owner=0, mode=0o755):
             return SimpleNamespace(st_flags=flags, st_uid=owner, st_mode=mode)
-        with patch.object(provider.sys, 'platform', 'darwin'):
+        with fixed_tool_platform("darwin"):
             for directory, allowed in ((True, 0x00080000 | 0x00100000 | 0x00800000 | 0x00008000),
                                        (False, 0x00000020)):
                 self.assertEqual(provider._tool_flags(info(allowed), directory=directory), allowed)
@@ -902,8 +908,11 @@ class VersionAllocationSourceTests(unittest.TestCase):
                 for bad in (info(0, owner=os.geteuid() or 501), info(0, mode=0o775)):
                     with self.assertRaises(ValueError):
                         provider._tool_flags(bad, directory=directory)
-        with patch.object(provider.sys, 'platform', 'linux'), self.assertRaises(ValueError):
-            provider._tool_flags(info(0x00100000), directory=True)
+        host_platform = sys.platform
+        with fixed_tool_platform("linux"):
+            self.assertEqual(checked_files.sys.platform, host_platform)
+            with self.assertRaises(ValueError):
+                provider._tool_flags(info(0x00100000), directory=True)
 
     def test_fixed_tool_allowed_flag_change_after_command_refuses_and_closes(self):
         f = self.fixture
@@ -911,7 +920,7 @@ class VersionAllocationSourceTests(unittest.TestCase):
         def change(run):
             f.tool_stats[1] = SimpleNamespace(**{**vars(f.tool_stats[1]), 'st_flags': 0x00100000})
         f.after_command = change
-        with f.mocks(), patch.object(provider.sys, 'platform', 'darwin'), self.assertRaises(ValueError):
+        with f.mocks(), fixed_tool_platform("darwin"), self.assertRaises(ValueError):
             source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir='/inert/runtime')
         self.assertEqual(len(f.calls), 1)
         self.assertEqual(f.tool_closed, provider.TOOL_FDS)
@@ -920,7 +929,9 @@ class VersionAllocationSourceTests(unittest.TestCase):
     def test_fixed_compressed_tool_completes_same_original_protocol(self):
         f = self.fixture
         f.tool_stats[-1].st_flags = 0x00000020
-        with f.mocks(), patch.object(provider.sys, 'platform', 'darwin'):
+        host_platform = sys.platform
+        with f.mocks(), fixed_tool_platform("darwin"):
+            self.assertEqual(checked_files.sys.platform, host_platform)
             source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir='/inert/runtime')
         self.assertEqual(len(f.calls), 7)
         self.assertEqual(f.tool_closed, provider.TOOL_FDS)
@@ -935,7 +946,7 @@ class VersionAllocationSourceTests(unittest.TestCase):
                 return SimpleNamespace(**{**vars(row), 'st_flags': 0x00100000})
             return row
         with f.mocks(), patch.object(os, 'stat', changed), \
-                patch.object(provider.sys, 'platform', 'darwin'), self.assertRaises(ValueError):
+                fixed_tool_platform("darwin"), self.assertRaises(ValueError):
             source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir='/inert/runtime')
         self.assertEqual(f.calls, [])
         self.assertEqual(f.tool_closed, provider.TOOL_FDS)
