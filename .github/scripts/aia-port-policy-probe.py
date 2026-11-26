@@ -173,8 +173,9 @@ def run():
     addresses = {row[4][0] for row in socket.getaddrinfo("localhost", 8080, type=socket.SOCK_STREAM)}
     require("127.0.0.1" in addresses and addresses <= {"127.0.0.1", "::1"}, "localhost escaped loopback")
     predicate = (
-        'process == "trustd" AND (category == "caissuer" OR category == "http" OR category == "trust" '
-        'OR eventMessage CONTAINS[c] "SSRF" OR eventMessage CONTAINS[c] "/mrk-aia/")'
+        'process == "trustd" AND (eventMessage CONTAINS[c] "/mrk-aia/" '
+        'OR eventMessage CONTAINS[c] "SSRF" OR eventMessage CONTAINS[c] "disallowed port" '
+        'OR eventMessage CONTAINS[c] "IP literal")'
     )
     with tempfile.TemporaryFile(dir=BASE) as stream:
         collector = subprocess.Popen([
@@ -183,7 +184,16 @@ def run():
         ], stdout=stream, stderr=subprocess.DEVNULL)
         try:
             time.sleep(1.0)
-            probes = [measure(port) for port in (0, 8080)]
+            probes = []
+            for port in (0, 8080):
+                probe = measure(port)
+                probes.append(probe)
+                print("MRK_AIA_PORT_RESULT=" + json.dumps({
+                    "port": probe["port"],
+                    "rows": [{"case": row["result"]["case"], "host": row["host"],
+                              "accepted": row["result"]["accepted"], "exactRequests": row["exactRequests"]}
+                             for row in probe["rows"]],
+                }, sort_keys=True), flush=True)
         finally:
             code = collector.wait(timeout=28)
         require(code == 0, "trustd log collector failed")
