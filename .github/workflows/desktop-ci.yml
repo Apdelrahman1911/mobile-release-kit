@@ -156,7 +156,9 @@ jobs:
     needs: frontend
     if: needs.frontend.outputs.native == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Cold Intel runners spent 36 minutes on tests and the development check
+    # before starting the embedded-frontend shell build.
+    timeout-minutes: ${{ matrix.os == 'macos-26-intel' && 65 || 45 }}
     strategy:
       fail-fast: false
       matrix:

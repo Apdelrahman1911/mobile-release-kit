@@ -14,6 +14,7 @@ from pathlib import Path
 import select
 import signal
 import struct
+import sys
 from subprocess import CompletedProcess
 import threading
 import time
@@ -334,6 +335,44 @@ class Handles:
         return self.values[name]
 
 
+def _observe_fixture_fork(wait, handles, case, phase):
+    if case != "healthy":
+        return wait.fork()
+    parent = os.getpid()
+    original_close = os.close
+    originals = {fd: label for label, fd in handles.values.items()}
+
+    def close_observer(fd):
+        if fd in originals and os.getpid() != parent:
+            try:
+                known_frames = {
+                    "cancellation.py", "_profile_process.py", "_command_process.py",
+                    "ios_profiles.py", "build_inputs.py", "checked_files.py",
+                    "local_signing_case_owner.py", "resource_tracker.py",
+                }
+                provenance = []
+                frame = sys._getframe(1)
+                for _ in range(12):
+                    if frame is None or len(provenance) >= 5:
+                        break
+                    filename = Path(frame.f_code.co_filename).name
+                    if filename in known_frames:
+                        provenance.append([filename, frame.f_lineno])
+                    frame = frame.f_back
+                _focused_record(dict(case=case, role="worker", step="at-fork-close",
+                                     fork=phase, pipe=originals[fd], provenance=provenance))
+            except BaseException:
+                pass
+        return original_close(fd)
+
+    # Only the original fork's inherited callbacks see the observation wrapper.
+    os.close = close_observer
+    try:
+        return wait.fork()
+    finally:
+        os.close = original_close
+
+
 class OriginalWait:
     """Only constructed immediately around the actual original fork result."""
     def __init__(self):
@@ -499,7 +538,7 @@ def _anchor(handles, launcher, home_group, root, name, task, run_deadline, hard,
         require(os.getpgrp() == own and os.getsid(0) != own, "anchor must not be a session leader")
         handles.pipe("w-run")
         handles.pipe("w-state")
-        if child.fork() == 0:
+        if _observe_fixture_fork(child, handles, name, "worker") == 0:
             _worker(handles, own, own, root, name, task, run_deadline, write_json, hard=hard, progress=progress,
                     matrix_context=matrix_context)
         handles.close("w-runr")
@@ -638,7 +677,7 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
                 pass
         handles.pipe("l-control")
         handles.pipe("a-state")
-        if anchor.fork() == 0:
+        if _observe_fixture_fork(anchor, handles, name, "anchor") == 0:
             _anchor(handles, owner, home_group, root, name, task, run_deadline, hard, write_json, progress=progress,
                     matrix_context=matrix_context)
         handles.close("l-controlr")

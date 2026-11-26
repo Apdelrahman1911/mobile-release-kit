@@ -29,6 +29,7 @@ from mobile_release._desktop_saved_command_control import SavedCommandDomain, so
 from mobile_release.cancellation import DefaultCancellation
 from mobile_release.config import ReleaseVersion
 from mobile_release.owned_process import ProcessCleanupError
+from unit.test_lifetime_evidence import fork_registry_model
 
 
 def configuration():
@@ -75,15 +76,16 @@ def parsed_request():
 
 @contextmanager
 def original():
-    guard, source = DefaultCancellation(ProcessCleanupError, "inert"), IOSArchiveInput(100)
-    source.acquired = source.active = source.request_returned = True  # Predicate DATA, no pipe.
-    guard._install_ios_archive_source(source)
-    guard.depth = 0  # No real signal handler installation occurred.
-    with patch.object(operation_module.time, "monotonic", return_value=100), patch.object(source, "poll"), \
-            patch.object(os, "open", side_effect=AssertionError("no native open in DATA tests")), \
-            patch.object(os, "close", side_effect=AssertionError("no native close in DATA tests")), \
-            patch.object(operation_module, "run_owned", side_effect=AssertionError("no native command in DATA tests")):
-        yield operation_module.IOSArchiveOperation(parsed_request(), guard, source)
+    with fork_registry_model():
+        guard, source = DefaultCancellation(ProcessCleanupError, "inert"), IOSArchiveInput(100)
+        source.acquired = source.active = source.request_returned = True  # Predicate DATA, no pipe.
+        guard._install_ios_archive_source(source)
+        guard.depth = 0  # No real signal handler installation occurred.
+        with patch.object(operation_module.time, "monotonic", return_value=100), patch.object(source, "poll"), \
+                patch.object(os, "open", side_effect=AssertionError("no native open in DATA tests")), \
+                patch.object(os, "close", side_effect=AssertionError("no native close in DATA tests")), \
+                patch.object(operation_module, "run_owned", side_effect=AssertionError("no native command in DATA tests")):
+            yield operation_module.IOSArchiveOperation(parsed_request(), guard, source)
 
 
 def complete_terminal(request):
