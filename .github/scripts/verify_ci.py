@@ -3735,6 +3735,18 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     if (step.id == gate and target in expected
                             and _minitest_failed_target(text, target, deadline=deadline)):
                         value["adapter_failure"] = diagnostic
+                observer = re.findall(
+                    rb"(?m)^MRK_FIXTURE_OBSERVER_V1 "
+                    rb"(kernel-[1]|kernel-13|identity|INPUT|CALLER_IDENTITY|SELF_QUERY|SELF_IDENTITY|QUERY|SIZE|"
+                    rb"GROUP_(?:LIBRARY|SYMBOL|CLOSE|COUNT|BOUND|READ|CHANGED|IDENTITY)|present-unmatched|"
+                    rb"absent-unmatched|empty|other) ([0-9]{1,3}|other) (quiet|diagnostics)$", result.stderr)
+                roles = re.findall(
+                    rb"(?m)^MRK_FIXTURE_OBSERVER_ROLE=(custodian|keeper|validator|descendant)$", result.stderr)
+                if result.ok is False and (observer or roles):
+                    value["fixture_observer_failure"] = (
+                        [[part.decode("ascii") for part in row] for row in observer[:12]],
+                        [role.decode("ascii") for role in roles[:12]],
+                    )
                 diagnostic = ownership_failure(result.stderr, deadline=deadline)
                 if diagnostic is not None:
                     gate, class_name = ADAPTER_FAILURE_PLATFORMS[diagnostic["platform"]]

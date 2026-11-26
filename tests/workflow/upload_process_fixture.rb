@@ -1100,7 +1100,30 @@ module UploadProcessFixture
     custody[:run_deadline_ns] = run_deadline_ns unless run_deadline_ns.nil?
     if observer
       result = capture_command([observer, pid.to_s], seconds: seconds, environment: PROCESS_OBSERVER_LOCALE, **custody)
-      observer_liveness(parse_process_observer(*result, pid, group))
+      begin
+        observer_liveness(parse_process_observer(*result, pid, group))
+      rescue Failure
+        stdout, stderr, status = result
+        code = case stdout
+        when /\AMRK_PROCESS_V1 denied #{pid} kernel (1|13)\n\z/
+          "kernel-#{$1}"
+        when /\AMRK_PROCESS_V1 denied #{pid} identity 0\n\z/
+          "identity"
+        when /\AMRK_PROCESS_V1 error (INPUT|CALLER_IDENTITY|SELF_QUERY|SELF_IDENTITY|QUERY|SIZE)\n\z/
+          $1
+        when /\AMRK_PROCESS_V1 error (GROUP_(?:LIBRARY|SYMBOL|CLOSE|COUNT|BOUND|READ|CHANGED|IDENTITY))(?:_[0-9]{1,4}(?:_AND_CLOSE)?)?\n\z/
+          $1
+        when /\AMRK_PROCESS_V1 present /
+          "present-unmatched"
+        when /\AMRK_PROCESS_V1 absent /
+          "absent-unmatched"
+        else
+          stdout.empty? ? "empty" : "other"
+        end
+        bounded_status = status.is_a?(Integer) && status.between?(0, 255) ? status : "other"
+        warn "MRK_FIXTURE_OBSERVER_V1 #{code} #{bounded_status} #{stderr.empty? ? "quiet" : "diagnostics"}"
+        raise
+      end
     else
       result = capture_command(["/bin/ps", "-o", "pid=,pgid=,stat=", "-p", pid.to_s], seconds: seconds,
                                environment: PROCESS_OBSERVER_LOCALE, **custody)
@@ -1289,7 +1312,12 @@ module UploadProcessFixture
 
   def observe_owner_death!(owner, deadline:, root: nil)
     owner_processes!(owner).each do |item|
-      dead!(item.fetch("pid"), item.fetch("group"), deadline: deadline)
+      begin
+        dead!(item.fetch("pid"), item.fetch("group"), deadline: deadline)
+      rescue Failure
+        warn "MRK_FIXTURE_OBSERVER_ROLE=#{item.fetch("role")}"
+        raise
+      end
     end
     true
   rescue Exception
