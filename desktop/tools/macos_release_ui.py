@@ -121,9 +121,10 @@ def install(media, work):
 
 
 class UI:
-    def __init__(self, client, evidence):
+    def __init__(self, client, evidence, screen):
         self.client = client
         self.evidence = evidence
+        self.screen = screen
         self.count = 0
         self.project_name = None
 
@@ -132,6 +133,8 @@ class UI:
         event = dict(sequence=self.count, timeNs=time.time_ns(), command=name, passed=False)
         if "selector" in params:
             event["selector"] = params["selector"]
+        if name in ("element.click", "pointer.click", "pointer.scroll"):
+            event["target"] = {key: params[key] for key in ("id", "x", "y", "dy") if key in params}
         try:
             result = self.client.command(name, params)
             event.update(passed=result["ok"], error=(result.get("error") or {}).get("code"))
@@ -147,14 +150,22 @@ class UI:
         need(result["ok"], f"{name}-{event['error']}")
         return result["result"]
 
-    def node(self, name, *, category=None, contains=False, enabled=False, actionable=False):
+    def node(self, name, *, category=None, contains=False, enabled=False, actionable=False, region=None):
         selector = {"text_contains": name, "visible": True}
         if category:
             selector["role"] = category
         if enabled:
             selector["enabled"] = True
-        found = self.command("element.wait", selector=selector, state="present", timeout_ms=10000)
-        nodes = found["nodes"]
+        if region is None:
+            found = self.command("element.wait", selector=selector, state="present", timeout_ms=10000)
+            nodes = found["nodes"]
+        else:
+            found = self.command("tree.snapshot", limit=300)
+            parents = [row for row in found["nodes"] if row["name"] == region and row["visible"]]
+            need(len(parents) == 1, f"missing-or-ambiguous-region-{region}")
+            prefix = parents[0]["id"] + "."
+            nodes = [row for row in found["nodes"] if row["id"].startswith(prefix) and row["visible"]
+                     and (not enabled or row["enabled"]) and (category is None or row["role"] == category)]
         if not contains:
             nodes = [node for node in nodes if name in (node.get("name"), node.get("text"))]
         if actionable and not category:
@@ -162,26 +173,33 @@ class UI:
         need(len(nodes) == 1, f"missing-or-ambiguous-element-{name}")
         return found["snapshot_id"], nodes[0]
 
-    def click(self, name, *, category=None, contains=False):
-        snapshot, node = self.node(name, category=category, contains=contains, enabled=True, actionable=True)
-        box = node["bounds"]
-        if not category or category in ("button", "checkbox", "textfield"):
-            # WebKit can expose controls outside the scroll viewport. Use the
-            # original app window and refresh the target after scrolling.
-            rows = self.command("windows.list")["windows"]
-            owners = [row for row in rows if node["id"].startswith(f"mac:{row['process_id']}:")]
-            if len(owners) == 1 and owners[0]["bounds"]:
-                window = owners[0]["bounds"]
-                top = window["y"] + 70
-                bottom = window["y"] + window["height"] - 24
-                for _ in range(12):
-                    center = box["y"] + box["height"] // 2
-                    if top <= center <= bottom:
-                        break
-                    self.command("pointer.scroll", x=window["x"] + window["width"] // 2,
-                                 y=window["y"] + window["height"] // 2, dy=8 if center > bottom else -8)
-                    snapshot, node = self.node(name, category=category, contains=contains, enabled=True, actionable=True)
-                    box = node["bounds"]
+    def reveal(self, name, **selectors):
+        snapshot, node = self.node(name, **selectors)
+        root = self.command("tree.snapshot", limit=1)["nodes"]
+        need(len(root) == 1 and root[0]["role"] == "window" and root[0]["bounds"] and
+             node["id"].startswith(root[0]["id"] + "."), "original-focused-app-window")
+        window = root[0]["bounds"]
+        top = max(0, window["y"] + 35)
+        bottom = min(self.screen["height"] - 65, window["y"] + window["height"] - 8)
+        left = max(0, window["x"] + 3)
+        right = min(self.screen["width"], window["x"] + window["width"]) - 3
+        for _ in range(16):
+            box = node["bounds"]
+            x, y = box["x"] + box["width"] // 2, box["y"] + box["height"] // 2
+            need(left <= x <= right, f"target-outside-window-width-{name}")
+            if top <= y <= bottom:
+                return snapshot, node
+            # Keep the pointer in the target's own column. The sidebar and
+            # document can move independently. Never click through the Dock.
+            distance = y - (top + bottom) // 2
+            dy = min(15, max(2, abs(distance) // 70)) * (1 if distance > 0 else -1)
+            self.command("pointer.scroll", x=x, y=(top + bottom) // 2, dy=dy)
+            snapshot, node = self.node(name, **selectors)
+        raise AssertionError(f"target-not-reachable-in-app-viewport-{name}")
+
+    def click(self, name, *, category=None, contains=False, region=None):
+        snapshot, node = self.reveal(name, category=category, contains=contains, region=region,
+                                     enabled=True, actionable=True)
         self.command("element.click", snapshot_id=snapshot, id=node["id"])
 
     def edit(self, name, text):
@@ -241,9 +259,9 @@ class UI:
         need(evidence["denied"], "local-network-prompt-remained-after-denial")
 
     def page(self, title):
-        self.click(title, category="button")
+        self.click(title, category="button", region="Workspace navigation")
         heading = self.project_name if title == "Overview" and self.project_name else PAGE_HEADINGS[title]
-        self.node(heading, category="heading")
+        self.reveal(heading, category="heading")
 
     def pick(self, project, *, cancel=False):
         self.click("Open another project folder" if self.project_name else "Choose project folder", category="button")
@@ -329,7 +347,8 @@ def observe(work, action, media):
     scenarios = results["scenarios"]
     (evidence / "RESULT.json").write_text(json.dumps(results, indent=2) + "\n")
     connection, client = open_session(work, action)
-    ui = UI(client, evidence)
+    capabilities = json.loads(client.fetch("/v2/capabilities"))
+    ui = UI(client, evidence, capabilities["screen"])
     project = work / "MRK Verification Android"
     original = {path.relative_to(project): file_hash(path) for path in project.rglob("*")
                 if path.is_file() and ".git" not in path.relative_to(project).parts}
@@ -361,7 +380,6 @@ def observe(work, action, media):
         return scenarios[name]["status"] == "Passed"
 
     def startup():
-        capabilities = json.loads(client.fetch("/v2/capabilities"))
         results["commands"] = sorted(capabilities["commands"])
         if not {"element.wait", "element.click", "tree.snapshot"} <= set(capabilities["commands"]):
             raise Blocked("macOS Accessibility is unavailable to the action on this runner")
@@ -461,6 +479,7 @@ def observe(work, action, media):
         head = git("rev-parse", "HEAD")
         need(b" M README.md\n" in before, "synthetic-worktree-change")
         ui.page("GitHub")
+        ui.click("Connect", category="radiobutton", region="GitHub tasks")
         ui.click("Check local Git access", category="button")
         ui.node("Local Git reader available", category="heading")
         ui.click("Refresh changes", category="button")
@@ -489,7 +508,6 @@ def observe(work, action, media):
             for page in PAGE_HEADINGS:
                 label = "nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-")
                 scenario(label, lambda page=page: ui.page(page))
-            scenario("window-layouts", window_layouts)
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
                 scenario("version-cancel-save-quit-reopen", versions)
@@ -498,6 +516,7 @@ def observe(work, action, media):
                 scenarios["cli-grant-and-revoke"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["git-local-diff-and-no-side-effects"] = dict(status="Blocked", reason="Fixture project selection failed")
+            scenario("window-layouts", window_layouts)
         else:
             for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
                          "version-cancel-save-quit-reopen", "window-layouts", "git-local-diff-and-no-side-effects"):
