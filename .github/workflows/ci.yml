@@ -20,7 +20,15 @@ jobs:
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
       inputs.verification_target == 'macos'
-    runs-on: macos-26-intel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            major: '26'
+          - runner: xcode-27
+            major: '27'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -33,10 +41,10 @@ jobs:
       - name: Observe trustd while evaluating the same synthetic issuer controls
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          EXPECTED_OS_MAJOR: '26'
+          EXPECTED_OS_MAJOR: ${{ matrix.major }}
         run: |
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == X64 && "$(id -u)" != 0 ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
           [[ "$(sw_vers -productVersion)" == "$EXPECTED_OS_MAJOR".* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ -z "$(git status --porcelain)" ]]
           [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
@@ -64,6 +72,12 @@ jobs:
 
           patterns = {
               "issuer-request-scheduled": "request for uri:",
+              "issuer-cache-hit": "cache hit, for",
+              "anchor-source-search": "searching anchor source",
+              "parent-source-search": "searching parent source",
+              "looking-for-parents": "looking for parents of partial",
+              "rejected-paths": "considering rejected paths",
+              "partial-paths": "considering partials",
               "issuer-download-failed": "failed to download issuer",
               "issuer-obtained": "found parents for",
               "issuer-url-missing": "certificate has no caissuer urls",
@@ -90,6 +104,10 @@ jobs:
                row["evaluationEndUnixNs"], Counter(), Counter())
               for row in rows
           ]
+          cases = [
+              (row["directNetworkDenied"], span["case"], span["start"], span["end"], Counter(), Counter())
+              for row in rows for span in row.get("casesTimed", ())
+          ]
           timed_events = 0
           events = fixture_events = 0
           with open(sys.argv[1], encoding="utf-8") as rows:
@@ -115,6 +133,14 @@ jobs:
                       if at is not None and start <= at <= end:
                           window_markers.update(event_markers)
                           window_codes.update(event_codes)
+                  for _denied, _case, start, end, case_markers, source_steps in cases:
+                      if at is not None and start <= at <= end:
+                          case_markers.update(event_markers)
+                          if event.get("category") == "trust":
+                              match = re.fullmatch(r"(searching parent source|broad(?:en)?ing search to) ([1-8])/([1-8])(?: sources)?", lower)
+                              if match:
+                                  label = "lookup" if match[1] == "searching parent source" else "broaden"
+                                  source_steps[f"{label}-{match[2]}-of-{match[3]}"] += 1
                   fixture_events += "/mrk-aia/" in lower
                   counts.update(event_markers)
                   if "issuer-download-failed" in event_markers or "/mrk-aia/" in lower:
@@ -125,6 +151,11 @@ jobs:
               "collectorReturn": int(sys.argv[4]), "eventCount": events, "timedEventCount": timed_events,
               "fixtureUrlVisibleCount": fixture_events, "markerCounts": counts,
               "issuerUrlErrorCounts": codes, "probeReturn": int(sys.argv[3]),
+              "caseWindows": [
+                  {"directNetworkDenied": denied, "case": case, "markerCounts": markers,
+                   "parentSourceSteps": steps}
+                  for denied, case, _start, _end, markers, steps in cases
+              ],
               "evaluationWindows": [
                   {"route": route, "directNetworkDenied": denied, "markerCounts": markers,
                    "urlErrorCounts": errors}

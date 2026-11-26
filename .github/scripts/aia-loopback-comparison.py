@@ -55,7 +55,18 @@ def authority_for(route):
 def evaluate(route, port, deadline):
     scratch(Path.cwd())
     module = authority_for(route)
+    windows = []
+    original = module._evaluate_case
+
+    def timed_case(fixture, deadline, observations):
+        start = time.time_ns()
+        result = original(fixture, deadline, observations)
+        windows.append({"case": fixture["case"], "start": start, "end": time.time_ns()})
+        return result
+
+    module._evaluate_case = timed_case
     record = module.evaluate_aia(port, deadline)
+    print("MRK_TRUST_CASE_WINDOWS=" + json.dumps(windows, separators=(",", ":")), file=sys.stderr)
     print(module.AIA_PREFIX.decode("ascii") + json.dumps(record, separators=(",", ":")))
 
 
@@ -92,6 +103,26 @@ def issuer_extension(authority, fixture, expected_uri):
         return {"accessorAvailable": True, "uriCount": count, "uriMatches": False}
     finally:
         owner.close()
+
+
+def case_windows(data, start, end):
+    prefix = b"MRK_TRUST_CASE_WINDOWS="
+    if len(data) > 1024 or not data.startswith(prefix) or data.count(b"\n") != 1 or not data.endswith(b"\n"):
+        return None
+    try:
+        rows = json.loads(data[len(prefix):])
+    except (ValueError, UnicodeError):
+        return None
+    cases = ("online", "offline", "mutant", "product-offline")
+    if type(rows) is not list or len(rows) != len(cases):
+        return None
+    for case, row in zip(cases, rows):
+        if (type(row) is not dict or set(row) != {"case", "start", "end"} or row["case"] != case
+                or type(row["start"]) is not int or type(row["end"]) is not int
+                or not start <= row["start"] <= row["end"] <= end):
+            return None
+        start = row["end"]
+    return rows
 
 
 def observe(route, deny_direct_network):
@@ -139,14 +170,16 @@ def observe(route, deny_direct_network):
                 "childReturn": child.returncode, "elapsedSeconds": round(time.monotonic() - start, 3),
                 "nativeIssuerProperty": decoder,
                 "evaluationStartUnixNs": evaluation_start, "evaluationEndUnixNs": evaluation_end}
-        if child.returncode or child.stderr or not 0 < len(child.stdout) <= 8192:
+        windows = case_windows(child.stderr, evaluation_start, evaluation_end)
+        if child.returncode or windows is None or not 0 < len(child.stdout) <= 8192:
             return {**note, "result": "unavailable", "stderrBytes": len(child.stderr)}
-        return {**note, "result": authority._aia_comparison_note(child.stdout, fixtures, responder.requests)}
+        return {**note, "casesTimed": windows,
+                "result": authority._aia_comparison_note(child.stdout, fixtures, responder.requests)}
 
 
 if __name__ == "__main__":
-    if sys.platform != "darwin" or os.uname().machine != "x86_64" or os.getuid() == 0:
-        raise RuntimeError("requires the fixed nonroot hosted Intel macOS account")
+    if sys.platform != "darwin" or os.uname().machine != "arm64" or os.getuid() == 0:
+        raise RuntimeError("requires the fixed nonroot hosted Apple Silicon account")
     if len(sys.argv) == 5 and sys.argv[1] == "evaluate":
         evaluate(sys.argv[2], int(sys.argv[3]), float(sys.argv[4]))
     elif len(sys.argv) == 1:
