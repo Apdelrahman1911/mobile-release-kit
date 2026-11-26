@@ -1164,9 +1164,11 @@ def native_compatibility_ids(source_root: Path, *, public_only: bool = False,
                              deadline: float | None = None) -> tuple[str, ...]:
     """Closed source-known controls, never a generic selector or native role."""
     _require(type(public_only) is bool, "NATIVE_COMPATIBILITY_SELECTION")
-    ordinary = native_partition_ids(source_root, "ordinary", deadline=deadline)
+    # Compatibility runs in its own interpreter, so its fixed controls include
+    # the descriptor-map test regardless of its full-suite partition.
+    complete = native_partition_ids(source_root, "all", deadline=deadline)
     prefix = "unit.test_native_process.NativeProcessCompatibilityTests."
-    actual = tuple(identifier for identifier in ordinary if identifier.startswith(prefix))
+    actual = tuple(identifier for identifier in complete if identifier.startswith(prefix))
     _require(actual == NATIVE_COMPATIBILITY_IDS, "NATIVE_COMPATIBILITY_INVENTORY")
     return NATIVE_PUBLIC_API_IDS if public_only else actual
 

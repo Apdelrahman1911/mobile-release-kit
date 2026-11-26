@@ -6084,8 +6084,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                 selected = checks.native_partition_ids(ROOT, name, deadline=deadline)
                 self.assertEqual(selected, (identifier,))
                 poison.extend(selected)
-            self.assertEqual(inventory.call_count, 76)
-            self.assertEqual(metadata.call_count, 76)
+            self.assertEqual(inventory.call_count, len(_PYTHON_SINGLETON_FIXTURES))
+            self.assertEqual(metadata.call_count, len(_PYTHON_SINGLETON_FIXTURES))
         poison = tuple(poison)
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
@@ -6145,7 +6145,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     self.assertRaises(checks.CheckError):
                 checks.native_partition_ids(ROOT, "authority", deadline=deadline)
 
-    def test_native_compatibility_selectors_are_exact_ordinary_three_and_no_child_one(self):
+    def test_native_compatibility_selectors_keep_all_three_controls_across_partitions(self):
         checks = ci_module("ci_checks")
         expected = tuple(sorted("unit.test_native_process.NativeProcessCompatibilityTests." + name for name in (
             "test_native_public_api_atomic_duplication", "test_native_helper_and_validator_fd_maps",
@@ -6153,7 +6153,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(checks.native_compatibility_ids(ROOT), expected)
         public = ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",)
         self.assertEqual(checks.native_compatibility_ids(ROOT, public_only=True), public)
-        self.assertTrue(set(expected) <= set(checks.native_partition_ids(ROOT, "ordinary")))
+        fresh = checks.native_partition_ids(ROOT, "fresh-native-fd-maps")
+        self.assertEqual(fresh, ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps",))
+        ordinary = set(checks.native_partition_ids(ROOT, "ordinary"))
+        self.assertEqual(ordinary.intersection(expected), set(expected).difference(fresh))
         self.assertFalse(set(expected) & set(checks.NATIVE_AUTHORITY_IDS))
         for changed in (expected[:2], expected + expected[:1], tuple(sorted(expected + (
                 "unit.test_native_process.NativeProcessCompatibilityTests.test_unreviewed",)))):

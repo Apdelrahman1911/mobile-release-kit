@@ -103,7 +103,7 @@ jobs:
           [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]]
           # Preserve current selection/owner authority; catalogue edits need a new assignment.
           /usr/bin/shasum -a 256 -c <<'PINS'
-          ab34d6656787934ae5e2ea2aa5c19e117772320fcee8b32cfd14c857d2b8b549  .github/scripts/verify_ci.py
+          3a721dab5d4263e40a7c767311743e254f51d3fbc348d8ffece82b36b0c974e4  .github/scripts/verify_ci.py
           8315644d4f402a1f99114aae1b16ee7bd59431b82870916c8b48bc007db810de  tests/workflow/local_signing_layered_catalog.py
           c0466d2a6342bf91758037fd477bf32812898b2956d2906b6fb44bdd0705a19c  tests/workflow/local_signing_semantic_catalog.py
           5e5ddda912664da2ef4438532f5b484e3aaa2eb4a774fd9f89ad4cf387160c78  tests/workflow/local_signing_regression_catalog.py
