@@ -1,4 +1,4 @@
-name: Disposable Intel macOS 26 issuer comparison
+name: Compare byte-identical synthetic issuer chains
 
 on:
   workflow_dispatch:
@@ -11,15 +11,51 @@ on:
 permissions:
   contents: read
 
-env:
-  PYTHONSAFEPATH: '1'
-
 jobs:
-  issuer-loopback-transport:
+  fixture:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
       inputs.verification_target == 'macos'
+    runs-on: macos-26
+    timeout-minutes: 8
+    outputs:
+      sha256: ${{ steps.generate.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Generate only public synthetic fixture files
+        id: generate
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
+          umask 077
+          mkdir "$RUNNER_TEMP/mrk-aia-fixture"
+          file="$RUNNER_TEMP/mrk-aia-fixture/capsule.json"
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C \
+            python -I -B .github/scripts/aia-loopback-comparison.py generate >"$file"
+          digest="$(shasum -a 256 "$file")"
+          printf 'sha256=%s\n' "${digest%% *}" >>"$GITHUB_OUTPUT"
+      - name: Upload the public DER fixture capsule
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: same-der-synthetic-issuer
+          path: ${{ runner.temp }}/mrk-aia-fixture/capsule.json
+          retention-days: 1
+          if-no-files-found: error
+
+  replay:
+    needs: fixture
     strategy:
       fail-fast: false
       matrix:
@@ -38,10 +74,15 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Observe trustd while evaluating the same synthetic issuer controls
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: same-der-synthetic-issuer
+          path: ${{ runner.temp }}/mrk-aia-fixture
+      - name: Evaluate the same bytes under fixed client network denial
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           EXPECTED_OS_MAJOR: ${{ matrix.major }}
+          MRK_FIXTURE_SHA256: ${{ needs.fixture.outputs.sha256 }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(id -u)" != 0 ]]
@@ -50,117 +91,5 @@ jobs:
           [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
           printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "${ImageVersion:-unknown}"
           umask 077
-          capture="$(mktemp -d "$RUNNER_TEMP/mrk-trustd.XXXXXX")"
-          trap 'rm -rf -- "$capture"' EXIT
-          (
-            ulimit -f 4096
-            exec sudo -n /usr/bin/log stream --style ndjson --level debug --timeout 20 \
-              --predicate 'process == "trustd" AND (category == "caissuer" OR category == "http" OR category == "trust" OR category == "async" OR category == "trustd" OR subsystem == "com.apple.CFNetwork" OR subsystem == "com.apple.network")'
-          ) >"$capture/events" 2>"$capture/collector-errors" &
-          collector=$!
-          sleep 2
-          probe_status=0
-          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C python -I -B .github/scripts/aia-loopback-comparison.py >"$capture/probe" || probe_status=$?
-          collector_status=0
-          wait "$collector" || collector_status=$?
-          python -I -B - "$capture/events" "$capture/probe" "$probe_status" "$collector_status" <<'PY'
-          from collections import Counter
-          from datetime import datetime
-          import json
-          import re
-          import sys
-
-          patterns = {
-              "issuer-request-scheduled": "request for uri:",
-              "issuer-cache-hit": "cache hit, for",
-              "anchor-source-search": "searching anchor source",
-              "parent-source-search": "searching parent source",
-              "looking-for-parents": "looking for parents of partial",
-              "rejected-paths": "considering rejected paths",
-              "partial-paths": "considering partials",
-              "issuer-download-failed": "failed to download issuer",
-              "issuer-obtained": "found parents for",
-              "issuer-url-missing": "certificate has no caissuer urls",
-              "host-backoff": "skipping host due to too many recent timeouts",
-              "request-timeout": "trustd triggered evaluation timeout",
-              "no-request-issued": "no request issued",
-              "policy-allows-network": "network access re-enabled by policy",
-              "policy-denies-network": "network access disabled by policy",
-              "environment-denies-network": "network access not allowed in this environment",
-              "variant-denies-network": "variant does not allow network",
-              "issuer-fetch-skipped-expired": "skipping caissuer fetch for expired",
-              "evaluation-awaits-reply": "waiting for async reply",
-              "evaluation-completed": "completed:",
-              "local-network-denied": "local network prohibited",
-              "restricted-network": "network is disallowed",
-              "transport-security": "app transport security",
-          }
-          counts, codes = Counter(), Counter()
-          with open(sys.argv[2], encoding="utf-8") as result_file:
-              document = result_file.read(262144)
-          rows = json.loads(document)["observations"] if document else []
-          windows = [
-              (row["route"], row["directNetworkDenied"], row["evaluationStartUnixNs"],
-               row["evaluationEndUnixNs"], Counter(), Counter())
-              for row in rows
-          ]
-          cases = [
-              (row["directNetworkDenied"], span["case"], span["start"], span["end"], Counter(), Counter())
-              for row in rows for span in row.get("casesTimed", ())
-          ]
-          timed_events = 0
-          events = fixture_events = 0
-          with open(sys.argv[1], encoding="utf-8") as rows:
-              for raw in rows:
-                  try:
-                      event = json.loads(raw)
-                  except ValueError:
-                      continue
-                  message = event.get("eventMessage") if isinstance(event, dict) else None
-                  if not isinstance(message, str):
-                      continue
-                  events += 1
-                  try:
-                      at = round(datetime.fromisoformat(event["timestamp"]).timestamp() * 10**9)
-                  except (KeyError, TypeError, ValueError):
-                      at = None
-                  timed_events += at is not None
-                  lower = message.lower()
-                  event_markers = {key for key, marker in patterns.items() if marker in lower
-                                   and (key != "evaluation-completed" or event.get("category") == "trust")}
-                  event_codes = set(re.findall(r"NSURLErrorDomain\s+Code=(-10\d{2}|-120\d)\b", message))
-                  for _route, _denied, start, end, window_markers, window_codes in windows:
-                      if at is not None and start <= at <= end:
-                          window_markers.update(event_markers)
-                          window_codes.update(event_codes)
-                  for _denied, _case, start, end, case_markers, source_steps in cases:
-                      if at is not None and start <= at <= end:
-                          case_markers.update(event_markers)
-                          if event.get("category") == "trust":
-                              match = re.fullmatch(r"(searching parent source|broad(?:en)?ing search to) ([1-8])/([1-8])(?: sources)?", lower)
-                              if match:
-                                  label = "lookup" if match[1] == "searching parent source" else "broaden"
-                                  source_steps[f"{label}-{match[2]}-of-{match[3]}"] += 1
-                  fixture_events += "/mrk-aia/" in lower
-                  counts.update(event_markers)
-                  if "issuer-download-failed" in event_markers or "/mrk-aia/" in lower:
-                      codes.update(event_codes)
-          if document:
-              print(json.dumps(json.loads(document), sort_keys=True))
-          print("MRK_TRUSTD_COMPARISON=" + json.dumps({
-              "collectorReturn": int(sys.argv[4]), "eventCount": events, "timedEventCount": timed_events,
-              "fixtureUrlVisibleCount": fixture_events, "markerCounts": counts,
-              "issuerUrlErrorCounts": codes, "probeReturn": int(sys.argv[3]),
-              "caseWindows": [
-                  {"directNetworkDenied": denied, "case": case, "markerCounts": markers,
-                   "parentSourceSteps": steps}
-                  for denied, case, _start, _end, markers, steps in cases
-              ],
-              "evaluationWindows": [
-                  {"route": route, "directNetworkDenied": denied, "markerCounts": markers,
-                   "urlErrorCounts": errors}
-                  for route, denied, _start, _end, markers, errors in windows
-              ],
-          }, sort_keys=True))
-          PY
-          [[ "$probe_status" == 0 && "$collector_status" == 0 ]]
+          env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C MRK_FIXTURE_SHA256="$MRK_FIXTURE_SHA256" \
+            python -I -B .github/scripts/aia-loopback-comparison.py replay

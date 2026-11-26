@@ -1,5 +1,8 @@
 """Compare synthetic loopback transports on disposable hosted macOS."""
+import base64
+import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import stat
@@ -13,7 +16,10 @@ import urllib.request
 
 HELPER = Path(__file__).resolve().with_name("ci_native_authority.py")
 BASE = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
-HOSTS = {"ipv4": "127.0.0.1", "ipv6": "[::1]", "localhost": "localhost"}
+FIXTURE_PORT = 38771
+CAPSULE_NAMES = ("aia.json", *(f"{case}-{role}.der"
+    for case in ("online", "offline", "mutant", "product-offline")
+    for role in ("root", "issuer", "leaf")))
 
 
 def scratch(path):
@@ -27,24 +33,10 @@ def scratch(path):
 
 def authority_for(route):
     text = HELPER.read_text(encoding="utf-8")
-    if route == "ipv6":
-        pairs = (
-            ("http://127.0.0.1:{port}", "http://[::1]:{port}"),
-            ("socket.socket(socket.AF_INET, socket.SOCK_STREAM)", "socket.socket(socket.AF_INET6, socket.SOCK_STREAM)"),
-            ('listener.bind(("127.0.0.1", 0))', 'listener.bind(("::1", 0))'),
-            ('address[0] == "127.0.0.1"', 'address[0] == "::1"'),
-        )
-        for original, replacement in pairs:
-            if text.count(original) != 1:
-                raise RuntimeError("original responder shape differs")
-            text = text.replace(original, replacement)
-    elif route == "localhost":
-        before = "http://127.0.0.1:{port}"
-        if text.count(before) != 1:
-            raise RuntimeError("original fixture URL differs")
-        text = text.replace(before, "http://localhost:{port}")
-    elif route != "ipv4":
-        raise RuntimeError("unexpected loopback selector")
+    listener = 'listener.bind(("127.0.0.1", 0))'
+    if route != "ipv4" or text.count(listener) != 1:
+        raise RuntimeError("fixed loopback responder differs")
+    text = text.replace(listener, f'listener.bind(("127.0.0.1", {FIXTURE_PORT}))')
     authority = types.ModuleType("_mrk_aia_transport_diagnostic")
     authority.__file__ = str(HELPER)
     exec(compile(text, str(HELPER), "exec"), vars(authority))
@@ -125,6 +117,41 @@ def case_windows(data, start, end):
     return rows
 
 
+def export_fixture():
+    authority = authority_for("ipv4")
+    deadline = time.monotonic() + 70.0
+    previous = Path.cwd()
+    with tempfile.TemporaryDirectory(prefix="mrk-aia-route-", dir=BASE) as directory:
+        work = scratch(Path(directory))
+        try:
+            os.chdir(work)
+            authority.prepare_aia(FIXTURE_PORT, deadline)
+            authority._fixtures(work, FIXTURE_PORT, deadline)
+            if {path.name for path in work.iterdir()} != set(CAPSULE_NAMES):
+                raise RuntimeError("synthetic public fixture inventory differs")
+            public = {name: base64.b64encode(authority._read_public(work / name)).decode("ascii")
+                      for name in CAPSULE_NAMES}
+        finally:
+            os.chdir(previous)
+    print(json.dumps(public, sort_keys=True, separators=(",", ":")))
+
+
+def import_fixture(authority, work):
+    expected = os.environ["MRK_FIXTURE_SHA256"]
+    wire = authority._read_public(BASE / "mrk-aia-fixture" / "capsule.json", 65536)
+    if not re.fullmatch(r"[a-f0-9]{64}", expected) or hashlib.sha256(wire).hexdigest() != expected:
+        raise RuntimeError("shared fixture digest differs")
+    public = json.loads(wire)
+    if type(public) is not dict or set(public) != set(CAPSULE_NAMES):
+        raise RuntimeError("shared public fixture inventory differs")
+    for name in CAPSULE_NAMES:
+        original = base64.b64decode(public[name], validate=True)
+        if not 0 < len(original) <= 4096:
+            raise RuntimeError("shared fixture member size differs")
+        authority._write_new(work / name, original)
+    return expected
+
+
 def observe(route, deny_direct_network):
     start = time.monotonic()
     deadline = start + 70.0
@@ -135,17 +162,17 @@ def observe(route, deny_direct_network):
         responder = authority._Responder(deadline)
         try:
             os.chdir(work)
-            authority.prepare_aia(responder.port, deadline)
+            fixture_sha = import_fixture(authority, work)
             fixtures = authority._fixtures(work, responder.port, deadline)
             decoder = [
                 {"case": row["case"], **issuer_extension(
-                    authority, row, f"http://{HOSTS[route]}:{responder.port}" + row["route"])}
+                    authority, row, f"http://127.0.0.1:{responder.port}" + row["route"])}
                 for row in fixtures
             ]
             responder.start({row["route"]: row["issuer"] for row in fixtures})
             control = fixtures[-1]
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(f"http://{HOSTS[route]}:{responder.port}" + control["route"], timeout=3) as reply:
+            with opener.open(f"http://127.0.0.1:{responder.port}" + control["route"], timeout=3) as reply:
                 if reply.read(len(control["issuer"]) + 1) != control["issuer"]:
                     raise RuntimeError("direct reachability returned different issuer bytes")
             until = time.monotonic() + 2
@@ -168,7 +195,7 @@ def observe(route, deny_direct_network):
             responder.close()
         note = {"route": route, "directNetworkDenied": deny_direct_network, "controllerReachedResponder": True,
                 "childReturn": child.returncode, "elapsedSeconds": round(time.monotonic() - start, 3),
-                "nativeIssuerProperty": decoder,
+                "nativeIssuerProperty": decoder, "fixtureSha256": fixture_sha,
                 "evaluationStartUnixNs": evaluation_start, "evaluationEndUnixNs": evaluation_end}
         windows = case_windows(child.stderr, evaluation_start, evaluation_end)
         if child.returncode or windows is None or not 0 < len(child.stdout) <= 8192:
@@ -182,11 +209,13 @@ if __name__ == "__main__":
         raise RuntimeError("requires the fixed nonroot hosted Apple Silicon account")
     if len(sys.argv) == 5 and sys.argv[1] == "evaluate":
         evaluate(sys.argv[2], int(sys.argv[3]), float(sys.argv[4]))
-    elif len(sys.argv) == 1:
+    elif sys.argv[1:] == ["generate"]:
+        export_fixture()
+    elif sys.argv[1:] == ["replay"]:
         os_version = subprocess.check_output(["/usr/bin/sw_vers", "-productVersion"], text=True).strip()
-        observations = [observe(route, denied) for route in ("ipv4",) for denied in (False, True)]
-        print(json.dumps({"scope": "diagnostic only", "os": os_version, "observations": observations}, sort_keys=True))
-        raise SystemExit(int(any(row["result"] == "unavailable" or not row["result"].get("available")
-                                 for row in observations)))
+        observation = observe("ipv4", True)
+        print(json.dumps({"scope": "diagnostic only", "os": os_version, "observation": observation}, sort_keys=True))
+        result = observation["result"]
+        raise SystemExit(int(result == "unavailable" or not result.get("available")))
     else:
         raise RuntimeError("unexpected diagnostic invocation")
