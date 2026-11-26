@@ -68,3 +68,11 @@ jobs:
         shell: bash
         run: |
           "${{ steps.python.outputs.python-path }}" -B -m unittest tests.desktop.test_macos_candidate_parts tests.desktop.test_macos_candidate_part_transport tests.desktop.test_macos_candidate_parts_workflow tests.desktop.test_macos_desktop_update tests.desktop.test_macos_candidate_stages tests.desktop.test_macos_optional_arrays tests.desktop.test_runtime_preparation.MacCoreBytecodeDataTests
+      - name: Exercise matching package receipts and frozen media before production signing
+        if: github.ref == 'refs/heads/main' && inputs.operation == 'main-release-preflight'
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          "$PYTHON" -B -m unittest \
+            tests.desktop.test_macos_installed_staging.MacAndroidHelperPackagingData.test_separate_producer_and_removal_graphs_preserve_their_own_bindings \
+            tests.desktop.test_macos_release_media

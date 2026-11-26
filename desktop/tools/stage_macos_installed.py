@@ -2885,8 +2885,17 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
     "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "remove-owner-fields")
   workflow = _PREVIEW_FINAL_IMAGE_WORKFLOW if expected_workflow is None else expected_workflow
   need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_FINAL_IMAGE_WORKFLOW,
-                    _CANDIDATE_REMOVE_WORKFLOW), "remove-owner-workflow")
-  if prepared_removal is None:
+                    _CANDIDATE_REMOVE_WORKFLOW, _MAIN_FINAL_IMAGE_WORKFLOW), "remove-owner-workflow")
+  if workflow == _MAIN_FINAL_IMAGE_WORKFLOW:
+    from desktop.tools.macos_prepared_package import PreparedBinding, ordinary_desktop_carrier
+    need(type(prepared_removal) is PreparedBinding and prepared_removal.same_source
+         and type(environment) is dict and environment.get("GITHUB_WORKFLOW_REF") == workflow
+         and ordinary_desktop_carrier(environment) and binding == prepared_removal.consumer
+         and binding["target"] == prepared_removal.origin["target"] == selection.target
+         and prepared_removal.manifest["packageRole"] == "ordinary-image", "prepared-main-remove-owner-binding")
+    prepared_removal.finalization_environment(environment)
+    product_source = prepared_removal.source
+  elif prepared_removal is None:
     product_source = removal_product_source(binding, workflow)
   else:
     from desktop.tools.macos_prepared_package import PreparedBinding
@@ -2960,6 +2969,7 @@ _CANDIDATE_REMOVE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflo
 _PREVIEW_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview'
 _INSTALLED_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed'
 _CANDIDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-candidate'
+_MAIN_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/main'
 _UPDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-positive-update'
 _UPDATE_DISTRIBUTION_SCOPE = 'positive-macos-update-distribution'
 _UPDATE_GUIDE = b"""# Mobile Release Kit - manual updated-app verification required
