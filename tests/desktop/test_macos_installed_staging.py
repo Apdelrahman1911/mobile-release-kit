@@ -4069,8 +4069,21 @@ sys.exit(status)
     def notary_fixture_call(self, state):
         module, operation = ANDROID_HELPER, state.operation
         originals = (TOOL.DESKTOP, TOOL.ANDROID_SUPPORT_MANIFEST, module.NOTARY_XCODE, module.WORK_PARENT,
-                     module.time.monotonic_ns, module.os.fstatvfs)
+                     module.time.monotonic_ns, module.os.fstatvfs, Path.lstat)
         volume = SimpleNamespace(f_frsize=4096, f_bavail=2 * 1024 * 1024)
+        # Model stable host ancestors for this synthetic Xcode selection.
+        # In CI, unrelated temporary activity can change the shared parent.
+        # The private root, tool directories, alias and tool files stay live.
+        root = operation.work.parent
+        host_parents = set(root.parents) | set(root.resolve(strict=True).parents)
+        original_lstat = Path.lstat
+        host_stats = {path: original_lstat(path) for path in host_parents}
+
+        def fixture_lstat(path, **options):
+            if path in host_stats:
+                return host_stats[path]
+            return original_lstat(path, **options)
+
         try:
             with (mock.patch.object(TOOL, "DESKTOP", operation.checkout / "desktop"),
                   mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", state.support.manifest_path),
@@ -4078,11 +4091,12 @@ sys.exit(status)
                   mock.patch.object(module, "NOTARY_XCODE", state.xcode),
                   mock.patch.object(module, "WORK_PARENT", operation.work.parent),
                   mock.patch.object(module.time, "monotonic_ns", new=lambda: state.clock[0]),
-                  mock.patch.object(module.os, "fstatvfs", new=lambda _fd: volume)):
+                  mock.patch.object(module.os, "fstatvfs", new=lambda _fd: volume),
+                  mock.patch.object(Path, "lstat", fixture_lstat)):
                 yield operation
         finally:
             for actual, expected in zip((TOOL.DESKTOP, TOOL.ANDROID_SUPPORT_MANIFEST, module.NOTARY_XCODE, module.WORK_PARENT,
-                                         module.time.monotonic_ns, module.os.fstatvfs), originals):
+                                         module.time.monotonic_ns, module.os.fstatvfs, Path.lstat), originals):
                 self.assertIs(actual, expected)
 
     def python_image(self, target, flags=0x2):

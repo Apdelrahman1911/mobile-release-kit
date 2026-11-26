@@ -1,4 +1,5 @@
 """Actual package owners with inert native/key boundaries; no Apple service."""
+from contextlib import ExitStack
 from pathlib import Path
 import tempfile
 import stat
@@ -52,18 +53,22 @@ class LauncherPackaging(unittest.TestCase):
 
     def test_private_stapled_ticket_reaches_real_final_input_both_targets(self):
         # Actual existing Operation, input_command, launcher/tree/roster and
-        # inventory consumers. Only the already-inert native boundary changes
-        # its created ticket modes; this is not Apple/native qualification.
+        # inventory consumers. The inert boundary varies ticket modes and
+        # exercises unrelated activity above the private fixture root.
         helper = staging.MacAndroidHelperPackagingData()
         for target in TOOL.MAC_TARGETS:
             for mode in (0o400, 0o600, 0o444, 0o644):
-                with self.subTest(target=target, mode=oct(mode)), tempfile.TemporaryDirectory() as temporary:
-                    state = helper.notary_fixture(Path(temporary), target=target, launcher=True)
+                with (self.subTest(target=target, mode=oct(mode)),
+                      tempfile.TemporaryDirectory() as temporary, ExitStack() as siblings):
+                    root = Path(temporary).resolve(strict=True)
+                    state = helper.notary_fixture(root, target=target, launcher=True)
                     operation = state.operation
                     original_call = operation.owner.run_owned
                     def native(argv, **options):
                         returned = original_call(argv, **options)
                         role = operation.calls[-1]["role"]
+                        if role == "payload-zip":
+                            siblings.enter_context(tempfile.TemporaryDirectory(dir=root.parent))
                         if role.startswith("staple-"):
                             (Path(argv[-1]) / "Contents/CodeResources").chmod(mode)
                         return returned
