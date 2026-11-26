@@ -19,6 +19,7 @@ FIXTURE = Path("tests/fixtures/macos_android_journey")
 VERSION_FILE = Path("public/version.properties")
 CONFIG_FILE = Path("release/mobile-release.json")
 PAYLOAD_PATTERN = r"[/]MobileReleaseKitPayload\.app/Contents/MacOS/mobile-release-kit-desktop( |$)"
+CONSOLE_OCR = Path(__file__).with_name("macos_release_ui_privacy.swift")
 PAGE_HEADINGS = {
     "Overview": "Get your app ready.",
     "Build & release": "Build and release your app",
@@ -129,11 +130,16 @@ class UI:
     def command(self, name, **params):
         self.count += 1
         event = dict(sequence=self.count, timeNs=time.time_ns(), command=name, passed=False)
+        if "selector" in params:
+            event["selector"] = params["selector"]
         try:
             result = self.client.command(name, params)
             event.update(passed=result["ok"], error=(result.get("error") or {}).get("code"))
         except Exception as error:
             event.update(error=type(error).__name__, httpStatus=getattr(error, "status", None))
+            payload = getattr(error, "payload", None)
+            if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+                event["errorCode"] = payload["error"].get("code")
             raise
         finally:
             with (self.evidence / "trace.jsonl").open("a", encoding="utf-8") as stream:
@@ -189,7 +195,50 @@ class UI:
     def image(self, name):
         frame = self.client.fetch("/v1/screenshot")
         need(frame.startswith(b"\x89PNG\r\n\x1a\n"), "ui-screenshot-png")
-        (self.evidence / f"{name}.png").write_bytes(frame)
+        path = self.evidence / f"{name}.png"
+        path.write_bytes(frame)
+        return path
+
+    def snapshot(self, name):
+        tree = self.command("tree.snapshot", limit=160)
+        (self.evidence / f"{name}-tree.json").write_text(json.dumps(tree, indent=2) + "\n")
+
+    def local_network_decision(self, capabilities):
+        def records(path):
+            result = call("/usr/bin/swift", str(CONSOLE_OCR), str(path), timeout=45)
+            return json.loads(result.stdout)
+
+        def prompt(rows):
+            return any("allow python to find devices" in row["text"].translate(
+                str.maketrans("", "", "\"“”")).lower() for row in rows)
+
+        evidence = dict(beforeApp=prompt(records(self.evidence / "before-app-launch.png")),
+                        beforeDriver=prompt(records(self.evidence / "before-ui-driver.png")))
+        rows = records(self.image("first-window"))
+        evidence["afterDriver"] = prompt(rows)
+        target = self.evidence / "local-network-decision.json"
+        target.write_text(json.dumps(evidence, indent=2) + "\n")
+        need(not evidence["beforeApp"], "unexpected-privacy-prompt-before-app")
+        if not evidence["afterDriver"]:
+            need(not evidence["beforeDriver"], "privacy-prompt-disappeared-without-a-decision")
+            return
+
+        def label(text):
+            return [row for row in rows if row["text"].lower().replace("’", "'") == text]
+
+        deny, allow = label("don't allow"), label("allow")
+        need(len(deny) == len(allow) == 1, "exact-local-network-choice-labels")
+        question = [row for row in rows if "find devices" in row["text"].lower()]
+        need(len(question) == 1 and 0 < deny[0]["y"] - question[0]["y"] < 0.25 and
+             abs(deny[0]["y"] - allow[0]["y"]) < 0.02 and 0 < allow[0]["x"] - deny[0]["x"] < 0.25,
+             "exact-local-network-choice-geometry")
+        screen = capabilities["screen"]
+        self.command("pointer.click", x=round(deny[0]["x"] * screen["width"]),
+                     y=round(deny[0]["y"] * screen["height"]))
+        time.sleep(1)
+        evidence["denied"] = not prompt(records(self.image("after-local-network-denial")))
+        target.write_text(json.dumps(evidence, indent=2) + "\n")
+        need(evidence["denied"], "local-network-prompt-remained-after-denial")
 
     def page(self, title):
         self.click(title, category="button")
@@ -215,6 +264,9 @@ class UI:
     def record_session(self, name, exercise):
         self.command("recording.start", duration_seconds=25)
         try:
+            # Give the action's 2 fps recorder time for a frame before the
+            # first serialized AX command holds its capture lock.
+            time.sleep(1)
             exercise()
         except Exception:
             try:
@@ -300,16 +352,21 @@ def observe(work, action, media):
                 ui.image(name + "-failure")
             except Exception:
                 pass
+            try:
+                ui.snapshot(name + "-failure")
+            except Exception:
+                pass
         finally:
             save()
         return scenarios[name]["status"] == "Passed"
 
     def startup():
-        ui.image("first-window")
         capabilities = json.loads(client.fetch("/v2/capabilities"))
         results["commands"] = sorted(capabilities["commands"])
         if not {"element.wait", "element.click", "tree.snapshot"} <= set(capabilities["commands"]):
             raise Blocked("macOS Accessibility is unavailable to the action on this runner")
+        ui.local_network_decision(capabilities)
+        ui.snapshot("first-window")
         ui.page("Build tools")
         ui.click("Advanced · app connection details", contains=True)
         ui.node("Bundled runtime", category="heading")
