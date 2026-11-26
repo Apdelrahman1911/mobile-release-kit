@@ -258,10 +258,22 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
     def test_actual_jobs_preserve_each_original_cut_and_only_the_failed_part_retries(self):
         workflow = yaml(P.WORKFLOW); jobs = workflow['jobs']
         data_path=jobs['candidate-parts-data']['uses'].removeprefix('./')
-        data_command=yaml(data_path)['jobs']['source-bound-inputs']['steps'][-1]['run']
+        preflight_steps = yaml(data_path)['jobs']['source-bound-inputs']['steps']
+        data_step, = [step for step in preflight_steps
+                      if step.get('name') == 'Check closed part provenance, retry, archive and signing diagnostics']
+        data_command = data_step['run']
+        self.assertNotIn('if', data_step)
         self.assertIn('tests.desktop.test_macos_candidate_stages',data_command.split())
         self.assertIn('tests.desktop.test_macos_optional_arrays',data_command.split())
         self.assertNotIn('test_macos_candidate_stages.FixedSigningFailureDiagnosticTests',data_command)
+        release_step, = [step for step in preflight_steps
+                         if step.get('name') == 'Exercise matching package receipts and frozen media before production signing']
+        self.assertEqual(release_step['if'], "github.ref == 'refs/heads/main' && inputs.operation == 'main-release-preflight'")
+        self.assertIn(
+            'tests.desktop.test_macos_installed_staging.MacAndroidHelperPackagingData'
+            '.test_separate_producer_and_removal_graphs_preserve_their_own_bindings',
+            release_step['run'].split())
+        self.assertIn('tests.desktop.test_macos_release_media', release_step['run'].split())
         for scope,(profile,runner) in P.PROFILES.items():
             prefix = 'candidate-' + profile.lower()
             cuts = []
