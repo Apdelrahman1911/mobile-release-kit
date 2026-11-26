@@ -4,6 +4,7 @@ No real supplier archive, downloader, TLS connection, executable or installation
 is used. PublicVendorTransfer is replaced before every service run. Production
 descriptor/cancellation/ZIP/tar code is used on task-owned temporary fixtures.
 """
+from contextlib import contextmanager
 from dataclasses import replace
 import gzip
 import hashlib
@@ -158,16 +159,20 @@ def fake_transfer(payloads, calls, *, after=None):
     return Transfer
 
 
+@contextmanager
+def supplier_volume():
+    """Use real fixture I/O on bounded tmpfs with a modeled supplier volume."""
+    with patch.object(tool_acquisition, "os", wraps=os) as system:
+        system.fstatvfs.return_value = SimpleNamespace(f_frsize=4096, f_bavail=1024 * 1024)
+        yield system.fstatvfs
+
+
 class ToolAcquisitionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="mrk-tools-synthetic-")
         self.root = Path(self.temporary.name) / "cache"
         self.root.mkdir(mode=0o700)
-        # The full Linux suite uses bounded tmpfs. These tiny archive fixtures
-        # exercise real file I/O with a modeled supplier-volume capacity.
-        system = self.enterContext(patch.object(tool_acquisition, "os", wraps=os))
-        self.capacity = system.fstatvfs
-        self.capacity.return_value = SimpleNamespace(f_frsize=4096, f_bavail=1024 * 1024)
+        self.capacity = self.enterContext(supplier_volume())
         self.manifest, self.payloads = fixtures()
         self.calls = []
 

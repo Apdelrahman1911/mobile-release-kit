@@ -14,7 +14,7 @@ from mobile_release import _desktop_tool_acquisition_protocol as wire
 from mobile_release._tool_acquisition_spec import COMPONENTS, Component, canonical
 from mobile_release.tool_acquisition import ToolAcquisition
 from test_desktop_tool_acquisition_protocol import request, parse
-from test_tool_acquisition import FixtureOwner, fake_transfer, fixtures
+from test_tool_acquisition import FixtureOwner, fake_transfer, fixtures, supplier_volume
 
 
 def subset_request(missing):
@@ -96,7 +96,7 @@ class PartialToolAcquisition(unittest.TestCase):
         selected, kept = wire.component_partition(["sdk-build-tools", "gradle"], ["jdk", "sdk-platform"])
         self.assertEqual(kept, (Component.JDK, Component.SDK_PLATFORM))
         calls = []
-        with tempfile.TemporaryDirectory(prefix="mrk-partial-tools-") as temp:
+        with tempfile.TemporaryDirectory(prefix="mrk-partial-tools-") as temp, supplier_volume():
             root = Path(temp) / "cache"; root.mkdir(mode=0o700)
             # Existing user content is not an extraction destination or a lease.
             existing = Path(temp) / "existing-sdk"; existing.mkdir()

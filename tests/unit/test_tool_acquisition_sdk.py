@@ -23,7 +23,7 @@ from mobile_release._tool_acquisition_files import OutputTree
 from mobile_release.build_inputs import _Directory
 from mobile_release.desktop_tool_acquisition import ToolAcquisitionRun
 from mobile_release.tool_acquisition import ToolAcquisition, _Space
-from test_tool_acquisition import FixtureOwner, fake_transfer, fixtures
+from test_tool_acquisition import FixtureOwner, fake_transfer, fixtures, supplier_volume
 from test_tool_acquisition_partial import subset_request, staged
 from test_desktop_tool_acquisition_protocol import parse
 
@@ -89,6 +89,9 @@ def tree_snapshot(root):
 
 
 class SdkAssemblyTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(supplier_volume())
+
     def test_both_directions_copy_checked_half_fetch_only_missing_and_reuse_only_missing_cache(self):
         for component in SDK:
             with self.subTest(component=component), tempfile.TemporaryDirectory(prefix="mrk-sdk-copy-data-") as temp:
