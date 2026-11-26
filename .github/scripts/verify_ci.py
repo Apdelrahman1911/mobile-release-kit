@@ -2018,7 +2018,7 @@ def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
             outcome = outcomes.get(token) if closed else None
         if identifier is not None:
             observed = {"id": identifier}
-            # Optional timing is scoped to this header's immediately preceding
+            # Optional telemetry is scoped to this header's immediately preceding
             # line. The Linux runner can time an exact standard start header
             # before its outcome arrives. No timing is a completion receipt.
             if index:
@@ -2028,10 +2028,19 @@ def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
                 prefix, separator, scalar = preceding.partition(b"=")
                 if separator and (closed and prefix == b"MRK_NATIVE_ELAPSED_MS"
                                   or prefix == b"MRK_PYTHON_ELAPSED_MS"):
-                    if re.fullmatch(rb"(?:0|[1-9][0-9]{0,6})", scalar):
-                        elapsed = int(scalar)
-                        if elapsed <= 3_600_000:
-                            observed["elapsed_ms"] = elapsed
+                    number = rb"(0|[1-9][0-9]{0,6})"
+                    pattern = number
+                    if prefix == b"MRK_PYTHON_ELAPSED_MS":
+                        pattern += rb"(?: CPU_MS=" + number + rb" RSS_KIB=" + number + rb")?"
+                    timing = re.fullmatch(pattern, scalar)
+                    if timing and int(timing[1]) <= 3_600_000:
+                        metrics = timing.groups()[1:]
+                        if not metrics or metrics[0] is None:
+                            observed["elapsed_ms"] = int(timing[1])
+                        else:
+                            cpu_ms, rss_kib = map(int, metrics)
+                            if cpu_ms <= 3_600_000 and rss_kib <= 4 * 1024**2:
+                                observed.update(elapsed_ms=int(timing[1]), cpu_ms=cpu_ms, peak_rss_kib=rss_kib)
             value["last_observed_start"] = observed
             if outcome is not None:
                 value["last_observed_outcome"] = {**observed, "outcome": outcome}

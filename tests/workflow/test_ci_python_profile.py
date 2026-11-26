@@ -314,12 +314,14 @@ def _pure(module, fixture, **overrides):
         environ={"MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1"},
         umask=lambda value: fixture.event("umask", "fixed", value),
         chdir=lambda value: fixture.event("chdir", str(value), None))
-    limits = SimpleNamespace(**{"RLIMIT_" + name: name for name in fixture.limits}, getrlimit=fixture.getrlimit)
+    limits = SimpleNamespace(**{"RLIMIT_" + name: name for name in fixture.limits}, getrlimit=fixture.getrlimit,
+                             RUSAGE_SELF=0, getrusage=lambda _who: SimpleNamespace(ru_maxrss=4567))
     framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
         TextTestRunner=unittest.TextTestRunner, TestLoader=Mock(side_effect=AssertionError("unexpected discovery")))
     values = {"os": system, "resource": limits, "Path": fixture.path,
         "time": SimpleNamespace(monotonic=lambda: fixture.now,
-                                monotonic_ns=lambda: round(fixture.now * 1_000_000_000)),
+                                monotonic_ns=lambda: round(fixture.now * 1_000_000_000),
+                                process_time_ns=lambda: 123_000_000),
         "sys": SimpleNamespace(platform=fixture.platform, stdout=fixture.stdout, stderr=fixture.stderr, path=[],
             exc_info=sys.exc_info, flags=SimpleNamespace(isolated=1, dont_write_bytecode=1)),
         "subprocess": SimpleNamespace(), "selectors": SimpleNamespace(), "shutil": SimpleNamespace(),
@@ -659,7 +661,7 @@ class CIPythonProfileTests(unittest.TestCase):
         callback = {"id": expected[1], "outcome": "error", "category": "os-error", "errno": errno.EFBIG}
         self.assertEqual(report["details"]["failure_callbacks"], [callback])
         self.assertEqual(report["details"]["storage_profile"], _profile_details())
-        self.assertEqual(fixture.stderr.getvalue().count("MRK_PYTHON_ELAPSED_MS=0\n"), 2)
+        self.assertEqual(fixture.stderr.getvalue().count("MRK_PYTHON_ELAPSED_MS=0 CPU_MS=123 RSS_KIB=4567\n"), 2)
         self.assertIn("PRIVATE_SUBTEST_PARAMETER", fixture.stderr.getvalue())
         self.assertNotIn("PRIVATE_", stdout)
         self.assertEqual(fixture.fds, {})

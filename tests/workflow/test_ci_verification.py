@@ -1782,6 +1782,16 @@ class CIControllerContractTests(unittest.TestCase):
                             + linux_timing + b"120\n" + header(second) + b" ... ")
         self.assertEqual(value["last_observed_start"], {"id": second, "elapsed_ms": 120})
         self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": "ok", "elapsed_ms": 110})
+        value = observation(linux_timing + b"110 CPU_MS=83 RSS_KIB=22000\n" + header(first) + b" ... ok\n"
+                            + linux_timing + b"120 CPU_MS=92 RSS_KIB=22120\n" + header(second) + b" ... ")
+        self.assertEqual(value["last_observed_start"],
+                         {"id": second, "elapsed_ms": 120, "cpu_ms": 92, "peak_rss_kib": 22120})
+        self.assertEqual(value["last_observed_outcome"],
+                         {"id": first, "outcome": "ok", "elapsed_ms": 110, "cpu_ms": 83, "peak_rss_kib": 22000})
+        for scalar in (b"120 CPU_MS=92", b"120 CPU_MS=092 RSS_KIB=22120", b"120 CPU_MS=3600001 RSS_KIB=22120",
+                       b"120 CPU_MS=92 RSS_KIB=4194305", b"120 CPU_MS=92 RSS_KIB=" + private):
+            value = observation(linux_timing + scalar + b"\n" + header(second) + b" ... ")
+            self.assertEqual(value["last_observed_start"], {"id": second})
         value = observation(linux_timing + b"120\n" + private + b"\n" + header(second) + b" ... ")
         self.assertEqual(value["last_observed_start"], {"id": second})
         self.assertIsNone(value["last_observed_outcome"])

@@ -1278,6 +1278,9 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
         allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
         monotonic_ns = time.monotonic_ns
         started_ns = monotonic_ns()
+        if selection == "full":
+            process_time_ns = time.process_time_ns
+            getrusage, rusage_self = resource.getrusage, resource.RUSAGE_SELF
 
         class Result(unittest.TextTestResult):
             def startTest(self, test):
@@ -1290,9 +1293,11 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                          and identifier not in {item["id"] for item in observations}, "TEST_STARTED_ID")
                 observations.append({"id": identifier, "outcome": "incomplete"})
                 if selection == "full":
-                    # Stderr survives a timeout before the final JSON report.
+                    # Stderr survives abrupt exit before the final JSON report.
                     elapsed_ms = (monotonic_ns() - started_ns) // 1_000_000
-                    self.stream.writeln(f"\nMRK_PYTHON_ELAPSED_MS={elapsed_ms}")
+                    cpu_ms = process_time_ns() // 1_000_000
+                    rss_kib = getrusage(rusage_self).ru_maxrss  # Linux reports KiB.
+                    self.stream.writeln(f"\nMRK_PYTHON_ELAPSED_MS={elapsed_ms} CPU_MS={cpu_ms} RSS_KIB={rss_kib}")
                 super().startTest(test)
 
             def record(self, test, outcome, error=None):
