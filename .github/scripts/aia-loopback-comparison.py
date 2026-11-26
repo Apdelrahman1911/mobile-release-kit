@@ -60,44 +60,36 @@ def evaluate(route, port, deadline):
 
 
 def issuer_extension(authority, fixture, expected_uri):
-    """Read only the synthetic leaf's AIA property using Security.framework."""
+    """Observe the same borrowed issuer-URL array used by trustd's fetch path."""
     import ctypes as C
-    import plistlib
-
-    def contains(value):
-        if isinstance(value, dict):
-            return any(contains(item) for item in value.values())
-        if isinstance(value, list):
-            return any(contains(item) for item in value)
-        return type(value) is str and value == expected_uri
 
     owner = authority._Trust(fixture["leaf"], fixture["root"])
     ptr = C.c_void_p
     try:
-        copy_values = owner.security.SecCertificateCopyValues
-        copy_values.restype, copy_values.argtypes = ptr, [ptr, ptr, C.POINTER(ptr)]
-        oid_aia = ptr.in_dll(owner.security, "kSecOIDAuthorityInfoAccess").value
-        error = ptr()
-        values = copy_values(owner._certificate(fixture["leaf"]), owner._array([oid_aia]), C.byref(error))
-        if error.value:
-            owner._own(error.value)
-        if not values:
-            return {"propertyAvailable": False, "uriMatches": False}
-        owner._own(values)
-        serialize = owner.foundation.CFPropertyListCreateData
-        serialize.restype, serialize.argtypes = ptr, [ptr, ptr, C.c_long, C.c_ulong, C.POINTER(ptr)]
-        error = ptr()
-        data = serialize(None, values, 200, 0, C.byref(error))  # Binary plist, read-only public properties.
-        if error.value:
-            owner._own(error.value)
-        if not data:
-            return {"propertyAvailable": False, "uriMatches": False}
-        raw = owner._own(data)
-        size, address = owner.data_length(raw), owner.data_bytes(raw)
-        if not address or not 0 < size < 16384:
-            return {"propertyAvailable": False, "uriMatches": False}
-        document = plistlib.loads(C.string_at(address, size))
-        return {"propertyAvailable": bool(document), "uriMatches": contains(document)}
+        get_issuers = getattr(owner.security, "SecCertificateGetCAIssuers", None)
+        if get_issuers is None:
+            return {"accessorAvailable": False, "uriCount": None, "uriMatches": False}
+        get_issuers.restype, get_issuers.argtypes = ptr, [ptr]
+        leaf = owner._certificate(fixture["leaf"])
+        urls = get_issuers(leaf)  # The certificate owns this Get-rule result.
+        if not urls:
+            return {"accessorAvailable": True, "uriCount": 0, "uriMatches": False}
+        count = owner.array_count(urls)
+        if not 0 <= count <= 8:
+            return {"accessorAvailable": True, "uriCount": None, "uriMatches": False}
+        url_text = owner.foundation.CFURLGetString
+        url_text.restype, url_text.argtypes = ptr, [ptr]
+        string_to_bytes = owner.foundation.CFStringGetCString
+        string_to_bytes.restype = C.c_ubyte
+        string_to_bytes.argtypes = [ptr, ptr, C.c_long, C.c_uint32]
+        for index in range(count):
+            item = owner.array_item(urls, index)
+            text = url_text(item) if item else None
+            result = C.create_string_buffer(1024)
+            if (text and string_to_bytes(text, result, len(result), 0x08000100)
+                    and result.value == expected_uri.encode("ascii")):
+                return {"accessorAvailable": True, "uriCount": count, "uriMatches": True}
+        return {"accessorAvailable": True, "uriCount": count, "uriMatches": False}
     finally:
         owner.close()
 
