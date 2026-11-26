@@ -5451,7 +5451,7 @@ final class NormalAppUITests: XCTestCase {
         try require(input.value as? String == text, "typed synthetic field did not retain its exact value")
     }
     @MainActor private func select(_ root: XCUIElement, label: String, value: String,
-                                  renderer: XCUIElement, line: UInt = #line) throws {
+                                  renderer: XCUIElement, keyboard: Bool = false, line: UInt = #line) throws {
         var phase = "control"
         defer {
             if guidedProductSurface && phase != "settled" {
@@ -5460,6 +5460,10 @@ final class NormalAppUITests: XCTestCase {
         }
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
                                      in: root, enabled: true, line: line)
+        if keyboard && control.value as? String == value {
+            phase = "settled"
+            return
+        }
         phase = "reveal"
         try reveal(control, in: renderer, line: line)
         // WebKit presents an AppKit NSMenu on a transient view, not as a
@@ -5468,6 +5472,17 @@ final class NormalAppUITests: XCTestCase {
         let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         control.click()
         phase = "item"
+        if keyboard {
+            guard let first = value.first else { throw Refusal.condition("credential menu choice is empty") }
+            app.typeKey(String(first).lowercased(), modifierFlags: [])
+            app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+            phase = "written-value"
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: control)
+            try require(XCTWaiter.wait(for: [selected], timeout: try remaining(5)) == .completed,
+                        "the exact keyboard menu choice was not selected", line: line)
+            phase = "settled"
+            return
+        }
         // A menu-tree query can include closed menu-bar subtrees. The intended
         // exact menu item, not an empty application menu census, is the action.
         let item = try waitElement(app.menuItems.matching(identifier: value), in: app, enabled: true, line: line)
@@ -6168,9 +6183,9 @@ final class NormalAppUITests: XCTestCase {
             let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
             let storage = try waitElement(named(renderer, storageLabel), in: renderer)
             selectedStorage = storage
-            try select(storage, label: "Platform", value: "iOS", renderer: renderer)
-            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+            try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboard: guidedProductSurface)
             try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
             try privateStatus(storage, action: "open-vault")
             _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
@@ -6204,10 +6219,10 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("persistence-context-invalidation") {
             try privateRecordCount(storage, count: 2, assigned: 2)
-            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer, keyboard: guidedProductSurface)
             try privateContext(storage, renderer: renderer)
             try privateRecordCount(storage, count: 2, assigned: 0)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboard: guidedProductSurface)
             try privateContext(storage, renderer: renderer)
             try privateRecordCount(storage, count: 2, assigned: 0)
             try fixture.assertStoreUnchanged()
@@ -6295,9 +6310,9 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
                                 failures: Self.privateInputFailures)
             try privateRecordCount(storage, count: 0, assigned: 0)
-            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer)
-            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: restartedRenderer)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer)
+            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: restartedRenderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer, keyboard: guidedProductSurface)
             // Same default vault/provider/helper, never a second Initialize or
             // fixture admission. Opening must be locked with no exposed rows.
             try openAndUnlockPrivateVault(storage, renderer: restartedRenderer)
@@ -6903,7 +6918,7 @@ final class NormalAppUITests: XCTestCase {
             try settings("iOS")
             try selected("Xcode project", relative: "ios/Example.xcodeproj")
             try selected("Xcode workspace", relative: "ios/Example.xcworkspace")
-            try press(renderer, "Review draft changes", renderer: renderer)
+            try press(renderer, guidedProductSurface ? "Check what’s needed" : "Review draft changes", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "Current draft · retained baseline"), in: renderer)
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation needs attention")),
                                 in: renderer)
@@ -8352,6 +8367,8 @@ final class NormalAppUITests: XCTestCase {
                     _ = try waitForSnapshotIdentity(identity, in: renderer)
                 }
                 try fixture.assertUnchanged()
+            }
+            try stage("ios-unsigned-diagnostics") {
                 try observeIOSToolDiagnostics(renderer)
                 try fixture.assertUnchanged()
             }
