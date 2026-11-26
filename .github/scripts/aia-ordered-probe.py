@@ -5,16 +5,25 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import runpy
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import types
 
 SCRIPT = Path(__file__).resolve()
 BASE = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
-AUTHORITY = runpy.run_path(str(SCRIPT.with_name("ci_native_authority.py")))
+HOST = 'issuer.mrk.test'
+helper = SCRIPT.with_name("ci_native_authority.py")
+original = 'http://127.0.0.1:{port}'
+source = helper.read_text(encoding="utf-8")
+if source.count(original) != 1:
+    raise RuntimeError("reviewed fixture URL seam changed")
+module = types.ModuleType("_mrk_aia_local_test_host")
+module.__file__ = str(helper)
+exec(compile(source.replace(original, 'http://' + HOST + ':{port}'), str(helper), "exec"), vars(module))
+AUTHORITY = vars(module)
 CONDITIONS = (
     (False, False),
     (False, True),
@@ -41,7 +50,7 @@ def scratch(path):
 def fixture_set(work, port, deadline):
     fixtures = AUTHORITY["_fixtures"](work, port, deadline)
     for fixture in fixtures:
-        url = f"http://127.0.0.1:{port}" + fixture["route"]
+        url = f"http://{HOST}:{port}" + fixture["route"]
         require(fixture["leaf"].count(url.encode("ascii")) == 1, "original loopback URI differs")
     return fixtures
 

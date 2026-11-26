@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import runpy
 import subprocess
 import sys
@@ -20,6 +21,7 @@ ORDERED = runpy.run_path(str(HERE / "aia-ordered-probe.py"))
 STAGING = runpy.run_path(str(HERE / "aia-staging-probe.py"))
 BASE = ORDERED["BASE"]
 AUTHORITY = ORDERED["AUTHORITY"]
+HOST = ORDERED["HOST"]
 require = ORDERED["require"]
 TIME_LIMIT = 22
 REQUEST = "request for uri:"
@@ -107,7 +109,7 @@ def probe(work, responder, fixtures):
     def sanity_check():
         # The fourth fixture has its own URL. Run after every trust case.
         fixture = fixtures[-1]
-        conn = HTTPConnection("127.0.0.1", responder.port, timeout=2)
+        conn = HTTPConnection(HOST, responder.port, timeout=2)
         try:
             conn.request("GET", fixture["route"])
             reply = conn.getresponse()
@@ -122,11 +124,11 @@ def probe(work, responder, fixtures):
         # Every leaf/URL here starts cold. The public control runs after local cases.
         for index, label, mode in ((0, "loopback-online", "online"), (1, "loopback-offline", "offline"),
                                    (2, "loopback-mutant", "online"), (0, "loopback-complete-offline", "complete")):
-            url = f"http://127.0.0.1:{responder.port}" + fixtures[index]["route"]
+            url = f"http://{HOST}:{responder.port}" + fixtures[index]["route"]
             window(rows, label, url, lambda: child(
                 "aia-ordered-probe.py", work, mode, str(index), str(responder.port), "-",
             ))
-        window(rows, "direct-loopback-control", "", sanity_check)
+        window(rows, "direct-loopback-control", f"http://{HOST}:{responder.port}" + fixtures[-1]["route"], sanity_check)
         window(rows, "public-leaf-offline", f"http://{STAGING['ISSUER_HOST']}/",
                lambda: child("aia-staging-probe.py", work, "leaf-offline-before"))
         window(rows, "public-leaf-online", f"http://{STAGING['ISSUER_HOST']}/",
@@ -134,7 +136,7 @@ def probe(work, responder, fixtures):
         return rows
 
     host = STAGING["ISSUER_HOST"]
-    needle = f"127.0.0.1:{responder.port}"
+    needle = f"{HOST}:{responder.port}"
     predicate = (
         f'process == "trustd" AND (eventMessage CONTAINS "{host}" OR '
         f'eventMessage CONTAINS "{needle}" OR category == "caissuer" OR category == "http" '
@@ -149,7 +151,7 @@ def report(responder, evidence):
     for label, url, start, end, details in windows:
         within = [message for stamp, message in events if start <= stamp <= end + 0.08]
         counts = Counter(key for line in within for key, marker in CATEGORIES.items() if marker in line)
-        route = "/" + url.split("/", 3)[-1] if label.startswith("loopback-") else None
+        route = "/" + url.split("/", 3)[-1] if url and not label.startswith("public-") else None
         if label == "loopback-complete-offline":
             route = None  # Same leaf as online. Listener hits belong to its cold evaluation.
         output.append({
@@ -178,6 +180,8 @@ def report(responder, evidence):
 def run():
     require(sys.platform == "darwin" and os.uname().machine == "arm64" and os.getuid() != 0,
             "requires a disposable nonroot Apple Silicon runner")
+    addresses = {result[4][0] for result in socket.getaddrinfo(HOST, 80, type=socket.SOCK_STREAM)}
+    require(addresses == {"127.0.0.1"}, "test name must resolve to IPv4 loopback only")
     STAGING["same_issuer_from_http"](STAGING["certificates"]())
     previous = Path.cwd()
     for key in ("prepare_aia", "_fixtures"):

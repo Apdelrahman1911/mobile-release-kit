@@ -1,4 +1,4 @@
-name: Correlate macOS 26 issuer scheduling with loopback packets and replies
+name: Compare a reserved test hostname on macOS 26 loopback
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  issuer-correlation:
+  issuer-alias:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.ref == 'refs/heads/verify/macos-native-issuer-trustd' &&
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
-      - name: Capture exact trustd URL, transport and responder evidence
+      - name: Measure issuer fetch with a test hostname on the original loopback listener
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
@@ -38,5 +38,26 @@ jobs:
           [[ "$(git hash-object .github/scripts/ci_native_authority.py)" == cdec3376c8afef2306af1b0bcde78153973c5252 ]]
           printf 'OS=%s build=%s image=%s\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)" "$ImageVersion"
           umask 077
+          host_file=/private/etc/hosts
+          original_hosts="$(mktemp "$RUNNER_TEMP/mrk-hosts-before.XXXXXX")"
+          expected_hosts="$(mktemp "$RUNNER_TEMP/mrk-hosts-during.XXXXXX")"
+          cp "$host_file" "$original_hosts"
+          if grep -Fiq 'issuer.mrk.test' "$original_hosts"; then
+            exit 1
+          fi
+          cat "$original_hosts" > "$expected_hosts"
+          printf '\n127.0.0.1 issuer.mrk.test # mrk-aia-diagnostic\n' >> "$expected_hosts"
+          restore_hosts() {
+            if cmp -s "$host_file" "$original_hosts"; then
+              return
+            fi
+            cmp -s "$host_file" "$expected_hosts" || return 1
+            sudo -n /bin/cp "$original_hosts" "$host_file"
+            cmp -s "$host_file" "$original_hosts"
+            printf '%s\n' 'MRK_HOSTS_RESTORED=1'
+          }
+          trap restore_hosts EXIT
+          sudo -n /bin/cp "$expected_hosts" "$host_file"
+          cmp -s "$host_file" "$expected_hosts"
           env -i PATH="$PATH" RUNNER_TEMP="$RUNNER_TEMP" LC_ALL=C \
             python -I -B .github/scripts/aia-correlated-probe.py
