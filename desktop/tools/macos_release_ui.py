@@ -176,12 +176,14 @@ class UI:
     def reveal(self, name, **selectors):
         # The action retains one snapshot. Read the window first so the
         # subsequent element observation is the one eligible for a click.
+        pid = self.payload_pid()
         root = self.command("tree.snapshot", limit=1)["nodes"]
         snapshot, node = self.node(name, **selectors)
-        need(len(root) == 1 and root[0]["role"] == "window" and root[0]["bounds"] and
-             node["id"].startswith(root[0]["id"] + "."), "original-focused-app-window")
+        need(len(root) == 1 and root[0]["role"] in ("window", "sheet") and root[0]["bounds"] and
+             root[0]["id"] == f"mac:{pid}:0" and node["id"].startswith(root[0]["id"] + "."),
+             "original-focused-app-window-or-sheet")
         window = root[0]["bounds"]
-        top = max(0, window["y"] + 35)
+        top = max(0, window["y"] + (35 if root[0]["role"] == "window" else 3))
         bottom = min(self.screen["height"] - 65, window["y"] + window["height"] - 8)
         left = max(0, window["x"] + 3)
         right = min(self.screen["width"], window["x"] + window["width"]) - 3
@@ -302,10 +304,13 @@ class UI:
         need(frame.startswith((b"GIF87a", b"GIF89a")), "ui-recording-gif")
         (self.evidence / f"{name}.gif").write_bytes(frame)
 
-    def resize(self, width, height):
+    def payload_pid(self):
         active = call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN).stdout.splitlines()
         need(len(active) == 1, "exact-original-payload")
-        pid = int(active[0])
+        return int(active[0])
+
+    def resize(self, width, height):
+        pid = self.payload_pid()
 
         def window():
             rows = [row for row in self.command("windows.list")["windows"] if row["process_id"] == pid]
