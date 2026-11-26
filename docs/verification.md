@@ -382,7 +382,11 @@ capture/deadline/EOF/finality checks remain mandatory.
 
 The fixed AIA probe uses four fresh synthetic chains/unique loopback issuer URLs
 under the same authority policy: direct client networking remains denied, with
-no AIA socket exception. The fixed trust-service route must still produce real
+no AIA socket exception. The URLs use `http://localhost:8080` because hosted
+macOS 26.7.2's trust service rejects numeric loopback hosts and ephemeral HTTP
+ports before scheduling issuer fetches. The controller checks that localhost
+resolves only to loopback and binds its own IPv4 loopback listener on port 8080.
+An occupied port fails the check. The fixed trust-service route must still produce real
 online/mutant fetches; a provider that also prevents those fetches fails admission.
 After a common explicitly enabled network baseline, the online control must
 actually fetch and accept; the offline

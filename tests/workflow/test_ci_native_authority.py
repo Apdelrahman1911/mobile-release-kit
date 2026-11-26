@@ -1167,10 +1167,10 @@ class NativeAuthorityTests(unittest.TestCase):
                     patch.object(m, "_write_new", side_effect=lambda path, data: writes.__setitem__(path.name, data)), \
                     patch.object(m, "_read_public", side_effect=lambda path: b"\x30" + path.name.encode()):
                 if failure is None:
-                    m.prepare_aia(60123, 100.0)
+                    m.prepare_aia(8080, 100.0)
                 else:
                     with self.assertRaises(OSError if failure == "child" else BaseExceptionGroup):
-                        m.prepare_aia(60123, 100.0)
+                        m.prepare_aia(8080, 100.0)
             native.assert_not_called()
             self.assertTrue(all(argv[0] == "/usr/bin/openssl" for argv in events))
             if failure == "child":
@@ -1184,6 +1184,7 @@ class NativeAuthorityTests(unittest.TestCase):
                 self.assertEqual(len(removed), 36)
                 self.assertTrue(all(name.endswith((".key", ".pem", ".csr", ".cnf")) for name in removed))
                 manifest = json.loads(writes["aia.json"])
+                self.assertEqual(manifest["port"], 8080)
                 self.assertEqual([row["case"] for row in manifest["cases"]], list(cases))
                 self.assertEqual({name for name in writes if name.endswith(".cnf")}, {f"{case}.cnf" for case in cases})
                 expected_requests = []
@@ -1191,7 +1192,7 @@ class NativeAuthorityTests(unittest.TestCase):
                     config = writes[f"{case}.cnf"]
                     self.assertNotIn(b"prompt=no", config)
                     self.assertTrue(config.startswith(b"[req]\ndistinguished_name=dn\n[dn]\nCN=unused\n"))
-                    expected = f"authorityInfoAccess=caIssuers;URI:http://127.0.0.1:60123/mrk-aia/{index:032x}/{case}.der\n"
+                    expected = f"authorityInfoAccess=caIssuers;URI:http://localhost:8080/mrk-aia/{index:032x}/{case}.der\n"
                     self.assertIn(expected.encode(), config)
                     # Expected roles/nonces come from this fixed test inventory,
                     # never by interpreting a subject or filename from argv.
@@ -1213,16 +1214,38 @@ class NativeAuthorityTests(unittest.TestCase):
                         for flag in ("-config", "-subj", "-keyout", "-out")))
                 self.assertEqual(observed_requests, expected_requests)
 
+    def test_responder_requires_the_fixed_localhost_endpoint(self):
+        m = self.module
+        for addresses in (("127.0.0.1", "::1"), ("127.0.0.1", "192.0.2.1"), ("::1",)):
+            with self.subTest(addresses=addresses), clock(m):
+                listener = Mock()
+                listener.getsockname.return_value = ("127.0.0.1", 8080)
+                lookup = Mock(return_value=[(None, None, None, "", (host, 8080)) for host in addresses])
+                with patch.object(m.socket, "getaddrinfo", lookup), patch.object(m.socket, "socket", return_value=listener) as acquire, \
+                        patch.object(m.threading, "Event"):
+                    if addresses == ("127.0.0.1", "::1"):
+                        responder = m._Responder(100.0)
+                        self.assertEqual(responder.port, 8080)
+                        listener.bind.assert_called_once_with(("127.0.0.1", 8080))
+                        listener.listen.assert_called_once_with(8)
+                    else:
+                        with self.assertRaisesRegex(m.NativeControlError, "localhost resolution differs"):
+                            m._Responder(100.0)
+                        acquire.assert_not_called()
+                lookup.assert_called_once_with("localhost", 8080, type=m.socket.SOCK_STREAM)
+
     def test_responder_setup_failure_does_not_lose_listener_close_error(self):
         m = self.module
         listener = SimpleNamespace(settimeout=Mock(), bind=Mock(side_effect=OSError("bind")),
                                    close=Mock(side_effect=OSError("close")))
-        fake_socket = SimpleNamespace(AF_INET=2, SOCK_STREAM=1, socket=Mock(return_value=listener))
+        fake_socket = SimpleNamespace(AF_INET=2, SOCK_STREAM=1, socket=Mock(return_value=listener),
+                                      getaddrinfo=Mock(return_value=[(None, None, None, "", ("127.0.0.1", 8080))]))
         with clock(m), patch.object(m, "socket", fake_socket), \
                 patch.object(m, "threading", SimpleNamespace(Event=lambda: SimpleNamespace())), \
                 self.assertRaises(BaseExceptionGroup) as raised:
             m._Responder(100.0)
         self.assertEqual(len(raised.exception.exceptions), 2)
+        listener.bind.assert_called_once_with(("127.0.0.1", 8080))
         listener.close.assert_called_once_with()
 
     def test_responder_cleanup_independently_attempts_join_and_close(self):
