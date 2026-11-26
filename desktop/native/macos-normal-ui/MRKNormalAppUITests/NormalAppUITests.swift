@@ -5452,21 +5452,31 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func select(_ root: XCUIElement, label: String, value: String,
                                   renderer: XCUIElement, line: UInt = #line) throws {
+        var phase = "control"
+        defer {
+            if guidedProductSurface && phase != "settled" {
+                print("MRK_GUIDED_SELECT=v1;phase=\(phase);line=\(line)")
+            }
+        }
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
                                      in: root, enabled: true, line: line)
+        phase = "reveal"
         try reveal(control, in: renderer, line: line)
         // WebKit presents an AppKit NSMenu on a transient view, not as a
         // descendant of the HTML select. Monitor the already-owned payload;
         // this never launches or adopts another application.
         let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         control.click()
+        phase = "item"
         // A menu-tree query can include closed menu-bar subtrees. The intended
         // exact menu item, not an empty application menu census, is the action.
         let item = try waitElement(app.menuItems.matching(identifier: value), in: app, enabled: true, line: line)
         try require(item.isHittable, "owned selection menu item is not actionable")
         item.click()
+        phase = "written-value"
         try waitGone(item, line: line)
         try require(control.value as? String == value, "selected value was not observed")
+        phase = "settled"
     }
     @MainActor private func expand(_ root: XCUIElement, prefix: String, renderer: XCUIElement,
                                   line: UInt = #line) throws {
