@@ -6618,9 +6618,22 @@ final class NormalAppUITests: XCTestCase {
             let picker = try waitForGuidedProjectPicker(window)
             try goToFolder(picker, path: project)
             try nativeOpen(picker)
-            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
-                                timeout: 24, failures: Self.guidedWorkspaceFailures + ["Project read details"])
+            let failures = Self.guidedWorkspaceFailures + ["The project could not be selected", "Project read details"]
+            guard let clock = caseClock, let journeyDeadline else {
+                throw Refusal.condition("recovery project selection deadline is missing")
+            }
+            let selectionDeadline = min(journeyDeadline, try clock.end(within: 24))
+            let title = URL(fileURLWithPath: project).lastPathComponent
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", title)),
+                                in: renderer, timeout: try clock.remaining(5, before: selectionDeadline),
+                                failures: failures, snapshotObservation: true)
+            let selectedPath = renderer.staticTexts.matching(identifier: project)
+            if selectedPath.count == 0 {
+                try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            }
+            _ = try waitElement(selectedPath, in: renderer,
+                                timeout: try clock.remaining(24, before: selectionDeadline), failures: failures,
+                                snapshotObservation: true)
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)

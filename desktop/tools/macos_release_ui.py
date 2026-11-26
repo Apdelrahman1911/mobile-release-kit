@@ -19,10 +19,19 @@ FIXTURE = Path("tests/fixtures/macos_android_journey")
 VERSION_FILE = Path("public/version.properties")
 CONFIG_FILE = Path("release/mobile-release.json")
 PAYLOAD_PATTERN = r"[/]MobileReleaseKitPayload\.app/Contents/MacOS/mobile-release-kit-desktop( |$)"
-PAGES = (
-    "Overview", "Build & release", "Store listing", "Signing & accounts",
-    "Project settings", "Build tools", "GitHub", "Build files", "Recover work", "Automation",
-)
+CONSOLE_OCR = Path(__file__).with_name("macos_release_ui_privacy.swift")
+PAGE_HEADINGS = {
+    "Overview": "Get your app ready.",
+    "Build & release": "Build and release your app",
+    "Store listing": "Write your Store listing",
+    "Signing & accounts": "Signing and Store accounts",
+    "Project settings": "Set up your project",
+    "Build tools": "Check your build tools",
+    "GitHub": "Connect GitHub",
+    "Build files": "Inspect a build",
+    "Recover work": "Check interrupted work safely",
+    "Automation": "Let a command-line tool help",
+}
 
 
 class Blocked(Exception):
@@ -53,6 +62,24 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def detach_install_media(mount, evidence):
+    attempts = []
+    try:
+        for attempt in range(5):
+            result = call("/usr/bin/hdiutil", "detach", str(mount), timeout=35, check=False)
+            attempts.append(dict(returnCode=result.returncode, error=result.stderr.decode(errors="replace")[-500:]))
+            if result.returncode != 16 or attempt == 4:
+                return result.returncode
+            # Installer can retain the read-only image briefly after its
+            # success reply. Retry the detach, never Installer or a forced eject.
+            time.sleep(2)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        attempts.append(dict(error=type(error).__name__))
+        return None
+    finally:
+        (evidence / "detach-install-media.json").write_text(json.dumps(attempts, indent=2) + "\n")
+
+
 def install(media, work):
     manifest = json.loads((media / "RELEASE-MANIFEST.json").read_bytes())
     name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-Install.dmg"
@@ -73,15 +100,18 @@ def install(media, work):
                        timeout=180, check=False)
         (work / "evidence/installer.log").write_bytes(outcome.stdout[-65536:] + outcome.stderr[-65536:])
         need(outcome.returncode == 0, "installer-original-return")
+        state = json.loads(call("/usr/bin/sudo", "-n", "/bin/cat", str(PRODUCT / "installation-v2.json")).stdout)
+        release = state["current"]["release"]
+        need((release["sourceCommit"], release["packageVersion"], release["packageSha256"]) ==
+             (manifest["sourceCommit"], manifest["version"], expected["sha256"]), "native-installed-identity")
+        call("/usr/bin/codesign", "--verify", "--strict", str(APP))
+        call("/usr/bin/codesign", "--verify", "--strict", str(PRODUCT / "Mobile Release Kit.app"))
+        installed = dict(sourceCommit=release["sourceCommit"], packageSha256=expected["sha256"],
+                         packageVersion=release["packageVersion"], nativeSignaturesVerified=True)
+        (work / "evidence/INSTALLED.json").write_text(json.dumps(installed, indent=2) + "\n")
     finally:
-        call("/usr/bin/hdiutil", "detach", str(mount))
-    state = json.loads(call("/usr/bin/sudo", "-n", "/bin/cat", str(PRODUCT / "installation-v2.json")).stdout)
-    release = state["current"]["release"]
-    need((release["sourceCommit"], release["packageVersion"], release["packageSha256"]) ==
-         (manifest["sourceCommit"], manifest["version"], manifest["packages"]["Install.pkg"]["sha256"]),
-         "native-installed-identity")
-    call("/usr/bin/codesign", "--verify", "--strict", str(APP))
-    call("/usr/bin/codesign", "--verify", "--strict", str(PRODUCT / "Mobile Release Kit.app"))
+        detached = detach_install_media(mount, work / "evidence")
+    need(detached == 0, "installer-mounted-media-still-busy")
     shutil.copytree(FIXTURE, work / "MRK Verification Android")
     project = work / "MRK Verification Android"
     call("/usr/bin/git", "-C", str(project), "init", "-b", "main")
@@ -91,33 +121,100 @@ def install(media, work):
 
 
 class UI:
-    def __init__(self, client, evidence):
+    def __init__(self, client, evidence, screen):
         self.client = client
         self.evidence = evidence
+        self.screen = screen
         self.count = 0
+        self.project_name = None
 
     def command(self, name, **params):
-        result = self.client.command(name, params)
         self.count += 1
-        code = result.get("error", {}).get("code")
-        with (self.evidence / "trace.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(dict(sequence=self.count, timeNs=time.time_ns(), command=name,
-                                         passed=result["ok"], error=code)) + "\n")
-        need(result["ok"], f"{name}-{code}")
+        event = dict(sequence=self.count, timeNs=time.time_ns(), command=name, passed=False)
+        if "selector" in params:
+            event["selector"] = params["selector"]
+        if name in ("element.click", "pointer.click", "pointer.scroll"):
+            event["target"] = {key: params[key] for key in ("id", "x", "y", "dy") if key in params}
+        try:
+            result = self.client.command(name, params)
+            event.update(passed=result["ok"], error=(result.get("error") or {}).get("code"))
+        except Exception as error:
+            event.update(error=type(error).__name__, httpStatus=getattr(error, "status", None))
+            payload = getattr(error, "payload", None)
+            if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+                event["errorCode"] = payload["error"].get("code")
+            raise
+        finally:
+            with (self.evidence / "trace.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event) + "\n")
+        need(result["ok"], f"{name}-{event['error']}")
         return result["result"]
 
-    def node(self, name, *, category=None, contains=False):
-        selector = {"text_contains" if contains else "name": name, "visible": True}
+    def node(self, name, *, category=None, contains=False, enabled=False, actionable=False, region=None):
+        selector = {"text_contains": name, "visible": True}
         if category:
             selector["role"] = category
-        found = self.command("element.wait", selector=selector, timeout_ms=16000)
-        need(found["matched"] == 1, f"ambiguous-element-{name}")
-        return found["snapshot_id"], found["nodes"][0]
+        if enabled:
+            selector["enabled"] = True
+        if region is None:
+            found = self.command("element.wait", selector=selector, state="present", timeout_ms=10000)
+            nodes = found["nodes"]
+        else:
+            found = self.command("tree.snapshot", limit=300)
+            parents = [row for row in found["nodes"] if row["name"] == region and row["visible"]]
+            need(len(parents) == 1, f"missing-or-ambiguous-region-{region}")
+            prefix = parents[0]["id"] + "."
+            nodes = [row for row in found["nodes"] if row["id"].startswith(prefix) and row["visible"]
+                     and (not enabled or row["enabled"]) and (category is None or row["role"] == category)]
+        if not contains:
+            nodes = [node for node in nodes if name in (node.get("name"), node.get("text"))]
+        if actionable and not category:
+            nodes = [node for node in nodes if node["role"] in ("button", "disclosuretriangle")]
+        need(len(nodes) == 1, f"missing-or-ambiguous-element-{name}")
+        return found["snapshot_id"], nodes[0]
 
-    def click(self, name, *, category=None, contains=False):
-        snapshot, node = self.node(name, category=category, contains=contains)
-        need(node.get("enabled"), f"disabled-element-{name}")
-        self.command("element.click", snapshot_id=snapshot, id=node["id"])
+    def reveal(self, name, **selectors):
+        # The action retains one snapshot. Read the window first so the
+        # subsequent element observation is the one eligible for a click.
+        pid = self.payload_pid()
+        root = self.command("tree.snapshot", limit=1)["nodes"]
+        snapshot, node = self.node(name, **selectors)
+        need(len(root) == 1 and root[0]["role"] in ("window", "sheet") and root[0]["bounds"] and
+             root[0]["id"] == f"mac:{pid}:0" and node["id"].startswith(root[0]["id"] + "."),
+             "original-focused-app-window-or-sheet")
+        window = root[0]["bounds"]
+        top = max(0, window["y"] + (35 if root[0]["role"] == "window" else 3))
+        bottom = min(self.screen["height"] - 65, window["y"] + window["height"] - 8)
+        left = max(0, window["x"] + 3)
+        right = min(self.screen["width"], window["x"] + window["width"]) - 3
+        for _ in range(16):
+            box = node["bounds"]
+            x, y = box["x"] + box["width"] // 2, box["y"] + box["height"] // 2
+            need(left <= x <= right, f"target-outside-window-width-{name}")
+            if top <= y <= bottom:
+                return snapshot, node
+            # Keep the pointer in the target's own column. The sidebar and
+            # document can move independently. Never click through the Dock.
+            distance = y - (top + bottom) // 2
+            dy = min(15, max(2, abs(distance) // 70)) * (1 if distance > 0 else -1)
+            self.command("pointer.scroll", x=x, y=(top + bottom) // 2, dy=dy)
+            snapshot, node = self.node(name, **selectors)
+        raise AssertionError(f"target-not-reachable-in-app-viewport-{name}")
+
+    def click(self, name, *, category=None, contains=False, region=None):
+        for attempt in range(2):
+            snapshot, node = self.reveal(name, category=category, contains=contains, region=region,
+                                         enabled=True, actionable=True)
+            try:
+                self.command("element.click", snapshot_id=snapshot, id=node["id"])
+                return
+            except Exception as error:
+                # The pinned action rejects a stale snapshot before sending
+                # any pointer event. Re-observe once, with the same checks.
+                payload = getattr(error, "payload", None)
+                if (attempt or getattr(error, "status", None) != 409 or not isinstance(payload, dict) or
+                    (payload.get("error") or {}).get("code") != "stale_snapshot"):
+                    raise
 
     def edit(self, name, text):
         self.click(name, category="textfield", contains=True)
@@ -130,41 +227,107 @@ class UI:
     def image(self, name):
         frame = self.client.fetch("/v1/screenshot")
         need(frame.startswith(b"\x89PNG\r\n\x1a\n"), "ui-screenshot-png")
-        (self.evidence / f"{name}.png").write_bytes(frame)
+        path = self.evidence / f"{name}.png"
+        path.write_bytes(frame)
+        return path
+
+    def snapshot(self, name):
+        tree = self.command("tree.snapshot", limit=160)
+        (self.evidence / f"{name}-tree.json").write_text(json.dumps(tree, indent=2) + "\n")
+
+    def local_network_decision(self, capabilities):
+        def records(path):
+            result = call("/usr/bin/swift", str(CONSOLE_OCR), str(path), timeout=45)
+            return json.loads(result.stdout)
+
+        def prompt(rows):
+            return any("allow python to find devices" in row["text"].translate(
+                str.maketrans("", "", "\"“”")).lower() for row in rows)
+
+        evidence = dict(beforeApp=prompt(records(self.evidence / "before-app-launch.png")),
+                        beforeDriver=prompt(records(self.evidence / "before-ui-driver.png")))
+        rows = records(self.image("first-window"))
+        evidence["afterDriver"] = prompt(rows)
+        target = self.evidence / "local-network-decision.json"
+        target.write_text(json.dumps(evidence, indent=2) + "\n")
+        need(not evidence["beforeApp"], "unexpected-privacy-prompt-before-app")
+        if not evidence["afterDriver"]:
+            need(not evidence["beforeDriver"], "privacy-prompt-disappeared-without-a-decision")
+            return
+
+        def label(text):
+            return [row for row in rows if row["text"].lower().replace("’", "'") == text]
+
+        deny, allow = label("don't allow"), label("allow")
+        need(len(deny) == len(allow) == 1, "exact-local-network-choice-labels")
+        question = [row for row in rows if "find devices" in row["text"].lower()]
+        need(len(question) == 1 and 0 < deny[0]["y"] - question[0]["y"] < 0.25 and
+             abs(deny[0]["y"] - allow[0]["y"]) < 0.02 and 0 < allow[0]["x"] - deny[0]["x"] < 0.25,
+             "exact-local-network-choice-geometry")
+        screen = capabilities["screen"]
+        self.command("pointer.click", x=round(deny[0]["x"] * screen["width"]),
+                     y=round(deny[0]["y"] * screen["height"]))
+        time.sleep(1)
+        evidence["denied"] = not prompt(records(self.image("after-local-network-denial")))
+        target.write_text(json.dumps(evidence, indent=2) + "\n")
+        need(evidence["denied"], "local-network-prompt-remained-after-denial")
 
     def page(self, title):
-        self.click(title, category="button")
-        def page_content():
-            return any(title in (node.get("name"), node.get("text")) and node.get("visible")
-                       and node.get("role") in ("heading", "statictext")
-                       for node in self.command("tree.snapshot")["nodes"])
-        until(page_content, 12, f"visible-page-{title}")
+        self.click(title, category="button", region="Workspace navigation")
+        heading = self.project_name if title == "Overview" and self.project_name else PAGE_HEADINGS[title]
+        self.reveal(heading, category="heading")
 
-    def pick(self, project, *, first=False):
-        self.click("Choose project folder" if first else "Open another project folder", category="button")
+    def pick(self, project, *, cancel=False):
+        self.click("Open another project folder" if self.project_name else "Choose project folder", category="button")
         self.node("Choose a mobile project folder", contains=True)
+        if cancel:
+            self.click("Cancel", category="button")
+            self.node(PAGE_HEADINGS["Overview"], category="heading")
+            return
         self.keys("command", "shift", "g")
+        self.node("Go to Folder", contains=True)
+        self.keys("command", "a")
         self.command("text.insert", text=str(project))
         self.keys("return")
         self.click("Open", category="button")
+        self.node(project.name, category="heading")
+        self.project_name = project.name
 
     def record_session(self, name, exercise):
         self.command("recording.start", duration_seconds=25)
         try:
+            # Give the action's 2 fps recorder time for a frame before the
+            # first serialized AX command holds its capture lock.
+            time.sleep(1)
             exercise()
-        finally:
-            self.command("recording.stop")
-            frame = self.client.fetch("/v2/recording")
-            need(frame.startswith((b"GIF87a", b"GIF89a")), "ui-recording-gif")
-            (self.evidence / f"{name}.gif").write_bytes(frame)
+        except Exception:
+            try:
+                self.save_recording(name)
+            except Exception:
+                pass
+            raise
+        self.save_recording(name)
 
-    def resize(self, width, height):
+    def save_recording(self, name):
+        self.command("recording.stop")
+        frame = self.client.fetch("/v2/recording")
+        need(frame.startswith((b"GIF87a", b"GIF89a")), "ui-recording-gif")
+        (self.evidence / f"{name}.gif").write_bytes(frame)
+
+    def payload_pid(self):
         active = call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN).stdout.splitlines()
         need(len(active) == 1, "exact-original-payload")
-        pid = int(active[0])
+        return int(active[0])
+
+    def resize(self, width, height):
+        pid = self.payload_pid()
 
         def window():
-            rows = [row for row in self.command("windows.list")["windows"] if row["process_id"] == pid]
+            nodes = self.command("tree.snapshot", limit=1)["nodes"]
+            need(len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "window" and
+                 nodes[0]["name"] == "Mobile Release Kit", "exact-focused-payload-window")
+            rows = [row for row in self.command("windows.list")["windows"]
+                    if row["process_id"] == pid and row["title"] == nodes[0]["name"] and row["bounds"] == nodes[0]["bounds"]]
             need(len(rows) == 1 and rows[0]["bounds"] is not None, "exact-original-window")
             return rows[0]
 
@@ -198,11 +361,15 @@ def observe(work, action, media):
     evidence = work / "evidence"
     manifest = json.loads((media / "RELEASE-MANIFEST.json").read_bytes())
     results = dict(sourceCommit=manifest["sourceCommit"], sourceTree=manifest["sourceTree"],
-                   packageSha256=manifest["packages"]["Install.pkg"]["sha256"], scenarios={})
+                   buildRun=manifest["buildRun"], carrierRun=manifest["carrierRun"],
+                   manifestSha256=file_hash(media / "RELEASE-MANIFEST.json"),
+                   packageSha256=manifest["packages"]["Install.pkg"]["sha256"],
+                   removeSha256=manifest["packages"]["Remove.pkg"]["sha256"], scenarios={})
     scenarios = results["scenarios"]
     (evidence / "RESULT.json").write_text(json.dumps(results, indent=2) + "\n")
     connection, client = open_session(work, action)
-    ui = UI(client, evidence)
+    capabilities = json.loads(client.fetch("/v2/capabilities"))
+    ui = UI(client, evidence, capabilities["screen"])
     project = work / "MRK Verification Android"
     original = {path.relative_to(project): file_hash(path) for path in project.rglob("*")
                 if path.is_file() and ".git" not in path.relative_to(project).parts}
@@ -225,24 +392,39 @@ def observe(work, action, media):
                 ui.image(name + "-failure")
             except Exception:
                 pass
+            try:
+                ui.snapshot(name + "-failure")
+            except Exception:
+                pass
         finally:
             save()
         return scenarios[name]["status"] == "Passed"
 
-    def startup():
-        ui.image("first-window")
-        capabilities = json.loads(client.fetch("/v2/capabilities"))
+    def start_observation():
         results["commands"] = sorted(capabilities["commands"])
         if not {"element.wait", "element.click", "tree.snapshot"} <= set(capabilities["commands"]):
             raise Blocked("macOS Accessibility is unavailable to the action on this runner")
+        ui.local_network_decision(capabilities)
+        ui.snapshot("first-window")
+
+    def startup():
         ui.page("Build tools")
-        ui.click("Advanced · app connection details")
-        ui.node("Bundled runtime", category="statictext", contains=True)
+        ui.click("Advanced · app connection details", contains=True)
+        ui.node("Bundled runtime", category="heading")
         need(call(str(CLI), "status", "--json", check=False).returncode == 3, "initial-cli-denial")
+
+    def cancel_picker():
+        ui.page("Overview")
+        ui.pick(project, cancel=True)
+        need(all(file_hash(project / name) == digest for name, digest in original.items()),
+             "cancelled-project-picker-changed-fixture")
 
     def select_project():
         ui.page("Overview")
-        ui.pick(project, first=True)
+        ui.pick(project)
+        ui.click("Project details & saved observations", contains=True)
+        ui.node(str(project), category="statictext")
+        ui.node("org.mrk.fixture", contains=True)
         ui.click("Edit version & build number")
         ui.click("Open saved version editor", category="button")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
@@ -250,12 +432,15 @@ def observe(work, action, media):
 
     def permission_lifecycle():
         ui.page("Project settings")
-        ui.click("Advanced · CLI / AI access")
+        ui.click("Advanced · CLI / AI access", contains=True)
         ui.click("Check access", category="button")
         ui.click("Allow selected project for 1 hour", category="button")
         ui.node("1 project was allowed at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 0, "cli-native-grant")
-        need(call(str(CLI), "projects", "--json", check=False).returncode == 0, "cli-project-readback")
+        projects = json.loads(call(str(CLI), "projects", "--json").stdout)
+        response = projects["response"]
+        need(response["kind"] == "projects" and len(response["value"]) == 1
+             and response["value"][0]["registeredInCurrentHost"] is True, "cli-project-readback")
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
@@ -263,6 +448,11 @@ def observe(work, action, media):
     def versions():
         ui.page("Overview")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
+        ui.edit("Build number", "x")
+        ui.node("Enter a marketing-version string", contains=True)
+        _, refused = ui.node("Validate and review values", category="button")
+        need(not refused["enabled"] and file_hash(project / VERSION_FILE) == original[VERSION_FILE],
+             "invalid-build-input-was-admitted")
         ui.edit("Marketing version", "1.0.1")
         ui.edit("Build number", "2")
         ui.click("Validate and review values", category="button")
@@ -285,41 +475,75 @@ def observe(work, action, media):
         until(lambda: call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False).returncode == 1,
               18, "original-payload-did-not-quit")
         call("/usr/bin/open", "-a", str(APP))
-        ui.page("Overview")
-        ui.pick(project, first=True)
+        ui.click("Overview", category="button")
+        empty = PAGE_HEADINGS["Overview"]
+        def reopened_overview():
+            snapshot = ui.command("tree.snapshot")
+            matches = {value for node in snapshot["nodes"] if node["role"] == "heading" and node["visible"]
+                       for value in (node.get("name"), node.get("text")) if value in (empty, project.name)}
+            need(len(matches) <= 1, "ambiguous-reopened-overview")
+            return matches.pop() if matches else None
+        if until(reopened_overview, 12, "reopened-overview-not-rendered") == empty:
+            ui.project_name = None
+            ui.pick(project)
         ui.click("Edit version & build number")
         ui.click("Open saved version editor", category="button")
         ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
         need((project / VERSION_FILE).read_bytes() == expected
              and file_hash(project / CONFIG_FILE) == original[CONFIG_FILE], "reopened-saved-values")
 
+    def git_observation():
+        readme = project / "README.md"
+        marker = b"\nSynthetic signed candidate UI verification.\n"
+        readme.write_bytes(readme.read_bytes() + marker)
+        def git(*args):
+            return call("/usr/bin/git", "-C", str(project), *args).stdout
+        before = git("status", "--porcelain=v1")
+        head = git("rev-parse", "HEAD")
+        need(b" M README.md\n" in before, "synthetic-worktree-change")
+        ui.page("GitHub")
+        ui.click("Connect", category="radiobutton", region="GitHub tasks")
+        ui.click("Check local Git access", category="button")
+        ui.node("Local Git reader available", category="heading")
+        ui.click("Refresh changes", category="button")
+        ui.click("Select README.md", category="checkbox")
+        ui.click("Working changes", category="button")
+        ui.node(marker.strip().decode(), contains=True)
+        need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
+             and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
+
     def window_layouts():
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
-        if screen["width"] < 1200 or screen["height"] < 800:
-            raise Blocked("The synthetic console is too small for the two controlled sizes")
+        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 75, 740)
+        if width < 980 or height < 690:
+            raise Blocked("The synthetic console is too small for two readable window sizes")
         results["windowBounds"] = []
-        for width, height in ((1100, 700), (1180, 740)):
+        for width, height in ((width - 40, height - 20), (width, height)):
             results["windowBounds"].append(ui.resize(width, height))
             ui.page("Overview")
             ui.page("Project settings")
             ui.image(f"settings-{width}x{height}")
 
     try:
-        if scenario("cold-runtime-and-cli-denial", lambda: ui.record_session("cold-runtime", startup)):
+        if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
+            scenario("cold-runtime-and-cli-denial", startup)
+            scenario("cancel-native-project-picker", cancel_picker)
             selected = scenario("project-picker-and-saved-config", select_project)
-            for page in PAGES:
+            for page in PAGE_HEADINGS:
                 label = "nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-")
                 scenario(label, lambda page=page: ui.page(page))
-            scenario("window-layouts", window_layouts)
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
                 scenario("version-cancel-save-quit-reopen", versions)
+                scenario("git-local-diff-and-no-side-effects", git_observation)
             else:
                 scenarios["cli-grant-and-revoke"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
+                scenarios["git-local-diff-and-no-side-effects"] = dict(status="Blocked", reason="Fixture project selection failed")
+            scenario("window-layouts", window_layouts)
         else:
             for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
-                         "version-cancel-save-quit-reopen", "window-layouts"):
+                         "version-cancel-save-quit-reopen", "window-layouts", "git-local-diff-and-no-side-effects"):
                 scenarios[name] = dict(status="Blocked", reason="Original UI session or initialization did not pass")
     finally:
         save()
