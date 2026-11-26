@@ -21,6 +21,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+from mobile_release import tool_acquisition
 from mobile_release._tool_acquisition_spec import (AcquisitionError, CHUNK, COMPONENTS, Component,
     canonical, decode_manifest, relative)
 from mobile_release._tool_acquisition_files import OutputTree, directory_identity
@@ -162,6 +163,11 @@ class ToolAcquisitionTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="mrk-tools-synthetic-")
         self.root = Path(self.temporary.name) / "cache"
         self.root.mkdir(mode=0o700)
+        # The full Linux suite uses bounded tmpfs. These tiny archive fixtures
+        # exercise real file I/O with a modeled supplier-volume capacity.
+        system = self.enterContext(patch.object(tool_acquisition, "os", wraps=os))
+        self.capacity = system.fstatvfs
+        self.capacity.return_value = SimpleNamespace(f_frsize=4096, f_bavail=1024 * 1024)
         self.manifest, self.payloads = fixtures()
         self.calls = []
 
@@ -272,9 +278,9 @@ class ToolAcquisitionTests(unittest.TestCase):
 
     def test_insufficient_space_does_not_create_pending_intent_or_job(self):
         owner = FixtureOwner(self.root, self.manifest)
-        with patch("mobile_release.tool_acquisition.os.fstatvfs", return_value=SimpleNamespace(f_frsize=4096, f_bavail=1)):
-            with self.assertRaises(AcquisitionError) as error:
-                self.run_service(owner)
+        self.capacity.return_value = SimpleNamespace(f_frsize=4096, f_bavail=1)
+        with self.assertRaises(AcquisitionError) as error:
+            self.run_service(owner)
         self.assertEqual(error.exception.reason, "disk-space")
         self.assertEqual(owner.book.entries, {})
         self.assertEqual(list(self.root.iterdir()), [])
@@ -420,14 +426,16 @@ class ToolAcquisitionTests(unittest.TestCase):
                 manifest["archives"][3]["bytes"] = len(data)
                 manifest["archives"][3]["sha256"] = hashlib.sha256(data).hexdigest()
                 owner = FixtureOwner(root, manifest, missing=(Component.GRADLE,))
-                with self.assertRaises(AcquisitionError):
+                with self.assertRaises(AcquisitionError) as error:
                     self.run_service(owner, transfer=fake_transfer(payloads, []))
+                self.assertEqual(error.exception.reason, "archive-layout")
                 self.assertFalse((root / "tool-operation1/result.json").exists())
                 self.assertEqual(list((root / "tool-operation1/sources").iterdir()), [])
                 self.assertFalse((root / "outside").exists())
 
     def test_tar_links_and_oversized_pax_or_gnu_metadata_refuse_before_allocating_payload(self):
-        for kind in ("symlink", "hardlink", "pax-size", "gnu-size"):
+        for kind, reason in (("symlink", "archive-member"), ("hardlink", "archive-member"),
+                             ("pax-size", "limit"), ("gnu-size", "limit")):
             with self.subTest(kind=kind):
                 root = self.root / kind
                 root.mkdir(mode=0o700)
@@ -444,8 +452,9 @@ class ToolAcquisitionTests(unittest.TestCase):
                 manifest["archives"][0]["bytes"] = len(data)
                 manifest["archives"][0]["sha256"] = hashlib.sha256(data).hexdigest()
                 owner = FixtureOwner(root, manifest, missing=(Component.JDK,))
-                with self.assertRaises(AcquisitionError):
+                with self.assertRaises(AcquisitionError) as error:
                     self.run_service(owner, transfer=fake_transfer(payloads, []))
+                self.assertEqual(error.exception.reason, reason)
                 self.assertFalse((root / "tool-operation1/result.json").exists())
                 self.assertEqual(list((root / "tool-operation1/sources").iterdir()), [])
 
