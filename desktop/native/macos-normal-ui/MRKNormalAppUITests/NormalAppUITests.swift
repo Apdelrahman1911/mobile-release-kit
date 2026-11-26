@@ -6406,7 +6406,7 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
         try stage("android-source-jdk") {
-            try press(renderer, "Releases", renderer: renderer)
+            try press(renderer, guidedProductSurface ? "Build tools" : "Releases", renderer: renderer)
             try androidRetained()
             try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk.jdk")
         }
