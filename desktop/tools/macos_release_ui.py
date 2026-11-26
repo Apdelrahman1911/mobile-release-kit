@@ -61,6 +61,24 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def detach_install_media(mount, evidence):
+    attempts = []
+    try:
+        for attempt in range(5):
+            result = call("/usr/bin/hdiutil", "detach", str(mount), timeout=35, check=False)
+            attempts.append(dict(returnCode=result.returncode, error=result.stderr.decode(errors="replace")[-500:]))
+            if result.returncode != 16 or attempt == 4:
+                return result.returncode
+            # Installer can retain the read-only image briefly after its
+            # success reply. Retry the detach, never Installer or a forced eject.
+            time.sleep(2)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        attempts.append(dict(error=type(error).__name__))
+        return None
+    finally:
+        (evidence / "detach-install-media.json").write_text(json.dumps(attempts, indent=2) + "\n")
+
+
 def install(media, work):
     manifest = json.loads((media / "RELEASE-MANIFEST.json").read_bytes())
     name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-Install.dmg"
@@ -81,15 +99,18 @@ def install(media, work):
                        timeout=180, check=False)
         (work / "evidence/installer.log").write_bytes(outcome.stdout[-65536:] + outcome.stderr[-65536:])
         need(outcome.returncode == 0, "installer-original-return")
+        state = json.loads(call("/usr/bin/sudo", "-n", "/bin/cat", str(PRODUCT / "installation-v2.json")).stdout)
+        release = state["current"]["release"]
+        need((release["sourceCommit"], release["packageVersion"], release["packageSha256"]) ==
+             (manifest["sourceCommit"], manifest["version"], expected["sha256"]), "native-installed-identity")
+        call("/usr/bin/codesign", "--verify", "--strict", str(APP))
+        call("/usr/bin/codesign", "--verify", "--strict", str(PRODUCT / "Mobile Release Kit.app"))
+        installed = dict(sourceCommit=release["sourceCommit"], packageSha256=expected["sha256"],
+                         packageVersion=release["packageVersion"], nativeSignaturesVerified=True)
+        (work / "evidence/INSTALLED.json").write_text(json.dumps(installed, indent=2) + "\n")
     finally:
-        call("/usr/bin/hdiutil", "detach", str(mount))
-    state = json.loads(call("/usr/bin/sudo", "-n", "/bin/cat", str(PRODUCT / "installation-v2.json")).stdout)
-    release = state["current"]["release"]
-    need((release["sourceCommit"], release["packageVersion"], release["packageSha256"]) ==
-         (manifest["sourceCommit"], manifest["version"], manifest["packages"]["Install.pkg"]["sha256"]),
-         "native-installed-identity")
-    call("/usr/bin/codesign", "--verify", "--strict", str(APP))
-    call("/usr/bin/codesign", "--verify", "--strict", str(PRODUCT / "Mobile Release Kit.app"))
+        detached = detach_install_media(mount, work / "evidence")
+    need(detached == 0, "installer-mounted-media-still-busy")
     shutil.copytree(FIXTURE, work / "MRK Verification Android")
     project = work / "MRK Verification Android"
     call("/usr/bin/git", "-C", str(project), "init", "-b", "main")

@@ -253,7 +253,7 @@ jobs:
           startup-timeout-seconds: '180'
           launch: /usr/bin/open -a "/Applications/Mobile Release Kit.app"
       - name: Require the original UI observer result
-        if: ${{ !cancelled() && env.MRK_UI_WORK != '' }}
+        if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
         run: |
           set -euo pipefail
           for ((waited=0; waited<10; waited++)); do
