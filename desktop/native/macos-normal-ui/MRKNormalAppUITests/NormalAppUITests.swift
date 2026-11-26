@@ -5389,7 +5389,8 @@ final class NormalAppUITests: XCTestCase {
                                  failures: [String] = [], timeout: TimeInterval = 5, line: UInt = #line) throws {
         let guidedLabels = ["Open project folder": "Choose project folder", "Credentials": "Signing & accounts",
                             "Environment": "Build tools", "Releases": "Build & release", "Artifacts": "Build files",
-                            "Recovery": "Recover work", "Metadata": "Store listing"]
+                            "Recovery": "Recover work", "Metadata": "Store listing", "Dashboard": "Overview",
+                            "Preview GitHub setup": "Preview without saving (optional)"]
         let displayed = guidedProductSurface && root == renderer ? guidedLabels[label] ?? label : label
         let item = try waitElement(root.buttons.matching(identifier: displayed), in: root, enabled: true,
                                    timeout: timeout, failures: failures, line: line)
@@ -5436,6 +5437,14 @@ final class NormalAppUITests: XCTestCase {
         let item = try waitElement(root.checkBoxes.matching(identifier: label), in: root,
                                    enabled: true, line: line)
         try reveal(item, in: renderer, line: line)
+        item.click()
+    }
+    @MainActor private func guidedTaskTab(_ label: String, group: String, renderer: XCUIElement) throws {
+        guard guidedProductSurface else { return }
+        let tabs = try waitElement(named(renderer, group), in: renderer)
+        let item = try waitElement(controls(tabs, [.radioButton, .button, .other], label: label, prefix: true),
+                                   in: tabs, enabled: true)
+        try reveal(item, in: renderer)
         item.click()
     }
     @MainActor private func field(_ root: XCUIElement, _ label: String, multiline: Bool = false) throws -> XCUIElement {
@@ -6168,6 +6177,8 @@ final class NormalAppUITests: XCTestCase {
         try beginCase(seconds: 300)
         let fixture = LocalFixture()
         ownedFixture = fixture
+        let platforms = guidedProductSurface ? ["Android", "iOS", "Project dependency access"] : []
+        let purposes = guidedProductSurface ? ["All selected input roles", "Build / signing only", "Store access only"] : []
         try stage("persistence-admission") {
             _ = try admittedJourneyApplication(profile: normalJourneyProfile(for: "persistence-test.xcresult"))
             try fixture.admitDefaultVault() // Before any application launch.
@@ -6190,11 +6201,9 @@ final class NormalAppUITests: XCTestCase {
             let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
             let storage = try waitElement(named(renderer, storageLabel), in: renderer)
             selectedStorage = storage
-            try select(storage, label: "Platform", value: "iOS", renderer: renderer,
-                       keyboardOptions: guidedProductSurface ? ["Android", "iOS", "Project dependency access"] : [])
+            try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboardOptions: platforms)
             try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer,
-                       keyboardOptions: guidedProductSurface ? ["All selected input roles", "Build / signing only", "Store access only"] : [])
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
             try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
             try privateStatus(storage, action: "open-vault")
             _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
@@ -6228,10 +6237,10 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("persistence-context-invalidation") {
             try privateRecordCount(storage, count: 2, assigned: 2)
-            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer, keyboardOptions: purposes)
             try privateContext(storage, renderer: renderer)
             try privateRecordCount(storage, count: 2, assigned: 0)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
             try privateContext(storage, renderer: renderer)
             try privateRecordCount(storage, count: 2, assigned: 0)
             try fixture.assertStoreUnchanged()
@@ -6319,9 +6328,9 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
                                 failures: Self.privateInputFailures)
             try privateRecordCount(storage, count: 0, assigned: 0)
-            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer, keyboard: guidedProductSurface)
-            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: restartedRenderer, keyboard: guidedProductSurface)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer, keyboard: guidedProductSurface)
+            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer, keyboardOptions: platforms)
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: restartedRenderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer, keyboardOptions: purposes)
             // Same default vault/provider/helper, never a second Initialize or
             // fixture admission. Opening must be locked with no exposed rows.
             try openAndUnlockPrivateVault(storage, renderer: restartedRenderer)
@@ -6981,7 +6990,11 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try click(sheet.buttons.matching(identifier: "Cancel"), "native folder Cancel unavailable")
             try waitGone(sheet)
-            try dashboard(renderer)
+            if guidedProductSurface {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "Get your app ready."), in: renderer)
+            } else {
+                try dashboard(renderer)
+            }
             try fixture.assertUnchanged()
         }
         try stage("project-open") {
@@ -7006,9 +7019,23 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
         try stage("config") {
-            try press(renderer, "Project settings", renderer: renderer)
-            let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
-            try settingsTab(settings, "General", renderer: renderer)
+            @MainActor func projectDefaults() throws {
+                try press(renderer, "Project settings", renderer: renderer)
+                if guidedProductSurface {
+                    let heading = renderer.staticTexts.matching(identifier: "3. Review the project defaults")
+                    if heading.count == 0 {
+                        if renderer.buttons.matching(identifier: "Next: Version & build").count == 1 {
+                            try press(renderer, "Next: Version & build", renderer: renderer)
+                        }
+                        try press(renderer, "Next: Project defaults", renderer: renderer)
+                    }
+                    _ = try waitElement(heading, in: renderer)
+                } else {
+                    let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
+                    try settingsTab(settings, "General", renderer: renderer)
+                }
+            }
+            try projectDefaults()
             let candidate = try field(renderer, "Candidate branch")
             try require(candidate.value as? String == "main", "saved candidate branch was not loaded")
             try replace(candidate, with: "qa-candidate", renderer: renderer)
@@ -7017,15 +7044,23 @@ final class NormalAppUITests: XCTestCase {
             try press(locales, "Add entry", renderer: renderer)
             try replace(field(locales, "Android locales, entry 2"), with: "fr-FR", renderer: renderer)
             // The SAME unsaved configuration must survive page navigation.
-            try press(renderer, "Project settings", renderer: renderer)
+            try projectDefaults()
             try require(field(renderer, "Candidate branch").value as? String == "qa-candidate", "navigation lost the branch draft")
             try press(renderer, "Metadata", renderer: renderer)
             try require(field(renderer, "Android locales, entry 2").value as? String == "fr-FR", "navigation lost the locale draft")
+            if guidedProductSurface {
+                try expand(renderer, prefix: "Check without saving", renderer: renderer)
+            }
             try press(renderer, "Validate only", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "value == %@", "Format validation complete")), in: renderer,
                                 failures: Self.configurationFailures)
-            try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
-            let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
+            if guidedProductSurface {
+                try press(renderer, "Project settings", renderer: renderer)
+            }
+            try press(renderer, guidedProductSurface ? "Review & save…" : "Prepare save review", renderer: renderer,
+                      failures: Self.configurationFailures)
+            let reviewLabel = guidedProductSurface ? "Review and save project settings" : "Native configuration save"
+            let review = try waitElement(named(renderer, reviewLabel), in: renderer)
             _ = try waitElement(review.buttons.matching(identifier: "Apply reviewed save"), in: review,
                                 enabled: true, timeout: 48, failures: Self.configurationFailures)
             try inventory(review, caption: "Exact native destination inventory", paths: ["release/mobile-release.json", ".gitignore"])
@@ -7048,6 +7083,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("github") {
             try press(renderer, "GitHub", renderer: renderer)
+            try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
             try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
             try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
             let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
@@ -7387,6 +7423,12 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Artifacts", renderer: renderer)
             let selected = try waitElement(controls(renderer, [.popUpButton, .comboBox], label: "Evidence stage", prefix: true), in: renderer)
             try require(selected.value as? String == "Candidate", "initial evidence stage is not candidate")
+            if guidedProductSurface {
+                let choose = try unique(renderer.buttons.matching(identifier: "Choose evidence folder"), "evidence chooser is ambiguous")
+                if !choose.isEnabled {
+                    try press(renderer, "Check operation status", renderer: renderer)
+                }
+            }
             try press(renderer, "Choose evidence folder", renderer: renderer)
             let sheet = try nativeSheet(window, title: "Choose a release evidence folder")
             try goToFolder(sheet, path: fixture.evidencePath); try nativeOpen(sheet)
@@ -7488,6 +7530,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("workflow-refusal-preview") {
             try press(renderer, "GitHub", renderer: renderer)
+            try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
             try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
             try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
             let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
@@ -7649,6 +7692,7 @@ final class NormalAppUITests: XCTestCase {
         var selected: XCUIElement?
         try stage("offline-review-and-start") {
             try press(renderer, "Releases", renderer: renderer)
+            try guidedTaskTab("Local checks", group: "Release tasks", renderer: renderer)
             let panel = try waitElement(named(renderer, "Review the saved inputs and project-code effects")
                 .containing(.button, identifier: "Refresh saved configuration observation"), in: renderer)
             selected = panel
@@ -8388,13 +8432,7 @@ final class NormalAppUITests: XCTestCase {
             let failures = ["No new iOS archive outcome was confirmed", "Cleanup needs attention"]
             try stage("ios-unsigned-review") {
                 try press(renderer, "Releases", renderer: renderer)
-                if guidedProductSurface {
-                    let tabs = try waitElement(named(renderer, "Release tasks"), in: renderer)
-                    let archive = try waitElement(controls(tabs, [.radioButton, .button, .other], label: "iOS build"),
-                                                  in: tabs, enabled: true)
-                    try reveal(archive, in: renderer)
-                    archive.click()
-                }
+                try guidedTaskTab("iOS build", group: "Release tasks", renderer: renderer)
                 let panel = try waitElement(named(renderer, "Review the current saved inputs")
                     .containing(.button, identifier: "Review saved iOS inputs"), in: renderer)
                 selected = panel
