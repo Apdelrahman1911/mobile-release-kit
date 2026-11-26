@@ -33,6 +33,9 @@ AIA_PREFIX = b"MRK_NATIVE_AIA="
 AIA_BASELINE_PREFIX = b"MRK_NATIVE_AIA_BASELINE="
 _DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
 _CASES = ("online", "offline", "mutant", "product-offline")
+_AIA_HOST = "localhost"
+_AIA_ADDRESS = "127.0.0.1"
+_AIA_PORT = 8080
 _CONTRAST_CASE = "online-full-chain-offline"
 _ISSUER_ROOT_CONTRAST_CASE = "online-issuer-root-offline"
 _LEAF_ISSUER_CONTRAST_CASE = "online-leaf-issuer-offline"
@@ -571,7 +574,7 @@ def prepare_aia(port: int, deadline: float) -> None:
     for case in _CASES:
         _remaining(deadline)
         nonce = secrets.token_hex(16)
-        url = f"http://127.0.0.1:{port}" + _route(nonce, case)
+        url = f"http://{_AIA_HOST}:{port}" + _route(nonce, case)
         config = work / f"{case}.cnf"
         # Some providers prioritize prompt=no's configured DN over -subj. Keep
         # the role-specific CLI subject authoritative; -batch prevents prompting.
@@ -1322,12 +1325,19 @@ class _Responder:
         self.stop = threading.Event()
         self.responses, self.requests, self.errors = {}, [], []
         _remaining(deadline)
+        addresses = {result[4][0] for result in socket.getaddrinfo(_AIA_HOST, _AIA_PORT, type=socket.SOCK_STREAM)}
+        _require(_AIA_ADDRESS in addresses and addresses <= {_AIA_ADDRESS, "::1"},
+                 "native AIA localhost resolution differs")
+        _remaining(deadline)
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener = listener  # Custody precedes any fallible configuration.
         try:
             listener.settimeout(0.1)
-            listener.bind(("127.0.0.1", 0))
-            self.port = _port(listener.getsockname()[1])
+            # trustd screens AIA destinations before scheduling HTTP. Its
+            # local test endpoint uses a hostname and an allowed HTTP port.
+            listener.bind((_AIA_ADDRESS, _AIA_PORT))
+            _require(listener.getsockname() == (_AIA_ADDRESS, _AIA_PORT), "native AIA listener address differs")
+            self.port = _AIA_PORT
             listener.listen(8)
         except BaseException as original:
             try:
@@ -1359,7 +1369,7 @@ class _Responder:
                     continue
                 errors = []
                 try:
-                    _require(address[0] == "127.0.0.1" and len(self.requests) < 8,
+                    _require(address[0] == _AIA_ADDRESS and len(self.requests) < 8,
                              "unexpected responder client or request bound")
                     request = b""
                     while b"\r\n\r\n" not in request:

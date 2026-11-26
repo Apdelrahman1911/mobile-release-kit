@@ -1,0 +1,142 @@
+name: "${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Assemble the current observer and sign code inside-out (never --deep)' || 'Assemble the ordinary image app and sign code inside-out (never --deep)' }}"
+description: "Shared original recipe; job retains its original result and timeout"
+inputs:
+  binding-1:
+    description: "Exact current original step binding"
+    required: true
+  binding-2:
+    description: "Exact current original step binding"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: "${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Assemble the current observer and sign code inside-out (never --deep)' || 'Assemble the ordinary image app and sign code inside-out (never --deep)' }}"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+        set -euo pipefail
+        set -o noclobber
+        if [[ "$MRK_MACOS_NATIVE_SCOPE" == disabled ]]; then
+        # Current compiler-derived program, not an installer alias. The
+        # same fixed signing owner returns a digest only after known finality.
+        /bin/mkdir -m 700 "$MRK_MACOS_WORK/applications-launcher"
+        bash desktop/native/macos-applications-launcher/build.sh \
+          "$MRK_MACOS_WORK/applications-launcher/MobileReleaseKitLauncher.app" "$MRK_MACOS_MACHINE"
+        launcher_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-applications-launcher --target "$MRK_MACOS_TARGET")
+        [[ "$launcher_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+        MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256=${launcher_result#sha256=}
+        printf 'MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256=%s\n' "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256" >> "$GITHUB_ENV"
+        fi
+        remover_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-remover --target "$MRK_MACOS_TARGET")
+        [[ "$remover_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+        MRK_MACOS_REMOVER_SHA256=${remover_result#sha256=}
+        printf 'MRK_MACOS_REMOVER_SHA256=%s\n' "$MRK_MACOS_REMOVER_SHA256" >> "$GITHUB_ENV"
+        cli_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-installed-cli --target "$MRK_MACOS_TARGET")
+        [[ "$cli_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+        MRK_MACOS_INSTALLED_CLI_SHA256=${cli_result#sha256=}
+        printf 'MRK_MACOS_INSTALLED_CLI_SHA256=%s\n' "$MRK_MACOS_INSTALLED_CLI_SHA256" >> "$GITHUB_ENV"
+        removal_arguments=()
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
+          removal_arguments=(--removal-abrupt-fixture)
+        fi
+        github_seal_arguments=()
+        if [[ '${{ inputs.binding-1 }}' == true ]]; then
+          github_seal_arguments=(--github-seal "$MRK_MACOS_WORK/github-seal-capsule/mrk-github-seal"
+            --expected-github-seal "$MRK_MACOS_GITHUB_SEAL_SHA256" --expected-github-seal-bytes "$MRK_MACOS_GITHUB_SEAL_BYTES")
+        fi
+        if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup || "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then
+          app_binary_arguments=(--binary "$MRK_MACOS_OBSERVER_BINARY"
+            --expected-app-binary "$MRK_MACOS_OBSERVER_SHA256"
+            --observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl"
+            --observer-cargo-target-dir "$CARGO_TARGET_DIR")
+        else
+          app_binary_arguments=(--binary "$MRK_MACOS_WORK/mobile-release-kit-desktop"
+          --expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256"
+          --desktop-image "$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/libmrk_desktop_image.dylib"
+          --expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256"
+          --desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"
+          --desktop-image-cargo-target-dir "$CARGO_TARGET_DIR"
+          --applications-launcher "$MRK_MACOS_WORK/applications-launcher/MobileReleaseKitLauncher.app"
+          --expected-applications-launcher "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256")
+        fi
+        /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
+        "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} ${github_seal_arguments[@]+"${github_seal_arguments[@]}"} \
+          --package-role "$MRK_MACOS_PACKAGE_ROLE" \
+          --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
+          --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
+          --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+          --remover "$MRK_MACOS_WORK/remover-target/$MRK_MACOS_TARGET/release/mrk-macos-remove" \
+          --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+          --remover-cargo-messages "$MRK_MACOS_WORK/remover-build.jsonl" \
+          --remover-cargo-target-dir "$MRK_MACOS_WORK/remover-target" \
+          --installed-cli "$MRK_MACOS_WORK/installed-cli-target/$MRK_MACOS_TARGET/release/mrk" \
+          --expected-installed-cli "$MRK_MACOS_INSTALLED_CLI_SHA256" \
+          --installed-cli-cargo-messages "$MRK_MACOS_WORK/installed-cli-build.jsonl" \
+          --installed-cli-cargo-target-dir "$MRK_MACOS_WORK/installed-cli-target" \
+          --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
+          --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
+          --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
+          --expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256" \
+          --bundletool-archive "$MRK_MACOS_WORK/signed-android-transport/bundletool-all-1.18.3.jar" \
+          --aapt2-archive "$MRK_MACOS_WORK/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
+          --android-support-signed-receipt "$MRK_MACOS_WORK/signed-android-transport/android-support-signed-receipt.json" \
+          "${app_binary_arguments[@]}" \
+          --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before --target "$MRK_MACOS_TARGET"
+        payload="$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app"
+        if [[ "$MRK_MACOS_NATIVE_SCOPE" == disabled ]]; then
+        # Resident image/facade and vault helper are already signed. Sign
+        # the copied desktop dylib before its C facade bundle and outer entry.
+        desktop_image="$payload/Contents/Frameworks/libmrk_desktop_image.dylib"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-desktop-image --target "$MRK_MACOS_TARGET"
+        /usr/bin/codesign --verify --strict "$desktop_image"
+        desktop_image_sha=$(/usr/bin/shasum -a 256 "$desktop_image")
+        desktop_image_sha=${desktop_image_sha%% *}
+        [[ "$desktop_image_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+        fi
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-desktop-payload --target "$MRK_MACOS_TARGET"
+        /usr/bin/codesign --verify --strict "$payload"
+        payload_sha=$(/usr/bin/shasum -a 256 "$payload/Contents/MacOS/mobile-release-kit-desktop")
+        payload_sha=${payload_sha%% *}
+        [[ "$payload_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-app --target "$MRK_MACOS_TARGET"
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after --target "$MRK_MACOS_TARGET"
+        # verify-after independently rebinds the unchanged signed resident image.
+        if [[ "$MRK_MACOS_NATIVE_SCOPE" == disabled ]]; then
+          /usr/bin/codesign --verify --strict "$desktop_image"
+        fi
+        /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
+        if [[ '${{ inputs.binding-1 }}' == true ]]; then
+          /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-github-seal"
+        fi
+        if [[ '${{ inputs.binding-2 }}' == true ]]; then
+          /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/runtime/tools/gh"
+        fi
+        /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-macos-remove"
+        /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk"
+        /usr/bin/codesign --verify --strict "$payload"
+        /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+        entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
+        entry_sha=${entry_sha%% *}
+        [[ "$entry_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+        if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup || "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then
+          printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\n' "$entry_sha" "$payload_sha" >> "$GITHUB_ENV"
+        else
+        printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\nMRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256=%s\n' "$entry_sha" "$payload_sha" "$desktop_image_sha" >> "$GITHUB_ENV"
+        fi
+        unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD

@@ -10,8 +10,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
+import stat
+import struct
+from importlib.machinery import ModuleSpec, SourceFileLoader
 from pathlib import Path
+from zipfile import BadZipFile, LargeZipFile, ZipFile, ZIP_DEFLATED, ZIP_STORED
+from zipimport import zipimporter
+from zlib import error as ZlibError
 
 from .errors import ValidationError
 
@@ -48,11 +55,92 @@ def pem_certificates(content: bytes) -> tuple[bytes, ...]:
     return tuple(certificates)
 
 
+_PUBLIC_ROOT_BYTES = 16 * 1024
+_PUBLIC_ROOT_ARCHIVE_BYTES = 40 * 1024 * 1024
+_PUBLIC_ROOT_DIRECTORY_BYTES = 2 * 1024 * 1024
+_PUBLIC_ROOT_MEMBERS = 2048
+
+
+def _archive_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _zip_apple_root_bytes(archive_path: str) -> bytes:
+    """Read only the fixed public resource in our admitted conventional core ZIP.
+
+    Desktop's installed-runtime owner authenticates the complete protected core.
+    This is not a generic untrusted-archive importer or an alternate trust store.
+    The producer caps core source at 32 MiB / 2048 files and emits no ZIP comment.
+    """
+    def opener(path: str, flags: int) -> int:
+        return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+
+    try:
+        named = os.lstat(archive_path)
+        require(stat.S_ISREG(named.st_mode) and named.st_nlink == 1
+                and 42 <= named.st_size <= _PUBLIC_ROOT_ARCHIVE_BYTES)
+        original = _archive_identity(named)
+        # FileIO owns the one original descriptor. ZipFile receives that same
+        # stream and never reopens a pathname or owns a second backing handle.
+        with open(archive_path, "rb", buffering=0, opener=opener) as raw:
+            require(_archive_identity(os.fstat(raw.fileno())) == original)
+            raw.seek(-42, os.SEEK_END)
+            tail = raw.read(43)
+            require(len(tail) == 42 and tail[:4] != b"PK\x06\x07")
+            end = struct.unpack("<4s4H2IH", tail[-22:])
+            signature, disk, directory_disk, disk_count, count, size, offset, comment = end
+            require(signature == b"PK\x05\x06" and disk == directory_disk == 0
+                    and disk_count == count and 0 < count <= _PUBLIC_ROOT_MEMBERS
+                    and comment == 0 and 0 < size <= _PUBLIC_ROOT_DIRECTORY_BYTES
+                    and offset + size == named.st_size - 22)
+            with ZipFile(raw, "r") as archive:
+                entries = archive.infolist()
+                require(len(entries) == count)
+                matches = [entry for entry in entries
+                           if entry.filename == "mobile_release/data/apple-profile-roots.pem"]
+                require(len(matches) == 1)
+                entry = matches[0]
+                require(0 < entry.file_size <= _PUBLIC_ROOT_BYTES
+                        and entry.compress_type in (ZIP_STORED, ZIP_DEFLATED)
+                        and not entry.flag_bits & 1)
+                with archive.open(entry, "r") as member:
+                    # One byte beyond the declared size proves complete EOF;
+                    # ZipExtFile also checks the CRC as that EOF is consumed.
+                    content = member.read(entry.file_size + 1)
+                    require(type(content) is bytes and len(content) == entry.file_size)
+            require(_archive_identity(os.fstat(raw.fileno())) == original
+                    == _archive_identity(os.lstat(archive_path)))
+        require(_archive_identity(os.lstat(archive_path)) == original)
+    except (OSError, ValueError, KeyError, RuntimeError, BadZipFile, LargeZipFile,
+            struct.error, ZlibError):
+        raise ValidationError("bundled Apple profile trust resource is invalid or unavailable") from None
+    # All member, archive and original-stream closes have returned before any
+    # PEM decoding or trust-pin acceptance. An error never retries or falls back.
+    return content
+
+
+def _apple_root_bytes() -> bytes:
+    spec = __spec__
+    loader = getattr(spec, "loader", None)
+    require(type(spec) is ModuleSpec and spec.name == "mobile_release.ios_profile_trust"
+            and spec.origin == __file__ and __loader__ is loader)
+    if type(loader) is SourceFileLoader:
+        require(loader.name == spec.name and loader.path == __file__)
+        # Keep the original no-follow snapshot reader for unpacked installations.
+        # Do not change the separate untrusted provisioning-profile reader.
+        from .ios_profiles import read_profile_bytes
+
+        return read_profile_bytes(Path(__file__).parent / "data/apple-profile-roots.pem", maximum=16 * 1024)
+    require(type(loader) is zipimporter)
+    require(loader.prefix == "mobile_release" + os.sep
+            and __file__ == str(Path(loader.archive) / "mobile_release/ios_profile_trust.py"))
+    return _zip_apple_root_bytes(loader.archive)
+
+
 def apple_roots() -> tuple[bytes, ...]:
     # Public Apple CA certificates only, pinned independently of the artifact.
-    from .ios_profiles import read_profile_bytes
-
-    roots = pem_certificates(read_profile_bytes(Path(__file__).parent / "data/apple-profile-roots.pem", maximum=16 * 1024))
+    roots = pem_certificates(_apple_root_bytes())
     require(len(roots) == 3 and {hashlib.sha256(item).hexdigest() for item in roots} == APPLE_ROOT_SHA256)
     return roots
 

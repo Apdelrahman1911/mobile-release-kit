@@ -1,0 +1,17 @@
+@import UIKit;
+@interface MRKFixtureDelegate : UIResponder <UIApplicationDelegate>
+@property(nonatomic,strong) UIWindow *window;
+@end
+@implementation MRKFixtureDelegate
+- (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)options {
+    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    UIViewController *controller = [UIViewController new];
+    controller.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.window.rootViewController = controller;
+    [self.window makeKeyAndVisible];
+    return YES;
+}
+@end
+int main(int argc, char **argv) {
+    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(MRKFixtureDelegate.class)); }
+}

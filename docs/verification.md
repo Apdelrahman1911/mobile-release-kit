@@ -382,7 +382,11 @@ capture/deadline/EOF/finality checks remain mandatory.
 
 The fixed AIA probe uses four fresh synthetic chains/unique loopback issuer URLs
 under the same authority policy: direct client networking remains denied, with
-no AIA socket exception. The fixed trust-service route must still produce real
+no AIA socket exception. The URLs use `http://localhost:8080` because hosted
+macOS 26.7.2's trust service rejects numeric loopback hosts and ephemeral HTTP
+ports before scheduling issuer fetches. The controller checks that localhost
+resolves only to loopback and binds its own IPv4 loopback listener on port 8080.
+An occupied port fails the check. The fixed trust-service route must still produce real
 online/mutant fetches; a provider that also prevents those fetches fails admission.
 After a common explicitly enabled network baseline, the online control must
 actually fetch and accept; the offline
@@ -473,6 +477,12 @@ renewed grace period. Original-handle cleanup still runs; uncertain finality
 cannot pass. These verification scheduling allocations do not change product
 deadlines or native-control permissions and do not predict a passing duration.
 
+The Linux full Python source gate has a 2100-second wall-clock allocation for
+the full discovered inventory and its isolated fault cases. The installed-wheel
+gate uses 900 seconds. Preparation, every original capture, finality and union
+reconciliation share one cutoff clamped to the same 3300-second job deadline.
+Each isolated fault case retains its 900-second relative maximum.
+
 The ordinary per-file logical-size limit is512MiB. Only the exact Linux
 `python-full` invocation uses `(1 << 32) + 1MiB`, preserving the genuine sparse
 ZIP64 regression rather than splitting, skipping or mocking it. This fixed
@@ -480,8 +490,10 @@ profile makes the entire host-backed work tree read-only and overlays only
 namespace-private tmpfs leaves:640MiB work/tmp;16MiB each for work/home, config,
 cache, gem-cache, bundle-config, bundle-home and checks;128MiB /tmp;16MiB each
 for /run and /dev/shm. Their aggregate912MiB bounds **file data**, not total RAM
-or inode metadata. Dispatch also requires actual MemAvailable>=1536MiB; existing
-CPU/address-space/process/FD/deadline/output limits are unchanged.
+or inode metadata. Dispatch also requires actual MemAvailable>=1536MiB. Only
+this fixed full source capture has a 450-second CPU limit, with the same
+2100-second wall allocation. Address-space, process, descriptor and output
+limits remain in force.
 
 Before discovering tests, actual Linux controls verify limits, zero additional
 user namespaces, the read-only/capped mount topology and private writable roots.
@@ -491,6 +503,11 @@ control must reach ENOSPC and clean its file. Failure prevents discovery. The
 real ZIP64 test asserts exact logical length, sparse allocated blocks and actual
 production parsing/stdlib extraction. Namespace disposal is not product cleanup
 and cannot convert failed or incomplete test outcomes into success.
+
+The Linux `python-pr-journal` gate runs the real pull-request journal cold-reopen
+fixture under the ordinary sandbox's private temporary directory. The journal
+checks every ancestor, so the sticky mounts in `python-full` cannot host this
+fixture. Its required result binds the exact case and original process finality.
 
 Acceptance requires the actual original launcher wait, zero return code, both
 stream EOFs, bounded and reconciled persisted bytes, and an empty reserved-identity
@@ -1023,19 +1040,19 @@ attempt, not transferable execution permissions. Retain the workflow/run URL and
 actual Actions job outcome; a late publication failure invalidates an earlier
 success-shaped summary. Later gates after failure stay `UNEXECUTED`.
 
-Public reports use schema 2 without changing the original in-memory gate records.
-Successful Python/native gates omit only exactly checked duplicate completion
-lists: `completed_from: summary.tests` expands to the sorted IDs of that
-partition's retained test/outcome records; `completed_from: partitions` expands
-to the duplicate-free sorted union of its partitions' completion IDs (expanding
-the first reference where present). Counts must match, every partition must have
-passed, and delegated matrix obligations remain separate. Every observed test ID
-and outcome, original capture/finality result, failure diagnostic and source
-binding remains present. Failed and unexecuted rows are not abbreviated. These
-references are lossless presentation, not new validation authority or permission
-to reuse another run's evidence. Compact JSON retains the unchanged 768 KiB public
-bound; inconsistent references, excess nonredundant output or a publication error
-still fail the job. A gate-start log line alone is never a passing gate result.
+Public reports use schema 3. In a successful Python summary, each
+`test_groups` entry contains a shared ID prefix and the ordered suffixes that
+follow it. Concatenate each prefix and suffix in list order, then mark entries
+at the zero-based `skipped` positions as `skip` and every other entry as `ok`.
+`completed_from: summary.test_groups` expands to the sorted IDs in that
+partition. `completed_from: partitions` expands to the duplicate-free sorted
+union of a gate's partition completions. Counts and completion IDs must match
+the original in-memory records before publication, and delegated matrix
+obligations remain separate. The projection preserves test order and outcomes,
+capture and finality evidence, and source binding. Failed and unexecuted rows
+retain their original fields. Inconsistent references, output above 768 KiB,
+or a publication error still fail the job. A gate-start log line alone does not
+establish a passing result.
 
 Failure diagnostics may identify the fixed ACL attribute or whitelisted Ruby
 startup tokens from already captured stderr. They disclose no raw ACL entries,

@@ -1,0 +1,899 @@
+diff --git a/src/mobile_release/_github_pull_request_journal.py b/src/mobile_release/_github_pull_request_journal.py
+--- a/src/mobile_release/_github_pull_request_journal.py
++++ b/src/mobile_release/_github_pull_request_journal.py
+@@ -1,7 +1,8 @@
+ """Create-only draft-PR intents on the existing private journal custodian.
+
+ No replacement, deletion or resume-write method. Loaded records are comparison
+-data only. A new marker cannot bypass an earlier intent for the same repository ID/branch pair.
++data only. Every earlier same-pair intent must have its exact durable 201 receipt
++and an immutable historical closure; new creation still checks open PRs afresh.
+ """
+ from __future__ import annotations
+
+@@ -11,12 +12,13 @@
+ from ._desktop_github_engine import _decode_json
+ from ._github_preflight_journal import Journal as Custodian, JournalError
+ from . import github_pull_request as p
++from .github_pull_request_management import closure_leaf, closed_observation
+
+
+ class Journal(Custodian):
+-    _leaf_pattern = re.compile(r"([0-9a-f]{32})\.(intent|claim|receipt)\.json\Z", re.ASCII)
+-    _max_entries = p.MAX_RECORDS * 3
+-    _max_total_bytes = p.MAX_RECORDS * (p.MAX_RECORD_BYTES + 2048)
++    _leaf_pattern = re.compile(r"([0-9a-f]{32})\.(intent|claim|receipt|closed)\.json\Z", re.ASCII)
++    _max_entries = p.MAX_RECORDS * 4
++    _max_total_bytes = p.MAX_RECORDS * (p.MAX_RECORD_BYTES + 3072)
+
+     def __init__(self, home: str, *, end: float):
+         super().__init__(home, end=end)
+@@ -50,28 +52,39 @@
+             digest = hashlib.sha256(raw).hexdigest()
+             entry = {"prepared": prepared.value(), "claimed": False, "acknowledged": None}
+             seen.add(intent)
++            receipt_digest = None
+             claim, receipt = marker + ".claim.json", marker + ".receipt.json"
+             if claim in names:
+                 p.require(self.decode(self._read(claim), 1024) == {"intentSha256": digest, "phase": "create"})
+                 seen.add(claim); entry["claimed"] = True
+                 if receipt in names:
+-                    acknowledged = p.obj(self.decode(self._read(receipt), 1024), {"intentSha256", "pullRequest"})
++                    receipt_raw = self._read(receipt)
++                    acknowledged = p.obj(self.decode(receipt_raw, 1024), {"intentSha256", "pullRequest"})
++                    receipt_digest = hashlib.sha256(receipt_raw).hexdigest()
+                     p.require(acknowledged["intentSha256"] == digest)
+                     entry["acknowledged"] = p.acknowledgement(acknowledged["pullRequest"], prepared)
+                     seen.add(receipt)
+-            self.creations[marker] = {"data": p.pending_record(entry), "digest": digest}
++                    closed = marker + ".closed.json"
++                    if closed in names:
++                        entry["closed"] = closure_leaf(self.decode(self._read(closed), 1024), prepared,
++                                                       digest, receipt_digest, entry["acknowledged"])
++                        seen.add(closed)
++            self.creations[marker] = {"data": p.pending_record(entry), "digest": digest, "receiptDigest": receipt_digest}
+         p.require(seen == names and names == self._names())
+
+     def create_intent(self, value: dict) -> None:
+         prepared = p.Prepared.parse(value)
+         p.need(self.selected is None and len(self.creations) < p.MAX_RECORDS, "previous-attempt")
+-        # Cross marker/project/account aliases: no new nonce can grant a second
+-        # attempt for this exact remote repository ID and base/head pair.
++        # Every prior same-pair attempt, across project/account aliases, stays
++        # fenced unless its actual 201 receipt has an exact historical closure.
++        # Never replay that old claim. The new original already repeated the
++        # fresh open-PR query, so a reopened PR still blocks a replacement.
+         for record in self.creations.values():
+             previous = p.Prepared.parse(record["data"]["prepared"]).target
+             p.need(previous.scope["repositoryId"] != prepared.target.scope["repositoryId"]
+                    or (previous.intent["base"], previous.intent["head"]) !=
+-                   (prepared.target.intent["base"], prepared.target.intent["head"]), "previous-attempt")
++                   (prepared.target.intent["base"], prepared.target.intent["head"])
++                   or record["data"].get("closed") is not None, "previous-attempt")
+         marker = prepared.target.intent["marker"]
+         p.need(marker not in self.creations, "previous-attempt")
+         raw = p.canonical({"protocol": p.PROTOCOL, "prepared": prepared.value()}) + b"\n"
+@@ -80,7 +93,7 @@
+         except (JournalError, OSError):
+             raise p.Refused("journal-unavailable") from None
+         self.creations[marker] = {"data": {"prepared": prepared.value(), "claimed": False, "acknowledged": None},
+-                                  "digest": hashlib.sha256(raw).hexdigest()}
++                                  "digest": hashlib.sha256(raw).hexdigest(), "receiptDigest": None}
+         self.selected = marker  # Only this new original may ever claim POST.
+
+     def claim(self) -> None:
+@@ -98,11 +111,36 @@
+         record = self.creations[self.selected]
+         p.need(record["data"]["claimed"] and record["data"]["acknowledged"] is None, "previous-attempt")
+         safe = p.acknowledgement(repository, p.Prepared.parse(record["data"]["prepared"]))
++        raw = p.canonical({"intentSha256": record["digest"], "pullRequest": safe}) + b"\n"
+         try:
+-            self._create(self.selected + ".receipt.json", p.canonical({"intentSha256": record["digest"], "pullRequest": safe}) + b"\n")
++            self._create(self.selected + ".receipt.json", raw)
+         except (JournalError, OSError):
+             raise p.Refused("journal-unavailable") from None
+         record["data"]["acknowledged"] = safe
++        record["receiptDigest"] = hashlib.sha256(raw).hexdigest()
++
++    def record_closed(self, value: dict, closed: dict) -> None:
++        self._post()
++        prepared = p.Prepared.parse(value)
++        marker = prepared.target.intent["marker"]
++        record = self.creations.get(marker)
++        p.need(self.selected is None and record is not None
++               and record["data"]["prepared"] == prepared.value()
++               and record["data"]["claimed"] is True
++               and record["data"]["acknowledged"] is not None
++               and record["receiptDigest"] is not None, "journal-unavailable")
++        safe = closed_observation(closed, record["data"]["acknowledged"])
++        if record["data"].get("closed") is not None:
++            # Retain the first actual closure, even if a PR later reopens and
++            # closes again. It is explicitly historical, never current absence.
++            return
++        raw = p.canonical({"protocol": p.PROTOCOL, "intentSha256": record["digest"],
++                           "receiptSha256": record["receiptDigest"], "closed": safe}) + b"\n"
++        try:
++            self._create(marker + ".closed.json", raw)
++        except (JournalError, OSError):
++            raise p.Refused("journal-unavailable") from None
++        record["data"]["closed"] = safe
+
+     def pending(self, target: p.Target) -> list[dict]:
+         self._post()
+diff --git a/src/mobile_release/github_pull_request.py b/src/mobile_release/github_pull_request.py
+--- a/src/mobile_release/github_pull_request.py
++++ b/src/mobile_release/github_pull_request.py
+@@ -328,13 +328,23 @@
+
+
+ def pending_record(value: object) -> dict:
+-    r = obj(value, {"prepared", "claimed", "acknowledged"}); prepared = Prepared.parse(r["prepared"])
++    require(type(value) is dict and set(value) in ({"prepared", "claimed", "acknowledged"}, {"prepared", "claimed", "acknowledged", "closed"}))
++    r = value; prepared = Prepared.parse(r["prepared"])
+     require(type(r["claimed"]) is bool and (r["acknowledged"] is None or r["claimed"]))
+-    return {"prepared": prepared.value(), "claimed": r["claimed"], "acknowledged": None if r["acknowledged"] is None else acknowledgement(r["acknowledged"], prepared)}
+-
+-
+-def reconcile(record: dict, exchange: Exchange) -> dict:
+-    original = pending_record(record); prepared = Prepared.parse(original["prepared"]); op = Operation(prepared.target, exchange)
++    out = {"prepared": prepared.value(), "claimed": r["claimed"], "acknowledged": None if r["acknowledged"] is None else acknowledgement(r["acknowledged"], prepared)}
++    if "closed" in r:
++        from .github_pull_request_management import closed_observation
++        require(out["acknowledged"] is not None)
++        out["closed"] = closed_observation(r["closed"], out["acknowledged"])
++    return out
++
++
++def reconcile(record: dict, exchange: Exchange, *, journal=None) -> dict:
++    original = pending_record(record)
++    if original["acknowledged"] is not None:
++        from .github_pull_request_management import reconcile_acknowledged
++        return reconcile_acknowledged(original, exchange, journal)
++    prepared = Prepared.parse(original["prepared"]); op = Operation(prepared.target, exchange)
+     result = {"effect": "unresolved", "reason": "unresolved", "claimed": original["claimed"], "acknowledged": original["acknowledged"],
+               "observed": None, "control": _control()}
+     try:
+@@ -375,6 +385,7 @@
+     elif e == "potentially-applied": require(kind == "create" and r["claimed"] and ack is None and seen is None and r["reason"] != "none")
+     elif e == "acknowledged-unconfirmed": require(kind == "create" and r["claimed"] and ack is not None and seen is None and r["reason"] != "none")
+     elif e == "created-observed": require(r["claimed"] and ack is not None and seen == ack and r["reason"] == "none")
++    elif e == "closed-confirmed": require(kind == "reconcile" and r["claimed"] and ack is not None and seen == ack and r["reason"] == "none")
+     elif e == "unresolved": require(kind == "reconcile" and seen is None and r["reason"] != "none")
+     elif e == "found-unattributed": require(kind == "reconcile" and ack is None and seen is not None and r["reason"] == "unattributed")
+     else: require(False)
+diff --git a/src/mobile_release/_desktop_github_pull_request.py b/src/mobile_release/_desktop_github_pull_request.py
+--- a/src/mobile_release/_desktop_github_pull_request.py
++++ b/src/mobile_release/_desktop_github_pull_request.py
+@@ -106,7 +106,7 @@
+                 p.require(request.kind == "reconcile" and retained is not None and journal is not None)
+                 matches = [entry for entry in journal.pending(request.target) if entry["prepared"] == retained.value()]
+                 p.need(len(matches) == 1, "journal-unavailable")
+-                result["creation"] = p.reconcile(matches[0], exchange)
++                result["creation"] = p.reconcile(matches[0], exchange, journal=journal)
+                 result["reason"] = result["creation"]["reason"]
+     except (p.Refused, ReadFailure) as error:
+         result["reason"] = error.reason
+diff --git a/desktop/src-tauri/src/github_pull_request_protocol.rs b/desktop/src-tauri/src/github_pull_request_protocol.rs
+--- a/desktop/src-tauri/src/github_pull_request_protocol.rs
++++ b/desktop/src-tauri/src/github_pull_request_protocol.rs
+@@ -9,6 +9,9 @@
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ use sha2::{Digest, Sha256};
++
++#[path="github_pull_request_management.rs"]
++mod management;
+
+ pub(crate) const PROTOCOL: &str = "mrk-github-pull-request/1";
+ pub(crate) const EVENT: &str = "github-pull-request-status";
+@@ -86,6 +89,7 @@
+     PotentiallyApplied,
+     AcknowledgedUnconfirmed,
+     CreatedObserved,
++    ClosedConfirmed,
+     Unresolved,
+     FoundUnattributed,
+ }
+@@ -290,8 +294,8 @@
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct Prepared {
+     pub(crate) target: Target,
+-    base_sha: String,
+-    head_sha: String,
++    pub(super) base_sha: String,
++    pub(super) head_sha: String,
+     comparison: Comparison,
+     draft: bool,
+     creation_permission: String,
+@@ -353,6 +357,8 @@
+     pub(crate) claimed: bool,
+     #[serde(deserialize_with = "nullable")]
+     pub(crate) acknowledged: Option<Acknowledgement>,
++    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="management::present")]
++    pub(crate) closed: Option<management::Closed>,
+ }
+ impl Pending {
+     fn valid(&self) -> bool {
+@@ -361,13 +367,14 @@
+                 .acknowledged
+                 .as_ref()
+                 .is_none_or(|v| self.claimed && v.valid(&self.prepared))
++            && self.closed.as_ref().is_none_or(|c| self.claimed && self.acknowledged.as_ref().is_some_and(|a| c.valid(a)))
+     }
+     fn heap(&self) -> Option<usize> {
+         self.prepared.heap()?.checked_add(
+             self.acknowledged
+                 .as_ref()
+                 .map_or(Some(0), Acknowledgement::heap)?,
+-        )
++        )?.checked_add(self.closed.as_ref().map_or(Some(0), management::Closed::heap)?)
+     }
+ }
+ #[derive(Clone, PartialEq, Eq)]
+@@ -549,6 +556,10 @@
+                     && self.acknowledged.is_some()
+                     && self.acknowledged == self.observed
+                     && self.reason == Reason::None
++            }
++            Effect::ClosedConfirmed => {
++                r.kind == Kind::Reconcile && self.claimed && self.acknowledged.is_some()
++                    && self.acknowledged == self.observed && self.reason == Reason::None
+             }
+             Effect::Unresolved => {
+                 r.kind == Kind::Reconcile && self.observed.is_none() && self.reason != Reason::None
+diff --git a/desktop/src-tauri/src/github_pull_request_session.rs b/desktop/src-tauri/src/github_pull_request_session.rs
+--- a/desktop/src-tauri/src/github_pull_request_session.rs
++++ b/desktop/src-tauri/src/github_pull_request_session.rs
+@@ -245,6 +245,15 @@
+         self.pull_request.finish(before);
+         self.pull_request.view.clone()
+     }
++    pub(super) fn pull_request_browser_comparison(&self, id:&str, project:&str, g:u32,
++        root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<crate::github_browser_protocol::Destination,BridgeError> {
++        let c=self.pull_request.consent.as_ref().filter(|c|c.id==id&&c.project_id==project
++            &&c.generation==g&&&c.root==root&&edit.matches(&c.stamp)&&now<c.end
++            &&self.private.as_ref().is_some_and(|s|s.id==c.session_id&&s.retirement.is_none()))
++            .ok_or_else(crate::github_browser_protocol::refused)?;
++        Ok(crate::github_browser_protocol::Destination::Comparison{repository:c.prepared.target.scope.repository.clone(),
++            base_sha:c.prepared.base_sha.clone(),head_sha:c.prepared.head_sha.clone()})
++    }
+     pub(crate) fn pull_request_registered_project(&self) -> Option<&str> {
+         self.pull_request
+             .active
+@@ -974,7 +983,7 @@
+                 }
+             }
+         }
+-        if reason != p::Reason::None && effect == p::Effect::CreatedObserved {
++        if reason != p::Reason::None && matches!(effect, p::Effect::CreatedObserved | p::Effect::ClosedConfirmed) {
+             effect = if self.pull_request.view.acknowledged.is_some() {
+                 p::Effect::AcknowledgedUnconfirmed
+             } else {
+@@ -994,7 +1003,7 @@
+             self.pull_request.view.observed = None;
+             if let Some(o) = &mut self.pull_request.view.operation {
+                 o.reason = reason;
+-                if o.effect == p::Effect::CreatedObserved {
++                if matches!(o.effect, p::Effect::CreatedObserved | p::Effect::ClosedConfirmed) {
+                     o.effect = if self.pull_request.view.acknowledged.is_some() {
+                         p::Effect::AcknowledgedUnconfirmed
+                     } else {
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -146,6 +146,8 @@
+ #[path = "asset_session_repository_create.rs"]
+ mod repository_create;
+ pub(crate) use repository_create::RepositoryCreateGoGate;
++#[path = "asset_session_github_browser.rs"]
++mod github_browser;
+ #[path = "asset_session_github_activity.rs"]
+ mod activity;
+ pub(crate) use activity::GitHubActivityGoGate;
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2501,6 +2501,17 @@
+ async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+     actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
++}
++
++// Non-async: Tauri executes this original command on the main thread. The
++// native shim checks that again; no dispatch queue can outlive the Doc gate.
++#[tauri::command]
++fn github_browser_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_browser_protocol::RequestSent, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Browser handoff has no fixture admission."));
++    edit_window(&webview)?;
++    let tauri::ipc::InvokeBody::Raw(bytes)=request.body() else {return Err(BridgeError::invalid());};
++    let selected=crate::github_browser_protocol::decode(bytes)?;
++    state.document.github_browser_open(&selected)
+ }
+
+ fn github_activity_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+@@ -5104,7 +5115,7 @@
+             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
+             github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
+             github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
+-            github_activity_status, github_activity_read, github_activity_cancel,
++            github_activity_status, github_activity_read, github_activity_cancel, github_browser_open,
+             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
+             github_history_status, github_history_start, github_history_cancel,
+             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -304,6 +304,7 @@
+ mod github_publication_protocol;
+ mod github_repository_create_protocol;
+ mod github_activity_protocol;
++mod github_browser_protocol;
+ mod github_pull_request_protocol;
+ mod github_actions_retry_protocol;
+ mod github_setup_session;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -340,7 +340,7 @@
+             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
+             "github_release_reconcile", "github_release_pending", "github_release_cancel",
+             "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
+-            "github_activity_status", "github_activity_read", "github_activity_cancel",
++            "github_activity_status", "github_activity_read", "github_activity_cancel", "github_browser_open",
+             "github_pull_request_status", "github_pull_request_prepare", "github_pull_request_create", "github_pull_request_pending", "github_pull_request_reconcile", "github_pull_request_discard", "github_pull_request_cancel",
+             "github_actions_retry_status", "github_actions_retry_prepare", "github_actions_retry_start", "github_actions_retry_pending", "github_actions_retry_reconcile", "github_actions_retry_discard", "github_actions_retry_cancel",
+             "github_repository_create_status", "github_repository_create_prepare", "github_repository_create_create", "github_repository_create_pending", "github_repository_create_reconcile", "github_repository_create_discard", "github_repository_create_cancel",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -78,6 +78,7 @@
+     "allow-github-activity-status",
+     "allow-github-activity-read",
+     "allow-github-activity-cancel",
++    "allow-github-browser-open",
+     "allow-github-actions-retry-status",
+     "allow-github-actions-retry-prepare",
+     "allow-github-actions-retry-start",
+diff --git a/desktop/native/macos-installed-native/build.rs b/desktop/native/macos-installed-native/build.rs
+--- a/desktop/native/macos-installed-native/build.rs
++++ b/desktop/native/macos-installed-native/build.rs
+@@ -165,6 +165,7 @@
+         println!("cargo:rustc-cfg=mrk_wrapping_keychain_qualification_native");
+     }
+     println!("cargo:rerun-if-changed=src/native.m");
++    println!("cargo:rerun-if-changed=src/github_browser.m");
+     println!("cargo:rerun-if-changed=src/android_registration.m");
+     println!("cargo:rerun-if-changed=src/android_service_management.m");
+     println!("cargo:rerun-if-changed=src/install_producer.m");
+@@ -338,7 +339,7 @@
+         println!("cargo:rerun-if-changed=../macos-installed-entry/fixed_paths.h");
+         build.file("../macos-installed-entry/gate.c");
+     }
+-    build.file("src/native.m").file("src/android_registration.m").file("src/android_service_management.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
++    build.file("src/native.m").file("src/github_browser.m").file("src/android_registration.m").file("src/android_service_management.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
+         .flag("-mmacosx-version-min=26.0").warnings(true).compile("mrk_macos_installed_native");
+     println!("cargo:rustc-link-lib=framework=AppKit");
+     println!("cargo:rustc-link-lib=framework=Foundation");
+diff --git a/desktop/native/macos-installed-native/src/lib.rs b/desktop/native/macos-installed-native/src/lib.rs
+--- a/desktop/native/macos-installed-native/src/lib.rs
++++ b/desktop/native/macos-installed-native/src/lib.rs
+@@ -180,6 +180,8 @@
+ use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
+     os::{fd::{AsRawFd, BorrowedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, ptr::NonNull, rc::Rc};
+
++pub mod github_browser;
++
+ unsafe extern "C" {
+     fn mrk_platform() -> c_int;
+     #[cfg(test)]
+diff --git a/desktop/src/githubActivityController.ts b/desktop/src/githubActivityController.ts
+--- a/desktop/src/githubActivityController.ts
++++ b/desktop/src/githubActivityController.ts
+@@ -1,15 +1,17 @@
+ // Presentation only. The retained native Connection/Setup owner supplies every
+ // result, cancellation and join; navigation never starts a remote read.
++import { browserRequestReturned, browserFailure, BROWSER_HELP } from './githubPullRequestManagement.ts';
++import type { GitHubBrowserState, GitHubBrowserPage } from './githubPullRequestManagement.ts';
+ import { sameConnectionData as same } from './githubConnectionProtocol.ts';
+ import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
+ import { parseActivitySelection, activityError, ACTIVITY_HELP, parseActivityStatus } from './githubActivityProtocol.ts';
+ import type { ActivityObservation, ActivityReason, ActivitySelection, ActivityStatus, ActivityTarget, GitHubActivityPort } from './githubActivityProtocol.ts';
+ interface Context {documentId:string;projectId:string;projectGeneration:number;repository:string;sessionId:string;accountId:string;repositoryId:string}
+ interface Original {port:GitHubActivityPort;live:boolean;unlisten:(()=>void)|null;status:ActivityStatus|null;fresh:boolean}
+-interface Work {owner:Original;kind:'subscribe'|'status'|'read'|'cancel';ended:boolean;promise:Promise<unknown>|null}
++interface Work {owner:Original;kind:'subscribe'|'status'|'read'|'cancel'|'browser';ended:boolean;promise:Promise<unknown>|null}
+ interface Attempt {owner:Original;work:Work;context:Context;epoch:object;selection:ActivitySelection;revision:number;previousId:string|null;operationId:string|null;sent:boolean;stopWanted:boolean;stopSent:boolean}
+ interface BoundResult {owner:Original;context:Context;epoch:object;observation:ActivityObservation}
+-export interface GitHubActivityView {native:boolean;status:ActivityStatus|null;branchDraft:string;pending:boolean;observing:boolean;cancelling:boolean;uncertain:boolean;error:ActivityReason|null;originalRepository:string|null}
++export interface GitHubActivityView {browserState:GitHubBrowserState;browserPending:boolean;native:boolean;status:ActivityStatus|null;branchDraft:string;pending:boolean;observing:boolean;cancelling:boolean;uncertain:boolean;error:ActivityReason|null;originalRepository:string|null}
+ function immutable<T>(v:T):T{if(v&&typeof v==='object'&&!Object.isFrozen(v)){Object.values(v).forEach(immutable);Object.freeze(v);}return v;}
+ function context(view:GitHubConnectionViewState):Context|null{
+   const c=view.context,s=view.status,a=s?.account.value,r=s?.repository.value,session=s?.session;
+@@ -30,18 +32,19 @@
+   return true;
+ }
+ export class GitHubActivityController {
+-  private state:GitHubActivityView=immutable({native:false,status:null,branchDraft:'',pending:false,observing:false,cancelling:false,uncertain:false,error:null,originalRepository:null});
++  private state:GitHubActivityView=immutable({browserState:'idle',browserPending:false,native:false,status:null,branchDraft:'',pending:false,observing:false,cancelling:false,uncertain:false,error:null,originalRepository:null});
+   private listeners=new Set<()=>void>();private desired:GitHubActivityPort|null=null;private original:Original|null=null;private work=new Set<Work>();
+   private attempt:Attempt|null=null;private result:BoundResult|null=null;private current:Context|null=null;private epoch:object={};private unknown=false;private disposed=false;private cancelledId:string|null=null;
++  private browserToken:object|null=null;
+   private connection:()=>GitHubConnectionViewState;private peer:()=>string|null;
+   constructor(connection:()=>GitHubConnectionViewState,peer:()=>string|null=()=>null){this.connection=connection;this.peer=peer;}
+   getSnapshot=():GitHubActivityView=>this.state;
+   subscribe=(f:()=>void):(()=>void)=>{this.listeners.add(f);return()=>{this.listeners.delete(f);};};
+-  private update(p:Partial<GitHubActivityView>={}):void{this.state=immutable({...this.state,...p,pending:this.attempt!==null,
++  private update(p:Partial<GitHubActivityView>={}):void{this.state=immutable({...this.state,...p,pending:this.attempt!==null,browserPending:[...this.work].some(w=>w.kind==='browser'),
+     observing:[...this.work].some(w=>w.kind==='status'||w.kind==='subscribe'),cancelling:[...this.work].some(w=>w.kind==='cancel')});
+     for(const f of [...this.listeners]){try{f();}catch{/* Rendering never disowns an original invocation. */}}}
+   private fail(reason:ActivityReason):void{if(this.unknown){this.update();return;}this.unknown=true;this.result=null;this.update({uncertain:true,error:reason});}
+-  private invalidate():void{this.epoch={};this.result=null;if(this.attempt)this.attempt.stopWanted=true;this.update();this.stopInvalidated();}
++  private invalidate():void{this.epoch={};this.browserToken=null;this.state=immutable({...this.state,browserState:'idle'});this.result=null;if(this.attempt)this.attempt.stopWanted=true;this.update();this.stopInvalidated();}
+   beforeWorkspaceAction():void{if(!this.disposed)this.invalidate();}
+   syncContext=():void=>{if(this.disposed)return;const c=context(this.connection());if(!same(c,this.current)){this.current=c;this.invalidate();}};
+   setBranch(value:string):void{if(!this.disposed&&typeof value==='string'&&value.length<=200&&value!==this.state.branchDraft){this.invalidate();this.update({branchDraft:value});}}
+@@ -106,6 +109,7 @@
+   }
+   ownerReason():string|null{
+     if(this.unknown)return ACTIVITY_HELP['cleanup-unknown'];
++    if([...this.work].some(w=>w.kind==='browser'))return 'The original browser request is still returning. Other tasks wait for that same call.';
+     return this.attempt||this.work.size||this.original?.status?.operation&&this.original.status.operation.phase!=='settled'?
+       'The original GitHub activity read is still running or closing. Status and Stop remain available.':null;
+   }
+@@ -119,6 +123,33 @@
+     if(!s||!o.fresh||s.sessionId!==c.sessionId)return 'Check current activity status first.';
+     if(!s.available)return ACTIVITY_HELP[s.reason];return this.peer();
+   }
++  matchesContext(expected:unknown):boolean {return same(expected,context(this.connection()));}
++  refreshResult(expected:ActivityObservation):void {if(this.currentResult()===expected)this.read(expected.selection);}
++  browserReason(expected:ActivityObservation):string|null {
++    if(this.currentResult()!==expected||expected.data.kind!=='pull-request')return BROWSER_HELP.stale;
++    if(!this.original?.port.openBrowser)return BROWSER_HELP.unavailable;
++    if(['unconfirmed','unavailable','stale'].includes(this.state.browserState))return BROWSER_HELP[this.state.browserState];
++    return this.readReason(expected.selection);
++  }
++  openPullRequest(expected:ActivityObservation,page:GitHubBrowserPage):void {
++    if(!['conversation','files'].includes(page)||this.browserReason(expected))return;
++    const o=this.original!,s=o.status!,c=context(this.connection()),epoch=this.epoch,revision=this.connection().status?.revision;
++    if(!c||revision===undefined||!s.operation||!o.port.openBrowser)return;
++    const token={};this.browserToken=token;
++    const w:Work={owner:o,kind:'browser',ended:false,promise:null};this.work.add(w);this.update({browserState:'requesting'});
++    const peer=this.peer();
++    const current=()=>this.browserToken===token&&this.epoch===epoch&&this.currentResult()===expected&&o===this.original&&o.port===this.desired&&
++      o.status===s&&same(c,context(this.connection()))&&this.connection().status?.revision===revision;
++    if(!current()||peer||this.work.size!==1){if(this.browserToken===token)this.update({browserState:'stale'});this.finish(w);return;}
++    const returned=(raw:unknown)=>{const ok=browserRequestReturned(raw);if(this.browserToken===token)this.update({browserState:current()?(ok?'request-sent':'unconfirmed'):'stale'});};
++    const failed=(raw:unknown)=>{const state=browserFailure(raw);if(this.browserToken===token)this.update({browserState:current()?state:'stale'});};
++    try {
++      const promise=o.port.openBrowser({kind:'activity-pull-request',sessionId:c.sessionId,expectedRevision:s.revision,
++        expectedConnectionRevision:revision,operationId:s.operation.id,page});
++      if(!(promise instanceof Promise))throw new Error('Original browser request not retained');w.promise=promise;
++      void promise.then(returned,failed).finally(()=>this.finish(w));
++    }catch(e){failed(e);this.finish(w);}
++  }
+   readSelection(from:ActivityObservation,selected:ActivitySelection):void{
+     // Row callbacks must belong to this exact still-current result, not a
+     // previously rendered repository, port or away-and-back selection.
+@@ -126,16 +157,17 @@
+     if(selected.kind==='pull-request'&&current.data.pullRequests.rows.some(r=>r.number===selected.number)||
+       selected.kind==='workflow-run'&&current.data.workflowRuns.rows.some(r=>r.id===selected.runId&&r.attempt===selected.attempt))this.read(selected);
+   }
+-  read(selected:ActivitySelection={kind:'overview',branch:this.state.branchDraft||null}):void{
++  read(selected:ActivitySelection={kind:'overview',branch:this.state.branchDraft||null},stillCurrent:()=>boolean=()=>true):void{
+     const parsed=parseActivitySelection(selected);if(!parsed)return;selected=parsed;
+     if(this.readReason(selected))return;
+     const source=this.connection(),o=this.original!,c=context(source),s=o.status,epoch=this.epoch;
+     if(!c||!s||!source.status)return;const revision=source.status.revision;
+     const w:Work={owner:o,kind:'read',ended:false,promise:null};this.work.add(w);
+     const a:Attempt={owner:o,work:w,context:c,epoch,selection:immutable(structuredClone(selected)),revision:s.revision,previousId:s.operation?.id??null,operationId:null,sent:false,stopWanted:false,stopSent:false};
+-    this.attempt=a;this.result=null;this.update({error:null,originalRepository:c.repository});
++    this.attempt=a;this.result=null;this.browserToken=null;this.update({error:null,browserState:'idle',originalRepository:c.repository});
++    let sourceCurrent=false;try{sourceCurrent=stillCurrent();}catch{/* Veto only; never invoke on a thrown binding check. */}
+     const peer=this.peer();
+-    if(this.attempt!==a||a.stopWanted||epoch!==this.epoch||o!==this.original||o.port!==this.desired||this.disposed||this.unknown||o.status!==s||!o.fresh||peer||
++    if(!sourceCurrent||this.attempt!==a||a.stopWanted||epoch!==this.epoch||o!==this.original||o.port!==this.desired||this.disposed||this.unknown||o.status!==s||!o.fresh||peer||
+       !same(c,context(this.connection()))||revision!==this.connection().status?.revision){this.attempt=null;this.update({error:a.stopWanted?'cancelled':'target-changed'});this.finish(w);return;}
+     a.sent=true;
+     const failed=(raw:unknown,sync:boolean)=>{const e=activityError(raw);
+diff --git a/desktop/src/githubActivityProtocol.ts b/desktop/src/githubActivityProtocol.ts
+--- a/desktop/src/githubActivityProtocol.ts
++++ b/desktop/src/githubActivityProtocol.ts
+@@ -1,4 +1,6 @@
+ // Bounded read-only PR/Actions DATA. No workflow dispatch, approval or token.
++import { encodeGitHubBrowserRequest } from './githubPullRequestManagement.ts';
++import type { GitHubBrowserRequest } from './githubPullRequestManagement.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { connectionKeys as keys, connectionNumericId as numeric, connectionOpaqueId as id,
+   connectionUtc as utc, sameConnectionData as same } from './githubConnectionProtocol.ts';
+@@ -27,7 +29,7 @@
+ export interface ActivityOperation {id:string;projectId:string;target:ActivityTarget;selection:ActivitySelection;phase:'running'|'stopping'|'settled'|'cleanup-unknown';reason:ActivityReason}
+ export interface ActivityStatus {schemaVersion:1;revision:number;sessionId:string|null;available:boolean;reason:ActivityReason;operation:ActivityOperation|null;result:ActivityObservation|null}
+ export interface ActivityRead {sessionId:string;projectId:string;expectedRevision:number;expectedConnectionRevision:number;selection:ActivitySelection}
+-export interface GitHubActivityPort {readonly mode:'native';status():Promise<unknown>;read(args:ActivityRead):Promise<unknown>;cancel(args:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
++export interface GitHubActivityPort {readonly mode:'native';openBrowser?(request:GitHubBrowserRequest):Promise<unknown>;status():Promise<unknown>;read(args:ActivityRead):Promise<unknown>;cancel(args:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
+ export type ActivityCommand = `github_activity_${'status'|'read'|'cancel'}`;
+ const one = <T extends string>(v:unknown,items:readonly T[]):v is T=>typeof v==='string'&&(items as readonly string[]).includes(v);
+ const rev = (v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>0&&v<=0xffff_fffe;
+@@ -87,10 +89,10 @@
+     command==='github_activity_read'&&keys(v,['sessionId','projectId','expectedRevision','expectedConnectionRevision','selection'])&&id(v.sessionId)&&id(v.projectId)&&rev(v.expectedRevision)&&rev(v.expectedConnectionRevision)&&activitySelection(v.selection);
+     if(!ok)return null;const b=new TextEncoder().encode(JSON.stringify(v));return b.length<=1024?b:null;}catch{return null;}
+ }
+-export function createGitHubActivityPort(mode:string,invoke:(name:ActivityCommand,bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof ACTIVITY_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):GitHubActivityPort|null{
++export function createGitHubActivityPort(mode:string,invoke:(name:ActivityCommand|'github_browser_open',bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof ACTIVITY_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):GitHubActivityPort|null{
+   if(mode!=='native'||!listen)return null;
+   const call=(name:ActivityCommand,v:unknown)=>{const bytes=encodeActivityRequest(name,v);if(!bytes)throw {code:'github_activity_refused_invalid_input'};return invoke(name,bytes);};
+-  return Object.freeze({mode:'native',status:()=>call('github_activity_status',{}),read:(v)=>call('github_activity_read',v),cancel:(v)=>call('github_activity_cancel',v),subscribe:(f)=>listen(ACTIVITY_EVENT,f)} satisfies GitHubActivityPort);
++  return Object.freeze({mode:'native',openBrowser:(request:GitHubBrowserRequest)=>{const bytes=encodeGitHubBrowserRequest(request);if(!bytes)throw {code:'github_browser_refused'};return invoke('github_browser_open',bytes);},status:()=>call('github_activity_status',{}),read:(v)=>call('github_activity_read',v),cancel:(v)=>call('github_activity_cancel',v),subscribe:(f)=>listen(ACTIVITY_EVENT,f)} satisfies GitHubActivityPort);
+ }
+ export function activityError(raw:unknown):{reason:ActivityReason;notAdmitted:boolean}{
+   try{const d=raw&&typeof raw==='object'?Object.getOwnPropertyDescriptor(raw,'code'):null;const code=d&&Object.hasOwn(d,'value')?d.value:null;
+diff --git a/desktop/src/githubPullRequestController.ts b/desktop/src/githubPullRequestController.ts
+--- a/desktop/src/githubPullRequestController.ts
++++ b/desktop/src/githubPullRequestController.ts
+@@ -1,5 +1,7 @@
+ // One presentation coordinator for the original native connection operation.
+ // No HTTP, token, timer, automatic creation, Git mutation or new execution owner.
++import { browserRequestReturned, browserFailure, BROWSER_HELP } from './githubPullRequestManagement.ts';
++import type { GitHubBrowserState, GitHubBrowserPage } from './githubPullRequestManagement.ts';
+ import { sameConnectionData as same } from './githubConnectionProtocol.ts';
+ import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
+ import { parsePullRequestStatus, parsePullRequestDraft, pullRequestError, PULL_REQUEST_HELP } from './githubPullRequestProtocol.ts';
+@@ -8,11 +10,14 @@
+
+ interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; repositoryId: string }
+ interface Original { port: PullRequestPort; live: boolean; unlisten: (() => void) | null; status: PullRequestStatus | null; fresh: boolean; closeCheck: object | null }
+-interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean; promise: Promise<unknown> | null }
++interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard' | 'browser'; ended: boolean; promise: Promise<unknown> | null }
+ interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: PullRequestKind; draft: PullRequestDraft; target: PullRequestTarget | null; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
+   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: PullRequestConsent | null }
+ interface Review { owner: Original; context: Context; epoch: object; consent: PullRequestConsent; draft: PullRequestDraft }
++export interface PullRequestCompletion { readonly context:Context; readonly status:PullRequestStatus }
++interface Completion {owner:Original;epoch:object;value:PullRequestCompletion}
+ export interface PullRequestView {
++  browserState:GitHubBrowserState;browserPending:boolean;
+   native: boolean; status: PullRequestStatus | null; draft: PullRequestDraft;
+   confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean;
+   error: PullRequestReason | null; originalRepository: string | null;
+@@ -44,7 +49,7 @@
+   return true;
+ }
+ export class GitHubPullRequestController {
+-  private state: PullRequestView = immutable({ native: false, status: null, draft: {base:'',head:'',title:'',body:''}, confirmed: false,
++  private state: PullRequestView = immutable({ browserState:'idle',browserPending:false,native: false, status: null, draft: {base:'',head:'',title:'',body:''}, confirmed: false,
+     pending: false, observing: false, cancelling: false, discarding: false, uncertain: false, error: null, originalRepository: null });
+   private listeners = new Set<() => void>();
+   private desired: PullRequestPort | null = null;
+@@ -52,6 +57,8 @@
+   private work = new Set<Work>();
+   private attempt: Attempt | null = null;
+   private review: Review | null = null;
++  private completion:Completion|null=null;
++  private browserToken:object|null=null;
+   private current: Context | null = null;
+   private epoch: object = {};
+   private approval: object = {};
+@@ -64,14 +71,14 @@
+   getSnapshot = (): PullRequestView => this.state;
+   subscribe = (f: () => void): (() => void) => { this.listeners.add(f); return () => { this.listeners.delete(f); }; };
+   private update(patch: Partial<PullRequestView> = {}): void {
+-    this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null,
++    this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null, browserPending:[...this.work].some(w=>w.kind==='browser'),
+       observing: [...this.work].some((w) => w.kind === 'status' || w.kind === 'subscribe'), cancelling: [...this.work].some((w) => w.kind === 'cancel'),
+       discarding: [...this.work].some((w) => w.kind === 'discard') });
+     for (const f of [...this.listeners]) { try { f(); } catch { /* Rendering cannot disown an original invocation. */ } }
+   }
+-  private fail(reason: PullRequestReason): void { if (this.unknown) { this.update(); return; } this.unknown = true; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
++  private fail(reason: PullRequestReason): void { if (this.unknown) { this.update(); return; } this.unknown = true; this.completion=null; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
+   private invalidate(): void {
+-    this.epoch = {}; this.review = null;
++    this.epoch = {}; this.review = null; this.completion=null; this.browserToken=null; this.state=immutable({...this.state,browserState:'idle'});
+     if (this.attempt) this.attempt.stopWanted = true;
+     this.update({ confirmed: false }); this.stopInvalidated();
+   }
+@@ -168,6 +175,8 @@
+       same(a.context, context(this.connection())) && a.draft === this.state.draft && sameBranches(s.consent.prepared.target,a.draft)) {
+       this.review = { owner: a.owner, epoch: a.epoch, context: a.context, consent: s.consent, draft:a.draft };
+     }
++    if(a.replyOk&&(a.kind==='create'||a.kind==='reconcile')&&(s.acknowledged||s.observed)&&a.epoch===this.epoch&&a.owner.port===this.desired&&!this.disposed&&same(a.context,context(this.connection())))
++      this.completion={owner:a.owner,epoch:a.epoch,value:immutable({context:a.context,status:s})};
+     this.update({ uncertain: false, error: s.operation.reason === 'none' ? null : s.operation.reason });
+   }
+   canCheck():boolean { const o=this.original;return !!o?.live&&(!this.disposed||this.owns(o))&&![...this.work].some(w=>w.owner===o&&(w.kind==='status'||w.kind==='subscribe')); }
+@@ -196,8 +205,51 @@
+     return r && !this.unknown && !this.disposed && r.owner === o && o.port === this.desired && o.fresh && r.epoch === this.epoch &&
+       same(c, r.context) && same(o.status?.consent, r.consent) && r.draft===this.state.draft && sameBranches(r.consent.prepared.target,r.draft) ? r.consent : null;
+   }
++  currentCompletion():PullRequestCompletion|null {
++    const r=this.completion,o=this.original,s=o?.status;
++    return r&&!this.unknown&&!this.disposed&&r.owner===o&&o.live&&o.port===this.desired&&o.fresh&&r.epoch===this.epoch&&
++      same(r.value.context,context(this.connection()))&&same(r.value.status.operation,s?.operation)&&same(r.value.status.acknowledged,s?.acknowledged)&&
++      same(r.value.status.observed,s?.observed)?r.value:null;
++  }
++  completionBrowserReason(expected:PullRequestCompletion):string|null {
++    return this.currentCompletion()!==expected?BROWSER_HELP.stale:this.browserReason();
++  }
++  comparisonBrowserReason(expected:PullRequestConsent):string|null {
++    return this.currentConsent()!==expected?BROWSER_HELP.stale:this.browserReason();
++  }
++  private browserReason():string|null {
++    if(!this.original?.port.openBrowser)return BROWSER_HELP.unavailable;
++    if(['unconfirmed','unavailable','stale'].includes(this.state.browserState))return BROWSER_HELP[this.state.browserState];
++    return this.startReason();
++  }
++  openCompletedPullRequest(expected:PullRequestCompletion,page:GitHubBrowserPage):void {
++    if(!['conversation','files'].includes(page)||this.completionBrowserReason(expected)||!expected.status.operation)return;
++    this.openBrowser({kind:'created-pull-request',operationId:expected.status.operation.id,page},()=>this.currentCompletion()===expected);
++  }
++  openComparison(expected:PullRequestConsent):void {
++    if(this.comparisonBrowserReason(expected))return;
++    this.openBrowser({kind:'comparison',consentId:expected.id},()=>this.currentConsent()===expected);
++  }
++  private openBrowser(target:{kind:'created-pull-request';operationId:string;page:GitHubBrowserPage}|{kind:'comparison';consentId:string},sourceCurrent:()=>boolean):void {
++    const o=this.original!,s=o.status!,c=context(this.connection()),epoch=this.epoch,revision=this.connection().status?.revision;
++    if(!c||revision===undefined||!o.port.openBrowser)return;
++    const token={};this.browserToken=token;
++    const w:Work={owner:o,kind:'browser',ended:false,promise:null};this.work.add(w);this.update({browserState:'requesting'});
++    const peer=this.peer();
++    const current=()=>this.browserToken===token&&this.epoch===epoch&&sourceCurrent()&&o===this.original&&o.port===this.desired&&
++      o.status===s&&same(c,context(this.connection()))&&revision===this.connection().status?.revision;
++    if(!current()||peer||this.work.size!==1){if(this.browserToken===token)this.update({browserState:'stale'});this.finish(w);return;}
++    const returned=(raw:unknown)=>{const ok=browserRequestReturned(raw);if(this.browserToken===token)this.update({browserState:current()?(ok?'request-sent':'unconfirmed'):'stale'});};
++    const failed=(raw:unknown)=>{const state=browserFailure(raw);if(this.browserToken===token)this.update({browserState:current()?state:'stale'});};
++    try {
++      const promise=o.port.openBrowser({...target,sessionId:c.sessionId,expectedRevision:s.revision,expectedConnectionRevision:revision});
++      if(!(promise instanceof Promise))throw new Error('Original browser request not retained');w.promise=promise;
++      void promise.then(returned,failed).finally(()=>this.finish(w));
++    }catch(e){failed(e);this.finish(w);}
++  }
+   ownerReason(): string | null {
+     if (this.unknown) return PULL_REQUEST_HELP['cleanup-unknown'];
++    if([...this.work].some(w=>w.kind==='browser'))return 'The original browser request is still returning. Other tasks wait for that same call.';
+     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
+       return 'The original draft pull request task is still active. Check status or Stop it before starting another task.';
+     if (this.original?.closeCheck) return 'Check task status to refresh the original review. Your draft is kept; Close has not been repeated.';
+@@ -220,7 +272,7 @@
+     if(this.currentConsent())return 'Create or close the current review first.';
+     if(!parsePullRequestDraft(this.state.draft))return PULL_REQUEST_HELP['invalid-input'];
+     const s=this.original!.status!,c=context(this.connection())!;
+-    if(s.pending.some(p=>inContext(p.prepared.target,c)&&sameBranches(p.prepared.target,this.state.draft)) ||
++    if(s.pending.some(p=>!p.closed&&inContext(p.prepared.target,c)&&sameBranches(p.prepared.target,this.state.draft)) ||
+       s.operation?.kind==='create'&&s.operation.effect!=='not-sent'&&inContext(s.operation.target,c)&&sameBranches(s.operation.target,this.state.draft))
+       return 'Check the previous attempt for these branches below. A new review cannot authorize a duplicate Create.';
+     return null;
+@@ -244,7 +296,7 @@
+     const a: Attempt = { owner: o, work: w, context: c, epoch, kind, draft:this.state.draft, target:kind==='create'?consent?.prepared.target??null:kind==='reconcile'?s.pending.find(p=>p.prepared.target.intent?.marker===marker)?.prepared.target??null:null,
+       revision: s.revision, previousId: s.operation?.id ?? null, operationId: null, marker, sent: false, replyOk: false, stopWanted: false, stopSent: false,
+       consent: kind === 'create' ? consent : null };
+-    this.attempt = a; this.review = null; this.update({ confirmed: false, error: null, originalRepository: c.repository });
++    this.attempt = a; this.review = null; this.completion=null; this.browserToken=null; this.update({ confirmed: false, error: null, browserState:'idle', originalRepository: c.repository });
+     const peer = this.peer();
+     if (this.attempt !== a || a.stopWanted || kind==='create'&&approval!==this.approval || a.draft!==this.state.draft || this.epoch !== epoch || o !== this.original || o.port !== this.desired || this.disposed ||
+       this.unknown || o.status !== s || !o.fresh || peer ||
+diff --git a/desktop/src/githubPullRequestProtocol.ts b/desktop/src/githubPullRequestProtocol.ts
+--- a/desktop/src/githubPullRequestProtocol.ts
++++ b/desktop/src/githubPullRequestProtocol.ts
+@@ -1,5 +1,7 @@
+ // One closed draft-PR route on the existing native connection. No token, push,
+ // merge, ready-for-review, workflow dispatch or provider URL crosses this port.
++import { encodeGitHubBrowserRequest, pullRequestClosed } from './githubPullRequestManagement.ts';
++import type { GitHubBrowserRequest, PullRequestClosed } from './githubPullRequestManagement.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { connectionKeys as keys, connectionNumericId as numeric, connectionOpaqueId as id,
+   connectionUtc as utc, sameConnectionData as same } from './githubConnectionProtocol.ts';
+@@ -12,20 +14,20 @@
+   'resources-unavailable','runtime-unavailable','unqualified','not-connected','busy','cleanup-unknown','consent-expired'] as const;
+ export type PullRequestReason = typeof PULL_REQUEST_REASONS[number];
+ export type PullRequestKind = 'prepare'|'create'|'pending'|'reconcile';
+-export type PullRequestEffect = 'none'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'unresolved'|'found-unattributed';
++export type PullRequestEffect = 'none'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'closed-confirmed'|'unresolved'|'found-unattributed';
+ export interface PullRequestDraft {base:string;head:string;title:string;body:string}
+ export interface PullRequestScope {projectBinding:string;repository:string;accountId:string;repositoryId:string}
+ export interface PullRequestIntent {base:string;head:string;marker:string;titleSha256:string;bodySha256:string}
+ export interface PullRequestTarget {scope:PullRequestScope;intent:PullRequestIntent|null}
+ export interface PullRequestPrepared {target:PullRequestTarget;baseSha:string;headSha:string;comparison:{aheadBy:number;behindBy:number;totalCommits:number;reportedFiles:number;coverage:'windowed';files:{path:string;change:string}[]};draft:true;creationPermission:'not-proven';confirmation:string}
+ export interface PullRequestAcknowledgement {id:string;number:string;url:string}
+-export interface PullRequestPending {prepared:PullRequestPrepared;claimed:boolean;acknowledged:PullRequestAcknowledgement|null}
++export interface PullRequestPending {prepared:PullRequestPrepared;claimed:boolean;acknowledged:PullRequestAcknowledgement|null;closed?:PullRequestClosed}
+ export interface PullRequestConsent {id:string;expiresAt:string;prepared:PullRequestPrepared}
+ export interface PullRequestOperation {id:string;projectId:string;kind:PullRequestKind;target:PullRequestTarget;phase:'running'|'stopping'|'settled'|'cleanup-unknown';reason:PullRequestReason;effect:PullRequestEffect}
+ export interface PullRequestStatus {schemaVersion:1;revision:number;sessionId:string|null;available:boolean;reason:PullRequestReason;operation:PullRequestOperation|null;consent:PullRequestConsent|null;pending:PullRequestPending[];observed:PullRequestAcknowledgement|null;acknowledged:PullRequestAcknowledgement|null}
+ export interface PullRequestPrepare {sessionId:string;expectedRevision:number;expectedConnectionRevision:number;draft:PullRequestDraft}
+ export interface PullRequestCreate {sessionId:string;expectedRevision:number;consentId:string;confirm:true}
+-export interface PullRequestPort {readonly mode:'native';status():Promise<unknown>;prepare(a:PullRequestPrepare):Promise<unknown>;create(a:PullRequestCreate):Promise<unknown>;pending(a:{sessionId:string;expectedRevision:number;expectedConnectionRevision:number}):Promise<unknown>;reconcile(a:{sessionId:string;expectedRevision:number;marker:string}):Promise<unknown>;discard(a:{sessionId:string;expectedRevision:number;consentId:string}):Promise<unknown>;cancel(a:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
++export interface PullRequestPort {readonly mode:'native';openBrowser?(request:GitHubBrowserRequest):Promise<unknown>;status():Promise<unknown>;prepare(a:PullRequestPrepare):Promise<unknown>;create(a:PullRequestCreate):Promise<unknown>;pending(a:{sessionId:string;expectedRevision:number;expectedConnectionRevision:number}):Promise<unknown>;reconcile(a:{sessionId:string;expectedRevision:number;marker:string}):Promise<unknown>;discard(a:{sessionId:string;expectedRevision:number;consentId:string}):Promise<unknown>;cancel(a:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
+ export type PullRequestCommand = `github_pull_request_${'status'|'prepare'|'create'|'pending'|'reconcile'|'discard'|'cancel'}`;
+ const one=<T extends string>(v:unknown,items:readonly T[]):v is T=>typeof v==='string'&&(items as readonly string[]).includes(v);
+ const rev=(v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>0&&v<=0xffff_fffe;
+@@ -45,19 +47,20 @@
+   const paths=new Set<string>();return c.files.every(f=>{if(!keys(f,['path','change'])||!text(f.path,192)||!one(f.change,['added','removed','modified','renamed','copied','changed','unchanged'])||paths.has(f.path))return false;paths.add(f.path);return true;})&&new TextEncoder().encode(JSON.stringify(v)).length<=4096-64;
+ }
+ function acknowledgement(v:unknown,t:PullRequestTarget):v is PullRequestAcknowledgement{return keys(v,['id','number','url'])&&numeric(v.id)&&numeric(v.number)&&v.url===`https://github.com/${t.scope.repository}/pull/${v.number}`;}
+-function pending(v:unknown):v is PullRequestPending{return keys(v,['prepared','claimed','acknowledged'])&&prepared(v.prepared)&&typeof v.claimed==='boolean'&&(v.acknowledged===null||v.claimed&&acknowledgement(v.acknowledged,v.prepared.target));}
++function pending(v:unknown):v is PullRequestPending{return (keys(v,['prepared','claimed','acknowledged'])||keys(v,['prepared','claimed','acknowledged','closed']))&&prepared(v.prepared)&&typeof v.claimed==='boolean'&&(v.acknowledged===null||v.claimed&&acknowledgement(v.acknowledged,v.prepared.target))&&(!Object.hasOwn(v,'closed')||v.claimed&&pullRequestClosed(v.closed,v.acknowledged as PullRequestAcknowledgement|null));}
+ export function parsePullRequestStatus(raw:unknown):PullRequestStatus|null{
+   try{const v=copyBoundedComparisonData(raw,192*1024,8192);
+     if(!keys(v,['schemaVersion','revision','sessionId','available','reason','operation','consent','pending','observed','acknowledged'])||v.schemaVersion!==1||!rev(v.revision)||(v.sessionId!==null&&!id(v.sessionId))||typeof v.available!=='boolean'||!one(v.reason,PULL_REQUEST_REASONS)||v.available!==(v.reason==='none'))return null;
+     const o=v.operation;
+-    if(o!==null&&(!keys(o,['id','projectId','kind','target','phase','reason','effect'])||!id(o.id)||!id(o.projectId)||!one(o.kind,['prepare','create','pending','reconcile'])||!target(o.target)||(o.kind==='pending')!==(o.target.intent===null)||!one(o.phase,['running','stopping','settled','cleanup-unknown'])||!one(o.reason,PULL_REQUEST_REASONS)||!one(o.effect,['none','not-sent','potentially-applied','acknowledged-unconfirmed','created-observed','unresolved','found-unattributed'])||v.sessionId===null||o.phase!=='settled'&&v.available||o.phase==='cleanup-unknown'&&o.reason!=='cleanup-unknown'||(o.kind==='prepare'||o.kind==='pending')&&o.effect!=='none'))return null;
++    if(o!==null&&(!keys(o,['id','projectId','kind','target','phase','reason','effect'])||!id(o.id)||!id(o.projectId)||!one(o.kind,['prepare','create','pending','reconcile'])||!target(o.target)||(o.kind==='pending')!==(o.target.intent===null)||!one(o.phase,['running','stopping','settled','cleanup-unknown'])||!one(o.reason,PULL_REQUEST_REASONS)||!one(o.effect,['none','not-sent','potentially-applied','acknowledged-unconfirmed','created-observed','closed-confirmed','unresolved','found-unattributed'])||v.sessionId===null||o.phase!=='settled'&&v.available||o.phase==='cleanup-unknown'&&o.reason!=='cleanup-unknown'||(o.kind==='prepare'||o.kind==='pending')&&o.effect!=='none'))return null;
+     const c=v.consent;if(c!==null&&(!keys(c,['id','expiresAt','prepared'])||!hex(c.id,32)||!utc(c.expiresAt)||!prepared(c.prepared)||!o||o.kind!=='prepare'||o.phase!=='settled'||o.reason!=='none'||!same(c.prepared.target,o.target)))return null;
+     if(!Array.isArray(v.pending)||v.pending.length>32)return null;
+     const markers=new Set<string>();for(const r of v.pending){if(!pending(r)||!r.prepared.target.intent||markers.has(r.prepared.target.intent.marker))return null;markers.add(r.prepared.target.intent.marker);}
+     const selectedTarget=o===null?null:o.target;if(selectedTarget!==null&&!target(selectedTarget))return null;
+     if(v.acknowledged!==null&&(!o||!selectedTarget||o.phase!=='settled'||!one(o.kind,['create','reconcile'])||!acknowledgement(v.acknowledged,selectedTarget)))return null;
+-    if(v.observed!==null&&(!o||!selectedTarget||o.phase!=='settled'||!acknowledgement(v.observed,selectedTarget)||!(o.effect==='created-observed'&&o.reason==='none'&&same(v.acknowledged,v.observed)||o.effect==='found-unattributed'&&o.reason==='unattributed'&&v.acknowledged===null)))return null;
+-    if(o?.effect==='created-observed'&&(v.acknowledged===null||v.observed===null)||o?.effect==='acknowledged-unconfirmed'&&v.acknowledged===null||o?.effect==='found-unattributed'&&v.observed===null)return null;
++    if(v.observed!==null&&(!o||!selectedTarget||o.phase!=='settled'||!acknowledgement(v.observed,selectedTarget)||!((o.effect==='created-observed'||o.kind==='reconcile'&&o.effect==='closed-confirmed')&&o.reason==='none'&&same(v.acknowledged,v.observed)||o.effect==='found-unattributed'&&o.reason==='unattributed'&&v.acknowledged===null)))return null;
++    if((o?.effect==='created-observed'||o?.effect==='closed-confirmed')&&(v.acknowledged===null||v.observed===null)||o?.effect==='acknowledged-unconfirmed'&&v.acknowledged===null||o?.effect==='found-unattributed'&&v.observed===null)return null;
++    if(o?.effect==='closed-confirmed'&&(o.kind!=='reconcile'||o.phase!=='settled'||o.reason!=='none'))return null;
+     return v as unknown as PullRequestStatus;
+   }catch{return null;}
+ }
+@@ -72,10 +75,10 @@
+     if(!ok)return null;const b=new TextEncoder().encode(JSON.stringify(v));return b.length<=max?b:null;
+   }catch{return null;}
+ }
+-export function createGitHubPullRequestPort(mode:string,invoke:(name:PullRequestCommand,bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof PULL_REQUEST_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):PullRequestPort|null{
++export function createGitHubPullRequestPort(mode:string,invoke:(name:PullRequestCommand|'github_browser_open',bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof PULL_REQUEST_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):PullRequestPort|null{
+   if(mode!=='native'||!listen)return null;
+   const call=(name:PullRequestCommand,v:unknown)=>{const bytes=encodePullRequestRequest(name,v);if(!bytes)throw {code:'github_pull_request_refused_invalid_input'};return invoke(name,bytes);};
+-  return Object.freeze({mode:'native',status:()=>call('github_pull_request_status',{}),prepare:(a)=>call('github_pull_request_prepare',a),create:(a)=>call('github_pull_request_create',a),pending:(a)=>call('github_pull_request_pending',a),reconcile:(a)=>call('github_pull_request_reconcile',a),discard:(a)=>call('github_pull_request_discard',a),cancel:(a)=>call('github_pull_request_cancel',a),subscribe:(f)=>listen(PULL_REQUEST_EVENT,f)} satisfies PullRequestPort);
++  return Object.freeze({mode:'native',openBrowser:(request:GitHubBrowserRequest)=>{const bytes=encodeGitHubBrowserRequest(request);if(!bytes)throw {code:'github_browser_refused'};return invoke('github_browser_open',bytes);},status:()=>call('github_pull_request_status',{}),prepare:(a)=>call('github_pull_request_prepare',a),create:(a)=>call('github_pull_request_create',a),pending:(a)=>call('github_pull_request_pending',a),reconcile:(a)=>call('github_pull_request_reconcile',a),discard:(a)=>call('github_pull_request_discard',a),cancel:(a)=>call('github_pull_request_cancel',a),subscribe:(f)=>listen(PULL_REQUEST_EVENT,f)} satisfies PullRequestPort);
+ }
+ export function pullRequestError(raw:unknown):{reason:PullRequestReason;notAdmitted:boolean}{
+   try{const d=raw&&typeof raw==='object'?Object.getOwnPropertyDescriptor(raw,'code'):null,code=d&&Object.hasOwn(d,'value')?d.value:null;
+diff --git a/desktop/src/components/GitHubActivity.tsx b/desktop/src/components/GitHubActivity.tsx
+--- a/desktop/src/components/GitHubActivity.tsx
++++ b/desktop/src/components/GitHubActivity.tsx
+@@ -1,4 +1,6 @@
+ import { useId } from 'react';
++import { SelectedPullRequestActions } from './PullRequestManagement.tsx';
++import { BROWSER_HELP } from '../githubPullRequestManagement.ts';
+ import { SectionHeading } from './Common.tsx';
+ import { Icon } from './Icon.tsx';
+ import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
+@@ -32,7 +34,7 @@
+     {(state.pending || op && op.phase !== 'settled') && <p role="status">{op?.phase === 'cleanup-unknown' ? 'Cleanup needs attention.' : op?.phase === 'stopping' ? 'Stopping the original read…' : 'Reading the original GitHub selection…'}</p>}
+     {state.uncertain && <p className="review-caution" role="alert">The original read is unconfirmed. Keep the app open and preserve its files. Checking status does not repeat the remote read or clear unknown cleanup.</p>}
+     {state.error && <p className="review-caution" role="status">{ACTIVITY_HELP[state.error]}</p>}
+-    {op && op.reason !== 'none' && op.reason !== state.error && <p className="review-caution">{ACTIVITY_HELP[op.reason]}</p>}
++    {op && op.reason !== 'none' && op.reason !== state.error && <p className="review-caution">{ACTIVITY_HELP[op.reason]}</p>}    {state.browserPending && <p role="status">{BROWSER_HELP.requesting}</p>}
+     <div className="button-row">
+       <button type="button" className="button small secondary" disabled={!controller.canCheck()} onClick={() => controller.checkStatus()}>Check task status</button>
+       {(state.pending || op && op.phase !== 'settled') && <button type="button" className="button small secondary" disabled={!controller.canCancel() || state.cancelling} onClick={() => controller.cancel()}>Stop original read</button>}
+@@ -51,7 +53,7 @@
+       {result && data?.kind === 'overview' && <>
+         <h4>Open pull requests</h4><Coverage value={data.pullRequests} empty="No open pull requests were returned on this page." />
+         {data.pullRequests.rows.map(p => <div className="review-item" key={p.id}>
+-          <p><a href={activityLink(repository, 'pull', p.number)!} target="_blank" rel="noopener noreferrer">#{p.number} {p.title}</a> {p.draft ? '· Draft' : ''}</p>
++          <p><strong>#{p.number} {p.title}</strong> {p.draft ? '· Draft' : ''}</p>
+           <p className="save-note">{p.headRepository ?? 'Head repository not reported'} · {p.headBranch} → {p.baseBranch}</p>
+           <button type="button" className="button small secondary" disabled={!!controller.readReason({kind:'pull-request',number:p.number})} onClick={() => controller.readSelection(result,{kind:'pull-request',number:p.number})}>Read changes, reviews & checks</button>
+         </div>)}
+@@ -65,7 +67,7 @@
+       {data?.kind === 'pull-request' && <>
+         <h4>#{data.pullRequest.number} {data.pullRequest.title}</h4>
+         <p>{data.pullRequest.headRepository ?? 'Head repository not reported'} · {data.pullRequest.headBranch} → {data.pullRequest.baseBranch} · {data.pullRequest.state}{data.pullRequest.draft ? ' · Draft' : ''}</p>
+-        <p><a href={`${activityLink(repository,'pull',data.pullRequest.number)!}/files`} target="_blank" rel="noopener noreferrer">Open the full diff on GitHub</a></p>
++        <SelectedPullRequestActions controller={controller} state={state}/>
+         <h5>Changed files</h5><Coverage value={data.changedFiles} empty="No changed files were reported." />
+         <ul>{data.changedFiles.rows.map(f => <li key={f.path}>{f.path} · {f.change} · +{f.additions} / −{f.deletions}</li>)}</ul>
+         <h5>Review records</h5><p className="save-note">First chronological page, up to 30 records. A person’s later review may differ. These are not an overall approval or a branch-protection decision.</p>
+diff --git a/desktop/src/components/GitHubPullRequest.tsx b/desktop/src/components/GitHubPullRequest.tsx
+--- a/desktop/src/components/GitHubPullRequest.tsx
++++ b/desktop/src/components/GitHubPullRequest.tsx
+@@ -1,18 +1,20 @@
+ import { useId } from 'react';
++import type { ReactNode } from 'react';
++import { BROWSER_HELP } from '../githubPullRequestManagement.ts';
+ import { SectionHeading } from './Common.tsx';
+ import { Icon } from './Icon.tsx';
+ import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
+ import { PULL_REQUEST_HELP } from '../githubPullRequestProtocol.ts';
+ import type { GitHubPullRequestController, PullRequestView } from '../githubPullRequestController.ts';
+
+-export function GitHubPullRequest({ controller, state, repository = null, baseSuggestion = null, headSuggestion = null, compact = false, onShow }: {
++export function GitHubPullRequest({ controller, state, repository = null, baseSuggestion = null, headSuggestion = null, compact = false, onShow, management }: {
+   controller: GitHubPullRequestController; state: PullRequestView; repository?: string|null; baseSuggestion?: string|null; headSuggestion?: string|null;
+-  compact?: boolean; onShow?: () => void;
++  compact?: boolean; onShow?: () => void; management?:ReactNode;
+ }) {
+   const id=useId(), status=state.status, op=status?.operation, review=controller.currentConsent();
+   const attention=!!controller.ownerReason()||state.uncertain||!!state.error||!!status?.pending.length||!!op&&['potentially-applied','acknowledged-unconfirmed','unresolved','found-unattributed'].includes(op.effect);
+   if(compact&&!attention)return null;
+-  const busy=state.pending||state.observing||state.discarding||state.cancelling||state.uncertain;
++  const busy=state.browserPending||state.pending||state.observing||state.discarding||state.cancelling||state.uncertain;
+   const reason=review?controller.createReason():controller.prepareReason();
+   const settled=op?.phase==='settled'&&!state.pending&&!state.uncertain;
+   return <section className="card" aria-label="Create a draft pull request">
+@@ -21,10 +23,10 @@
+     {state.originalRepository&&attention&&<p className="save-note">Original task: <strong>{state.originalRepository}</strong></p>}
+     {op&&<p role="status">{op.phase==='cleanup-unknown'?'Cleanup needs attention':op.phase==='stopping'?'Stopping the original request…':!settled?'Waiting for the original task to finish…':
+       op.effect==='created-observed'?'Draft pull request created and checked':op.effect==='acknowledged-unconfirmed'?'GitHub acknowledged creation; final details are not confirmed':
+-      op.effect==='found-unattributed'?'Matching draft found — original creation is not confirmed':op.kind==='prepare'&&status?.consent?'Review ready — nothing created yet':'Original check finished'}</p>}
++      op.effect==='closed-confirmed'?'Earlier acknowledged pull request confirmed closed':op.effect==='found-unattributed'?'Matching draft found — original creation is not confirmed':op.kind==='prepare'&&status?.consent?'Review ready — nothing created yet':'Original check finished'}</p>}
+     {state.uncertain&&<p className="review-caution" role="alert">The original request is unconfirmed. Keep the app and its files. Check status; do not repeat Create or reconnect to dismiss this warning.</p>}
+     {state.error&&<p className="review-caution" role="status">{PULL_REQUEST_HELP[state.error]}</p>}
+-    {op&&op.reason!=='none'&&op.reason!==state.error&&<p className="review-caution">{PULL_REQUEST_HELP[op.reason]}</p>}
++    {op&&op.reason!=='none'&&op.reason!==state.error&&<p className="review-caution">{PULL_REQUEST_HELP[op.reason]}</p>}    {state.browserPending&&<p role="status">{BROWSER_HELP.requesting}</p>}
+     <div className="button-row">
+       <button type="button" className="button small secondary" disabled={!controller.canCheck()} onClick={()=>controller.checkStatus()}>Check task status</button>
+       {(state.pending||op&&op.phase!=='settled')&&<button type="button" className="button small secondary" disabled={!controller.canCancel()||state.cancelling} onClick={()=>controller.cancel()}>Stop original request</button>}
+@@ -53,18 +55,19 @@
+         <strong>{review.prepared.target.intent!.head} → {review.prepared.target.intent!.base}</strong>
+         <p>{review.prepared.comparison.aheadBy} commit(s) ahead · {review.prepared.comparison.behindBy} behind. Branches can change before the server accepts the request; they are checked again before sending.</p>
+         <p>File-name sample (up to four; not a full diff):</p><ul>{review.prepared.comparison.files.map(f=><li key={f.path}>{f.path} · {f.change}</li>)}</ul>
+-        <p><a href={`https://github.com/${review.prepared.target.scope.repository}/compare/${review.prepared.baseSha}...${review.prepared.headSha}`} target="_blank" rel="noopener noreferrer">Review the full comparison on GitHub</a></p>
++        {!management&&<p className="save-note">Copy this comparison address into your browser: <span className="review-text">{`https://github.com/${review.prepared.target.scope.repository}/compare/${review.prepared.baseSha}...${review.prepared.headSha}`}</span></p>}
+         <p><strong>{state.draft.title}</strong></p>{state.draft.body&&<pre className="review-text">{state.draft.body}</pre>}
+         <label className="checkbox-row"><input type="checkbox" checked={state.confirmed} disabled={busy} onChange={e=>controller.setConfirmed(e.target.checked)}/><span>{review.prepared.confirmation}</span></label>
+       </div></div>}
++      {management}
+       {reason&&<p className="save-note" role="status">{reason}</p>}
+       <div className="button-row"><button type="button" className="button" disabled={!!reason} onClick={()=>review?controller.create():controller.prepare()}>{review?'Create draft pull request':'Review draft pull request'}</button>
+         <button type="button" className="button secondary" disabled={!!controller.pendingReason()} onClick={()=>controller.loadPending()}>Check previous attempts</button></div>
+-      {settled&&status?.acknowledged&&<p><a href={status.acknowledged.url} target="_blank" rel="noopener noreferrer">Open pull request #{status.acknowledged.number}</a>. {op?.effect==='created-observed'?'Its original creation ID and reviewed details were checked. It is still a draft, not approved or merged.':'The original creation ID was acknowledged, but the final details still need review. Do not create a duplicate.'}</p>}
+-      {settled&&op?.effect==='found-unattributed'&&status?.observed&&<p><a href={status.observed.url} target="_blank" rel="noopener noreferrer">Inspect matching draft #{status.observed.number}</a>. It is not claimed as this app’s successful creation.</p>}
++      {!management&&settled&&status?.acknowledged&&<p>Pull request #{status.acknowledged.number}: <span className="review-text">{status.acknowledged.url}</span>. {op?.effect==='created-observed'?'Its original creation ID and reviewed details were checked. It is still a draft, not approved or merged.':'The original creation ID was acknowledged, but the final details still need review. Do not create a duplicate.'}</p>}
++      {!management&&settled&&op?.effect==='found-unattributed'&&status?.observed&&<p>Matching draft #{status.observed.number}: <span className="review-text">{status.observed.url}</span>. It is not claimed as this app’s successful creation.</p>}
+       {!!status?.pending.length&&<div><h4>Previous attempts</h4><p>Checking an attempt only reads GitHub. It never resends Create, closes a PR or changes your branches.</p>
+         {status.pending.map(p=><div key={p.prepared.target.intent!.marker}><p><strong>{p.prepared.target.scope.repository}</strong> · {p.prepared.target.intent!.head} → {p.prepared.target.intent!.base}<br/>
+-          {p.acknowledged?'Original creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
++          {p.closed?`Previously confirmed closed${p.closed.merged?' after merging':''}. A new explicit review still checks for an open PR.`:p.acknowledged?'Original creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
+           <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(p.prepared.target.intent!.marker)} onClick={()=>controller.reconcile(p.prepared.target.intent!.marker)}>Check this attempt on GitHub</button></div>)}
+       </div>}
+       <ProgressiveDisclosure title="Help: branches, permissions and separate actions">
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -18,6 +18,7 @@
+ import { GitHubPullRequestController } from './githubPullRequestController.ts';
+ import { GitHubActionsRetryController } from './githubActionsRetryController.ts';
+ import { GitHubPullRequest } from './components/GitHubPullRequest.tsx';
++import { PullRequestFollowup } from './components/PullRequestManagement.tsx';
+ import { GitHubActionsRetry } from './components/GitHubActionsRetry.tsx';
+ import { GitHubRepositoryCreate } from './components/GitHubRepositoryCreate.tsx';
+ import { ArtifactInspectionController, artifactInspectionOwnerReason } from './artifactInspection.ts';
+@@ -2140,6 +2141,7 @@
+               ? gitReadState.observation?.observation.branch ?? null : null} />
+             <GitHubActionsRetry controller={githubActionsRetry} state={actionsRetryState} /></>}
+           pullRequestView={<GitHubPullRequest controller={githubPullRequest} state={pullRequestState}
++            management={<PullRequestFollowup controller={githubPullRequest} state={pullRequestState} activity={githubActivity}/>}
+             repository={connectionState.context?.repository ?? null}
+             baseSuggestion={connectionState.status?.repository.state === 'observed' ? connectionState.status.repository.value?.defaultBranch ?? null : null}
+             headSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/version-reserve.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-rename.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-actions-retry.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/version-reserve.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-rename.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src-tauri/src/github_connection_session.rs b/desktop/src-tauri/src/github_connection_session.rs
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -15,6 +15,8 @@
+ pub(crate) mod publication;
+ #[path = "github_repository_create_session.rs"]
+ pub(crate) mod repository_create;
++#[path = "github_browser_session.rs"]
++mod browser;
+ #[path = "github_activity_session.rs"]
+ pub(crate) mod activity;
+ #[path = "github_pull_request_session.rs"]
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -79,6 +79,7 @@
+ #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
+ #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
+ #[path = "../src/github_activity_protocol.rs"] mod github_activity_protocol;
++#[path = "../src/github_browser_protocol.rs"] mod github_browser_protocol;
+ #[path = "../src/github_pull_request_protocol.rs"] mod github_pull_request_protocol;
+ #[path = "../src/github_actions_retry_protocol.rs"] mod github_actions_retry_protocol;
+ #[path = "../src/error.rs"] mod error;

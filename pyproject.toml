@@ -33,7 +33,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-mobile_release = ["data/apple-profile-roots.pem"]
+mobile_release = ["data/apple-profile-roots.pem", "api/data/*.json"]
 
 [tool.setuptools.data-files]
 "share/mobile-release-kit" = ["Gemfile", "Gemfile.lock"]
@@ -41,6 +41,22 @@ mobile_release = ["data/apple-profile-roots.pem"]
   "fastlane/Fastfile",
   "fastlane/play_store.rb",
   "fastlane/apple_store.rb",
+  "fastlane/apple_provisioning.rb",
+  "fastlane/apple_provisioning_bundle_registration.rb",
+  "fastlane/apple_provisioning_bundle_read.rb",
+  "fastlane/apple_provisioning_profile_read.rb",
+  "fastlane/apple_provisioning_p12.rb",
+    "fastlane/apple_provisioning_p12_assemble.rb",
+  "fastlane/apple_provisioning_signing.rb",
+  "fastlane/apple_distribution_key.rb",
+  "fastlane/apple_distribution_key_verify.rb",
+  "fastlane/apple_distribution_certificate_policy.rb",
+  "fastlane/apple_distribution_certificate_prepare.rb",
+  "fastlane/apple_distribution_certificate_verify.rb",
+  "fastlane/apple_provisioning_certificate_issuance.rb",
+  "fastlane/apple_store_versions.rb",
+  "fastlane/android_store_versions.rb",
+  "fastlane/play_edit_recovery.rb",
   "fastlane/apple_production.rb",
   "fastlane/apple_asset_upload.rb",
   "fastlane/apple_create_retry.rb",

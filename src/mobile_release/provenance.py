@@ -9,15 +9,19 @@ import shutil
 import tempfile
 import zipfile
 from base64 import b64decode
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 from . import __version__
 from .config import ReleaseConfig, ReleaseVersion
 from .discovery import GitContext, valid_observed_source
 from .errors import ValidationError
 from .metadata import android_release_notes, validate_android_release_note
+
+if TYPE_CHECKING:
+    from .android_zip import AndroidZipMetadata
 
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SENSITIVE_KEY_RE = re.compile(r"(?i)(password|private.?key|secret|token|credential|keystore.?base64)")
@@ -1173,6 +1177,32 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
         for field in ("commit", "tree")
     ):
         raise ValidationError("external-testing intent must use the exact candidate source commit/tree")
+    _validate_operation_intent_body(intent, stage=stage, platform=platform)
+    return payload
+
+
+def _validate_local_ios_archive_artifact(value: object) -> None:
+    """Local directory inventory DATA, never a ZIP/file hash or custody proof."""
+    row = _exact_keys(value, {"logicalName", "platform", "kind", "directory", "entries", "bytes", "sha256"},
+                      "local iOS archive artifact")
+    if (row["logicalName"] != "ios-archive" or row["platform"] != "ios" or row["kind"] != "xcarchive"
+            or row["directory"] != "archive.xcarchive"
+            or type(row["entries"]) is not int or not 1 <= row["entries"] <= 100_000
+            or type(row["bytes"]) is not int or not 1 <= row["bytes"] <= 8 << 30
+            or type(row["sha256"]) is not str or not HEX_SHA256_RE.fullmatch(row["sha256"])):
+        raise ValidationError("local iOS archive inventory is invalid")
+
+
+def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platform: str,
+                                    artifact_encoding: str = "files") -> None:
+    """Shared operation DATA policy; caller must first validate its closed origin.
+
+    This is not authorization and never supplies repository/executor identity.
+    """
+    if (type(artifact_encoding) is not str or artifact_encoding not in {"files", "local-ios-directory", "local-ios-stage-directory"}
+            or artifact_encoding == "local-ios-directory" and (stage, platform) != ("candidate", "ios")
+            or artifact_encoding == "local-ios-stage-directory" and (platform != "ios" or stage not in {"external-testing", "production-submit"})):
+        raise ValidationError("intent artifact encoding is invalid")
     expected_confirmation = f"{stage}:{platform}:{intent['version'].get('marketing') if isinstance(intent['version'], dict) else ''}:{intent['version'].get('build') if isinstance(intent['version'], dict) else ''}"
     if intent["confirmation"] != expected_confirmation:
         raise ValidationError("intent textual confirmation is invalid")
@@ -1270,6 +1300,13 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     artifact_names: set[str] = set()
     for artifact_value in intent["artifacts"]:
+        if (artifact_encoding in {"local-ios-directory", "local-ios-stage-directory"} and type(artifact_value) is dict
+                and artifact_value.get("logicalName") == "ios-archive"):
+            _validate_local_ios_archive_artifact(artifact_value)
+            if "ios-archive" in artifact_names:
+                raise ValidationError("duplicate local iOS archive artifact")
+            artifact_names.add("ios-archive")
+            continue
         artifact = _exact_keys(
             artifact_value,
             {
@@ -1348,6 +1385,9 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
             "externalReceiptSha256",
         },
     }[stage]
+    if (artifact_encoding == "local-ios-stage-directory" and stage == "production-submit"
+            and type(predecessors) is dict and "externalReadinessReceiptSha256" in predecessors):
+        expected_predecessors = expected_predecessors | {"externalReadinessReceiptSha256"}
     predecessors = _exact_keys(predecessors, expected_predecessors, "intent.predecessors")
     if not all(isinstance(item, str) and HEX_SHA256_RE.fullmatch(item) for item in predecessors.values()):
         raise ValidationError("intent predecessor digest is invalid")
@@ -1383,7 +1423,6 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
     if commitment_mode and snapshot_commitments != commitments:
         raise ValidationError("intent private-state commitments differ from Store precondition")
     _validate_timestamp(intent["createdAt"], "intent.createdAt")
-    return payload
 
 
 def validate_evidence_document(value: Mapping[str, Any]) -> None:
@@ -2358,6 +2397,132 @@ def validate_store_receipt(
     )
 
 
+def _validate_android_store_receipt_body(
+    receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
+    release: ReleaseVersion, stage: str, outcome: str, intent: Mapping[str, Any],
+) -> None:
+    """Shared platform DATA only; callers must validate their exact authority envelope."""
+    for field in ("destinationTrack", "releaseStatus", "versionCode"):
+        if field not in receipt:
+            raise ValidationError(f"Android Store receipt is missing {field}")
+    if isinstance(receipt["versionCode"], bool) or receipt["versionCode"] != release.build:
+        raise ValidationError("Play versionCode does not match the committed build number")
+    if not receipt.get("storeEditId") and not receipt.get("releaseId"):
+        raise ValidationError("Android Store receipt lacks authoritative edit/release readback")
+    for field in ("storeEditId", "releaseId"):
+        if field in receipt and (
+            not isinstance(receipt[field], str)
+            or not receipt[field].strip()
+            or len(receipt[field]) > 255
+        ):
+            raise ValidationError(f"Android Store receipt {field} is invalid")
+    _validate_play_store_state(
+        receipt.get("storeState"),
+        stage=stage,
+        outcome=outcome,
+        store_edit_id=receipt.get("storeEditId"),
+    )
+    _validate_play_state_intent(receipt["storeState"], intent)
+    expected_track = {
+        "candidate": "internal",
+        "external-testing": platform_config.get("externalTrack", {}).get("name"),
+        "production-submit": "production",
+    }[stage]
+    if receipt["destinationTrack"] != expected_track:
+        raise ValidationError("Play destination track does not match configured lifecycle stage")
+    if stage == "external-testing" and receipt.get("sourceTrack") != "internal":
+        raise ValidationError("External Play promotion must read from internal")
+    if (
+        stage == "external-testing"
+        and platform_config.get("externalTrack", {}).get("kind") == "closed"
+        and receipt.get("closedTesterAssignmentVerified") is not True
+    ):
+        raise ValidationError(
+            "Closed Play promotion lacks an API-verified nonempty tester-group assignment"
+        )
+    if stage == "production-submit" and receipt.get("sourceTrack") != platform_config.get(
+        "externalTrack", {}
+    ).get("name"):
+        raise ValidationError("Production Play draft must promote the configured external track")
+    if stage == "production-submit":
+        if receipt["releaseStatus"] != "draft":
+            raise ValidationError("Play production preparation must remain draft")
+        if receipt["state"] != "draft":
+            raise ValidationError("Play production readback state must explicitly be draft")
+    elif receipt["releaseStatus"] != "completed":
+        raise ValidationError("Play testing releases must be completed on their testing track")
+    elif receipt["state"] != "available-to-testers":
+        raise ValidationError("Play testing readback must prove availability to testers")
+
+
+def _validate_ios_store_receipt_body(receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
+        stage: str, outcome: str, intent: Mapping[str, Any],
+        operation_intent: Mapping[str, Any] | None = None, executed=None) -> None:
+    """Shared Apple receipt body; closed CI/local callers own authority validation."""
+    for field in ("appStoreAppId", "buildResourceId", "processingState"):
+        if (
+            not isinstance(receipt.get(field), str)
+            or not receipt[field].strip()
+            or len(receipt[field]) > 255
+        ):
+            raise ValidationError(f"Apple Store receipt is missing {field}")
+    if str(receipt["appStoreAppId"]) != str(platform_config.get("appStoreAppId")):
+        raise ValidationError("App Store app ID does not match configuration")
+    if receipt["processingState"] != "VALID":
+        raise ValidationError("Apple Store receipt must prove VALID processing")
+    if stage != "candidate" and receipt["buildResourceId"] != intent["storePrecondition"]["snapshot"]["build"]["id"]:
+        raise ValidationError("Apple Store receipt substituted a different candidate build")
+    if stage != "production-submit" and receipt.get("autoNotifyEnabled") is not False:
+        raise ValidationError("Apple Store receipt must prove automatic tester notification is disabled")
+    if outcome == "operator-authorized-create-retry":
+        _validate_create_retry(receipt.get("createRetry"), operation_intent=operation_intent, executed_by=executed)
+    if stage == "external-testing":
+        if receipt.get("externalGroup") != platform_config.get("externalTestFlightGroup"):
+            raise ValidationError("TestFlight external group does not match configuration")
+        if (
+            not isinstance(receipt.get("betaReviewState"), str)
+            or not receipt["betaReviewState"].strip()
+            or len(receipt["betaReviewState"]) > 255
+        ):
+            raise ValidationError("External TestFlight receipt lacks Beta Review readback")
+    if stage == "production-submit":
+        if receipt.get("automaticRelease") is not False:
+            raise ValidationError("App Store production must set automaticRelease=false")
+        if (
+            not isinstance(receipt.get("submissionState"), str)
+            or not receipt["submissionState"].strip()
+            or len(receipt["submissionState"]) > 255
+        ):
+            raise ValidationError("App Store receipt lacks submission-state readback")
+        if not isinstance(receipt["state"], str) or receipt["state"] not in {
+            "submitted-for-review",
+            "in-review",
+            "approved",
+            "pending-developer-release",
+        }:
+            raise ValidationError("App Store production readback state is not submission evidence")
+        for field in ("appStoreVersionId", "reviewSubmissionId"):
+            if not isinstance(receipt.get(field), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", receipt[field]):
+                raise ValidationError(f"App Store production receipt lacks exact {field}")
+        if not isinstance(receipt.get("storeStateSha256"), str) or not HEX_SHA256_RE.fullmatch(receipt["storeStateSha256"]):
+            raise ValidationError("App Store production receipt lacks its final complete public state digest")
+        production_before = intent["storePrecondition"]["snapshot"]["production"]
+        if production_before is not None and receipt["appStoreVersionId"] != production_before["id"]:
+            raise ValidationError("App Store production receipt substituted its version resource")
+    elif stage == "external-testing":
+        if not isinstance(receipt["state"], str) or receipt["state"] not in {
+            "available-to-testers",
+            "submitted-for-review",
+            "in-review",
+            "approved",
+        }:
+            raise ValidationError(
+                "External TestFlight receipt lacks an allowed explicit review/testing state"
+            )
+    elif not isinstance(receipt["state"], str) or receipt["state"] not in {"processed", "available-to-testers"}:
+        raise ValidationError("Internal TestFlight receipt lacks explicit processing state")
+
+
 def _validate_store_receipt_document(
     receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
     release: ReleaseVersion, stage: str, platform: str,
@@ -2485,120 +2650,11 @@ def _validate_store_receipt_document(
     _validate_timestamp(receipt["observedAt"], "Store receipt observedAt")
 
     if platform == "android":
-        for field in ("destinationTrack", "releaseStatus", "versionCode"):
-            if field not in receipt:
-                raise ValidationError(f"Android Store receipt is missing {field}")
-        if isinstance(receipt["versionCode"], bool) or receipt["versionCode"] != release.build:
-            raise ValidationError("Play versionCode does not match the committed build number")
-        if not receipt.get("storeEditId") and not receipt.get("releaseId"):
-            raise ValidationError("Android Store receipt lacks authoritative edit/release readback")
-        for field in ("storeEditId", "releaseId"):
-            if field in receipt and (
-                not isinstance(receipt[field], str)
-                or not receipt[field].strip()
-                or len(receipt[field]) > 255
-            ):
-                raise ValidationError(f"Android Store receipt {field} is invalid")
-        _validate_play_store_state(
-            receipt.get("storeState"),
-            stage=stage,
-            outcome=outcome,
-            store_edit_id=receipt.get("storeEditId"),
-        )
-        _validate_play_state_intent(receipt["storeState"], intent)
-        expected_track = {
-            "candidate": "internal",
-            "external-testing": platform_config.get("externalTrack", {}).get("name"),
-            "production-submit": "production",
-        }[stage]
-        if receipt["destinationTrack"] != expected_track:
-            raise ValidationError("Play destination track does not match configured lifecycle stage")
-        if stage == "external-testing" and receipt.get("sourceTrack") != "internal":
-            raise ValidationError("External Play promotion must read from internal")
-        if (
-            stage == "external-testing"
-            and platform_config.get("externalTrack", {}).get("kind") == "closed"
-            and receipt.get("closedTesterAssignmentVerified") is not True
-        ):
-            raise ValidationError(
-                "Closed Play promotion lacks an API-verified nonempty tester-group assignment"
-            )
-        if stage == "production-submit" and receipt.get("sourceTrack") != platform_config.get(
-            "externalTrack", {}
-        ).get("name"):
-            raise ValidationError("Production Play draft must promote the configured external track")
-        if stage == "production-submit":
-            if receipt["releaseStatus"] != "draft":
-                raise ValidationError("Play production preparation must remain draft")
-            if receipt["state"] != "draft":
-                raise ValidationError("Play production readback state must explicitly be draft")
-        elif receipt["releaseStatus"] != "completed":
-            raise ValidationError("Play testing releases must be completed on their testing track")
-        elif receipt["state"] != "available-to-testers":
-            raise ValidationError("Play testing readback must prove availability to testers")
+        _validate_android_store_receipt_body(receipt, platform_config=platform_config,
+            release=release, stage=stage, outcome=outcome, intent=intent)
     else:
-        for field in ("appStoreAppId", "buildResourceId", "processingState"):
-            if (
-                not isinstance(receipt.get(field), str)
-                or not receipt[field].strip()
-                or len(receipt[field]) > 255
-            ):
-                raise ValidationError(f"Apple Store receipt is missing {field}")
-        if str(receipt["appStoreAppId"]) != str(platform_config.get("appStoreAppId")):
-            raise ValidationError("App Store app ID does not match configuration")
-        if receipt["processingState"] != "VALID":
-            raise ValidationError("Apple Store receipt must prove VALID processing")
-        if stage != "candidate" and receipt["buildResourceId"] != intent["storePrecondition"]["snapshot"]["build"]["id"]:
-            raise ValidationError("Apple Store receipt substituted a different candidate build")
-        if stage != "production-submit" and receipt.get("autoNotifyEnabled") is not False:
-            raise ValidationError("Apple Store receipt must prove automatic tester notification is disabled")
-        if outcome == "operator-authorized-create-retry":
-            _validate_create_retry(receipt.get("createRetry"), operation_intent=operation_intent, executed_by=executed)
-        if stage == "external-testing":
-            if receipt.get("externalGroup") != platform_config.get("externalTestFlightGroup"):
-                raise ValidationError("TestFlight external group does not match configuration")
-            if (
-                not isinstance(receipt.get("betaReviewState"), str)
-                or not receipt["betaReviewState"].strip()
-                or len(receipt["betaReviewState"]) > 255
-            ):
-                raise ValidationError("External TestFlight receipt lacks Beta Review readback")
-        if stage == "production-submit":
-            if receipt.get("automaticRelease") is not False:
-                raise ValidationError("App Store production must set automaticRelease=false")
-            if (
-                not isinstance(receipt.get("submissionState"), str)
-                or not receipt["submissionState"].strip()
-                or len(receipt["submissionState"]) > 255
-            ):
-                raise ValidationError("App Store receipt lacks submission-state readback")
-            if not isinstance(receipt["state"], str) or receipt["state"] not in {
-                "submitted-for-review",
-                "in-review",
-                "approved",
-                "pending-developer-release",
-            }:
-                raise ValidationError("App Store production readback state is not submission evidence")
-            for field in ("appStoreVersionId", "reviewSubmissionId"):
-                if not isinstance(receipt.get(field), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", receipt[field]):
-                    raise ValidationError(f"App Store production receipt lacks exact {field}")
-            if not isinstance(receipt.get("storeStateSha256"), str) or not HEX_SHA256_RE.fullmatch(receipt["storeStateSha256"]):
-                raise ValidationError("App Store production receipt lacks its final complete public state digest")
-            production_before = intent["storePrecondition"]["snapshot"]["production"]
-            if production_before is not None and receipt["appStoreVersionId"] != production_before["id"]:
-                raise ValidationError("App Store production receipt substituted its version resource")
-        elif stage == "external-testing":
-            if not isinstance(receipt["state"], str) or receipt["state"] not in {
-                "available-to-testers",
-                "submitted-for-review",
-                "in-review",
-                "approved",
-            }:
-                raise ValidationError(
-                    "External TestFlight receipt lacks an allowed explicit review/testing state"
-                )
-        elif not isinstance(receipt["state"], str) or receipt["state"] not in {"processed", "available-to-testers"}:
-            raise ValidationError("Internal TestFlight receipt lacks explicit processing state")
+        _validate_ios_store_receipt_body(receipt, platform_config=platform_config, stage=stage,
+            outcome=outcome, intent=intent, operation_intent=operation_intent, executed=executed)
     return dict(receipt)
 
 
@@ -2615,15 +2671,51 @@ ARTIFACT_TYPES = {
 }
 
 
+def _artifact_type(name: str) -> tuple[str, str]:
+    """One pure logical-name/platform/kind policy for path and DATA callers."""
+    if name not in ARTIFACT_TYPES:
+        raise ValidationError(f"unsupported artifact logical name: {name}")
+    return ARTIFACT_TYPES[name]
+
+
+def _artifact_record(
+    name: str, *, file_name: str, size: int, sha256: str, architectures: list[str],
+) -> dict[str, Any]:
+    """Construct the existing seven-field record, without observing any file.
+
+    This is not an evidence publisher or admission/custody receipt. The legacy
+    path caller deliberately keeps its existing checks/read order; the stricter
+    owned-DATA caller bounds its observations before using this same constructor.
+    """
+    platform, kind = _artifact_type(name)
+    return {
+        "logicalName": name,
+        "platform": platform,
+        "kind": kind,
+        "fileName": file_name,
+        "size": size,
+        "sha256": sha256,
+        "architectures": architectures,
+    }
+
+
+def _android_aab_abi(name: str) -> str | None:
+    # Preserve the existing base/lib prefix observation, including directory
+    # entries and nested suffixes. It is not ELF inspection or ABI completeness
+    # across dynamic-feature modules. Unknown labels remain DATA, not paths.
+    parts = name.split("/")
+    return parts[2] if parts[:2] == ["base", "lib"] and len(parts) > 3 else None
+
+
 def _artifact_architectures(name: str, path: Path) -> list[str]:
     if name == "android-aab":
         try:
             with zipfile.ZipFile(path) as archive:
                 return sorted(
                     {
-                        parts[2]
+                        abi
                         for item in archive.namelist()
-                        if (parts := item.split("/"))[:2] == ["base", "lib"] and len(parts) > 3
+                        if (abi := _android_aab_abi(item)) is not None
                     }
                 )
         except zipfile.BadZipFile:
@@ -2640,23 +2732,156 @@ def artifact_records(artifacts: Iterable[tuple[str, Path]]) -> list[dict[str, An
         seen.add(name)
         if path.is_symlink() or not path.is_file():
             raise ValidationError(f"artifact must be a regular non-symlink file: {name}")
-        if name not in ARTIFACT_TYPES:
-            raise ValidationError(f"unsupported artifact logical name: {name}")
+        _artifact_type(name)
         if path.stat().st_size < 1:
             raise ValidationError(f"artifact is empty: {name}")
-        platform, kind = ARTIFACT_TYPES[name]
         records.append(
-            {
-                "logicalName": name,
-                "platform": platform,
-                "kind": kind,
-                "fileName": path.name,
-                "size": path.stat().st_size,
-                "sha256": sha256_file(path),
-                "architectures": _artifact_architectures(name, path),
-            }
+            _artifact_record(name, file_name=path.name, size=path.stat().st_size,
+                             sha256=sha256_file(path), architectures=_artifact_architectures(name, path))
         )
     return sorted(records, key=lambda item: item["logicalName"])
+
+
+ANDROID_ABI_LABELS = ("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+_OBSERVATION_MESSAGES = {
+    "input": "Artifact observations require exact bounded DATA values.",
+    "scope": "This observation profile requires exactly one Android AAB.",
+    "name": "An observed artifact file name must be a bounded safe basename.",
+    "size": "The observed Android AAB size is outside the supported bounds.",
+    "digest": "The observed artifact digest must be a lowercase SHA-256 value.",
+    "architectures": "Observed artifact architectures must be unique recognized ABI labels.",
+    "metadata": "ABI observations require supported already-inspected ZIP entry DATA.",
+    "limit": "ABI observation DATA exceeds the supported inspection limits.",
+}
+
+
+class ArtifactObservationError(ValidationError):
+    """Ordinary DATA refusal only; no original-owner/checkpoint exception wrapping."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(_OBSERVATION_MESSAGES[reason])
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactObservation:
+    """Forgeable comparison DATA, never an original artifact or custody receipt."""
+
+    logical_name: str
+    file_name: str
+    size: int
+    sha256: str
+    architectures: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidAbiObservation:
+    """Bounded base-module name observations, not ELF/native ABI verification."""
+
+    architectures: tuple[str, ...]
+    unknown_abi: bool
+
+
+def android_abis_from_zip_metadata(
+    metadata: AndroidZipMetadata, *, checkpoint: Callable[[], None],
+) -> AndroidAbiObservation:
+    """Observe the SAME inspected directory without ZipFile, paths or file reads.
+
+    The operation must supply its original integrity result's metadata and keep
+    the associated artifact custody/checks alive. These dataclass/type checks
+    bound DATA processing; they do not prove that a ZIP inspector ran. Only four
+    recognized labels and a boolean can escape; unrecognized entry/ABI strings
+    are neither retained in the result nor inserted into error messages.
+    """
+    from .android_zip import (
+        AndroidZipEntry, AndroidZipError, AndroidZipMetadata,
+        CENTRAL_HEADER_BYTES, MAX_CENTRAL_DIRECTORY_BYTES, MAX_ENTRY_COUNT,
+        MAX_ENTRY_NAME_BYTES, validate_zip_entry_policy,
+    )
+
+    def check() -> None:
+        if checkpoint() is not None:
+            raise ArtifactObservationError("input") from None
+
+    if not callable(checkpoint):
+        raise ArtifactObservationError("input")
+    check()
+    if type(metadata) is not AndroidZipMetadata or type(metadata.entries) is not tuple:
+        raise ArtifactObservationError("metadata")
+    if not 0 < len(metadata.entries) < 0xFFFF or len(metadata.entries) > MAX_ENTRY_COUNT:
+        raise ArtifactObservationError("limit")
+    found: set[str] = set()
+    unknown = False
+    name_work = 0
+    for entry in metadata.entries:
+        check()
+        if type(entry) is not AndroidZipEntry or type(entry.name) is not str:
+            raise ArtifactObservationError("metadata")
+        if len(entry.name) > MAX_ENTRY_NAME_BYTES:
+            raise ArtifactObservationError("limit")
+        name_work += CENTRAL_HEADER_BYTES + len(entry.name)
+        if name_work > MAX_CENTRAL_DIRECTORY_BYTES:
+            raise ArtifactObservationError("limit")
+        # Keep the shared raw-path/type/encryption predicate rather than grow a
+        # more permissive name policy for the owned observation path. No second
+        # decoding, normalization or central-directory interpretation occurs.
+        try:
+            validate_zip_entry_policy(entry.name, flag_bits=entry.flag_bits,
+                                      external_attr=entry.external_attr, file_size=entry.file_size)
+        except AndroidZipError:
+            raise ArtifactObservationError("metadata") from None
+        abi = _android_aab_abi(entry.name)
+        if abi is not None:
+            if abi in ANDROID_ABI_LABELS:
+                found.add(abi)
+            else:
+                unknown = True
+        check()
+    result = AndroidAbiObservation(tuple(sorted(found)), unknown)
+    check()
+    return result
+
+
+def artifact_records_from_observations(
+    observations: tuple[ArtifactObservation, ...],
+) -> list[dict[str, Any]]:
+    """Construct records from original already-inspected DATA, never from paths.
+
+    The first owned profile is one required Android AAB only. Its owner supplies
+    the recorded size/hash and the above same-directory ABI labels; this helper
+    cannot establish that relationship or create original custody from DATA.
+    Carry AndroidAbiObservation.unknown_abi separately in the local operation
+    result: the existing seven-field evidence record schema is not extended.
+    No freshness, source-binding, signature, candidate or Store claim is added.
+    """
+    from .android_zip import MAX_AAB_BYTES
+
+    if type(observations) is not tuple:
+        raise ArtifactObservationError("input")
+    if len(observations) != 1:
+        raise ArtifactObservationError("scope")
+    value = observations[0]
+    if type(value) is not ArtifactObservation:
+        raise ArtifactObservationError("input")
+    if type(value.logical_name) is not str or value.logical_name != "android-aab":
+        raise ArtifactObservationError("scope")
+    name = value.file_name
+    if (type(name) is not str or name in {"", ".", ".."} or len(name) > 255
+            or any(char in name for char in ("/", "\\", ":", "\0"))
+            or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in name)
+            or len(name.encode("utf-8")) > 255):
+        raise ArtifactObservationError("name")
+    if type(value.size) is not int or not 1 <= value.size <= MAX_AAB_BYTES:
+        raise ArtifactObservationError("size")
+    if type(value.sha256) is not str or len(value.sha256) != 64 or not HEX_SHA256_RE.fullmatch(value.sha256):
+        raise ArtifactObservationError("digest")
+    abis = value.architectures
+    if (type(abis) is not tuple or len(abis) > len(ANDROID_ABI_LABELS)
+            or any(type(abi) is not str or abi not in ANDROID_ABI_LABELS for abi in abis)
+            or len(abis) != len(set(abis))):
+        raise ArtifactObservationError("architectures")
+    return [_artifact_record(value.logical_name, file_name=name, size=value.size,
+                             sha256=value.sha256, architectures=sorted(abis))]
 
 
 def _workflow_run(stage: str) -> dict[str, Any]:
@@ -3417,6 +3642,25 @@ def validate_receipt_intent_binding(
         _validate_create_retry(receipt["createRetry"], operation_intent=operation_intent, executed_by=receipt["executedBy"])
 
 
+def external_production_blocker(receipt: Mapping[str, Any], *, platform: str) -> tuple[str, str] | None:
+    """One recorded-evidence predicate, not release/recovery authorization.
+
+    Callers validate the receipt and its exact intent/predecessor chain first.
+    A missing blocker says nothing about authentication or current Store state.
+    """
+    if platform == "ios" and receipt.get("readback", {}).get("state") != "available-to-testers":
+        return ("ios-external-not-available",
+                "iOS production requires an external receipt whose readback.state is "
+                "available-to-testers; start a NEW external-testing dispatch after Beta Review "
+                "approval using the original candidate, without recovery_run_id. "
+                "Rerunning the old dispatch preserves its immutable pending receipt.")
+    if platform == "android" and receipt.get("outcome") not in {"mutated", "reconciled"}:
+        return ("android-external-observation-only",
+                "Android production requires an external receipt produced by a confirmed "
+                "promotion; an observation-only already-present receipt is not authorization")
+    return None
+
+
 def validate_receipt_chain(
     *,
     candidate_manifest: Mapping[str, Any],
@@ -3497,26 +3741,10 @@ def validate_receipt_chain(
             raise ValidationError(
                 "external receipt lacks closed Play tester-assignment verification"
             )
-        if (
-            platform == "ios"
-            and (production_receipt is not None or require_production_eligible_external)
-            and receipt.get("readback", {}).get("state") != "available-to-testers"
-        ):
-            raise ValidationError(
-                "iOS production requires an external receipt whose readback.state is "
-                "available-to-testers; start a NEW external-testing dispatch after Beta Review "
-                "approval using the original candidate, without recovery_run_id. "
-                "Rerunning the old dispatch preserves its immutable pending receipt."
-            )
-        if (
-            platform == "android"
-            and (production_receipt is not None or require_production_eligible_external)
-            and receipt.get("outcome") not in {"mutated", "reconciled"}
-        ):
-            raise ValidationError(
-                "Android production requires an external receipt produced by a confirmed "
-                "promotion; an observation-only already-present receipt is not authorization"
-            )
+        if production_receipt is not None or require_production_eligible_external:
+            blocker = external_production_blocker(receipt, platform=platform)
+            if blocker is not None:
+                raise ValidationError(blocker[1])
     if production_receipt is not None:
         if candidate_receipt is None or external_receipt is None:
             raise ValidationError(

@@ -1,0 +1,65 @@
+name: "Select the fixed configured signed runtime before any payload download"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Select the fixed configured signed runtime before any payload download"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        umask 077
+        [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+        selection=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime-signing-selection --target "$MRK_MACOS_TARGET")
+        [[ ${#selection} -le 4096 ]] || exit 1
+        "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_SIGNING_SELECTION'
+        import json, os, re, stat, sys
+        value = json.loads(sys.argv[1])
+        fields = {
+            "runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
+            "signedPythonSha256": "MRK_MACOS_SIGNED_PYTHON_SHA256",
+            "signingReceiptSha256": "MRK_MACOS_SIGNING_RECEIPT_SHA256",
+            "signingSourceCommit": "MRK_MACOS_SIGNING_SOURCE_COMMIT",
+            "signingRunId": "MRK_MACOS_SIGNING_RUN_ID",
+            "signingRunAttempt": "MRK_MACOS_SIGNING_RUN_ATTEMPT",
+            "signingArtifactId": "MRK_MACOS_SIGNING_ARTIFACT_ID",
+            "producerProfileSha256": "MRK_MACOS_SIGNING_PRODUCER_PROFILE_SHA256",
+            "serviceProfileSha256": "MRK_MACOS_SIGNING_SERVICE_PROFILE_SHA256",
+            "nominationSha256": "MRK_MACOS_SIGNING_BINDING_SHA256",
+        }
+        fixed = {"schemaVersion", "kind", "target", "state", "sourceInputsSha256", "nativeAuthority"}
+        if (type(value) is not dict or set(value) != set(fields) | fixed
+                or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+                or value["kind"] != "configured-signed-runtime-selection-data"
+                or value["state"] != "configured" or value["target"] != os.environ["MRK_MACOS_TARGET"]
+                or value["nativeAuthority"] is not False
+                or value["sourceInputsSha256"] != os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]):
+            raise ValueError("fixed configured runtime selection required")
+        for key in fields:
+            item = value[key]
+            if key in ("signingRunId", "signingRunAttempt", "signingArtifactId"):
+                valid = type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item) and int(item) <= 9007199254740991
+            else:
+                width = 40 if key == "signingSourceCommit" else 64
+                valid = type(item) is str and re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", item) and item != "0" * width
+            if not valid: raise ValueError("fixed public signing field refused")
+        body = "".join(name + "=" + value[key] + "\n" for key, name in fields.items()).encode("ascii")
+        if len(body) > 4096: raise ValueError("signing selection output bound")
+        fd = os.open(os.environ["GITHUB_ENV"], os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise ValueError("original workflow environment file refused")
+            view = memoryview(body)
+            while view:
+                count = os.write(fd, view)
+                if count <= 0: raise OSError("signing selection write refused")
+                view = view[count:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        PY_SIGNING_SELECTION
+        # Resolve the separate fixed Store SOURCE selection before any payload download.
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py store-signing-selection --target "$MRK_MACOS_TARGET"

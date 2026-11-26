@@ -265,18 +265,49 @@ class LocalSigningTests(NativeCaseWorkspaceMixin, unittest.TestCase):
         self.assert_clean()
 
     def test_native_replacement_outside_operation_is_never_adopted_or_deleted(self):
+        def identity(path):
+            details = path.stat()
+            return details.st_dev, details.st_ino
+        retained_db = self.private / "retained-original-db"
+        foreign = self.private / "foreign-db"
         with self.assertRaises(CredentialError):
             with self.context():
-                foreign = self.private / "foreign-db"
+                original_db = identity(self.model.keychain)
                 foreign.write_bytes(b"fictional-foreign-db"); foreign.chmod(0o600)
+                self.assertNotEqual(identity(foreign), original_db)
+                self.model.keychain.replace(retained_db)
                 foreign.replace(self.model.keychain)
         with self.assertRaises(CredentialError): self.recover()
         self.assertEqual(self.model.keychain.read_bytes(), b"fictional-foreign-db")
-        self.model.keychain.unlink()
-        (self.model.keychain.parent / signing.LOCK_NAME).unlink()
-        self.model.preferences = copy.deepcopy(self.model.original)
+        # Fixture-owned restoration of the exact original isolates the lock
+        # counterexample: a DB mismatch must not mask failure to compare lock IDs.
+        self.model.keychain.replace(foreign)
+        retained_db.replace(self.model.keychain)
+        self.assertEqual(identity(self.model.keychain), original_db)
+        database = self.model.keychain.read_bytes()
+        lock = self.model.keychain.parent / signing.LOCK_NAME
+        original_lock = identity(lock)
+        retained_lock, foreign_lock = self.private / "retained-original-lock", self.private / "foreign-lock"
+        descriptor = os.open(foreign_lock, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        os.close(descriptor)
+        foreign_identity = identity(foreign_lock)
+        self.assertNotEqual(foreign_identity, original_lock)
+        lock.replace(retained_lock)
+        foreign_lock.replace(lock)
+        calls = len(self.model.calls)
+        with self.assertRaises(CredentialError): self.recover()
+        self.assertEqual(len(self.model.calls), calls)
+        self.assertEqual(identity(lock), foreign_identity)
+        self.assertEqual((stat.S_IMODE(lock.stat().st_mode), lock.read_bytes()), (0o400, b""))
+        self.assertEqual(identity(self.model.keychain), original_db)
+        self.assertEqual(self.model.keychain.read_bytes(), database)
+        lock.replace(foreign_lock)
+        retained_lock.replace(lock)
+        self.assertEqual(identity(lock), original_lock)
         self.recover()
         self.assert_clean()
+        self.assertEqual(foreign.read_bytes(), b"fictional-foreign-db")
+        self.assertEqual((identity(foreign_lock), foreign_lock.read_bytes()), (foreign_identity, b""))
 
     def test_every_completed_native_failure_after_effect_is_cleaned_without_repeating_setup(self):
         for command in NATIVE_FAILURE_COMMANDS:

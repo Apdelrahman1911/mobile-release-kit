@@ -6,6 +6,7 @@ require "tmpdir"
 require "fileutils"
 require "time"
 require_relative "apple_fixture"
+require_relative "local_stage_runtime_fixture"
 require_relative "../../fastlane/store_lane_fastlane_bridges"
 require "fastlane_core/itunes_transporter"
 require "fastlane_core/ipa_upload_package_builder"
@@ -13,6 +14,7 @@ require "fastlane_core/fastlane_pty"
 require "pilot/build_manager"
 
 class AppleReleaseLanesTest < Minitest::Test
+  include LocalStageRuntimeFixture
   def setup
     @environment = ENV.to_h
     @old_client = Spaceship::ConnectAPI.client
@@ -134,15 +136,7 @@ class AppleReleaseLanesTest < Minitest::Test
       # a build that predates authorization just because setup crossed a second.
       @service.attributes("builds", "build-1")["uploadedDate"] = precondition.fetch("snapshot").fetch("serverObservedAt")
     end
-    @payload = {
-      "schemaVersion" => 1, "documentType" => "store-operation-intent", "stage" => stage, "platform" => "ios",
-      "storePrecondition" => precondition, "authorizedBy" => @authority.dup,
-      "privateStateCommitments" => precondition.fetch("snapshot").fetch("privateStateCommitments", {}),
-      "artifacts" => { "ios-ipa" => "candidate.ipa", "ios-archive" => "archive.zip", "ios-dsyms" => "dsyms.zip" }.map do |name, file|
-        { "logicalName" => name, "size" => File.size(File.join(@root, file)),
-          "sha256" => Digest::SHA256.file(File.join(@root, file)).hexdigest }
-      end,
-    }
+    @payload = AppleFixture.ci_intent_payload(@root, stage, precondition, @authority)
     @intent_digest = Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(@payload))
     File.write(File.join(@root, "intent.json"), JSON.generate(@payload.merge("integrity" => { "algorithm" => "sha256", "sha256" => @intent_digest })))
     ENV["MOBILE_RELEASE_STORE_MODE"] = "execute"
@@ -205,7 +199,7 @@ class AppleReleaseLanesTest < Minitest::Test
     def gets(*) = nil
   end
 
-  def with_real_upload_bridge(cut:, conversion: :none, close_fails: false, foreign_build: false, response_loss: false)
+  def with_real_upload_bridge(cut:, conversion: :none, close_fails: false, foreign_build: false, response_loss: false, local: nil)
     # Real Pilot/package/key/transporter/PipeAdapter code, including the pinned
     # executor's StandardError#exit_status rescue. Native creation/wait/IO are
     # inert before entry; this is not native process or macOS evidence.
@@ -282,12 +276,30 @@ class AppleReleaseLanesTest < Minitest::Test
     end
     @fastfile.define_singleton_method(:validate_current_ios_upload!) do |ipa|
       test.instance_variable_get(:@upload_validation_calls) << {"ipa" => ipa, "at" => test.instance_variable_get(:@time)}
-      MobileReleaseKit::IosUploadValidation.current!(python: RbConfig.ruby,
+      result=MobileReleaseKit::IosUploadValidation.current!(python: RbConfig.ruby,
         module_root: File.expand_path("../../src", __dir__), app_root: test.instance_variable_get(:@root),
         config_path: File.join(test.instance_variable_get(:@root), "release/mobile-release.json"),
         intent_path: File.join(test.instance_variable_get(:@root), "intent.json"), ipa_path: ipa,
         intent_sha256: test.instance_variable_get(:@intent_digest), environment: {},
         tooling_directory: File.expand_path("../../fastlane", __dir__))
+      # The original current-result owner is real; only native admission of
+      # the protected tool tuple is modeled (separate real-file tests cover it).
+      record.instance_variable_set(:@local_execution,local) if local
+      result
+    end
+    if local
+      transport={'selection'=>{'developerDirectory'=>'/Applications/Xcode_Test.app/Contents/Developer'},
+        'altoolPath'=>'/Applications/Xcode_Test.app/Contents/Support/altoolShim'}
+      runtime.define_singleton_method(:local_ios_transport!) { transport }
+      runtime.define_singleton_method(:local_ios_key!) do |actual|
+        raise MobileReleaseKit::StoreLaneRuntime::Error.new(:local_key) unless key.all? { |name,value| actual[name]==value }
+        actual
+      end
+      runtime.define_singleton_method(:local_ios_inflight!) do |owner,adapter|
+        raise unless owner.equal?(record) && record.local_inflight_adapter?(adapter)
+        true
+      end
+      resources.define_singleton_method(:check_local_transport!) { true }
     end
     type = MobileReleaseKit::NativeUploadValidation.const_get(:CaptureSession, false)
     output = JSON.generate("documentType" => "ios-current-upload-validation", "schemaVersion" => 1,
@@ -317,8 +329,18 @@ class AppleReleaseLanesTest < Minitest::Test
       def exited? = true
       def signaled? = false
     end.new(4242, 0)
-    spawn = lambda do |command, **_options|
-      assert_equal "inert-upload-never-executed", command
+    spawn = lambda do |*commands, **_options|
+      if local
+        env,*argv=commands
+        assert_equal '/Applications/Xcode_Test.app/Contents/Developer',env.fetch('DEVELOPER_DIR')
+        assert_equal '/usr/bin:/bin:/usr/sbin:/sbin',env.fetch('PATH')
+        assert_equal ['C','C',nil,nil],env.values_at('LANG','LC_ALL','SDKROOT','TOOLCHAINS')
+        assert_equal File.dirname(resources.instance_variable_get(:@entries).fetch('key').fetch(:path)),env.fetch('API_PRIVATE_KEYS_DIR')
+        assert_equal ['/usr/bin/xcrun','--no-cache','--run','altool','--upload-app','--apiKey','KEY123',
+          '--apiIssuer','synthetic-issuer','-t','ios','-f',resources.instance_variable_get(:@entries).fetch('upload-asset').fetch(:path),'-k','100000'],argv
+      else
+        assert_equal ["inert-upload-never-executed"], commands
+      end
       @upload_count += 1
       @service.attributes("builds", "build-1")["uploadedDate"] = Time.now.utc.iso8601
       @service.visible = true
@@ -338,7 +360,28 @@ class AppleReleaseLanesTest < Minitest::Test
                     Process.stub(:waitpid2, ->(pid, flags) { waits << [pid, flags]; [pid, status] }) do
                       Process.stub(:kill, forbidden) do
                         Process.stub(:detach, forbidden) do
-                          Process.stub(:setsid, forbidden) { yield record, resources, endpoints, executor_calls, waits }
+                          Process.stub(:setsid, forbidden) do
+                            if local
+                              original_constructor=lambda do |*args,**kwargs|
+                                value=FastlaneCore::ItunesTransporter.allocate
+                                value.singleton_class.prepend(bridges.const_get(:TransporterBridge,false))
+                                value.send(:initialize,*args,**kwargs);value
+                              end
+                              MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) do
+                                MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,local) do
+                                  FastlaneCore::Helper.stub(:xcode_version,forbidden) do
+                                    FastlaneCore::AltoolTransporterExecutor.stub(:new,executor) do
+                                      FastlaneCore::ItunesTransporter.stub(:new,original_constructor) do
+                                        yield record,resources,endpoints,executor_calls,waits
+                                      end
+                                    end
+                                  end
+                                end
+                              end
+                            else
+                              yield record, resources, endpoints, executor_calls, waits
+                            end
+                          end
                         end
                       end
                     end
@@ -352,6 +395,154 @@ class AppleReleaseLanesTest < Minitest::Test
     end
   ensure
     resources&.close_independent!
+  end
+
+  def local_ios_execution_context
+    value=JSON.parse(File.binread(File.expand_path('../fixtures/local-intent-ios-candidate-valid.json',__dir__)))
+    value.delete('integrity')
+    value['storePrecondition']=@payload.fetch('storePrecondition')
+    value['application']={'id'=>'test.example.release','storeAppId'=>'12345'}
+    value['version']={'marketing'=>'1.2.3','build'=>123}
+    value['confirmation']='candidate:ios:1.2.3:123'
+    value['preparedBy']['confirmationSha256']=Digest::SHA256.hexdigest(value.fetch('confirmation'))
+    ipa=value.fetch('artifacts').find { |a| a['logicalName']=='ios-ipa' }
+    ipa.merge!('fileName'=>'candidate.ipa','size'=>File.size(File.join(@root,'candidate.ipa')),
+      'sha256'=>Digest::SHA256.file(File.join(@root,'candidate.ipa')).hexdigest)
+    Dir.mkdir(File.join(@root,'archive.xcarchive'),0o700)
+    File.binwrite(File.join(@root,'archive.xcarchive','Info.plist'),'inert original archive')
+    ENV['MOBILE_RELEASE_IOS_ARCHIVE_PATH']='archive.xcarchive'
+    ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+    @payload=value;@intent_digest=Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(value))
+    File.binwrite(File.join(@root,'intent.json'),MobileReleaseKit.canonical_json(value.merge(
+      'integrity'=>{'algorithm'=>'sha256','sha256'=>@intent_digest})))
+    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,'intent.json')),expected_sha256:@intent_digest,platform:'ios')
+    authority=payload.fetch('preparedBy').merge('purpose'=>'execute','authorizationId'=>'55555555-5555-4555-8555-555555555555','intentSha256'=>digest)
+    {payload:payload,digest:digest,authority:authority}
+  end
+
+  def local_ios_reconcile_context
+    @service.visible=false;prepare('candidate');value=local_ios_execution_context
+    @service.visible=true
+    @service.attributes('builds','build-1')['usesNonExemptEncryption']=false
+    @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=false
+    File.binwrite(File.join(@root,'journal.json'),'preserved old ambiguous original')
+    # Real local codec/intent and actual SDK models/lane below. Only the native
+    # admitted Runtime is inert, independently covered by its original gate tests.
+    value.merge(authority:value.fetch(:authority).merge('purpose'=>'recover'))
+  end
+  def with_local_ios_readonly(context)
+    runtime=Object.new
+    runtime.define_singleton_method(:local_ios_transport!) { raise 'readback requested upload tools' }
+    @fastfile.define_singleton_method(:finish_ios_candidate!) { |*| raise 'readback requested mutating finisher' }
+    @fastfile.define_singleton_method(:validate_current_ios_upload!) { |*| raise 'readback requested current IPA tool' }
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+      MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) { yield }
+    end
+  end
+  def assert_local_ios_readonly_preserved
+    assert_equal 0,@upload_count;assert_empty @upload_validation_calls;assert_empty @service.writes
+    assert_equal 'preserved old ambiguous original',File.binread(File.join(@root,'journal.json'))
+  end
+  def test_local_ios_reconcile_current_complete_build_double_reads_without_mutation
+    context=local_ios_reconcile_context
+    before=@service.requests.count { |method,path,_| method==:get && path=='/v1/builds' }
+    with_local_ios_readonly(context) { execute }
+    assert_equal 2,@service.requests.count { |method,path,_| method==:get && path=='/v1/builds' }-before
+    assert_local_ios_readonly_preserved
+    assert_equal 'local-store-execution-receipt',receipt.fetch('documentType')
+    assert_equal 'recover',receipt.fetch('executedBy').fetch('purpose')
+    assert_equal context.fetch(:authority),receipt.fetch('executedBy')
+    assert_equal 'reconciled',receipt.fetch('result');assert_equal 'processed',receipt.fetch('state')
+    assert_equal 'VALID',receipt.fetch('processingState');assert_equal false,receipt.fetch('autoNotifyEnabled')
+    assert_equal 'build-1',receipt.fetch('buildResourceId');refute receipt.key?('authorizedBy')
+  end
+  def test_local_ios_reconcile_absent_partial_or_foreign_never_finishes_or_retries
+    context=local_ios_reconcile_context
+    build=@service.attributes('builds','build-1');detail=@service.attributes('buildBetaDetails','detail-1')
+    original=Marshal.load(Marshal.dump([build,detail]))
+    cases=[-> { @service.visible=false },-> { build['processingState']='PROCESSING' },
+      -> { build['usesNonExemptEncryption']=nil },-> { detail['autoNotifyEnabled']=true },
+      -> { detail['internalBuildState']='PROCESSING' },-> { build['expired']=true },
+      -> { build['version']='124' },-> { build['uploadedDate']=(@wall_clock-86400).iso8601 }]
+    with_local_ios_readonly(context) do
+      cases.each do |change|
+        @service.visible=true;build.replace(original[0]);detail.replace(original[1]);change.call
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+        refute File.exist?(File.join(@root,'receipt.json'));assert_local_ios_readonly_preserved
+      end
+    end
+  end
+  def test_local_ios_reconcile_final_read_change_or_lost_reply_cannot_publish
+    context=local_ios_reconcile_context
+    [:changed,:lost_reply].each do |failure|
+      reads=0
+      @service.before_read=lambda do |path|
+        if path=='/v1/builds'
+          reads+=1
+          if reads>=2
+            if failure==:changed
+              @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=true
+            else
+              raise Faraday::TimeoutError,'Synthetic final GET outcome unknown'
+            end
+          end
+        end
+      end
+      @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=false
+      with_local_ios_readonly(context) do
+        assert_raises(FastlaneCore::Interface::FastlaneError,Faraday::TimeoutError) { execute }
+      end
+      assert_operator reads,:>=,2
+      refute File.exist?(File.join(@root,'receipt.json'));assert_local_ios_readonly_preserved
+    end
+  end
+
+  def local_original_bridge_case(response_loss:)
+    @service.visible=false;prepare('candidate');context=local_ios_execution_context
+    with_real_upload_bridge(cut:nil,local:context,response_loss:response_loss) do |record,resources,endpoints,calls,waits|
+      execute
+      assert_equal 1,@upload_count;assert_equal 1,calls.length;assert_equal [[4242,0]],waits
+      assert endpoints.all?(&:closed?);refute record.unknown?
+      assert_equal 'local-store-execution-receipt',receipt.fetch('documentType')
+      assert_equal context.fetch(:authority),receipt.fetch('executedBy');refute receipt.key?('authorizedBy')
+      assert_equal(response_loss ? 'reconciled' : 'accepted',receipt.fetch('result'))
+      assert_equal false,receipt.fetch('autoNotifyEnabled')
+      record.seal_uploads!;resources.finish!
+      assert record.uploads_sealed_and_retired?
+    end
+  end
+  def test_local_ios_original_pinned_bridge_constructor_key_parser_and_direct_send
+    local_original_bridge_case(response_loss:false)
+  end
+  def test_local_ios_lost_return_after_original_send_only_reads_back_without_resend
+    local_original_bridge_case(response_loss:true)
+  end
+  def test_local_ios_missing_transport_refuses_before_any_asc_access
+    @service.visible=false;prepare('candidate');context=local_ios_execution_context
+    @fastfile.define_singleton_method(:asc_api_key) { raise 'ASC touched before transport admission' }
+    runtime=Object.new
+    runtime.define_singleton_method(:local_ios_transport!) { raise MobileReleaseKit::StoreLaneRuntime::Error.new(:local_transport) }
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+      MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) do
+        assert_raises(MobileReleaseKit::StoreLaneRuntime::Error) { execute }
+      end
+    end
+    assert_equal 0,@upload_count;assert_empty @service.writes
+  end
+  def test_local_ios_visible_or_prior_attempt_never_adopts_or_uses_ci_retry
+    @service.visible=false;prepare('candidate');context=local_ios_execution_context
+    @service.visible=true
+    runtime=Object.new;runtime.define_singleton_method(:local_ios_transport!) { true }
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+      MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+        @service.visible=false
+        File.binwrite(File.join(@root,'journal.json'),'existing preserved old attempt')
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      end
+    end
+    assert_equal 0,@upload_count;assert_empty @service.writes
+    assert_equal 'existing preserved old attempt',File.binread(File.join(@root,'journal.json'))
   end
 
   def test_candidate_lost_upload_reply_reconciles_in_process_and_turns_off_notifications
@@ -937,4 +1128,122 @@ class AppleReleaseLanesTest < Minitest::Test
       refute File.exist?(File.join(@root, "receipt.json"))
     end
   end
+  def local_external_prepare
+    @stage_tree=stage_metadata_copy(File.join(@root,'release/store'))
+    File.write(File.join(@root,'release/store/testflight/what-to-test.txt'),'ambient bytes must never reach Store')
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'prepare',output:'precondition.json') { prepare('external-testing') }
+    precondition=JSON.parse(File.read(File.join(@root,'precondition.json')))
+    value=stage_intent_for_fixture('external-testing',precondition)
+    File.binwrite(File.join(@root,'intent.json'),MobileReleaseKit.canonical_json(value));@payload=value
+    @intent_digest=value.fetch('integrity').fetch('sha256');value
+  end
+  def test_local_external_actual_runtime_uses_snapshot_bytes_and_one_original_create_grant
+    value=local_external_prepare
+    baseline=Marshal.load(Marshal.dump(@service.resources.fetch('apps')))
+    ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) { execute }
+    assert_equal 'accepted',receipt.fetch('result');assert_equal 'external-testing',receipt.fetch('stage')
+    assert_equal value.fetch('candidateOperationId'),receipt.fetch('candidateOperationId')
+    assert_equal baseline,@service.resources.fetch('apps');assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+    assert @service.assigned
+    whats_new=@service.resources.fetch('betaBuildLocalizations').values.map { |row| row.dig('attributes','whatsNew') }
+    assert_includes whats_new,'Test the fictional workflow'
+    refute_includes whats_new,'ambient bytes must never reach Store'
+  end
+  def test_local_external_ambiguous_create_cannot_be_retried_by_fresh_invocation
+    value=local_external_prepare
+    @service.after_write=->(*) { raise Interrupt, "Synthetic cancellation after original Store write" if @service.writes.length==1 }
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) do
+      assert_raises(Interrupt) { execute }
+    end
+    refute File.exist?(File.join(@root,'receipt.json'))
+    before=Marshal.load(Marshal.dump(@service.writes));@service.after_write=nil;fresh_process
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) do
+      assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+    end
+    assert_equal before,@service.writes;assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+  end
+
+  def completed_local_external_for_readiness
+    value=local_external_prepare
+    ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) { execute }
+    assert_equal 'accepted',receipt.fetch('result');assert_equal 'submitted-for-review',receipt.fetch('state')
+    originals=%w[intent.json receipt.json journal.json].to_h { |name| [name,File.binread(File.join(@root,name))] }
+    @service.resources.fetch('betaAppReviewSubmissions').each_value { |row| row.fetch('attributes')['betaReviewState']='APPROVED' }
+    @service.attributes('buildBetaDetails','detail-1')['externalBuildState']='IN_BETA_TESTING'
+    fresh_process
+    test=self
+    %i[apple_prior_execution? apple_create_guard write_apple_state_journal validate_current_ios_upload! upload_to_testflight].each do |name|
+      @fastfile.define_singleton_method(name) { |*args,**kwargs| test.flunk "readonly readiness entered #{name}" }
+    end
+    @readiness_reads=0
+    original=@fastfile.method(:ios_external_current)
+    @fastfile.define_singleton_method(:ios_external_current) do |app,build|
+      current=original.call(app,build)
+      test.instance_variable_set(:@readiness_reads,test.instance_variable_get(:@readiness_reads)+1)
+      test.instance_variable_get(:@after_readiness_read)&.call
+      current
+    end
+    [value,originals,Digest::SHA256.hexdigest(originals.fetch('receipt.json'))]
+  end
+  def test_local_external_readiness_uses_two_full_get_snapshots_and_preserves_original_evidence
+    value,originals,digest=completed_local_external_for_readiness
+    before=Marshal.load(Marshal.dump(@service.writes));requests=@service.requests.length
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'readiness.json',
+      intent:value,readiness_receipt_sha256:digest) { execute }
+    observed=JSON.parse(File.binread(File.join(@root,'readiness.json')))
+    keys=%w[documentType schemaVersion origin operation platform stage project operationId candidateOperationId candidateSha256
+      operationIntentSha256 executionReceiptSha256 preparedBy observedBy appIdentity appStoreAppId marketingVersion buildNumber
+      observedAt result state buildResourceId processingState externalGroup autoNotifyEnabled betaReviewState priorExecutionFinality]
+    assert_equal keys.sort,observed.keys.sort
+    assert_equal 'local-store-external-readiness-receipt',observed.fetch('documentType')
+    assert_equal ['ready','available-to-testers','VALID','APPROVED',false],
+      observed.values_at('result','state','processingState','betaReviewState','autoNotifyEnabled')
+    assert_equal digest,observed.fetch('executionReceiptSha256')
+    assert_equal digest,observed.fetch('observedBy').fetch('executionReceiptSha256')
+    assert_equal 'external-readiness',observed.fetch('observedBy').fetch('purpose')
+    assert_equal value.fetch('operationId'),observed.fetch('operationId')
+    refute_equal receipt.fetch('executedBy').fetch('authorizationId'),observed.fetch('observedBy').fetch('authorizationId')
+    assert_equal 'not-established',observed.fetch('priorExecutionFinality')
+    assert_equal 2,@readiness_reads
+    assert_equal before,@service.writes
+    assert @service.requests.drop(requests).all? { |method,_,_| method==:get }
+    originals.each { |name,bytes| assert_equal bytes,File.binread(File.join(@root,name)) }
+    assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+  end
+  def test_local_external_readiness_refuses_pending_or_partial_target_and_between_read_drift_without_writes
+    %i[pending rejected expired build group private locale notify encryption drift].each do |fault|
+      teardown;setup
+      value,originals,digest=completed_local_external_for_readiness
+      case fault
+      when :pending
+        @service.attributes('buildBetaDetails','detail-1')['externalBuildState']='WAITING_FOR_BETA_REVIEW'
+        @service.resources.fetch('betaAppReviewSubmissions').each_value { |r| r.fetch('attributes')['betaReviewState']='WAITING_FOR_REVIEW' }
+      when :rejected
+        @service.attributes('buildBetaDetails','detail-1')['externalBuildState']='BETA_REJECTED'
+        @service.resources.fetch('betaAppReviewSubmissions').each_value { |r| r.fetch('attributes')['betaReviewState']='REJECTED' }
+      when :expired then @service.attributes('builds','build-1')['expired']=true
+      when :build then @service.attributes('builds','build-1')['version']='124'
+      when :group then @service.assigned=false
+      when :private then @service.attributes('betaAppReviewDetails','private-detail-1')['contactFirstName']='foreign contact'
+      when :locale then @service.attributes('betaBuildLocalizations','locale-en')['whatsNew']='foreign metadata'
+      when :notify then @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=true
+      when :encryption then @service.attributes('builds','build-1')['usesNonExemptEncryption']=true
+      when :drift
+        @after_readiness_read=-> { @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=true if @readiness_reads==1 }
+      end
+      before=Marshal.load(Marshal.dump(@service.writes));requests=@service.requests.length
+      with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'readiness.json',
+        intent:value,readiness_receipt_sha256:digest) do
+        assert_raises(FastlaneCore::Interface::FastlaneError,MobileReleaseKit::ContractError,fault.to_s) { execute }
+      end
+      refute File.exist?(File.join(@root,'readiness.json')),fault.to_s
+      assert_equal before,@service.writes
+      assert @service.requests.drop(requests).all? { |method,_,_| method==:get }
+      originals.each { |name,bytes| assert_equal bytes,File.binread(File.join(@root,name)) }
+      assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+    end
+  end
+
 end

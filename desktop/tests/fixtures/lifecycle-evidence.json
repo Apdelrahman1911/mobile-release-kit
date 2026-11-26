@@ -1,0 +1,1545 @@
+{
+  "androidCandidate": {
+    "schemaVersion": 1,
+    "stage": "candidate",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "android",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "android-aab",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+        "receipt": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intent": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+        "previousReceiptSha256": null
+      }
+    ],
+    "guidance": {
+      "code": "candidate-only",
+      "message": "Only candidate evidence was supplied. Later stages and recovery remain undetermined; these saved documents do not approve another operation."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "androidExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "android",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "android-aab",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+        "receipt": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intent": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "4376dc2dd0c38957a5971a4e3ff3c3cda7879b5ddcb424230ac1c829408805e5",
+        "intentSha256": "d8450a419c5ef11af97802d728ffbd063e6e102ca33f06f8d0887e72356d0989",
+        "previousReceiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
+      }
+    ],
+    "guidance": {
+      "code": "recorded-external-gate",
+      "message": "The saved external receipt satisfies the recorded external-to-production predicate only. Workflow authenticity, current configuration and live Store state are unverified; no release or retry is approved."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "androidProduction": {
+    "schemaVersion": 1,
+    "stage": "production-submit",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "production-submit-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/production-submit-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "android",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "android-aab",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+        "receipt": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intent": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "4376dc2dd0c38957a5971a4e3ff3c3cda7879b5ddcb424230ac1c829408805e5",
+        "intentSha256": "d8450a419c5ef11af97802d728ffbd063e6e102ca33f06f8d0887e72356d0989",
+        "previousReceiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
+      },
+      {
+        "stage": "production-submit",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "draft",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000002",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000002",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000002",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "f391447685a2fcad2076b5e63fd25a0211835b83b26314e07fc04482bcabceb6",
+        "intentSha256": "a4aa90356161a58e176cea3b03897d6e9d4c62dc6136fe74d6b97c07c93e5306",
+        "previousReceiptSha256": "4376dc2dd0c38957a5971a4e3ff3c3cda7879b5ddcb424230ac1c829408805e5"
+      }
+    ],
+    "guidance": {
+      "code": "production-recorded",
+      "message": "A production receipt is recorded in this local chain. It is not a live Store observation or proof of publication, and does not approve replay or recovery."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "androidObservedExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "android",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "android-aab",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+        "receipt": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intent": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "already-present",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "31f295bf523837639fdc8e75a90e27d444d42d86780f2aa5afdb46bac023eeb2",
+        "intentSha256": "90146e456fa666eea7933e21997b3f861659bdff98d03afb1a2f173a81d31875",
+        "previousReceiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
+      }
+    ],
+    "guidance": {
+      "code": "android-external-observation-only",
+      "message": "Android production requires an external receipt produced by a confirmed promotion; an observation-only already-present receipt is not authorization"
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "androidReconciledExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "android",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "android-aab",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+        "receipt": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intent": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "reconciled",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "8120ad8f1f9cab0479801e451218d92f1ade4beea86ad953eb778cfd24581751",
+        "intentSha256": "d8450a419c5ef11af97802d728ffbd063e6e102ca33f06f8d0887e72356d0989",
+        "previousReceiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
+      }
+    ],
+    "guidance": {
+      "code": "recorded-external-gate",
+      "message": "The saved external receipt satisfies the recorded external-to-production predicate only. Workflow authenticity, current configuration and live Store state are unverified; no release or retry is approved."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "iosAvailableExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "ios",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "ios-ipa",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "ios-archive",
+          "declaredBytes": "23456789",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "logicalName": "ios-dsyms",
+          "declaredBytes": "345678",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "9d646dbd3dd5f0496db431f726efecf337025af76ac8d6eb52b625efdc7cf55a",
+        "receipt": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intent": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "processed",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intentSha256": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "3a5bf07acc365991e73f8148129ac97dd44489a350b25029ae285b7fcfc435cd",
+        "intentSha256": "a7312234c5483622fc1b47dd7c4dc5bbef61630bb20c98b5315e73b2a549ba21",
+        "previousReceiptSha256": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035"
+      }
+    ],
+    "guidance": {
+      "code": "recorded-external-gate",
+      "message": "The saved external receipt satisfies the recorded external-to-production predicate only. Workflow authenticity, current configuration and live Store state are unverified; no release or retry is approved."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "iosProduction": {
+    "schemaVersion": 1,
+    "stage": "production-submit",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "production-submit-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/production-submit-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "ios",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "ios-ipa",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "ios-archive",
+          "declaredBytes": "23456789",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "logicalName": "ios-dsyms",
+          "declaredBytes": "345678",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "9d646dbd3dd5f0496db431f726efecf337025af76ac8d6eb52b625efdc7cf55a",
+        "receipt": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intent": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "processed",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intentSha256": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "available-to-testers",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "3a5bf07acc365991e73f8148129ac97dd44489a350b25029ae285b7fcfc435cd",
+        "intentSha256": "a7312234c5483622fc1b47dd7c4dc5bbef61630bb20c98b5315e73b2a549ba21",
+        "previousReceiptSha256": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035"
+      },
+      {
+        "stage": "production-submit",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "submitted-for-review",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000002",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000002",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000002",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "03bd50a36bb8f2eabf6d1c42d584f1bb9271986923dcb6ce345b62619a1f2b25",
+        "intentSha256": "2ddbc24253170ec9c847334c79ddc66011375440a5980387aa9d8dbfcbffae4c",
+        "previousReceiptSha256": "3a5bf07acc365991e73f8148129ac97dd44489a350b25029ae285b7fcfc435cd"
+      }
+    ],
+    "guidance": {
+      "code": "production-recorded",
+      "message": "A production receipt is recorded in this local chain. It is not a live Store observation or proof of publication, and does not approve replay or recovery."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "iosPendingExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "ios",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "ios-ipa",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "ios-archive",
+          "declaredBytes": "23456789",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "logicalName": "ios-dsyms",
+          "declaredBytes": "345678",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "9d646dbd3dd5f0496db431f726efecf337025af76ac8d6eb52b625efdc7cf55a",
+        "receipt": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intent": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "processed",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intentSha256": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395",
+        "previousReceiptSha256": null
+      },
+      {
+        "stage": "external-testing",
+        "recordedOutcome": "mutated",
+        "recordedReadback": "approved",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "1000000001",
+            "attempt": "1"
+          }
+        },
+        "receiptSha256": "8be900747d01275f0b2dd1c5edd7987dfe2f1e2b8f9568509638a66079f90131",
+        "intentSha256": "a7312234c5483622fc1b47dd7c4dc5bbef61630bb20c98b5315e73b2a549ba21",
+        "previousReceiptSha256": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035"
+      }
+    ],
+    "guidance": {
+      "code": "ios-external-not-available",
+      "message": "iOS production requires an external receipt whose readback.state is available-to-testers; start a NEW external-testing dispatch after Beta Review approval using the original candidate, without recovery_run_id. Rerunning the old dispatch preserves its immutable pending receipt."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "iosRecordedReconciliation": {
+    "schemaVersion": 1,
+    "stage": "candidate",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "ios",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "ios-ipa",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "ios-archive",
+          "declaredBytes": "23456789",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "logicalName": "ios-dsyms",
+          "declaredBytes": "345678",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "9d646dbd3dd5f0496db431f726efecf337025af76ac8d6eb52b625efdc7cf55a",
+        "receipt": "18a9e1fae84604fb8c8eec278a75ffb1acad24264d78b9afac6aba08206ae6b8",
+        "intent": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "operator-authorized-reconciliation",
+        "recordedReadback": "processed",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "9007199254740993",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "9007199254740993",
+            "attempt": "2"
+          }
+        },
+        "receiptSha256": "18a9e1fae84604fb8c8eec278a75ffb1acad24264d78b9afac6aba08206ae6b8",
+        "intentSha256": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395",
+        "previousReceiptSha256": null
+      }
+    ],
+    "guidance": {
+      "code": "candidate-only",
+      "message": "Only candidate evidence was supplied. Later stages and recovery remain undetermined; these saved documents do not approve another operation."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "iosRecordedRetry": {
+    "schemaVersion": 1,
+    "stage": "candidate",
+    "outcome": "consistent",
+    "documents": [
+      {
+        "path": "candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "ios",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "ios-ipa",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "ios-archive",
+          "declaredBytes": "23456789",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "logicalName": "ios-dsyms",
+          "declaredBytes": "345678",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "9d646dbd3dd5f0496db431f726efecf337025af76ac8d6eb52b625efdc7cf55a",
+        "receipt": "1dbcd0cac13c20a84132e0cb0bf977e200facb224c63b6a0aae8fe8b720874e9",
+        "intent": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395"
+      }
+    },
+    "history": [
+      {
+        "stage": "candidate",
+        "recordedOutcome": "operator-authorized-retry",
+        "recordedReadback": "processed",
+        "recordedRuns": {
+          "authorizedBy": {
+            "runId": "1000000000",
+            "attempt": "1"
+          },
+          "executedBy": {
+            "runId": "9007199254740993",
+            "attempt": "1"
+          },
+          "producedBy": {
+            "runId": "9007199254740993",
+            "attempt": "2"
+          }
+        },
+        "receiptSha256": "1dbcd0cac13c20a84132e0cb0bf977e200facb224c63b6a0aae8fe8b720874e9",
+        "intentSha256": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395",
+        "previousReceiptSha256": null
+      }
+    ],
+    "guidance": {
+      "code": "candidate-only",
+      "message": "Only candidate evidence was supplied. Later stages and recovery remain undetermined; these saved documents do not approve another operation."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "missingExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "incomplete",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "missing"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": null,
+    "history": [],
+    "guidance": {
+      "code": "evidence-incomplete",
+      "message": "Expected saved documents are missing. This does not prove that no Store operation occurred. Recovery is undetermined."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "invalidExternal": {
+    "schemaVersion": 1,
+    "stage": "external-testing",
+    "outcome": "invalid",
+    "documents": [
+      {
+        "path": "external-testing-receipt.json",
+        "state": "invalid"
+      },
+      {
+        "path": "operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": null,
+    "history": [],
+    "guidance": {
+      "code": "evidence-invalid",
+      "message": "Some saved documents are invalid. Recovery is undetermined; no retry or release is approved."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "inconsistentProduction": {
+    "schemaVersion": 1,
+    "stage": "production-submit",
+    "outcome": "inconsistent",
+    "documents": [
+      {
+        "path": "production-submit-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/production-submit-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/external-testing-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/external-testing-operation-intent.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/candidate-receipt.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/candidate-manifest.json",
+        "state": "valid"
+      },
+      {
+        "path": "operation/external/operation/candidate/operation/candidate-operation-intent.json",
+        "state": "valid"
+      }
+    ],
+    "summary": null,
+    "history": [],
+    "guidance": {
+      "code": "evidence-inconsistent",
+      "message": "The saved documents disagree. Keep the original evidence; this inspection cannot approve recovery or a retry."
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  }
+}

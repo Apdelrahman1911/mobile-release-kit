@@ -1,0 +1,20 @@
+name: "Sign only the fixed compiled remover"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Sign only the fixed compiled remover"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+        set -euo pipefail
+        result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-remover --target "$MRK_MACOS_TARGET")
+        [[ "$result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+        printf '
+        MRK_MACOS_REMOVER_SHA256=%s\n' "${result#sha256=}" >> "$GITHUB_ENV"
+        unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD

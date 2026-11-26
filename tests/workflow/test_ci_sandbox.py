@@ -1264,7 +1264,7 @@ class CISandboxPureTests(unittest.TestCase):
         with patch.object(Path, "exists", return_value=True), \
              patch.multiple(self.module, os=SimpleNamespace(umask=umask), subprocess=SimpleNamespace(),
                             socket=SimpleNamespace(), signal=SimpleNamespace()):
-            isolated, special_kwargs = session._argv(python_full, 300, profile="python-full")
+            isolated, special_kwargs = session._argv(python_full, 450, profile="python-full")
         self.assertEqual(special_kwargs, {})
         self.assertNotIn("--bind", isolated)
         self.assertNotIn("--unshare-user", isolated)
@@ -1294,7 +1294,7 @@ class CISandboxPureTests(unittest.TestCase):
         self.assertEqual(isolated[special_drop:special_drop + 12], argv[drop:drop + 12])
         entry_role = isolated.index("--enter-python-full")
         self.assertEqual(isolated[entry_role:entry_role + 6],
-                         ["--enter-python-full", "linux", str(session.uid), str(session.gid), "300", str(session.policy)])
+                         ["--enter-python-full", "linux", str(session.uid), str(session.gid), "450", str(session.policy)])
         self.assertEqual(isolated[entry_role + 6:], python_full)
         for flag in ("--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--new-session", "--die-with-parent",
                      "--assert-userns-disabled"):
@@ -1312,8 +1312,9 @@ class CISandboxPureTests(unittest.TestCase):
             session._argv([str(session.python)], 180)
 
     def test_python_full_profile_is_exact_and_admits_inputs_and_memory_before_collection(self):
-        cases = ("valid", "ordinary", "unknown-profile", "wrong-platform", "not-admitted", "admitting", "wrong-cwd", "wrong-seconds",
-                 "wrong-cpu", "wrong-output-limit", "unlatched", "cancel-control", "extra-argument",
+        cases = ("valid", "ordinary", "unknown-profile", "wrong-platform", "not-admitted", "admitting", "wrong-cwd",
+                 "old-seconds", "excess-seconds",
+                 "wrong-cpu", "excess-cpu", "ordinary-excess-cpu", "wrong-output-limit", "unlatched", "cancel-control", "extra-argument",
                  "argument-0", "argument-1", "argument-3", "argument-5", "argument-7", "argument-9", "argument-11",
                  "input-failure", "memory-failure")
         for case in cases:
@@ -1331,10 +1332,13 @@ class CISandboxPureTests(unittest.TestCase):
                     command.append("--unapproved-reader")
                 session.admitted = case != "not-admitted"
                 session._admitting = case == "admitting"
-                kwargs = dict(cwd=session.work, env={}, seconds=900, output_limit=8 * self.module.MiB,
-                              cpu_seconds=300, profile="ordinary" if case == "ordinary" else "python-full")
-                changes = {"wrong-cwd": {"cwd": session.source}, "wrong-seconds": {"seconds": 899},
-                           "wrong-cpu": {"cpu_seconds": 299}, "wrong-output-limit": {"output_limit": self.module.MiB},
+                kwargs = dict(cwd=session.work, env={}, seconds=2100, output_limit=8 * self.module.MiB,
+                              cpu_seconds=300 if case == "ordinary" else 450,
+                              profile="ordinary" if case in {"ordinary", "ordinary-excess-cpu"} else "python-full")
+                changes = {"wrong-cwd": {"cwd": session.source}, "old-seconds": {"seconds": 900},
+                           "excess-seconds": {"seconds": 2101},
+                           "wrong-cpu": {"cpu_seconds": 300}, "excess-cpu": {"cpu_seconds": 451},
+                           "wrong-output-limit": {"output_limit": self.module.MiB},
                            "unknown-profile": {"profile": "caller-selected-profile"}}
                 kwargs.update(changes.get(case, {}))
                 input_error = self.module.SessionError("synthetic fixed profile input refusal")
@@ -1372,7 +1376,7 @@ class CISandboxPureTests(unittest.TestCase):
                         if case in {"input-failure", "memory-failure"}:
                             self.assertIs(caught.exception, input_error if case == "input-failure" else memory_error)
                     if case in {"valid", "ordinary", "input-failure", "memory-failure"}:
-                        session._argv.assert_called_once_with(command, 300, profile=kwargs["profile"])
+                        session._argv.assert_called_once_with(command, kwargs["cpu_seconds"], profile=kwargs["profile"])
                     else:
                         session._argv.assert_not_called()
                 if case in {"valid", "input-failure", "memory-failure"}:
@@ -1501,7 +1505,7 @@ class CISandboxPureTests(unittest.TestCase):
             with self.subTest(profile_resource_limits=(platform, profile)):
                 expected = {0: 0, 1: 1024, 2: 256,
                             3: (1 << 32) + self.module.MiB if profile == "python-full" else 512 * self.module.MiB,
-                            4: 300}
+                            4: 450 if profile == "python-full" else 300}
                 if platform == "linux":
                     expected[5] = 4 * 1024 * self.module.MiB
                 limits, applied = {}, []
@@ -1519,7 +1523,7 @@ class CISandboxPureTests(unittest.TestCase):
                     RLIMIT_CPU=4, RLIMIT_AS=5, RLIM_INFINITY=-1, getrlimit=get_limit, setrlimit=set_limit)
                 with patch.multiple(self.module, resource=fake_resource, os=SimpleNamespace(), subprocess=SimpleNamespace(),
                                     socket=SimpleNamespace(), signal=SimpleNamespace()):
-                    self.module._limits(platform, 300, profile=profile)
+                    self.module._limits(platform, expected[4], profile=profile)
                 self.assertEqual(applied, list(expected))
                 self.assertEqual(limits, {which: (limit, limit) for which, limit in expected.items()})
 
@@ -1542,13 +1546,15 @@ class CISandboxPureTests(unittest.TestCase):
             with self.subTest(profile_limit_refusal=case), \
                  patch.multiple(self.module, resource=fake_resource, os=SimpleNamespace(), subprocess=SimpleNamespace(),
                                 socket=SimpleNamespace(), signal=SimpleNamespace()), self.assertRaises(self.module.SessionError):
-                self.module._limits("linux", 300, profile="python-full")
+                self.module._limits("linux", 450, profile="python-full")
             self.assertEqual(calls, [0, 1, 2] if case == "hard-ceiling" else [0, 1, 2, 3])
         with patch.multiple(self.module, resource=SimpleNamespace(), os=SimpleNamespace(), subprocess=SimpleNamespace(),
                             socket=SimpleNamespace(), signal=SimpleNamespace()):
-            for platform, profile in (("darwin", "python-full"), ("linux", "unknown")):
-                with self.subTest(profile_limit_platform=(platform, profile)), self.assertRaises(self.module.SessionError):
-                    self.module._limits(platform, 300, profile=profile)
+            for platform, profile, cpu in (("darwin", "python-full", 450), ("linux", "unknown", 300),
+                                           ("linux", "ordinary", 450), ("darwin", "ordinary", 450),
+                                           ("linux", "python-full", 300), ("linux", "python-full", 451)):
+                with self.subTest(profile_limits=(platform, profile, cpu)), self.assertRaises(self.module.SessionError):
+                    self.module._limits(platform, cpu, profile=profile)
 
         # Fixed child dispatch is tested through its real validation body. The
         # process-wide limits and exec are inert and cannot call the host APIs.
@@ -1566,7 +1572,8 @@ class CISandboxPureTests(unittest.TestCase):
                 kind = "--enter" if case.startswith("ordinary-") else "--enter-python-full"
                 platform = "darwin" if case in {"ordinary-mac", "wrong-platform"} else "linux"
                 gid = 60002 if case == "different-gid" else session.gid
-                arguments = [kind, platform, str(session.uid), str(gid), "299" if case == "wrong-cpu" else "300",
+                cpu = "300" if kind == "--enter" or case == "wrong-cpu" else "450"
+                arguments = [kind, platform, str(session.uid), str(gid), cpu,
                              str(session.policy) if case != "wrong-policy" else "/unapproved/profile.sb", *command]
                 if case == "wrong-command":
                     arguments[6] = "/unapproved/python"
@@ -1615,7 +1622,10 @@ class CISandboxPureTests(unittest.TestCase):
                     expected = ["/usr/bin/sandbox-exec", "-f", str(session.policy), *command]
                     executed.assert_called_once_with(expected[0], expected, {"FIXED_SYNTHETIC_ENV": "1"})
                 elif case in {"valid", "ordinary-linux"}:
-                    limits.assert_called_once_with("linux", 300, **({"profile": "python-full"} if case == "valid" else {}))
+                    if case == "valid":
+                        limits.assert_called_once_with("linux", 450, profile="python-full")
+                    else:
+                        limits.assert_called_once_with("linux", 300)
                     executed.assert_called_once_with(command[0], command, {"FIXED_SYNTHETIC_ENV": "1"})
                 else:
                     executed.assert_not_called()
@@ -5804,7 +5814,9 @@ class CISandboxPureTests(unittest.TestCase):
                               "sha256": hashlib.sha256(b"unchanged").hexdigest(), "root_owned": True, "maximum": 16 * self.module.MiB}
                 state["files"] = {state["policy"]: saved_file}
                 if mode == "file-budget":
-                    state["files"].update({session.bootstrap / f"original-{index}.dat": dict(saved_file) for index in range(1023)})
+                    # The policy already occupies one slot of the 1,152-file limit.
+                    state["files"].update({session.bootstrap / f"original-{index}.dat": dict(saved_file)
+                                           for index in range(1151)})
                 elif mode == "byte-budget":
                     state["files"][state["policy"]] = {**saved_file, "identity": (*saved_file["identity"][:6], 128 * self.module.MiB, 11, 12)}
                 original_files = {path: dict(row) for path, row in state["files"].items()}

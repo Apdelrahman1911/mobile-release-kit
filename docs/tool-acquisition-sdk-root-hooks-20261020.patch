@@ -1,0 +1,626 @@
+diff --git a/desktop/src-tauri/src/tool_acquisition_protocol.rs b/desktop/src-tauri/src/tool_acquisition_protocol.rs
+--- a/desktop/src-tauri/src/tool_acquisition_protocol.rs
++++ b/desktop/src-tauri/src/tool_acquisition_protocol.rs
+@@ -27,6 +27,8 @@
+ pub(crate) const MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
+ #[path = "tool_acquisition_components.rs"]
+ pub(crate) mod components;
++#[path = "tool_acquisition_sdk.rs"]
++pub(crate) mod sdk;
+ use components::Partition;
+ pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
+ pub(crate) const FIXED: [&str; 7] = [
+@@ -789,9 +791,8 @@
+         }
+         return Ok(());
+     }
+-    if !keys(
+-        v,
+-        &[
++    let copied = sdk::copied(v).map_err(|_| invalid())?;
++    let mut fields = vec![
+             "schemaVersion",
+             "kind",
+             "operationId",
+@@ -804,8 +805,9 @@
+             "downloadedArchives",
+             "groups",
+             "assurance",
+-        ],
+-    ) || v["schemaVersion"] != 1
++        ];
++    if copied.is_some() { fields.push("copiedSourceComponents"); }
++    if !keys(v, &fields)
+         || v["kind"] != "staged-tool-sources"
+         || v["operationId"] != operation
+         || v["cacheJob"] != format!("tool-{operation}")
+@@ -835,6 +837,13 @@
+         }
+     }
+     if all.is_empty() || all.len() > COMPONENTS.len() { return Err(invalid()); }
++    if let Some(component) = copied {
++        // Copied is NOT a downloaded/reused archive. Only its opposite SDK
++        // half may be in that original missing-archive set.
++        let other = if component == sdk::Component::Platform { "sdk-build-tools" } else { "sdk-platform" };
++        if all.contains(component.name()) || !all.contains(other) { return Err(invalid()); }
++        all.insert(component.name());
++    }
+     let expected: Vec<Value> = [("jdk", &COMPONENTS[..1]), ("sdk", &COMPONENTS[1..3]), ("gradle", &COMPONENTS[3..])]
+         .into_iter().filter_map(|(group, parts)| {
+             let missing: Vec<_> = parts.iter().copied().filter(|part| all.contains(part)).collect();
+@@ -856,7 +865,11 @@
+     COMPONENTS.into_iter().enumerate().all(|(index, name)| {
+         let count = reused.iter().chain(downloaded).filter(|v| *v == name).count();
+         count == usize::from(!partition.is_compatible(index))
+-    })
++    }) && match sdk::copied(value) {
++        Ok(None) => true, // Preserve old schema1 DATA; native Expected may require a copy.
++        Ok(Some(component)) => sdk::Component::for_partition(partition) == Some(component),
++        Err(()) => false,
++    }
+ }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -1096,6 +1109,30 @@
+         changed["groups"][0]["allRequiredComponentsStaged"] = json!(true);
+         changed["groups"][0]["next"] = json!("choose-native-source");
+         assert!(result_valid(&changed, &operation, &context).is_err());
++    }
++    #[test]
++    fn assembled_sdk_result_keeps_missing_archives_separate_from_exact_copied_half() {
++        let partition = Partition::observed([Some(true),Some(true),Some(false),Some(true)]).unwrap();
++        let operation = "d".repeat(32);
++        let mut context = prepare(&context_value()).unwrap(); context.action=Action::Acquire;
++        context.review=Some(Review { operation_id:"0".repeat(32),owner_generation:"1".repeat(32),requirements_sha256:"b".repeat(64) });
++        let offered=json!({"schemaVersion":2,"kind":"staged-tool-sources","operationId":operation,
++            "contextSha256":"1".repeat(64),"referenceSha256":"2".repeat(64),"projectionSha256":"3".repeat(64),
++            "cacheJob":format!("tool-{operation}"),"lookupScope":"registered-selected-known",
++            "reusedArchives":[],"downloadedArchives":["sdk-build-tools"],"copiedSourceComponents":["sdk-platform"],
++            "groups":[{"group":"sdk","components":["sdk-platform","sdk-build-tools"],"allRequiredComponentsStaged":true,"next":"choose-native-source"}],
++            "assurance":{"nativeFinality":false,"registered":false,"readyToBuild":false}});
++        assert!(result_valid(&offered,&operation,&context).is_ok()); assert!(staged_matches_partition(&offered,partition));
++        assert_eq!(sdk::copied(&offered),Ok(Some(sdk::Component::Platform)));
++        assert!(!staged_matches_partition(&offered,Partition::missing_all()));
++        for (field,value) in [("schemaVersion",json!(1)),("copiedSourceComponents",json!(["jdk"])),
++            ("copiedSourceComponents",json!(["sdk-build-tools"])),("downloadedArchives",json!(["sdk-platform","sdk-build-tools"]))] {
++            let mut changed=offered.clone(); changed[field]=value; assert!(result_valid(&changed,&operation,&context).is_err());
++        }
++        let mut forged=offered.clone(); forged["copiedSourceComponents"]=json!(["sdk-build-tools"]);
++        forged["downloadedArchives"]=json!(["sdk-platform"]);
++        assert!(result_valid(&forged,&operation,&context).is_ok()); // Well-shaped DATA still cannot replace native Expected.
++        assert!(!staged_matches_partition(&forged,partition));
+     }
+     #[test]
+     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {
+diff --git a/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs b/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs
+--- a/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs
++++ b/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs
+@@ -2,6 +2,8 @@
+ //! proposal, provider, payload pass, install or executable loan is created.
+ use super::*;
+ use crate::tool_acquisition_protocol::components::Partition;
++#[path = "android_registration_source_acquisition_sdk_macos.rs"]
++mod sdk_copy;
+
+ // Present only inside acquisition_read / its bounded walk and XML validation.
+ // None of these buffers survive the returned read, unlike every source record,
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs b/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs
+@@ -13,6 +13,7 @@
+     runtime_closed: bool,
+     sources: Option<AndroidRegistrationSourceSlots>,
+     picked: Option<(Partition, [u8; 32])>,
++    sdk_copy: Option<wire::sdk::CopyInput>,
+     unknown: bool,
+ }
+ impl Original {
+@@ -25,6 +26,7 @@
+             runtime_closed: false,
+             sources: None,
+             picked: None,
++            sdk_copy: None,
+             unknown: false,
+         }
+     }
+@@ -57,6 +59,7 @@
+             bytes = bytes.checked_add(request.capacity())?;
+         }
+         if let Some(source) = &self.sources { bytes = bytes.checked_add(source.retained_bytes()?)?; }
++        if let Some(copy) = &self.sdk_copy { bytes = bytes.checked_add(copy.retained_bytes()?)?; }
+         Some(bytes)
+     }
+     fn inspect_picked(&mut self, inner: &Arc<Inner>, owner: &Arc<Session>) -> Result<(), BridgeError> {
+@@ -96,6 +99,17 @@
+         if source.retained_bytes().is_none_or(|bytes| bytes > bound)
+             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
+         self.picked = Some(source.acquisition_finding().ok_or_else(wire::invalid)?);
++        if context.action == wire::Action::Acquire {
++            if let Some(root) = intent.known.sources.roots()[1].as_ref() {
++                // Same actually closed original records; a child will open NEW
++                // read-only originals. No renderer path or revived native loan.
++                self.sdk_copy = source.acquisition_sdk_copy_input(root).map_err(|_| wire::invalid())?;
++            }
++            if self.sdk_copy.as_ref().map(|copy| copy.component)
++                != wire::sdk::Component::for_partition(self.picked.ok_or_else(wire::invalid)?.0) {
++                return Err(wire::invalid());
++            }
++        }
+         Ok(())
+     }
+     fn picked_finding(&self) -> Option<(Partition, [u8; 32])> {
+@@ -357,9 +371,11 @@
+             "projectRoot":wire::native_path(&owner.project.path),"rootIdentity":owner.project.identity.posix().map_err(|_|wire::Reason::Input)?.preflight_identity(),
+             "catalogGeneration":intent.known.catalog.generation(),"ownerRevision":intent.known.revision,
+             "sourceGeneration":intent.known.source_generation,"registrationGeneration":intent.known.registration_generation,
+-            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1)}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
++            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1),
++            "sdkCopy":original.sdk_copy.as_ref().map(|copy|copy.data())}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
+         let expected = Expected {
+             components,
++            copied_sdk: original.sdk_copy.as_ref().map(|copy| copy.component),
+             context_sha256: hash(&context_raw),
+             reference_sha256: projection
+                 .reference_sha256
+@@ -406,13 +422,16 @@
+         if !context_current(inner, owner) {
+             return Err(wire::Reason::Stale);
+         }
+-        let cache = original.cache.cache_data(
++        let mut cache = original.cache.cache_data(
+             u64::from(intent.generation),
+             &expected.context_sha256,
+             &expected.reference_sha256,
+             &expected.projection_sha256,
+             components,
+         )?;
++        if let Some(copy) = &original.sdk_copy {
++            cache.as_object_mut().ok_or(wire::Reason::Input)?.insert("sdkCopy".into(),copy.data());
++        }
+         let bytes = wire::request(
+             &owner.id,
+             &owner.generation,
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition.rs b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+@@ -240,6 +240,7 @@
+     reference_sha256: String,
+     projection_sha256: String,
+     components: wire::components::Partition,
++    copied_sdk: Option<wire::sdk::Component>,
+ }
+
+ /// Native-only census from the SAME owner, original Android state and retained
+@@ -1200,6 +1201,7 @@
+                 || result["referenceSha256"] != expected.reference_sha256
+                 || result["projectionSha256"] != expected.projection_sha256
+                 || !wire::staged_matches_partition(result, expected.components)
++                || wire::sdk::copied(result) != Ok(expected.copied_sdk)
+             {
+                 return Err(BridgeError::protocol());
+             }
+diff --git a/src/mobile_release/tool_acquisition.py b/src/mobile_release/tool_acquisition.py
+--- a/src/mobile_release/tool_acquisition.py
++++ b/src/mobile_release/tool_acquisition.py
+@@ -24,6 +24,7 @@
+     METADATA_RESERVE, PROFILES, RESERVE_BYTES, canonical, decode_manifest, digest, operation_id, require)
+ from ._tool_acquisition_files import (Files, OutputTree, directory_identity, extract_tar, extract_zip, named)
+ from ._tool_vendor_transport import PublicVendorTransfer
++from ._tool_acquisition_sdk import CopyBinding, SdkCopy, SDK
+ from .cancellation import CleanupScope, DefaultCancellation, cancellation_owner
+
+ CACHE_JOBS_LIMIT = 32
+@@ -53,6 +54,7 @@
+     census_complete: bool
+     lookup_scope: str
+     deadline: float
++    sdk_copy: CopyBinding | None = None
+
+
+ class NativeAcquisitionOwner(Protocol):
+@@ -119,10 +121,12 @@
+     reused_archives: tuple[Component, ...]
+     downloaded_archives: tuple[Component, ...]
+     groups: tuple[StagedGroup, ...]
++    copied_source_components: tuple[Component, ...] = ()
+
+     def to_data(self) -> dict:
+         # No absolute path, URL, private runtime binding or authority receipt.
+-        return {"schemaVersion": 1, "kind": "staged-tool-sources",
++        return {"schemaVersion": 2 if self.copied_source_components else 1, "kind": "staged-tool-sources",
++            **({"copiedSourceComponents": [part.value for part in self.copied_source_components]} if self.copied_source_components else {}),
+             "operationId": self.operation_id, "contextSha256": self.context_sha256,
+             "referenceSha256": self.reference_sha256, "projectionSha256": self.projection_sha256,
+             "cacheJob": self.cache_job, "lookupScope": LOOKUP_SCOPE,
+@@ -157,6 +161,10 @@
+         and value.compatible == tuple(part for part in COMPONENTS if part in value.compatible)
+         and not set(value.missing).intersection(value.compatible)
+         and set(value.missing + value.compatible) == set(COMPONENTS), "census-incomplete")
++    if value.sdk_copy is not None:
++        require(type(value.sdk_copy) is CopyBinding and value.sdk_copy.component in value.compatible
++            and tuple(part for part in SDK if part in value.compatible) == (value.sdk_copy.component,)
++            and len(tuple(part for part in SDK if part in value.missing)) == 1, "stale")
+     now = time.monotonic()
+     require(type(value.deadline) in (int, float) and now < value.deadline <= now + 1200, "cancelled")
+
+@@ -214,6 +222,7 @@
+         self.unknown = False
+         self.guard: DefaultCancellation | None = None
+         self.files: Files | None = None
++        self.sdk_copy: SdkCopy | None = None
+         self.transfer: PublicVendorTransfer | None = None
+         self.scope: CleanupScope | None = None
+         self.admission: Admission | None = None
+@@ -242,7 +251,7 @@
+             self.guard = guard
+             files = Files(admission.cache_root, guard, self._check)
+             self.files = files
+-            scope = CleanupScope(guard, files.close, owns_cancellation=owns, first_primary=True)
++            scope = CleanupScope(guard, self._close_files, owns_cancellation=owns, first_primary=True)
+             self.scope = scope
+             offer = None
+             try:
+@@ -254,9 +263,16 @@
+                         files.acquire()
+                         require(directory_identity(os.fstat(files.root.fd)) == admission.cache_identity, "stale")
+                         archives = tuple(manifest.archive(part) for part in admission.missing)
++                        output_archives = archives
++                        if admission.sdk_copy is not None:
++                            compatible = manifest.archive(admission.sdk_copy.component)
++                            self.sdk_copy = SdkCopy(admission.sdk_copy, admission.reference_sha256, compatible, files)
++                            self.sdk_copy.acquire()  # Original retained before IO; reject physical overlap.
++                            output_archives = tuple(manifest.archive(part) for part in COMPONENTS
++                                if part in admission.missing or part is admission.sdk_copy.component)
+                         cached = self._cache(archives)
+                         new_bytes = sum(archive.size for archive in archives if archive.component not in cached)
+-                        space = _Space(files, new_bytes + sum(archive.expanded_bytes for archive in archives))
++                        space = _Space(files, new_bytes + sum(archive.expanded_bytes for archive in output_archives))
+                         files.before_write = space.consume
+                         self._check()
+                         intent = canonical({"schemaVersion": 1, "operationId": admission.operation_id,
+@@ -273,7 +289,9 @@
+                             files.control(job_fd, "origin.json", json.loads(intent))
+                             files.mkdir(job_fd, "sources")
+                             with files.directory(job_fd, "sources") as sources_fd:
+-                                tree = OutputTree(files, sources_fd, archives)
++                                tree = OutputTree(files, sources_fd, output_archives)
++                                if self.sdk_copy is not None:
++                                    self.sdk_copy.copy_to(tree)  # Full POST + positive close BEFORE any HTTP.
+                                 for archive in archives:
+                                     files.check()
+                                     previous = cached.get(archive.component)
+@@ -298,7 +316,8 @@
+                     scope.__exit__(*sys.exc_info())
+                 guard.check()
+                 self._check()
+-                require(files.settled and not (self.transfer is not None and self.transfer.unknown), "unknown")
++                require(files.settled and (self.sdk_copy is None or self.sdk_copy.closed)
++                    and not (self.transfer is not None and self.transfer.unknown), "unknown")
+             except BaseException:
+                 raise
+             assert offer is not None
+@@ -307,6 +326,7 @@
+             fatal = (self.guard is not None and self.guard.lifetime_ledger.fatal)
+             self.unknown = (fatal or (self.intent_attempted and not self.intent_recorded)
+                 or (self.files is not None and not self.files.settled)
++                or (self.sdk_copy is not None and not self.sdk_copy.closed)
+                 or (self.transfer is not None and self.transfer.unknown))
+             if self.unknown:
+                 # Keep this exact object even if diagnostic publication fails.
+@@ -322,6 +342,17 @@
+             if isinstance(error, AcquisitionError):
+                 raise
+             raise AcquisitionError("cache-conflict") from None
++
++    def _close_files(self):
++        first = None
++        for original in (self.sdk_copy, self.files):
++            if original is not None:
++                try:
++                    original.close()
++                except BaseException as error:
++                    if first is None: first = error
++        if first is not None:
++            raise first
+
+     def _cache(self, archives: tuple[Archive, ...]) -> dict[Component, _CachedArchive]:
+         files, admission = self.files, self.admission
+@@ -392,10 +423,11 @@
+         admission = self.admission
+         assert admission is not None
+         groups = []
++        copied = () if admission.sdk_copy is None else (admission.sdk_copy.component,)
+         for group in ("jdk", "sdk", "gradle"):
+-            parts = tuple(part for part in admission.missing if part.group == group)
++            parts = tuple(part for part in COMPONENTS if part.group == group and (part in admission.missing or part in copied))
+             if parts:
+                 groups.append(StagedGroup(group, parts, parts == tuple(part for part in COMPONENTS if part.group == group)))
+         return PreparedSources(admission.operation_id, admission.context_sha256, admission.reference_sha256,
+             admission.projection_sha256, job, tuple(part for part in admission.missing if part in cached),
+-            tuple(part for part in admission.missing if part not in cached), tuple(groups))
++            tuple(part for part in admission.missing if part not in cached), tuple(groups), copied)
+diff --git a/src/mobile_release/_desktop_tool_acquisition_protocol.py b/src/mobile_release/_desktop_tool_acquisition_protocol.py
+--- a/src/mobile_release/_desktop_tool_acquisition_protocol.py
++++ b/src/mobile_release/_desktop_tool_acquisition_protocol.py
+@@ -15,6 +15,8 @@
+
+ from ._tool_acquisition_spec import COMPONENTS, MANIFEST_LIMIT, canonical
+ from ._tool_requirements_capture import CONFIG, FIXED, module_files
++from ._tool_acquisition_sdk import CopyBinding
++from ._tool_acquisition_spec import AcquisitionError
+
+ PROTOCOL = "mrk-tool-acquisition/1"
+ CONSENT = "pinned-public-tool-sources-v1"
+@@ -194,16 +196,22 @@
+
+
+ def cache(value, *, operation, selected):
+-    keys(value, ("root", "rootIdentity", "generation", "contextSha256", "referenceSha256", "projectionSha256",
+-                 "missing", "compatible", "intentBase64", "origins", "footprint"))
++    fields = ("root", "rootIdentity", "generation", "contextSha256", "referenceSha256", "projectionSha256",
++              "missing", "compatible", "intentBase64", "origins", "footprint")
++    keys(value, fields + (("sdkCopy",) if type(value) is dict and "sdkCopy" in value else ()))
+     path(value["root"])
+     identity(value["rootIdentity"])
+     require(value["rootIdentity"]["mode"] == (stat.S_IFDIR | 0o700) and integer(value["generation"], 2**53 - 1, 1)
+             and all(text(value[key], SHA) for key in ("contextSha256", "referenceSha256", "projectionSha256")))
+     # The SAME native SourceSlots inspection supplies this exact partition.
+     # Present wrong/unreadable selections cannot be represented as missing.
+-    missing, _ = component_partition(value["missing"], value["compatible"])
++    missing, compatible = component_partition(value["missing"], value["compatible"])
+     require(bool(missing))
++    if "sdkCopy" in value:
++        try:
++            require(CopyBinding.parse(value["sdkCopy"], missing, compatible) is not None)
++        except AcquisitionError:
++            raise ProtocolError("Invalid fixed tool-acquisition protocol") from None
+     footprint(value["footprint"])
+     require(value["footprint"]["sourcesSha256"] == selected["review"]["requirementsSha256"])
+     require_saved_config(value["footprint"], selected)
+@@ -289,9 +297,12 @@
+
+
+ def staged(value, request):
++    copied = request.native["cache"].get("sdkCopy")
+     keys(value, ("schemaVersion", "kind", "operationId", "contextSha256", "referenceSha256", "projectionSha256", "cacheJob",
+-                 "lookupScope", "reusedArchives", "downloadedArchives", "groups", "assurance"))
+-    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["kind"] == "staged-tool-sources"
++                 "lookupScope", "reusedArchives", "downloadedArchives", "groups", "assurance")
++                 + (("copiedSourceComponents",) if copied is not None else ()))
++    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == (2 if copied is not None else 1)
++            and value["kind"] == "staged-tool-sources"
+             and value["operationId"] == request.operation_id and value["cacheJob"] == "tool-" + request.operation_id
+             and value["lookupScope"] == "registered-selected-known")
+     require(all(value[key] == request.native["cache"][key] for key in ("contextSha256", "referenceSha256", "projectionSha256")))
+@@ -305,10 +316,14 @@
+                 and parts == [part for part in expected if part in parts])
+         all_parts.extend(parts)
+     require(len(all_parts) == len(expected) and set(all_parts) == set(expected))
++    output = list(missing)
++    if copied is not None:
++        require(value["copiedSourceComponents"] == [copied["component"]])
++        output += [part for part in COMPONENTS if part.value == copied["component"]]
+     groups = value["groups"]
+     expected_groups = []
+     for group in ("jdk", "sdk", "gradle"):
+-        components = [part.value for part in missing if part.group == group]
++        components = [part.value for part in COMPONENTS if part in output and part.group == group]
+         if components:
+             complete = len(components) == sum(part.group == group for part in COMPONENTS)
+             expected_groups.append({"group": group, "components": components, "allRequiredComponentsStaged": complete,
+diff --git a/src/mobile_release/desktop_tool_acquisition.py b/src/mobile_release/desktop_tool_acquisition.py
+--- a/src/mobile_release/desktop_tool_acquisition.py
++++ b/src/mobile_release/desktop_tool_acquisition.py
+@@ -18,6 +18,7 @@
+ from ._tool_requirements_capture import Capture
+ from .cancellation import DefaultCancellation
+ from .owned_process import fatal_lifetime_error
++from ._tool_acquisition_sdk import CopyBinding
+ from .tool_acquisition import Admission, LOOKUP_SCOPE, ToolAcquisition
+
+
+@@ -86,7 +87,8 @@
+         return Admission(self.request.operation_id, native["contextSha256"], self.request.native["profile"],
+             native["referenceSha256"], native["projectionSha256"], native["generation"], Path(native["root"]),
+             (int(identity["device"]), int(identity["inode"]), identity["uid"], identity["gid"], identity["mode"]),
+-            missing, compatible, True, LOOKUP_SCOPE, self.source.work_end)
++            missing, compatible, True, LOOKUP_SCOPE, self.source.work_end,
++            CopyBinding.parse(native.get("sdkCopy"), missing, compatible))
+
+     def checked_manifest(self):
+         require(self._claimed)
+@@ -141,7 +143,8 @@
+     def closed(self):
+         capture_closed = self.capture is None or self.capture.closed
+         acquisition_closed = self.acquisition is None or (not self.acquisition.unknown
+-            and (self.acquisition.files is None or self.acquisition.files.settled))
++            and (self.acquisition.files is None or self.acquisition.files.settled)
++            and (self.acquisition.sdk_copy is None or self.acquisition.sdk_copy.closed))
+         return capture_closed and acquisition_closed and not self._unknown
+
+     def terminal(self):
+diff --git a/desktop/src/toolAcquisitionGuidance.ts b/desktop/src/toolAcquisitionGuidance.ts
+--- a/desktop/src/toolAcquisitionGuidance.ts
++++ b/desktop/src/toolAcquisitionGuidance.ts
+@@ -5,14 +5,17 @@
+ export type Component = 'jdk' | 'sdk-platform' | 'sdk-build-tools' | 'gradle';
+ export const components: readonly Component[] = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'];
+ const roles: readonly AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
+-export interface StagedToolSourcesData {
+-  schemaVersion: 1; kind: 'staged-tool-sources'; operationId: string; contextSha256: string;
++interface StagedToolSourcesBase {
++  kind: 'staged-tool-sources'; operationId: string; contextSha256: string;
+   referenceSha256: string; projectionSha256: string; cacheJob: string; lookupScope: 'registered-selected-known';
+   reusedArchives: Component[]; downloadedArchives: Component[];
+   groups: { group: AndroidToolSourceRole; components: Component[]; allRequiredComponentsStaged: boolean;
+     next: 'choose-native-source' | 'complete-sdk-manually' }[];
+   assurance: { nativeFinality: false; registered: false; readyToBuild: false };
+ }
++export type StagedToolSourcesData = StagedToolSourcesBase & (
++  { schemaVersion: 1; copiedSourceComponents?: never } |
++  { schemaVersion: 2; copiedSourceComponents: ['sdk-platform' | 'sdk-build-tools'] });
+ function fields(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return null;
+   const actual = Reflect.ownKeys(value);
+@@ -44,17 +47,26 @@
+ const sha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+ export function parseStagedToolSources(value: unknown): StagedToolSourcesData | null {
+   try {
++    const schema = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'schemaVersion')?.value : null;
+     const v = fields(value, ['schemaVersion', 'kind', 'operationId', 'contextSha256', 'referenceSha256', 'projectionSha256',
+-      'cacheJob', 'lookupScope', 'reusedArchives', 'downloadedArchives', 'groups', 'assurance']);
+-    if (!v || v.schemaVersion !== 1 || v.kind !== 'staged-tool-sources' || typeof v.operationId !== 'string' ||
++      'cacheJob', 'lookupScope', 'reusedArchives', 'downloadedArchives', 'groups', 'assurance', ...(schema === 2 ? ['copiedSourceComponents'] : [])]);
++    if (!v || ![1, 2].includes(v.schemaVersion as number) || v.kind !== 'staged-tool-sources' || typeof v.operationId !== 'string' ||
+         !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v.operationId) || !sha(v.contextSha256) || !sha(v.referenceSha256) || !sha(v.projectionSha256) ||
+         v.lookupScope !== 'registered-selected-known') return null;
+     const reused = componentList(v.reusedArchives), downloaded = componentList(v.downloadedArchives), groups = list(v.groups, 3);
+     const assurance = fields(v.assurance, ['nativeFinality', 'registered', 'readyToBuild']);
+     if (!reused || !downloaded || !groups || reused.some((part) => downloaded.includes(part)) ||
+         !assurance || Object.values(assurance).some((fact) => fact !== false)) return null;
+-    const selected = components.filter((part) => reused.includes(part) || downloaded.includes(part));
+-    if (v.cacheJob !== (selected.length ? `tool-${v.operationId}` : '') || groups.length !== roles.filter((role) => selected.some((part) => groupOf(part) === role)).length) return null;
++    const archives = components.filter((part) => reused.includes(part) || downloaded.includes(part));
++    const copied = schema === 2 ? componentList(v.copiedSourceComponents) : [];
++    if (!copied) return null;
++    if (schema === 2) {
++      const part = copied[0];
++      if (copied.length !== 1 || (part !== 'sdk-platform' && part !== 'sdk-build-tools') ||
++          archives.includes(part) || !archives.includes(part === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform')) return null;
++    }
++    const selected = components.filter((part) => archives.includes(part) || copied.includes(part));
++    if (v.cacheJob !== (archives.length ? `tool-${v.operationId}` : '') || groups.length !== roles.filter((role) => selected.some((part) => groupOf(part) === role)).length) return null;
+     const parsedGroups: StagedToolSourcesData['groups'] = [];
+     for (const role of roles) {
+       const parts = selected.filter((part) => groupOf(part) === role);
+@@ -94,6 +106,8 @@
+     'Keep existing installations and global settings. The search covered registered copies, selected folders and known supported locations, not every folder on this computer.'];
+   if (report.groups.some((group) => !group.allRequiredComponentsStaged)) steps.unshift(
+     'Only the missing Android SDK package was staged; the other required package was checked in your chosen SDK. This staged SDK is incomplete. Choose an existing complete supported SDK or finish manual SDK preparation without overwriting working tools.');
++  if (report.schemaVersion === 2) steps.unshift(
++    'The prepared SDK combines a verified copy of your matching package with the missing package. Your original SDK and its other packages were not changed. Inspect the complete candidate and review licenses before approving a protected copy.');
+   const pickers = report.groups.map((group) => ({ role: group.group,
+     label: group.group === 'jdk' ? 'Choose JDK' : group.group === 'gradle' ? 'Choose Gradle' :
+       group.allRequiredComponentsStaged ? 'Choose Android SDK' : 'Choose complete Android SDK' }));
+diff --git a/desktop/src/toolAcquisitionComponents.ts b/desktop/src/toolAcquisitionComponents.ts
+--- a/desktop/src/toolAcquisitionComponents.ts
++++ b/desktop/src/toolAcquisitionComponents.ts
+@@ -18,7 +18,11 @@
+ export function stagedMatchesComponents(report: StagedToolSourcesData, partition: ToolComponentPartition | null): boolean {
+   if (!partition || !partition.missing.length) return false;
+   const all = [...report.reusedArchives, ...report.downloadedArchives];
+-  return all.length === partition.missing.length && partition.missing.every((part) => all.includes(part));
++  if (all.length !== partition.missing.length || !partition.missing.every((part) => all.includes(part))) return false;
++  if (report.schemaVersion === 1) return report.copiedSourceComponents === undefined;
++  const copied = report.copiedSourceComponents;
++  return copied.length === 1 && partition.compatible.includes(copied[0]) &&
++    partition.missing.includes(copied[0] === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform');
+ }
+ const labels: Record<Component, string> = {
+   jdk: 'Java JDK', 'sdk-platform': 'Android API 35 platform',
+diff --git a/desktop/src/components/PrepareBuildEnvironment.tsx b/desktop/src/components/PrepareBuildEnvironment.tsx
+--- a/desktop/src/components/PrepareBuildEnvironment.tsx
++++ b/desktop/src/components/PrepareBuildEnvironment.tsx
+@@ -80,7 +80,7 @@
+         <dt>Keep unchanged</dt><dd>{parts.compatible.map(toolComponentLabel).join(', ') || 'No matching chosen sources'}</dd>
+         <dt>Download only</dt><dd>{parts.missing.map(toolComponentLabel).join(', ') || 'Nothing'}</dd>
+       </dl>}
+-      {!reuseSelected && parts && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. Its download will not be merged into your existing SDK. Keep the matching package and finish SDK setup manually below, then choose and inspect the complete folder.</p>}
++      {!reuseSelected && parts && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. The app will copy your checked matching package into a separate prepared SDK, then add only the missing package. Your existing SDK and other packages stay unchanged. You still inspect and approve the complete prepared folder.</p>}
+       <p>The saved project’s source hints were checked without running its build scripts. This is not a build-readiness check.</p>
+       <dl className="environment-baseline"><dt>Java JDK</dt><dd>{hint(requirements.jdk)}</dd>
+         <dt>Android platform</dt><dd>{hint(requirements.sdkPlatform)}</dd>
+@@ -96,10 +96,10 @@
+       </>}
+     </>}
+     {consent && <div className="notice notice-info"><div>
+-      <p>The app will reuse its checked cache first, then download only required pinned public sources. It will verify the archives and stage folders; it will not register tools or replace existing installations.</p>
++      <p>The app will reuse its checked cache first, then download only required pinned public sources. It will verify the archives and stage folders, copying a checked matching SDK package when needed to prepare a complete SDK. It will not register tools or replace existing installations.</p>
+       <label><input type="checkbox" checked={consent.acknowledged} disabled={state.pending !== null || state.requestPending || state.cancelPending}
+         onChange={(event) => controller.setAcknowledged(consent.operationId, consent.ownerGeneration, event.target.checked)} />{' '}
+-        I approve this download. I will inspect the prepared tools and separately approve any protected copy.</label>
++        I approve preparing these tools. I will inspect the prepared tools and separately approve any protected copy.</label>
+       <div className="button-row"><button type="button" className="button primary" disabled={downloadReason !== null}
+         onClick={() => void controller.download(consent.operationId, consent.ownerGeneration)}>Download required tools</button></div>
+       {downloadReason && <p className="save-note">{downloadReason}</p>}
+@@ -118,7 +118,7 @@
+       <p>A current, verified protected tool selection is reused without a download. A saved catalogue entry may need the existing Recover and Choose steps first. Downloads require a supported, separately enabled Mac build and a complete check of the supported catalogue and chosen folders. Only confirmed missing pieces are downloaded; present but incompatible or unreadable tools need manual review. Incompatible or dynamic requirements and unfinished operations use the manual route. Do not delete selections or working tools to bypass these checks.</p>
+       <h3>Complete an Android SDK manually</h3>
+       <ol>{MANUAL_ANDROID_SDK_STEPS.map((step) => <li key={step}>{step}</li>)}</ol>
+-      <p>The supported downloaded SDK contains API 35 revision 2 and Build-Tools 35.0.0 only. NDK, CMake, emulator, platform-tools and other versions are not installed by this action. A single-package download is not a complete SDK; no license acceptance is automated.</p>
++      <p>The supported downloaded SDK contains API 35 revision 2 and Build-Tools 35.0.0 only. NDK, CMake, emulator, platform-tools and other versions are not installed by this action. A complete prepared SDK contains both required packages, reusing your checked package when only one was missing. If that source changes or cannot be copied safely, review the operation and use manual setup; no license acceptance is automated.</p>
+       <p>Literal source hints are not Gradle’s resolved configuration. The native operation rechecks exact project sources and its pinned tool profile before any download. iOS/Xcode setup remains a separate check.</p>
+       {report && <p>Staging folder identifier: <code>{report.cacheJob}</code>. A folder name is not an installation or completion receipt.</p>}
+     </details>
+diff --git a/desktop/tests/tool-acquisition-controller.test.mjs b/desktop/tests/tool-acquisition-controller.test.mjs
+--- a/desktop/tests/tool-acquisition-controller.test.mjs
++++ b/desktop/tests/tool-acquisition-controller.test.mjs
+@@ -393,3 +393,24 @@
+   next.known(); await next.controller.reviewDownload();
+   assert.equal(next.calls.length, 2); assert.equal(next.state.inspection, null); assert.equal(next.state.consent, null);
+ });
++
++
++test('assembled result waits for original invoke and fresh status; wrong copied half cannot become current', async (t) => {
++  const missing = ['sdk-build-tools'];
++  const assembled = () => ({ ...subsetStaged(missing), schemaVersion: 2, copiedSourceComponents: ['sdk-platform'],
++    groups: [{ group: 'sdk', components: ['sdk-platform', 'sdk-build-tools'], allRequiredComponentsStaged: true, next: 'choose-native-source' }] });
++  const h = harness(t), op = await subsetReviewed(h, missing);
++  h.controller.setAcknowledged(ACQUIRE, ACQUIRE_OWNER, true);
++  const flow = h.controller.download(ACQUIRE, ACQUIRE_OWNER); await flush(); const start = h.calls.at(-1);
++  const done = terminal(op); done.result = assembled(); h.emit(status(6, done)); await flush();
++  assert.equal(h.state.requestPending, true); assert.notEqual(h.state.presentation, 'current-staged');
++  const read = deferred(); h.readQueue.push(read); start.resolve(status(5, running(op))); await flush();
++  assert.notEqual(h.state.presentation, 'current-staged'); read.resolve(status(6, done)); await flow;
++  assert.equal(h.state.presentation, 'current-staged'); assert.equal(h.state.issue, null);
++  h.known(); assert.notEqual(h.state.presentation, 'current-staged');
++  const other = harness(t), wrongOp = await subsetReviewed(other, missing); await downloadStarted(other, wrongOp);
++  const wrong = terminal(wrongOp); wrong.result = assembled(); wrong.result.copiedSourceComponents = ['sdk-build-tools'];
++  other.emit(status(6, wrong)); await flush();
++  assert.equal(other.state.issue, 'protocol'); assert.equal(other.state.canCancel, true);
++  assert.notEqual(other.state.presentation, 'current-staged');
++});
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/tests/tool-acquisition-source-picker.test.mjs b/desktop/tests/tool-acquisition-source-picker.test.mjs
+--- a/desktop/tests/tool-acquisition-source-picker.test.mjs
++++ b/desktop/tests/tool-acquisition-source-picker.test.mjs
+@@ -294,3 +294,28 @@
+   assert.equal(h.android.getSnapshot().toolSources.inspection, 'not-run');
+   assert.equal(h.android.getSnapshot().toolSources.protectedCopy, 'not-created');
+ });
++
++
++test('assembled SDK goes through the original explicit picker and leaves chosen JDK/Gradle untouched', async (t) => {
++  for (const copied of ['sdk-platform', 'sdk-build-tools']) {
++    const missing = [copied === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform'];
++    const selections = [{ role: 'jdk', displayName: 'Keep JDK' }, { role: 'sdk', displayName: 'Old partial SDK' },
++      { role: 'gradle', displayName: 'Keep Gradle' }];
++    const staged = report(); staged.schemaVersion = 2; staged.copiedSourceComponents = [copied];
++    staged.reusedArchives = []; staged.downloadedArchives = missing;
++    staged.groups = [{ group: 'sdk', components: ['sdk-platform', 'sdk-build-tools'], allRequiredComponentsStaged: true, next: 'choose-native-source' }];
++    const h = await controllers(t, { initialSources: { ...source(3, 'gradle'), selections }, missing, staged });
++    assert.deepEqual(h.tools.getSnapshot().preparedFolders.roles, ['sdk']);
++    assert.equal(h.tools.getSnapshot().preparedFolders.incompleteSdk, false);
++    assert.deepEqual(h.android.getSnapshot().toolSources.selections, selections);
++    await h.choose('jdk'); await h.choose('gradle'); assert.equal(h.calls.length, 0);
++    const picked = h.choose('sdk'); assert.equal(h.calls.length, 1);
++    assert.deepEqual(h.calls[0].input, { schemaVersion: 1, sourceGeneration: 3, projectId: 'p1', role: 'sdk', acquired: { operationId: OP, ownerGeneration: GEN } });
++    const after = [selections[0], { role: 'sdk', displayName: 'New prepared SDK' }, selections[2]];
++    h.reply(h.calls[0], { ...source(4, 'sdk'), selections: after }); await picked;
++    assert.deepEqual(h.android.getSnapshot().toolSources.selections, after);
++    assert.equal(h.android.getSnapshot().toolSources.inspection, 'not-run');
++    assert.equal(h.android.getSnapshot().toolSources.protectedCopy, 'not-created');
++    assert.equal(h.calls.length, 1); // No Inspect, approval, registration or build is automatic.
++  }
++});

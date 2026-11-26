@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Prepare Xcode</title></head>
+<body>
+<h1>Prepare Xcode for MobileReleaseKit</h1>
+<p>This separate package prepares a protected copy of Xcode. It does not install
+MobileReleaseKit, build an app, upload to a Store, or grant Store consent.</p>
+<h2>Before continuing</h2>
+<ol>
+<li>Finish all builds and Store operations, then quit MobileReleaseKit before
+continuing. Beginning preparation changes the selected-tool namespace and may
+invalidate an operation that already observed its absence.</li>
+<li>Install full Xcode from Apple in <code>/Applications/Xcode.app</code>. Open
+Xcode and complete Apple's license, first-launch and required platform/SDK setup.</li>
+<li>Keep enough free disk space for a second full logical copy plus working
+reserve. Copying and verification may take up to about an hour.</li>
+<li>Use your normal administrator approval in Apple's Installer. The source must
+already be publicly readable/searchable; unsupported private files or access
+control lists cause refusal, not permission changes to your original Xcode.</li>
+</ol>
+<h2>What this package changes</h2>
+<p>The protected copy is <code>/Library/MobileReleaseKitDeveloper/Xcode.app</code>.
+Your original Xcode stays unchanged. This package does not change
+<code>xcode-select</code>, bypass an Apple license, download Xcode, or automatically
+update it. A tiny, nonexecutable package carrier is also installed at
+<code>/Library/MobileReleaseKitXcodeSetup.bundle</code>. Unknown existing carrier
+contents or inconsistent package receipts are refused before replacement.</p>
+<h2>If preparation is interrupted</h2>
+<p>Open this same signed package again. It can discard only authenticated
+unfinished setup work, or an authenticated empty pending wrapper after a completed
+copy. It never replaces or deletes a completed protected Xcode copy. Only an exact
+same-package carrier repeat is supported; unrelated or older/newer carrier state
+is not automatically repaired. A failed Installer result does not prove that an
+earlier operation or cleanup finished.</p>
+<p>For details, use <strong>Window &gt; Installer Log</strong> in Installer. Return
+to MobileReleaseKit after preparation and use its normal environment checks.
+Installer completion alone does not establish tool, SDK, archive or upload
+readiness; the app validates its own current tool originals on each operation.</p>
+</body></html>

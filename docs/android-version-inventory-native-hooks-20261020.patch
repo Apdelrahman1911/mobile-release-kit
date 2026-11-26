@@ -1,0 +1,896 @@
+diff --git a/desktop/src-tauri/src/apple_provisioning_bundle_read.rs b/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
+--- a/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
++++ b/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
+@@ -15,14 +15,18 @@
+     AppStoreProfileReuse,
+     #[serde(rename = "ios-current-versions")]
+     IOSCurrentVersions,
++    #[serde(rename = "android-current-versions")]
++    AndroidCurrentVersions,
+ }
+
+ impl Query {
++    pub(super) fn platform(self)->super::AccessPlatform { match self { Self::AndroidCurrentVersions=>super::AccessPlatform::Android,_=>super::AccessPlatform::Ios } }
+     pub(super) fn consent(self) -> &'static str {
+         match self {
+             Self::BundleIdRegistration => CONSENT,
+             Self::AppStoreProfileReuse => super::profile_read::CONSENT,
+             Self::IOSCurrentVersions => super::store_versions::CONSENT,
++            Self::AndroidCurrentVersions => super::play_versions::CONSENT,
+         }
+     }
+ }
+diff --git a/desktop/src-tauri/src/asset_session_store_versions.rs b/desktop/src-tauri/src/asset_session_store_versions.rs
+--- a/desktop/src-tauri/src/asset_session_store_versions.rs
++++ b/desktop/src-tauri/src/asset_session_store_versions.rs
+@@ -1,4 +1,4 @@
+-//! Weak same-assignment witness for a joined current-iOS-inventory read.
++//! Weak same-assignment witness for a joined current single-platform inventory read.
+ //! Child of the original material module: no key bytes, new loan or authority.
+ use super::*;
+ use std::sync::Weak;
+@@ -16,14 +16,14 @@
+         let Some(StoreCommand::Access(context)) = &self.command else {
+             return Err(refused());
+         };
+-        if !wire::store_versions::selected(context) {
++        if !(wire::store_versions::selected(context)||wire::play_versions::selected(context)) {
+             return Ok(None);
+         }
+         if !self.matches(
+             context,
+             self.native.registry_generation,
+             &self.native.project,
+-        ) || apple_parts(&self.payload).is_none()
++        ) || !inventory_material(context.platform, &self.payload)
+             || self.supplemental.iter().any(Option::is_some)
+         {
+             return Err(refused());
+@@ -35,6 +35,9 @@
+             context: context.clone(),
+         }))
+     }
++}
++fn inventory_material(platform:wire::AccessPlatform,payload:&Payload)->bool {
++    match platform {wire::AccessPlatform::Ios=>apple_parts(payload).is_some(),wire::AccessPlatform::Android=>bytes(payload).is_some()}
+ }
+ impl StoreVersionMaterial {
+     pub(crate) fn matches_context(&self, context: &wire::Context) -> bool {
+@@ -54,7 +57,7 @@
+             .as_ref()
+             .is_some_and(|current| Arc::ptr_eq(current, &native))
+             && native.execution_mode == commands::ExecutionMode::Local
+-            && native.platform == Platform::Ios
++            && native.platform == match self.context.platform {wire::AccessPlatform::Ios=>Platform::Ios,wire::AccessPlatform::Android=>Platform::Android}
+             && matches!(native.purpose, Purpose::Store | Purpose::Full)
+             && native.project_id == self.context.project_id
+             && native.registry_generation == registration
+@@ -62,9 +65,9 @@
+             && native.revision == self.context.credential_context_revision
+             && self.key.id.0 == self.context.record_id
+             && self.key.revision == self.context.record_revision
+-            && github_secret::assigned(state, &self.key, Kind::AscP8, &native)
++            && github_secret::assigned(state, &self.key, match self.context.platform {wire::AccessPlatform::Ios=>Kind::AscP8,wire::AccessPlatform::Android=>Kind::GoogleServiceAccount}, &native)
+                 .is_some_and(|assigned| Arc::ptr_eq(assigned, &payload))
+-            && apple_parts(&payload).is_some()
++            && inventory_material(self.context.platform,&payload)
+     }
+     pub(crate) fn backing_bytes() -> usize {
+         // A Weak may keep its original Arc allocation, but never the dropped
+@@ -157,4 +160,44 @@
+         assert!(weak.upgrade().is_none());
+         assert!(!witness.current(&state, 7, &root));
+     }
+-}
++    #[test]
++    fn android_inventory_weak_material_requires_same_google_assignment_and_original_context() {
++        // Existing format-only material fixture, not a usable account or native receipt.
++        let mut state = super::super::tests::apple_model();
++        Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform = Platform::Android;
++        let raw = super::super::tests::sample();
++        let observation = credential_format::inspect(credential_format::FileKind::GoogleServiceAccount,
++            &raw, &mut || false).ok().unwrap();
++        assert!(observation.is_observed());
++        state.records[0].payload = Arc::new(Payload { kind: Kind::GoogleServiceAccount, fields: None,
++            material: Some(Arc::new(Material { observation,
++                origin: MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(raw)) })) });
++        state.assignments[0].kind = Kind::GoogleServiceAccount;
++        let mut input = serde_json::json!(wire::tests::context());
++        input.as_object_mut().unwrap().remove("operation");
++        input["projectId"] = serde_json::json!("inert-project");
++        input["platform"] = serde_json::json!("android");
++        input["query"] = serde_json::json!(wire::play_versions::QUERY);
++        input["credentialContextRevision"] = serde_json::json!(2);
++        input["recordId"] = serde_json::json!("a".repeat(32));
++        input["recordRevision"] = serde_json::json!(1);
++        let context = wire::prepare(&input).unwrap().context();
++        let root = state.context.as_ref().unwrap().project.clone();
++        let loan = borrow_preflight_material(&state, &context, 7, &root).unwrap();
++        let witness = loan.version_inventory_witness().unwrap().unwrap();
++        assert!(witness.current(&state, 7, &root));
++        assert!(!witness.current(&state, 8, &root));
++        state.assignments[0].record_revision += 1;
++        assert!(!witness.current(&state, 7, &root));
++        state.assignments[0].record_revision -= 1;
++        state.assignments[0].kind = Kind::AscP8;
++        assert!(!witness.current(&state, 7, &root));
++        state.assignments[0].kind = Kind::GoogleServiceAccount;
++        assert!(witness.current(&state, 7, &root));
++        drop(loan);
++        state.records.clear(); state.assignments.clear();
++        assert!(witness.payload.upgrade().is_none());
++        assert!(!witness.current(&state, 7, &root));
++    }
++
++}
+diff --git a/desktop/src-tauri/src/asset_session_version_reserve.rs b/desktop/src-tauri/src/asset_session_version_reserve.rs
+--- a/desktop/src-tauri/src/asset_session_version_reserve.rs
++++ b/desktop/src-tauri/src/asset_session_version_reserve.rs
+@@ -553,7 +553,7 @@
+         let binding = github_setup_project_binding(&root)?;
+         let template = serde_json::json!({"identityRevision":input.configuration_sha256,"source":review.source,
+             "baseVersion":{"name":review.store.context().saved_version.name,"build":review.store.context().saved_version.build},
+-            "platforms":["ios"],"policy":review.input.policy(),"storeContextRevision":crate::version_allocation_state_native::ios_inventory::context_digest(review.store.context()).map_err(|_|p::refused())?});
++            "platforms":[review.store.context().platform],"policy":review.input.policy(review.store.context().platform),"storeContextRevision":crate::version_allocation_state_native::play_inventory::current_context_digest(review.store.context()).map_err(|_|p::refused())?});
+         let selection = match review.previous {
+             Some(previous) => Selection::New {
+                 previous_request_sha256: previous,
+diff --git a/desktop/src-tauri/src/edit_owner_version_reserve.rs b/desktop/src-tauri/src/edit_owner_version_reserve.rs
+--- a/desktop/src-tauri/src/edit_owner_version_reserve.rs
++++ b/desktop/src-tauri/src/edit_owner_version_reserve.rs
+@@ -114,8 +114,10 @@
+         if !control.edit_window()
+             || data["schemaVersion"] != 1
+             || data["provider"]["kind"] != "macos-clt-git/1"
+-            || data["reservation"]["request"]["platforms"] != json!(["ios"])
+-            || data["reservation"]["request"]["policy"]["schemaVersion"] != 2
++            || !((data["reservation"]["request"]["platforms"] == json!(["ios"])
++                  && data["reservation"]["request"]["policy"]["schemaVersion"] == 2)
++                 || (data["reservation"]["request"]["platforms"] == json!(["android"])
++                  && data["reservation"]["request"]["policy"]["schemaVersion"] == 3))
+             || wire::bounded(&data, 12 * 1024).is_err()
+         {
+             return Err(invalid_owner());
+diff --git a/desktop/src-tauri/src/ios_store_versions.rs b/desktop/src-tauri/src/ios_store_versions.rs
+--- a/desktop/src-tauri/src/ios_store_versions.rs
++++ b/desktop/src-tauri/src/ios_store_versions.rs
+@@ -112,7 +112,7 @@
+         && value.scope == SCOPE
+         && value.observation.is_none()
+         && value.profile_reuse.is_none()
+-        && value.current_versions.as_ref().is_some_and(Summary::valid)
++        && value.current_versions.as_ref().and_then(super::play_versions::Inventory::ios).is_some_and(Summary::valid)
+         && value.limitations.as_slice() == LIMITATIONS
+         && value.findings.len() <= 16
+         && value.findings.iter().all(|f| {
+@@ -120,6 +120,7 @@
+                 && (!value
+                     .current_versions
+                     .as_ref()
++                    .and_then(super::play_versions::Inventory::ios)
+                     .is_some_and(Summary::observed)
+                     || !matches!(
+                         f.status,
+@@ -151,6 +152,7 @@
+             .as_ref()?
+             .current_versions
+             .as_ref()
++            .and_then(super::play_versions::Inventory::ios)
+             .filter(|s| s.observed())
+     }
+ }
+diff --git a/desktop/src-tauri/src/local_store_preflight_protocol.rs b/desktop/src-tauri/src/local_store_preflight_protocol.rs
+--- a/desktop/src-tauri/src/local_store_preflight_protocol.rs
++++ b/desktop/src-tauri/src/local_store_preflight_protocol.rs
+@@ -11,6 +11,8 @@
+ mod profile_read;
+ #[path = "ios_store_versions.rs"]
+ pub(crate) mod store_versions;
++#[path = "android_store_versions.rs"]
++pub(crate) mod play_versions;
+
+ pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
+ pub(crate) const CONSENT: &str = "local-android-store-access-v1";
+@@ -48,9 +50,6 @@
+     fn commands(self)->u32 {match self {Self::Android=>6,Self::Ios=>7}}
+     fn scope(self)->&'static str {match self {Self::Android=>"local-android-store-access-no-publishing",Self::Ios=>"local-ios-store-access-no-publishing"}}
+ }
+-#[derive(Deserialize)]
+-#[serde(rename_all = "lowercase")]
+-enum AppleSelection { Ios }
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "kebab-case")]
+ pub(crate) enum Operation { LocalStorePreflight }
+@@ -72,7 +71,7 @@
+         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
+         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
+         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
+-        && (self.query.is_none() || self.platform == AccessPlatform::Ios) }
++        && (self.query.is_none() || self.query.is_some_and(|q| q.platform()==self.platform)) }
+ }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -81,7 +80,7 @@
+     pub(crate) saved_config: Content, pub(crate) saved_version: crate::android_build_protocol::SavedVersion,
+     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
+     pub(crate) execution_mode: ExecutionMode,
+-    #[serde(default)] platform: Option<AppleSelection>,
++    #[serde(default)] platform: Option<AccessPlatform>,
+     #[serde(default, deserialize_with = "bundle_read::optional_query")] query: Option<bundle_read::Query>,
+ }
+ impl Prepare {
+@@ -89,7 +88,7 @@
+         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
+         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
+         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
+-        platform: if self.platform.is_some(){AccessPlatform::Ios}else{AccessPlatform::Android}, operation: Operation::LocalStorePreflight,
++        platform: self.platform.unwrap_or(AccessPlatform::Android), operation: Operation::LocalStorePreflight,
+         query: self.query } }
+ }
+ #[derive(Deserialize)]
+@@ -106,19 +105,20 @@
+             && value.get("platform").and_then(Value::as_str)==Some("ios"))
+         && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+             "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "query"])
+-            && value.get("platform").and_then(Value::as_str)==Some("ios")
+-            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"|"ios-current-versions"))) { return Err(invalid()); }
++            && matches!((value.get("platform").and_then(Value::as_str),value.get("query").and_then(Value::as_str)),
++                (Some("ios"),Some("bundle-id-registration"|"app-store-profile-reuse"|"ios-current-versions"))
++                |(Some("android"),Some("android-current-versions")))) { return Err(invalid()); }
+     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
+     if !input.context().valid() { return Err(invalid()); } Ok(input)
+ }
+ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
+     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
+     let input = Start::deserialize(value).map_err(|_| invalid())?;
+-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT|store_versions::CONSENT) { return Err(invalid()); } Ok(input)
++    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT|store_versions::CONSENT|play_versions::CONSENT) { return Err(invalid()); } Ok(input)
+ }
+ impl Start {
+     pub(crate) fn matches_context(&self, context:&Context)->bool {
+-        if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && self.consent_version == query.consent(); }
++        if let Some(query)=context.query { return context.platform == query.platform() && self.consent_version == query.consent(); }
+         self.consent_version == context.platform.consent()
+     }
+ }
+@@ -195,7 +195,7 @@
+ pub(crate) enum Limitation { NonPublishing, NoProjectCommands, NoBuildOrSigning, NoReleaseReadiness,
+     PointInTimeAccountAccess, SavedInputsNotAtomic, NoTeamVerification, NoGlobalAvailabilityClaim, NoProvisioningChanges,
+     MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory,
+-    CurrentVisibleOnly, NotAtomicStoreSnapshot, HistoricalUniquenessNotEstablished, ExternalUploadersNotCoordinated }
++    CurrentVisibleOnly, NotAtomicStoreSnapshot, HistoricalUniquenessNotEstablished, ExternalUploadersNotCoordinated, TemporaryPlayEdit, MayInvalidateAnotherPlayEdit }
+ const LIMITATIONS: [Limitation; 6] = [Limitation::NonPublishing, Limitation::NoProjectCommands,
+     Limitation::NoBuildOrSigning, Limitation::NoReleaseReadiness, Limitation::PointInTimeAccountAccess,
+     Limitation::SavedInputsNotAtomic];
+@@ -206,8 +206,8 @@
+     observation: Option<bundle_read::Observation>,
+     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "profile_read::optional_summary")]
+     profile_reuse: Option<profile_read::Summary>,
+-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "store_versions::optional_summary")]
+-    current_versions: Option<store_versions::Summary>,
++    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "play_versions::optional_inventory")]
++    current_versions: Option<play_versions::Inventory>,
+ }
+ impl ResultData {
+     fn valid(&self, context:&Context) -> bool {
+@@ -215,6 +215,7 @@
+             bundle_read::Query::BundleIdRegistration => bundle_read::valid_result(self),
+             bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
+             bundle_read::Query::IOSCurrentVersions => store_versions::valid_result(self),
++            bundle_read::Query::AndroidCurrentVersions => play_versions::valid_result(self),
+         }; }
+         self.observation.is_none() && self.profile_reuse.is_none() && self.current_versions.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
+             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16
+diff --git a/desktop/src-tauri/src/saved_command_store_versions.rs b/desktop/src-tauri/src/saved_command_store_versions.rs
+--- a/desktop/src-tauri/src/saved_command_store_versions.rs
++++ b/desktop/src-tauri/src/saved_command_store_versions.rs
+@@ -1,8 +1,8 @@
+-//! One current-iOS-inventory observation on the existing SavedCommandOwner.
++//! One current single-platform inventory observation on the existing SavedCommandOwner.
+ //! Native final retirement is the only mint; summary DATA cannot construct it.
+ use super::*;
+ use crate::{
+-    asset_session::StoreVersionMaterial, local_store_preflight_protocol::store_versions as wire,
++    asset_session::StoreVersionMaterial, local_store_preflight_protocol::{store_versions as wire, play_versions},
+ };
+ use std::{
+     sync::Weak,
+@@ -71,7 +71,7 @@
+     context: store_wire::Context,
+     registration: u32,
+     project: RegisteredRoot,
+-    summary: wire::Summary,
++    summary: play_versions::Inventory,
+     material: StoreVersionMaterial,
+     clock: Clock,
+     invalid: AtomicBool,
+@@ -80,7 +80,7 @@
+     pub(crate) fn context(&self) -> &store_wire::Context {
+         &self.context
+     }
+-    pub(crate) fn summary(&self) -> &wire::Summary {
++    pub(crate) fn summary(&self) -> &play_versions::Inventory {
+         &self.summary
+     }
+     pub(crate) fn observed_at(&self) -> u64 {
+@@ -122,7 +122,7 @@
+             return false;
+         };
+         if original.domain != SavedCommandDomain::LocalStorePreflight
+-            || !wire::selected(context)
++            || !(wire::selected(context)||play_versions::selected(context))
+             || !material.matches_context(context)
+         {
+             return false;
+@@ -180,7 +180,7 @@
+         {
+             return;
+         }
+-        let Some(summary) = terminal.current_versions_data(context) else {
++        let Some(summary) = terminal.current_inventory_data(context) else {
+             return;
+         };
+         self.observation = Some(Arc::new(StoreVersionObservation {
+@@ -291,57 +291,68 @@
+     }
+     #[test]
+     fn normal_terminal_transport_close_is_not_a_failure_or_receipt() {
+-        // Existing inert Session DATA and the ACTUAL terminal/stop handlers.
+-        // No runtime, credential, watchdog join or positive receipt is made.
+-        let mut input = serde_json::to_value(store_wire::tests::context()).unwrap();
+-        input.as_object_mut().unwrap().remove("operation");
+-        input["platform"] = serde_json::json!("ios");
+-        input["query"] = serde_json::json!(wire::QUERY);
+-        let context = store_wire::prepare(&input).unwrap().context();
+-        let application = SavedCommandOwner::new(
+-            RuntimeConfig::packaged("/unopened-store-version-runtime".into()),
+-            SavedCommandDomain::LocalStorePreflight,
+-        );
+-        let (application, owner) = super::super::tests::active_with_context(
+-            application,
+-            Context::LocalStorePreflight(context.clone()),
+-        );
+-        let mut value = store_wire::tests::complete();
+-        value["context"] = serde_json::json!(context);
+-        value["lifetime"]["commands"] = serde_json::json!(7);
+-        value["lifetime"]["commandDispatched"] = serde_json::json!(true);
+-        value["result"] = serde_json::json!({"schemaVersion":1,"scope":wire::SCOPE,
+-            "findings":[],"limitations":wire::LIMITATIONS,"currentVersions":{
+-                "observation":"observed","coverage":wire::COVERAGE,"revision":"a".repeat(64),
+-                "counts":{"builds":0,"buildUploads":0,"appStoreVersions":0},"maxBuild":0,
+-                "marketingVersion":null,"historicalUniqueness":"not-established"}});
+-        let terminal: store_wire::Terminal = serde_json::from_value(value).unwrap();
+-        assert!(terminal.current_versions_data(&context).is_some());
+-        application.inner.accept(
+-            &owner,
+-            Frame::LocalStorePreflight(store_wire::Frame::Accepted),
+-        );
+-        application.inner.accept(
+-            &owner,
+-            Frame::LocalStorePreflight(store_wire::Frame::Terminal(terminal)),
+-        );
+-        {
++        for android in [false, true] {
++            // Existing inert Session DATA and the ACTUAL terminal/stop handlers.
++            // No runtime, credential, watchdog join or positive receipt is made.
++            let mut input = serde_json::to_value(store_wire::tests::context()).unwrap();
++            input.as_object_mut().unwrap().remove("operation");
++            input["platform"] = serde_json::json!(if android {"android"} else {"ios"});
++            input["query"] = serde_json::json!(if android {play_versions::QUERY} else {wire::QUERY});
++            let context = store_wire::prepare(&input).unwrap().context();
++            let application = SavedCommandOwner::new(
++                RuntimeConfig::packaged("/unopened-store-version-runtime".into()),
++                SavedCommandDomain::LocalStorePreflight,
++            );
++            let (application, owner) = super::super::tests::active_with_context(
++                application,
++                Context::LocalStorePreflight(context.clone()),
++            );
++            let mut value = store_wire::tests::complete();
++            value["context"] = serde_json::json!(context);
++            value["lifetime"]["commands"] = serde_json::json!(if android { 6 } else { 7 });
++            value["lifetime"]["commandDispatched"] = serde_json::json!(true);
++            value["result"] = serde_json::json!({"schemaVersion":1,"scope":wire::SCOPE,
++                "findings":[],"limitations":wire::LIMITATIONS,"currentVersions":{
++                    "observation":"observed","coverage":wire::COVERAGE,"revision":"a".repeat(64),
++                    "counts":{"builds":0,"buildUploads":0,"appStoreVersions":0},"maxBuild":0,
++                    "marketingVersion":null,"historicalUniqueness":"not-established"}});
++            if android {
++                value["result"] = serde_json::json!({"schemaVersion":1,"scope":play_versions::SCOPE,
++                    "findings":[],"limitations":play_versions::LIMITATIONS,"currentVersions":{
++                        "observation":"observed","coverage":play_versions::COVERAGE,"revision":"a".repeat(64),
++                        "counts":{"tracks":0,"releases":0,"versionCodes":0,"bundles":0,"apks":1},
++                        "maxBuild":11000,"marketingVersion":null,"temporaryEdit":"deleted",
++                        "historicalUniqueness":"not-established"}});
++            }
++            let terminal: store_wire::Terminal = serde_json::from_value(value).unwrap();
++            assert!(terminal.current_inventory_data(&context).is_some());
++            assert_eq!(terminal.current_versions_data(&context).is_some(), !android);
++            application.inner.accept(
++                &owner,
++                Frame::LocalStorePreflight(store_wire::Frame::Accepted),
++            );
++            application.inner.accept(
++                &owner,
++                Frame::LocalStorePreflight(store_wire::Frame::Terminal(terminal)),
++            );
++            {
++                let r = application.inner.lock();
++                let active = r.active.as_ref().unwrap();
++                assert!(*owner.stop.borrow()); // Actual normal terminal closes input.
++                assert!(active.first_stop.is_none());
++                assert!(!original_veto(active, &owner));
++                assert!(!active.final_join_seen && !owner.watchdog_joined.load(Ordering::SeqCst));
++                assert!(owner.watchdog_return.lock().unwrap().is_none());
++                assert!(r.store_versions.observation.is_none());
++            }
++            // A genuine cancellation still vetoes even though transport STOP was
++            // already true. It does not need a second watch-channel transition.
++            application.inner.stop(&owner, Reason::Cancelled);
+             let r = application.inner.lock();
+             let active = r.active.as_ref().unwrap();
+-            assert!(*owner.stop.borrow()); // Actual normal terminal closes input.
+-            assert!(active.first_stop.is_none());
+-            assert!(!original_veto(active, &owner));
+-            assert!(!active.final_join_seen && !owner.watchdog_joined.load(Ordering::SeqCst));
+-            assert!(owner.watchdog_return.lock().unwrap().is_none());
++            assert!(active.first_stop.is_some());
++            assert!(original_veto(active, &owner));
+             assert!(r.store_versions.observation.is_none());
+         }
+-        // A genuine cancellation still vetoes even though transport STOP was
+-        // already true. It does not need a second watch-channel transition.
+-        application.inner.stop(&owner, Reason::Cancelled);
+-        let r = application.inner.lock();
+-        let active = r.active.as_ref().unwrap();
+-        assert!(active.first_stop.is_some());
+-        assert!(original_veto(active, &owner));
+-        assert!(r.store_versions.observation.is_none());
+-    }
+-}
++    }
++}
+diff --git a/desktop/src-tauri/src/supervisor_version_reserve.rs b/desktop/src-tauri/src/supervisor_version_reserve.rs
+--- a/desktop/src-tauri/src/supervisor_version_reserve.rs
++++ b/desktop/src-tauri/src/supervisor_version_reserve.rs
+@@ -244,7 +244,7 @@
+             .port()
+             .map_err(|_| BridgeError::cleanup_unknown())?;
+         let port = port.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+-        let observation = crate::version_allocation_state_native::ios_inventory::observation_data(
++        let observation = crate::version_allocation_state_native::play_inventory::current_observation_data(
+             &self.store_observation,
+             &port,
+         )
+diff --git a/desktop/src-tauri/src/version_allocation_ios_inventory.rs b/desktop/src-tauri/src/version_allocation_ios_inventory.rs
+--- a/desktop/src-tauri/src/version_allocation_ios_inventory.rs
++++ b/desktop/src-tauri/src/version_allocation_ios_inventory.rs
+@@ -64,7 +64,7 @@
+                     .unwrap_or(0),
+             ),
+     )?;
+-    let summary = original.summary();
++    let summary = original.summary().ios().ok_or_else(|| StateError::from(Error::InvalidRequest))?;
+     need(summary.observed())?;
+     let context_revision = context_digest(original.context())?;
+     Ok(
+diff --git a/desktop/src-tauri/src/version_allocation_protocol_native.rs b/desktop/src-tauri/src/version_allocation_protocol_native.rs
+--- a/desktop/src-tauri/src/version_allocation_protocol_native.rs
++++ b/desktop/src-tauri/src/version_allocation_protocol_native.rs
+@@ -112,7 +112,8 @@
+             "kind":kind,"localProjectId":local_project_id,"authority":authority,"accountId":account_id,
+             "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock});
+         if let Some((source,provider)) = native_source {
+-            require(selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"])
++            require(((selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"]))
++                || (selected.schema_version()==3 && selected.0["platforms"]==json!(["android"])))
+                 && source["ref"]==selected.0["source"]["ref"]
+                 && source["savedConfig"]["sha256"]==selected.0["source"]["configurationSha256"]
+                 && source["savedVersion"]["sha256"]==selected.0["source"]["versionSha256"]
+diff --git a/desktop/src-tauri/src/version_allocation_state_native.rs b/desktop/src-tauri/src/version_allocation_state_native.rs
+--- a/desktop/src-tauri/src/version_allocation_state_native.rs
++++ b/desktop/src-tauri/src/version_allocation_state_native.rs
+@@ -31,6 +31,8 @@
+ pub(crate) mod enrollment;
+ #[path="version_allocation_ios_inventory.rs"]
+ pub(crate) mod ios_inventory;
++#[path="version_allocation_android_inventory.rs"]
++pub(crate) mod play_inventory;
+ #[path="version_reserve_state_native.rs"]
+ pub(crate) mod reserve;
+
+@@ -120,17 +122,18 @@
+ impl Request {
+     fn project(&self) -> &str { self.0["projectId"].as_str().unwrap_or("") }
+     fn candidate(&self) -> &str { self.0["candidateId"].as_str().unwrap_or("") }
+-    fn schema_version(&self) -> u32 { if self.0["policy"]["schemaVersion"] == 2 { 2 } else { 1 } }
+-    fn request_hash(&self) -> Result<String> { hash(if self.schema_version() == 2 { ios_inventory::REQUEST_DOMAIN } else { b"mrk:allocation-request:1\0" }, self) }
+-    fn reservation_domain(&self) -> &'static [u8] { if self.schema_version() == 2 { ios_inventory::RESERVATION_DOMAIN } else { b"mrk:allocation-reservation:1\0" } }
++    fn schema_version(&self) -> u32 { match self.0["policy"]["schemaVersion"].as_u64() {Some(2)=>2,Some(3)=>3,_=>1} }
++    fn request_hash(&self) -> Result<String> { hash(match self.schema_version() {2=>ios_inventory::REQUEST_DOMAIN,3=>play_inventory::REQUEST_DOMAIN,_=>b"mrk:allocation-request:1\0"}, self) }
++    fn reservation_domain(&self) -> &'static [u8] { match self.schema_version() {2=>ios_inventory::RESERVATION_DOMAIN,3=>play_inventory::RESERVATION_DOMAIN,_=>b"mrk:allocation-reservation:1\0"} }
+     fn observations_valid(&self, values: &[Value]) -> bool {
+-        if self.schema_version() == 2 { values.len() == 1 && values.iter().all(|v| ios_inventory::observation_shape(v,self)) }
++        if self.schema_version() == 3 { values.len() == 1 && values.iter().all(|v| play_inventory::observation_shape(v,self)) }
++        else if self.schema_version() == 2 { values.len() == 1 && values.iter().all(|v| ios_inventory::observation_shape(v,self)) }
+         else { values.len() <= 2 && values.iter().all(observation_shape) }
+     }
+     fn valid(&self) -> bool {
+         let v = &self.0;
+         let source = &v["source"]; let policy = &v["policy"];
+-        let newer = policy["schemaVersion"].as_u64() == Some(2);
++        let newer = matches!(policy["schemaVersion"].as_u64(),Some(2|3));
+         let rules = policy["rules"].as_array();
+         let mut refs = BTreeSet::new();
+         closed(v, if newer { &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"] }
+@@ -143,7 +146,8 @@
+             && [json!(["android"]), json!(["ios"]), json!(["android", "ios"])].contains(&v["platforms"])
+             && closed(policy, if newer { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds", "storeScope"] }
+                 else { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"] })
+-            && (if newer { v["platforms"] == json!(["ios"]) && policy["storeScope"] == ios_inventory::POLICY_SCOPE
++            && (if newer { (if self.schema_version()==2 {v["platforms"] == json!(["ios"]) && policy["storeScope"] == ios_inventory::POLICY_SCOPE}
++                else {v["platforms"]==json!(["android"])&&policy["storeScope"]==play_inventory::POLICY_SCOPE})
+                 && string(&v["storeContextRevision"], |s| hex(s, 64)) } else { policy["schemaVersion"].as_u64() == Some(1) })
+             && policy["mode"] == "automatic"
+             && integer(&policy["buildCeiling"], 1, 2_100_000_000) && integer(&policy["storeMaxAgeSeconds"], 1, 3600)
+@@ -196,7 +200,7 @@
+ impl Pending {
+     fn valid(&self) -> Result<()> {
+         need(self.schema_version == self.reservation.request.schema_version()
+-            && self.protocol == if self.schema_version == 2 { ios_inventory::PROTOCOL } else { ALLOCATION_PROTOCOL }
++            && self.protocol == match self.schema_version {2=>ios_inventory::PROTOCOL,3=>play_inventory::PROTOCOL,_=>ALLOCATION_PROTOCOL}
+             && self.authority.valid()
+             && self.checkpoint.valid() && hex(&self.expected_blob, 40)
+             && self.reservation.request.project() == self.authority.project_id
+@@ -441,7 +445,7 @@
+     /// refresh/retry uses selected_request instead. OS randomness is consumed
+     /// once, then the FULL request is retained through the actual durable CAS.
+     pub(crate) fn select_new(&mut self, mut template: Value, previous_request: Option<&Value>) -> Result<WriteAck> {
+-        need(closed(&template, if template["policy"]["schemaVersion"] == 2 {
++        need(closed(&template, if matches!(template["policy"]["schemaVersion"].as_u64(),Some(2|3)) {
+             &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"]
+         } else { &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy"] }))?;
+         template["candidateId"] = json!("00000000-0000-4000-8000-000000000000");
+diff --git a/desktop/src-tauri/src/version_reserve_protocol.rs b/desktop/src-tauri/src/version_reserve_protocol.rs
+--- a/desktop/src-tauri/src/version_reserve_protocol.rs
++++ b/desktop/src-tauri/src/version_reserve_protocol.rs
+@@ -30,9 +30,10 @@
+             && crate::supervisor::version_allocation_source_branch(&self.reference)
+             && self.acknowledge_limitations
+     }
+-    pub(crate) fn policy(&self) -> Value {
+-        json!({"schemaVersion":2,"mode":"automatic","rules":[{"ref":self.reference,"increment":self.increment}],
+-            "buildCeiling":9999,"storeMaxAgeSeconds":900,"storeScope":"require-current-ios-inventory"})
++    pub(crate) fn policy(&self, platform:crate::local_store_preflight_protocol::AccessPlatform) -> Value {
++        let ios=platform==crate::local_store_preflight_protocol::AccessPlatform::Ios;
++        json!({"schemaVersion":if ios{2}else{3},"mode":"automatic","rules":[{"ref":self.reference,"increment":self.increment}],
++            "buildCeiling":if ios{9999}else{2_100_000_000},"storeMaxAgeSeconds":900,"storeScope":if ios{"require-current-ios-inventory"}else{"require-current-android-inventory"}})
+     }
+ }
+ pub(crate) enum Command {
+@@ -162,10 +163,10 @@
+     }
+ }
+ pub(crate) fn refused() -> BridgeError {
+-    BridgeError::new("version_reserve_changed","Read the saved iOS version and current App Store inventory again. The existing reservation is never recycled.")
++    BridgeError::new("version_reserve_changed","Read the saved version and current Android or iOS Store inventory again. The existing reservation is never recycled.")
+ }
+ pub(crate) fn unavailable() -> BridgeError {
+-    BridgeError::new("version_reserve_unavailable","Automatic reservations need the installed iOS runtime, current Store inventory, and a connected shared counter. Manual versions are unchanged.")
++    BridgeError::new("version_reserve_unavailable","Automatic reservations need one enabled platform, its current Store inventory, the installed runtime and a connected shared counter. Manual versions are unchanged.")
+ }
+ pub(crate) fn not_started(error: BridgeError) -> BridgeError {
+     if error.code == "cleanup_unknown" {
+diff --git a/desktop/src-tauri/src/version_reserve_state_native.rs b/desktop/src-tauri/src/version_reserve_state_native.rs
+--- a/desktop/src-tauri/src/version_reserve_state_native.rs
++++ b/desktop/src-tauri/src/version_reserve_state_native.rs
+@@ -131,8 +131,8 @@
+             .map_err(|_| unknown())?;
+         template["projectId"] = json!(port.authority.project_id);
+         need(
+-            template["policy"]["schemaVersion"] == 2
+-                && template["platforms"] == json!(["ios"])
++            ((template["policy"]["schemaVersion"] == 2 && template["platforms"] == json!(["ios"]))
++                 || (template["policy"]["schemaVersion"] == 3 && template["platforms"] == json!(["android"])))
+                 && template["source"]["ref"]
+                     .as_str()
+                     .is_some_and(|v| v.starts_with("refs/heads/") && full_ref(v)),
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -50,6 +50,7 @@
+ import { VersionEnrollmentController } from './versionEnrollmentController.ts';
+ import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
+ import { VersionReserveController } from './versionReserveController.ts';
++import { versionReserveProjectIssue } from './versionReserve.ts';
+ import { VersionReservePanel } from './components/VersionReservePanel.tsx';
+ import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
+ import { AgentIdentityActionController } from './agentIdentityActions.ts';
+@@ -774,6 +775,9 @@
+     if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
+       return 'Finish the prepared GitHub review before reserving a version.';
+     const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
++    const saved = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
++    const platformIssue = versionReserveProjectIssue(saved ? localStoreProjectObservation(saved, releaseVersion.getSnapshot()) : null);
++    if (platformIssue) return platformIssue;
+     return current?.session?.state === 'connected' && current.session.projectId === selected &&
+       connection.context?.projectId === selected && current.account.state === 'observed' && current.repository.state === 'observed'
+       ? null : 'Connect the enrolled shared counter with the intended GitHub account first.';
+diff --git a/desktop/src/components/IOSStoreVersions.tsx b/desktop/src/components/IOSStoreVersions.tsx
+--- a/desktop/src/components/IOSStoreVersions.tsx
++++ b/desktop/src/components/IOSStoreVersions.tsx
+@@ -1,7 +1,7 @@
+ import type { LocalStorePreflightController, LocalStoreState } from '../localStorePreflight.ts';
+ import { localStoreOwnerReason } from '../localStorePreflight.ts';
+ import { sameOfflineData } from '../offlinePreflightProtocol.ts';
+-import { IOS_VERSIONS_QUERY, IOS_VERSIONS_SCOPE, iosVersionDescriptions } from '../iosStoreVersions.ts';
++import { IOS_VERSIONS_QUERY, IOS_VERSIONS_SCOPE, IOS_VERSIONS_COVERAGE, iosVersionDescriptions } from '../iosStoreVersions.ts';
+
+ /** The existing Store controller and original native read; no automatic action. */
+ export function IOSStoreVersions({ state, controller, compact = false, onCredentials, onShow }: {
+@@ -22,7 +22,7 @@
+     ...state.request, platform: state.request.platform ?? 'android', query: IOS_VERSIONS_QUERY, operation: 'local-store-preflight',
+   });
+   const result = op.result?.scope === IOS_VERSIONS_SCOPE ? op.result : null;
+-  const summary = result?.currentVersions, copy = summary ? iosVersionDescriptions[summary.observation] : null;
++  const summary = result?.currentVersions?.coverage === IOS_VERSIONS_COVERAGE ? result.currentVersions : null, copy = summary ? iosVersionDescriptions[summary.observation] : null;
+   return <section className="card" aria-label="Current App Store versions">
+     <div className="inline-heading"><h2>Current App Store versions · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
+     {!compact && <>
+diff --git a/desktop/src/components/LocalStorePreflight.tsx b/desktop/src/components/LocalStorePreflight.tsx
+--- a/desktop/src/components/LocalStorePreflight.tsx
++++ b/desktop/src/components/LocalStorePreflight.tsx
+@@ -4,6 +4,8 @@
+ import { APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from '../localStorePreflightProtocol.ts';
+ import { AppleProvisioning } from './AppleProvisioning.tsx';
+ import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
++import { AndroidStoreVersions } from './AndroidStoreVersions.tsx';
++import { ANDROID_VERSIONS_QUERY } from '../androidStoreVersions.ts';
+ import { IOSStoreVersions } from './IOSStoreVersions.tsx';
+ import { IOS_VERSIONS_QUERY } from '../iosStoreVersions.ts';
+ const hints:Record<StoreCheck,string>={
+@@ -29,6 +31,7 @@
+  const resultLabels=originalApple?{...labels,'credential-format':'App Store Connect private-key format','store-access':'App Store Connect account access'}:labels;
+  if(op?.context.query===APPLE_BUNDLE_QUERY)return <AppleProvisioning state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+  if(op?.context.query===APPLE_PROFILE_QUERY)return <AppleProvisioningProfiles state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
++ if(op?.context.query===ANDROID_VERSIONS_QUERY)return <AndroidStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+  if(op?.context.query===IOS_VERSIONS_QUERY)return <IOSStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+  if(compact&&!retained)return null;
+  return <section className="card" aria-label={`Local ${store} access check`}>
+@@ -46,6 +49,7 @@
+    {apple&&<AppleProvisioning state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+    {apple&&<AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+    {apple&&<IOSStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
++   {!apple&&<AndroidStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+   </>}
+   {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
+   {retained&&<div role="status"><p>{op?.phase==='running'?'Checking access. Up to 20 minutes; Cancel stops the original operation.':retained}</p><button onClick={()=>void controller.cancel()}>Cancel original check</button></div>}
+diff --git a/desktop/src/components/VersionReservePanel.tsx b/desktop/src/components/VersionReservePanel.tsx
+--- a/desktop/src/components/VersionReservePanel.tsx
++++ b/desktop/src/components/VersionReservePanel.tsx
+@@ -10,9 +10,9 @@
+   if (compact && !busy) return null;
+   const configure = (value: Partial<typeof state.options>) => controller.configure({ ...state.options, ...value });
+   return <section className={compact ? 'notice notice-warning' : 'card'} aria-labelledby={`${id}-title`}>
+-    <h3 id={`${id}-title`}>{compact ? 'Original version reservation' : 'Automatic iOS version · optional'}</h3>
++    <h3 id={`${id}-title`}>{compact ? 'Original version reservation' : 'Automatic version · optional'}</h3>
+     {!compact && <>
+-      <p>Manual editing stays the default. This option uses the connected shared counter and your current iOS Store inventory; it does not build or upload an app.</p>
++      <p>Manual editing stays the default. This option uses the connected shared counter and your current Android or iOS Store inventory; it does not build or upload an app.</p>
+       <label><input type="checkbox" checked={state.enabled} disabled={!!busy} onChange={(e) => controller.setEnabled(e.target.checked)} /> Use a shared reservation for this version</label>
+       {state.enabled && <fieldset disabled={!!busy}>
+         <legend>What should change?</legend>
+@@ -28,7 +28,7 @@
+         <p className="save-note">Leave this unchecked to resume the same candidate. Failed or uncertain requests never get a new number automatically. Earlier numbers are never recycled.</p>
+         <label><input type="checkbox" checked={state.options.acknowledgeLimitations} onChange={(e) => configure({ acknowledgeLimitations: e.target.checked })} />
+           I understand that current Store listings are not a complete history and that uploaders outside this shared counter can still conflict.</label>
+-        <p className="save-note">Read “Current iOS versions” first and connect the shared counter in GitHub. Initial support is iOS-only, a checked-out branch, and whole-number builds up to 9,999. Missing, stale, partial or unsupported Store data stops this action; it never falls back to a guessed floor.</p>
++        <p className="save-note">Check “Current Play versions” or “Current App Store versions” first and connect the shared counter in GitHub. One enabled platform and a checked-out branch are supported: Android builds up to 2,100,000,000; iOS builds up to 9,999. Shared Android+iOS sources still need paired native Store observations; use manual versioning for those projects. Missing, stale, partial or unsupported Store data stops this action; it never falls back to a guessed floor.</p>
+       </fieldset>}
+     </>}
+     <p role={state.unknown ? 'alert' : 'status'}>{state.unknown ? 'Original outcome or cleanup unconfirmed' : state.pending === 'review' ? 'Reading the exact saved source…' :
+diff --git a/desktop/src/localStorePreflight.ts b/desktop/src/localStorePreflight.ts
+--- a/desktop/src/localStorePreflight.ts
++++ b/desktop/src/localStorePreflight.ts
+@@ -7,13 +7,14 @@
+ import type { AssetDisplayState } from './assetSessionTypes.ts';
+ import { assetStorageWritable } from './assetSessionProtocol.ts';
+ import { sameOfflineData } from './offlinePreflightProtocol.ts';
++import { ANDROID_VERSIONS_QUERY } from './androidStoreVersions.ts';
+ import { IOS_VERSIONS_QUERY } from './iosStoreVersions.ts';
+ import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent, APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from './localStorePreflightProtocol.ts';
+ import type { BridgeMode } from './types.ts';
+ import type { LocalStoreIdentity, LocalStorePreflightApi, LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
+ type Port=LocalStorePreflightApi&{mode:BridgeMode};
+ export interface LocalStoreState {mode:BridgeMode;platform:'android'|'ios';request:PrepareLocalStorePreflight|null;status:LocalStoreStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
+-export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'> & { iosDemoRequired?: boolean | null };
++export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'> & { iosDemoRequired?: boolean | null; versionPlatforms?: readonly ('android'|'ios')[] | null };
+ interface Source {project:()=>LocalStoreProject|null;assets:()=>AssetDisplayState|null;otherOperationReason:()=>string|null;now?:()=>number}
+ interface Attempt {request:PrepareLocalStorePreflight;epoch:number;after:number;previous:LocalStoreIdentity|null;id:LocalStoreIdentity|null;retired:boolean;started:boolean}
+ const active=(s:LocalStoreStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
+@@ -68,18 +69,18 @@
+  // The new query cannot dispatch from an intent revoked by a synchronous
+  // subscriber. Own pending bookkeeping is not a peer/native-currentness grant.
+  private inventoryInvocationCurrent(api:Port,a:Attempt):boolean{
+-  const owned=()=>!this.disposed&&this.api===api&&api.mode==='native'&&this.state.mode==='native'&&this.attempt===a&&!a.retired&&a.epoch===this.epoch&&!this.state.blocked&&this.state.platform==='ios';
++  const owned=()=>!this.disposed&&this.api===api&&api.mode==='native'&&this.state.mode==='native'&&this.attempt===a&&!a.retired&&a.epoch===this.epoch&&!this.state.blocked&&this.state.platform===(a.request.query===ANDROID_VERSIONS_QUERY?'android':'ios');
+   if(!owned())return false;
+   const base=localStoreRequest(this.source.project(),this.source.assets());
+-  const live=base&&parseLocalStoreRequest({...base,query:IOS_VERSIONS_QUERY});
++  const live=base&&parseLocalStoreRequest({...base,...(a.request.query===ANDROID_VERSIONS_QUERY?{platform:'android'}:{}),query:a.request.query});
+   const peer=this.source.otherOperationReason();
+   return owned()&&!peer&&sameOfflineData(live,a.request);
+  }
+- async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&((query!==APPLE_BUNDLE_QUERY&&query!==APPLE_PROFILE_QUERY&&query!==IOS_VERSIONS_QUERY)||this.state.platform!=='ios'))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,query});if(!request)return;
++ async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY|typeof ANDROID_VERSIONS_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&!((this.state.platform==='ios'&&(query===APPLE_BUNDLE_QUERY||query===APPLE_PROFILE_QUERY||query===IOS_VERSIONS_QUERY))||(this.state.platform==='android'&&query===ANDROID_VERSIONS_QUERY)))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,...(query===ANDROID_VERSIONS_QUERY?{platform:'android'}:{}),query});if(!request)return;
+   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+   this.update({pending:true,unconfirmed:true,error:null,historical:false});
+   try{
+-   if(query===IOS_VERSIONS_QUERY&&(!this.inventoryInvocationCurrent(api,a)||a.id!==null||this.state.status?.statusRevision!==a.after)){
++   if((query===IOS_VERSIONS_QUERY||query===ANDROID_VERSIONS_QUERY)&&(!this.inventoryInvocationCurrent(api,a)||a.id!==null||this.state.status?.statusRevision!==a.after)){
+     a.retired=true;
+     if(this.attempt===a&&!a.id){this.attempt=null;this.update({unconfirmed:this.state.blocked||active(this.state.status)});}
+     else if(a.id)void this.cancelOriginal(false);
+@@ -96,7 +97,7 @@
+   const consentUntil=this.state.consentUntil;
+   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
+   try{
+-   if(a.request.query===IOS_VERSIONS_QUERY&&(this.now()>=consentUntil||!this.inventoryInvocationCurrent(api,a)||!sameId(a.id,this.state.status?.operation)||this.state.status?.operation?.phase!=='awaiting-consent'||!this.state.status.operation.intentUsable)){
++   if((a.request.query===IOS_VERSIONS_QUERY||a.request.query===ANDROID_VERSIONS_QUERY)&&(this.now()>=consentUntil||!this.inventoryInvocationCurrent(api,a)||!sameId(a.id,this.state.status?.operation)||this.state.status?.operation?.phase!=='awaiting-consent'||!this.state.status.operation.intentUsable)){
+     this.invalidate();return; // Keep/cancel the actual prepared native original.
+    }
+    this.receive(await api.startLocalStorePreflight({...a.id,consentVersion:storeConsent(a.request.platform,a.request.query)}));}catch{this.fail();}finally{this.update({pending:false});}}
+@@ -154,6 +155,10 @@
+     const savedVersion = parseAndroidBuildSavedVersion({ ...result.savedVersion, source: result.source, name: result.version.name, build: result.version.build });
+     if (!savedVersion) return project;
+     project.savedVersion = savedVersion;
++    // Negative UI guidance only, from the same current saved config (never a draft).
++    const android = own(own(data, 'android'), 'enabled'), ios = own(own(data, 'ios'), 'enabled');
++    project.versionPlatforms = (android === undefined || typeof android === 'boolean') && (ios === undefined || typeof ios === 'boolean')
++      ? [...(android === true ? ['android' as const] : []), ...(ios === true ? ['ios' as const] : [])] : null;
+     const demoRequired = own(own(own(data, 'ios'), 'review'), 'demoAccountRequired');
+     project.iosDemoRequired = typeof demoRequired === 'boolean' ? demoRequired : null;
+     project.inputIssue = null;
+diff --git a/desktop/src/localStorePreflightProtocol.ts b/desktop/src/localStorePreflightProtocol.ts
+--- a/desktop/src/localStorePreflightProtocol.ts
++++ b/desktop/src/localStorePreflightProtocol.ts
+@@ -1,6 +1,7 @@
+ import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
+ import { parseAndroidBuildSavedVersion } from './androidBuildProtocol.ts';
+ import { IOS_VERSIONS_QUERY, IOS_VERSIONS_CONSENT, IOS_VERSIONS_SCOPE, iosVersionsLimitations, parseIOSCurrentVersions } from './iosStoreVersions.ts';
++import { ANDROID_VERSIONS_QUERY, ANDROID_VERSIONS_CONSENT, ANDROID_VERSIONS_SCOPE, androidVersionsLimitations, parseAndroidCurrentVersions } from './androidStoreVersions.ts';
+ import type { ApiError } from './types.ts';
+ import type { LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
+ export const STORE_EVENT='local-store-preflight-state-changed';
+@@ -12,7 +13,7 @@
+ export const APPLE_PROFILE_QUERY='app-store-profile-reuse' as const;
+ export const APPLE_PROFILE_CONSENT='local-ios-profile-reuse-read-v1' as const;
+ export const APPLE_PROFILE_SCOPE='local-ios-profile-reuse-metadata-read' as const;
+-export const storeConsent=(platform?:'android'|'ios',query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY)=>platform==='ios'?(query===APPLE_BUNDLE_QUERY?APPLE_BUNDLE_CONSENT:query===APPLE_PROFILE_QUERY?APPLE_PROFILE_CONSENT:query===IOS_VERSIONS_QUERY?IOS_VERSIONS_CONSENT:APPLE_STORE_CONSENT):STORE_CONSENT;
++export const storeConsent=(platform?:'android'|'ios',query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY|typeof ANDROID_VERSIONS_QUERY)=>platform==='ios'?(query===APPLE_BUNDLE_QUERY?APPLE_BUNDLE_CONSENT:query===APPLE_PROFILE_QUERY?APPLE_PROFILE_CONSENT:query===IOS_VERSIONS_QUERY?IOS_VERSIONS_CONSENT:APPLE_STORE_CONSENT):query===ANDROID_VERSIONS_QUERY?ANDROID_VERSIONS_CONSENT:STORE_CONSENT;
+ export type StoreCommand='prepare_local_store_preflight'|'start_local_store_preflight'|'local_store_preflight_status'|'cancel_local_store_preflight';
+ const limits=['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic'];
+ const bundleLimits=[...limits,'no-team-verification','no-global-availability-claim','no-provisioning-changes'];
+@@ -30,7 +31,7 @@
+ const member=(values:string[],v:unknown)=>typeof v==='string'&&values.includes(v);
+ const contextKeys=['projectId','draftRevision','baselineGeneration','savedConfig','savedVersion','credentialContextRevision','recordId','recordRevision','executionMode'];
+ function request(v:unknown):boolean{
+- return (keys(v,contextKeys)||keys(v,[...contextKeys,'platform'])&&v.platform==='ios'||keys(v,[...contextKeys,'platform','query'])&&v.platform==='ios'&&(v.query===APPLE_BUNDLE_QUERY||v.query===APPLE_PROFILE_QUERY||v.query===IOS_VERSIONS_QUERY))&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&counter(v.draftRevision)&&counter(v.baselineGeneration)&&!!parseSavedConfigContent(v.savedConfig)&&!!parseAndroidBuildSavedVersion(v.savedVersion)&&counter(v.credentialContextRevision)&&v.credentialContextRevision>0&&counter(v.recordRevision)&&v.recordRevision>0&&token(v.recordId)&&v.executionMode==='local';
++ return (keys(v,contextKeys)||keys(v,[...contextKeys,'platform'])&&v.platform==='ios'||keys(v,[...contextKeys,'platform','query'])&&((v.platform==='ios'&&(v.query===APPLE_BUNDLE_QUERY||v.query===APPLE_PROFILE_QUERY||v.query===IOS_VERSIONS_QUERY))||(v.platform==='android'&&v.query===ANDROID_VERSIONS_QUERY)))&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&counter(v.draftRevision)&&counter(v.baselineGeneration)&&!!parseSavedConfigContent(v.savedConfig)&&!!parseAndroidBuildSavedVersion(v.savedVersion)&&counter(v.credentialContextRevision)&&v.credentialContextRevision>0&&counter(v.recordRevision)&&v.recordRevision>0&&token(v.recordId)&&v.executionMode==='local';
+ }
+ function profileSummary(value:unknown):boolean{
+  if(!keys(value,['observation','counts','checkedAt'])||!member(bundleObservations,value.observation))return false;
+@@ -48,7 +49,7 @@
+ }
+ export function encodeLocalStoreRequest(command:StoreCommand,input:unknown):Uint8Array|null{
+  try{const v=copyBoundedComparisonData(input,8192);
+- const valid=command==='prepare_local_store_preflight'?request(v):command==='local_store_preflight_status'?keys(v,[]):keys(v,command==='start_local_store_preflight'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_store_preflight'||(v.consentVersion===STORE_CONSENT||v.consentVersion===APPLE_STORE_CONSENT||v.consentVersion===APPLE_BUNDLE_CONSENT||v.consentVersion===APPLE_PROFILE_CONSENT||v.consentVersion===IOS_VERSIONS_CONSENT));
++ const valid=command==='prepare_local_store_preflight'?request(v):command==='local_store_preflight_status'?keys(v,[]):keys(v,command==='start_local_store_preflight'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_store_preflight'||(v.consentVersion===STORE_CONSENT||v.consentVersion===APPLE_STORE_CONSENT||v.consentVersion===APPLE_BUNDLE_CONSENT||v.consentVersion===APPLE_PROFILE_CONSENT||v.consentVersion===IOS_VERSIONS_CONSENT||v.consentVersion===ANDROID_VERSIONS_CONSENT));
+  if(!valid)return null;const bytes=new TextEncoder().encode(JSON.stringify(v));return bytes.length<=8192?bytes:null;
+  }catch{return null;}
+ }
+@@ -58,13 +59,13 @@
+  const op=v.operation;if(op===null)return v as unknown as LocalStoreStatus;
+  if(!keys(op,['operationId','ownerGeneration','context','phase','intentUsable','outcome','reason','result'])||!token(op.operationId)||!token(op.ownerGeneration)||!member(phases,op.phase)||typeof op.intentUsable!=='boolean'||!member(reasons,op.reason))return null;
+  const c=op.context;if(!(keys(c,[...contextKeys,'platform','operation'])||keys(c,[...contextKeys,'platform','operation','query']))||!['android','ios'].includes(c.platform as string)||c.operation!=='local-store-preflight')return null;
+- const prepared={...c};if(c.platform==='android')delete prepared.platform;delete prepared.operation;if(!request(prepared))return null;
++ const prepared={...c};if(c.platform==='android'&&c.query===undefined)delete prepared.platform;delete prepared.operation;if(!request(prepared))return null;
+  if(op.phase==='terminal'){if(!member(outcomes,op.outcome)||op.outcome==='unknown'||op.intentUsable)return null;}
+  else if(op.phase==='unknown'){if(op.outcome!=='unknown'||op.reason!=='cleanup-unknown'||op.intentUsable||op.result!==null)return null;}
+  else if(op.outcome!==null||op.result!==null||op.intentUsable&&op.phase!=='awaiting-consent')return null;
+  if(op.result!==null){const r=op.result;
+-  const bundle=c.query===APPLE_BUNDLE_QUERY,profiles=c.query===APPLE_PROFILE_QUERY,versions=c.query===IOS_VERSIONS_QUERY;
+-  if(op.phase!=='terminal'||op.outcome!=='complete'||!keys(r,['schemaVersion','scope','findings','limitations',...(bundle?['observation']:profiles?['profileReuse']:versions?['currentVersions']:[])])||r.schemaVersion!==1||r.scope!==(bundle?APPLE_BUNDLE_SCOPE:profiles?APPLE_PROFILE_SCOPE:versions?IOS_VERSIONS_SCOPE:`local-${c.platform}-store-access-no-publishing`)||!sameOfflineData(r.limitations,bundle?bundleLimits:profiles?profileLimits:versions?iosVersionsLimitations:limits)||!Array.isArray(r.findings)||r.findings.length>16||r.findings.some(f=>!keys(f,['check','status'])||!member(checks,f.check)||!member(core,f.status)||(bundle||profiles||versions)&&f.check==='store-access')||bundle&&!member(bundleObservations,r.observation)||profiles&&!profileSummary(r.profileReuse)||versions&&(!parseIOSCurrentVersions(r.currentVersions)||op.reason!=='none'||(r.currentVersions as {observation?:unknown}).observation==='observed'&&r.findings.some(f=>['FAIL','MISSING','BLOCKED','INVALID'].includes(f.status as string))))return null;
++  const bundle=c.query===APPLE_BUNDLE_QUERY,profiles=c.query===APPLE_PROFILE_QUERY,play=c.query===ANDROID_VERSIONS_QUERY,versions=c.query===IOS_VERSIONS_QUERY||play;
++  if(op.phase!=='terminal'||op.outcome!=='complete'||!keys(r,['schemaVersion','scope','findings','limitations',...(bundle?['observation']:profiles?['profileReuse']:versions?['currentVersions']:[])])||r.schemaVersion!==1||r.scope!==(bundle?APPLE_BUNDLE_SCOPE:profiles?APPLE_PROFILE_SCOPE:play?ANDROID_VERSIONS_SCOPE:versions?IOS_VERSIONS_SCOPE:`local-${c.platform}-store-access-no-publishing`)||!sameOfflineData(r.limitations,bundle?bundleLimits:profiles?profileLimits:play?androidVersionsLimitations:versions?iosVersionsLimitations:limits)||!Array.isArray(r.findings)||r.findings.length>16||r.findings.some(f=>!keys(f,['check','status'])||!member(checks,f.check)||!member(core,f.status)||(bundle||profiles||versions)&&f.check==='store-access')||bundle&&!member(bundleObservations,r.observation)||profiles&&!profileSummary(r.profileReuse)||versions&&(!(play?parseAndroidCurrentVersions(r.currentVersions):parseIOSCurrentVersions(r.currentVersions))||op.reason!=='none'||(r.currentVersions as {observation?:unknown}).observation==='observed'&&r.findings.some(f=>['FAIL','MISSING','BLOCKED','INVALID'].includes(f.status as string))))return null;
+  }else if(op.outcome==='complete')return null;
+  return v as unknown as LocalStoreStatus;
+  }catch{return null;}
+diff --git a/desktop/src/localStorePreflightTypes.ts b/desktop/src/localStorePreflightTypes.ts
+--- a/desktop/src/localStorePreflightTypes.ts
++++ b/desktop/src/localStorePreflightTypes.ts
+@@ -1,9 +1,10 @@
++import type { AndroidCurrentVersions } from './androidStoreVersions.ts';
+ import type { IOSCurrentVersions } from './iosStoreVersions.ts';
+ import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
+ import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome, OfflineCoreStatus, SavedConfigContent } from './offlinePreflightTypes.ts';
+ export interface PrepareLocalStorePreflight {
+   projectId:string; draftRevision:number; baselineGeneration:number; savedConfig:SavedConfigContent; savedVersion:AndroidBuildSavedVersion;
+-  credentialContextRevision:number; recordId:string; recordRevision:number; executionMode:'local'; platform?:'ios';query?:'bundle-id-registration'|'app-store-profile-reuse'|'ios-current-versions';
++  credentialContextRevision:number; recordId:string; recordRevision:number; executionMode:'local'; platform?:'ios'|'android';query?:'bundle-id-registration'|'app-store-profile-reuse'|'ios-current-versions'|'android-current-versions';
+ }
+ export interface LocalStoreContext extends Omit<PrepareLocalStorePreflight,'platform'> {platform:'android'|'ios';operation:'local-store-preflight'}
+ export interface LocalStoreIdentity {operationId:string;ownerGeneration:string}
+@@ -11,12 +12,12 @@
+ export type StoreCheck='credential-format'|'query-prerequisites'|'runtime-unavailable'|'bundle-unavailable'|'store-access';
+ export type BundleIdObservation='found'|'not-returned'|'not-permitted'|'inconclusive'|'not-checked';
+ export interface ProfileReuseSummary {observation:BundleIdObservation;counts:{matchingProfiles:number;activeProfiles:number;currentMetadataCandidates:number;relatedCertificates:number}|null;checkedAt:string|null}
+-export interface LocalStoreResult {schemaVersion:1;scope:'local-android-store-access-no-publishing'|'local-ios-store-access-no-publishing'|'local-ios-bundle-id-registration-read'|'local-ios-profile-reuse-metadata-read'|'local-ios-current-version-inventory';findings:{check:StoreCheck;status:OfflineCoreStatus}[];limitations:string[];observation?:BundleIdObservation;profileReuse?:ProfileReuseSummary;currentVersions?:IOSCurrentVersions}
++export interface LocalStoreResult {schemaVersion:1;scope:'local-android-store-access-no-publishing'|'local-ios-store-access-no-publishing'|'local-ios-bundle-id-registration-read'|'local-ios-profile-reuse-metadata-read'|'local-ios-current-version-inventory'|'local-android-current-version-inventory';findings:{check:StoreCheck;status:OfflineCoreStatus}[];limitations:string[];observation?:BundleIdObservation;profileReuse?:ProfileReuseSummary;currentVersions?:IOSCurrentVersions|AndroidCurrentVersions}
+ export interface LocalStoreOperation extends LocalStoreIdentity {context:LocalStoreContext;phase:OfflinePreflightPhase;intentUsable:boolean;outcome:OfflinePreflightOutcome|null;reason:LocalStoreReason;result:LocalStoreResult|null}
+ export interface LocalStoreStatus {schemaVersion:1;statusRevision:number;availability:OfflinePreflightAvailability;operation:LocalStoreOperation|null}
+ export interface LocalStorePreflightApi {
+  prepareLocalStorePreflight(request:PrepareLocalStorePreflight):Promise<LocalStoreStatus>;
+- startLocalStorePreflight(request:LocalStoreIdentity&{consentVersion:'local-android-store-access-v1'|'local-ios-store-access-v1'|'local-ios-bundle-id-read-v1'|'local-ios-profile-reuse-read-v1'|'local-ios-current-versions-read-v1'}):Promise<LocalStoreStatus>;
++ startLocalStorePreflight(request:LocalStoreIdentity&{consentVersion:'local-android-store-access-v1'|'local-ios-store-access-v1'|'local-ios-bundle-id-read-v1'|'local-ios-profile-reuse-read-v1'|'local-ios-current-versions-read-v1'|'local-android-current-versions-edit-v1'}):Promise<LocalStoreStatus>;
+  localStorePreflightStatus():Promise<LocalStoreStatus>;
+  cancelLocalStorePreflight(operationId:string,ownerGeneration:string):Promise<LocalStoreStatus>;
+  subscribeLocalStorePreflight(listener:(status:unknown)=>void):Promise<()=>void>;
+diff --git a/desktop/src/versionReserve.ts b/desktop/src/versionReserve.ts
+--- a/desktop/src/versionReserve.ts
++++ b/desktop/src/versionReserve.ts
+@@ -1,3 +1,4 @@
++import type { LocalStoreProject } from './localStorePreflight.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+
+ // Public DATA only. Actual source/account/Store/candidate/namespace originals
+@@ -40,7 +41,7 @@
+     return exact(v, ['id', 'candidateId', 'name', 'build']) && reserveId(v.id) && typeof v.candidateId === 'string' &&
+       v.candidateId.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v.candidateId) &&
+       typeof v.name === 'string' && v.name.length <= 64 && !/[^0-9.]/.test(v.name) && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v.name) &&
+-      integer(v.build, 9999) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build }) : null;
++      integer(v.build, 2_100_000_000) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build }) : null;
+   } catch { return null; }
+ }
+ export const reserveActive = (s: VersionReserveStatus | null): boolean => !!s && ['reading', 'reserving', 'cleanup-unknown'].includes(s.phase);
+@@ -86,6 +87,16 @@
+     cancel: (operationId: string) => reserveId(operationId) ? send('version_reserve_cancel', { operationId }) : invalid(),
+   });
+ }
++// UI refusal/help only; native still proves the same saved source and original Store receipt.
++export function versionReserveProjectIssue(project: LocalStoreProject | null): string | null {
++  if (!project) return 'Choose a saved native Android or iOS project.';
++  if (project.inputIssue) return project.inputIssue;
++  if (project.dirtyDraft || project.snapshotPending || project.versionPending || project.saveRecoveryRequired) return 'Finish the saved-input review before reserving a version.';
++  const platforms = project.versionPlatforms;
++  if (platforms?.length === 2 && platforms[0] === 'android' && platforms[1] === 'ios') return 'Shared Android+iOS version sources need paired current Store observations and are not supported here yet. Keep manual versioning.';
++  return platforms?.length === 1 && (platforms[0] === 'android' || platforms[0] === 'ios') ? null :
++    'Read the current saved configuration and version for exactly one enabled platform.';
++}
+ export function versionReserveHelp(reason: VersionReserveStatus['reason'] | null): string {
+   switch (reason) {
+     case 'cleanup-unknown': return 'The original operation or cleanup is unconfirmed. Keep this app and its state. Check the original status; do not repeat the reservation or delete its journal.';
+diff --git a/desktop/src/versionReserveController.ts b/desktop/src/versionReserveController.ts
+--- a/desktop/src/versionReserveController.ts
++++ b/desktop/src/versionReserveController.ts
+@@ -93,7 +93,7 @@
+   reviewReason(): string | null {
+     const c = this.readContext();
+     return this.disposed ? 'This controller is retired.' : this.ownerReason() ?? unavailable(c) ??
+-      (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native iOS project.' : c.blockedReason) ??
++      (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native Android or iOS project.' : c.blockedReason) ??
+       (!parseReserveOptions(this.state.options) ? 'Enter the exact checked-out branch (for example refs/heads/main) and acknowledge the Store limits.' : null);
+   }
+   reserveReason(): string | null {
+diff --git a/desktop/tests/version-reserve.test.mjs b/desktop/tests/version-reserve.test.mjs
+--- a/desktop/tests/version-reserve.test.mjs
++++ b/desktop/tests/version-reserve.test.mjs
+@@ -40,7 +40,7 @@
+ });
+ test('strict status rejects malformed, contradictory, accessor and bounded-array data',()=>{
+   for(const phase of ['idle','reading','reviewed','reserving','reserved','refused','cleanup-unknown']) assert.ok(parseVersionReserveStatus(frame(phase,phase==='idle'?0:1)),phase);
+-  for(const invalid of [frame('reserved',1,{reason:'reservation-refused'}),frame('reserved',1,{reservation:{...reserved,build:10000}}),
++  for(const invalid of [frame('reserved',1,{reason:'reservation-refused'}),frame('reserved',1,{reservation:{...reserved,build:2_100_000_001}}),
+     frame('reserved',1,{reservation:{...reserved,name:'1.2.4\n'}}),frame('reviewed',1,{review:null}),frame('reserved',1,{token:'not-secret'}),
+     frame('idle',0,{reservation:reserved}),frame('reviewed',1,{revision:0xffff_ffff})])assert.equal(parseVersionReserveStatus(invalid),null);
+   let called=0;const raw=frame('reserved');Object.defineProperty(raw,'reservation',{enumerable:true,get(){called++;return reserved;}});

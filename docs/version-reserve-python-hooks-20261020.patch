@@ -1,0 +1,615 @@
+--- a/src/mobile_release/_desktop_edit_control.py
++++ b/src/mobile_release/_desktop_edit_control.py
+@@ -50,6 +50,7 @@
+         self.custody_unknown = False
+         self.buffer = bytearray()
+         self.frames = 0
++        self.reserved = None  # Closed native reserved-version handoff only.
+
+     def _owner(self) -> None:
+         if (self.pid != os.getpid() or self.thread is not threading.current_thread()
+@@ -92,6 +93,13 @@
+                 guard.cancelled = True
+             return
+         now = time.monotonic()
++        if self.reserved is not None:
++            try:
++                self.reserved.check_clock()
++            except BaseException:
++                self.reserved.failure_observed()
++                self._stop()
++                return
+         if ((not self.apply_active and now >= self.review_end)
+                 or self.active_end is not None and now >= self.active_end):
+             self._stop()
+@@ -155,6 +163,8 @@
+                 self.apply_active = request.op == "apply"
+                 if sequence != 0:
+                     self.active_end = time.monotonic() + 30.0
++                    if self.reserved is not None:
++                        self.active_end = min(self.active_end, self.reserved.work_end)
+                 return request
+             if self.fd is None:
+                 raise ProtocolError("Original edit input is unavailable")
+--- a/src/mobile_release/_desktop_edit_engine.py
++++ b/src/mobile_release/_desktop_edit_engine.py
+@@ -1,8 +1,10 @@
+-"""One original synchronous native typed-edit child, no descendants.
++"""One original synchronous native typed-edit child.
+
+ Only desktop/config_edit_bootstrap.py admits this entry point. It is neither a
+ CLI mutation method nor the passive engine. The native capability gate remains
+ closed; this source alone does not qualify a runtime or filesystem backend.
++Only its closed reserved-version arm borrows the existing C/A/W source reader;
++ordinary edit domains still run no descendant commands.
+ """
+ from __future__ import annotations
+
+@@ -211,6 +213,8 @@
+                 else:
+                     raise ProtocolError("Invalid fixed edit domain")
+         actions = [retire]
++        if self.input.reserved is not None:
++            actions.append(self.input.reserved.close)
+         if self.lease is not None:
+             actions.append(self.lease.close)
+         actions.append(self.input.close)
+@@ -225,11 +229,15 @@
+         # Terminal output follows root/handler settlement and has only a small
+         # local bounded delivery allowance. It cannot restart native cleanup.
+         end = time.monotonic() + 2.0 if terminal else None
++        if terminal and self.input.reserved is not None:
++            end = min(end, self.input.reserved.hard_end)
+         while remaining:
+             if not terminal:
+                 self.guard.check()
+             elif end is not None and time.monotonic() >= end:
+                 raise ProtocolError("Edit terminal delivery did not settle")
++            if terminal and self.input.reserved is not None:
++                self.input.reserved.check_clock(terminal=True)
+             try:
+                 count = os.write(1, remaining[:64 * 1024])
+                 if count <= 0:
+@@ -253,6 +261,9 @@
+         root = _root(request.params["root"])
+         self.saved_text_recovery = self.domain in {"metadata_text", "release_version"} and request.params.get("intent") == "recover"
+         self.configuration_recovery = self.domain == "configuration" and request.params.get("intent") == "recover"
++        if self.domain == "release_version" and "reservedVersion" in request.params:
++            from .reserved_version_edit import ReservedVersionEdit
++            ReservedVersionEdit(self, request.params["reservedVersion"])
+         if self.domain == "project_identity":
+             self.identity_intent = request.params["intent"]
+             self.identity_recovery = self.identity_intent == "recover"
+@@ -321,6 +332,8 @@
+             checkout = capture_metadata_text_edit(self.lease, request.params["platform"], request.params["locale"])
+         elif self.domain == "release_version":
+             checkout = capture_release_version_edit(self.lease)
++            if self.input.reserved is not None:
++                self.input.reserved.check_saved(checkout)
+         elif self.domain == "metadata_images":
+             if self.image_intent == "recover":
+                 from .metadata_images_recovery import capture_metadata_images_recovery
+@@ -409,8 +422,9 @@
+             plan = prepare_metadata_text_edit(self.lease, checkout, request.params["revision"],
+                                              request.params["expectedBaseline"], request.params["fields"])
+         elif self.domain == "release_version":
+-            plan = prepare_release_version_edit(self.lease, checkout, request.params["revision"],
+-                request.params["expectedBaseline"], request.params["intent"], request.params["values"])
++            plan = (self.input.reserved.prepare(checkout, request.params) if self.input.reserved is not None else
++                    prepare_release_version_edit(self.lease, checkout, request.params["revision"],
++                    request.params["expectedBaseline"], request.params["intent"], request.params["values"]))
+         elif self.domain == "metadata_images":
+             if self.image_intent == "recover":
+                 from .metadata_images_recovery import prepare_metadata_images_recovery
+@@ -463,7 +477,8 @@
+         elif self.domain == "metadata_text":
+             self.outcome = apply_metadata_text_edit(self.lease, plan)
+         elif self.domain == "release_version":
+-            self.outcome = apply_release_version_edit(self.lease, plan)
++            self.outcome = (self.input.reserved.apply(plan) if self.input.reserved is not None else
++                            apply_release_version_edit(self.lease, plan))
+         elif self.domain == "metadata_images":
+             if self.image_intent == "recover":
+                 from .metadata_images_recovery import apply_metadata_images_recovery
+@@ -486,6 +501,11 @@
+             observed = self.lease.last_outcome
+             outcome = CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
+         outcome = outcome or CoreEditOutcome("not_started", "not_created", "settled", "none")
++        if self.input.reserved is not None:
++            # The same ledger/source closures, not an ordinary terminal shape,
++            # must settle before native may consume this optional edit result.
++            if not self.input.reserved.settled():
++                raise ProtocolError("Reserved version source did not settle")
+         if (not self.input.closed or self.lease is not None and not self.lease.closed
+                 or self.guard.handler_state != "RESTORED" or self.guard.lifetime_ledger.fatal):
+             outcome = CoreEditOutcome(outcome.effect, outcome.journal, "unknown",
+--- a/src/mobile_release/_desktop_edit_protocol.py
++++ b/src/mobile_release/_desktop_edit_protocol.py
+@@ -125,6 +125,8 @@
+             names = {"root", "registeredIdentity", "platform", "locale"}
+         elif protocol in {WORKFLOW_PROTOCOL, VERSION_PROTOCOL}:
+             names = {"root", "registeredIdentity"}
++            if protocol == VERSION_PROTOCOL and "reservedVersion" in params:
++                names.add("reservedVersion")
+             if protocol == WORKFLOW_PROTOCOL and "intent" in params:
+                 names.add("intent")
+         else:
+@@ -136,6 +138,15 @@
+             valid = params["intent"] == "recover"
+         if valid and (recovering_text or recovering_config):
+             valid = params["intent"] == "recover"
++        if valid and protocol == VERSION_PROTOCOL and "reservedVersion" in params:
++            from .reserved_version_edit import HandoffData
++            try:
++                handoff = HandoffData.parse(params["reservedVersion"])
++                identity = registered_identity(params["registeredIdentity"])
++                valid = str(handoff.source.root) == params["root"] and handoff.source.identity == tuple(
++                    identity[key] for key in ("device", "inode", "mode", "uid", "gid"))
++            except (ValueError, TypeError, KeyError):
++                valid = False
+         if valid and protocol == METADATA_PROTOCOL and not recovering_text:
+             try:
+                 platform_value(params["platform"])
+--- a/src/mobile_release/_desktop_github_setup_engine.py
++++ b/src/mobile_release/_desktop_github_setup_engine.py
+@@ -96,6 +96,11 @@
+             request = None
+         elif type(header) is dict and header.get("protocol") == "mrk-version-enrollment/1":
+             from .desktop_version_enrollment import run_owned
++            end = started + 60.0
++            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
++            request = None
++        elif type(header) is dict and header.get("protocol") == "mrk-version-reserve/1":
++            from .desktop_version_reserve import run_owned
+             end = started + 60.0
+             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+             request = None
+--- a/src/mobile_release/_desktop_version_allocation_protocol.py
++++ b/src/mobile_release/_desktop_version_allocation_protocol.py
+@@ -17,6 +17,7 @@
+ from .api._github_connection import _id
+
+ PROTOCOL = "mrk-version-allocation-runtime/1"
++NATIVE_PROTOCOL = "mrk-version-reserve/1"
+ INITIAL_LIMIT = 8192
+ READY_LIMIT = 512
+ REQUEST_LIMIT = 16 * 1024
+@@ -77,24 +78,38 @@
+     request_sha256: str
+     clock: dict
+     digest: str
++    source: object = None
++    provider: object = None
++
++
++def message_protocol(initial: Initial) -> str:
++    require(type(initial) is Initial and (initial.source is None) == (initial.provider is None))
++    return NATIVE_PROTOCOL if initial.source is not None else PROTOCOL
+
+
+ def parse_initial(raw: bytes) -> Initial:
+     row = policy._object(frame(raw, INITIAL_LIMIT, nodes=256, depth=8), {"protocol", "id", "action"})
+-    require(row["protocol"] == PROTOCOL)
+-    action = policy._object(row["action"], {"kind", "localProjectId", "authority", "accountId",
+-                                          "candidateId", "requestSha256", "clock"})
++    require(row["protocol"] in (PROTOCOL, NATIVE_PROTOCOL))
++    native = row["protocol"] == NATIVE_PROTOCOL
++    keys = {"kind", "localProjectId", "authority", "accountId", "candidateId", "requestSha256", "clock"}
++    action = policy._object(row["action"], keys | ({"source", "provider"} if native else set()))
+     require(type(action["kind"]) is str and action["kind"] in KINDS)
+     authority = allocation.AuthorityRegistration.parse(action["authority"])
+     require(authority.protected_branch)
++    source = provider = None
++    if native:
++        from ._desktop_version_allocation_source_protocol import SourceRequest
++        from ._desktop_version_allocation_source_provider import Provider
++        source = SourceRequest.parse(action["source"])
++        provider = Provider.parse(action["provider"], source)
+     return Initial(policy._match(row["id"], _ID), action["kind"], state._local_project_id(action["localProjectId"]),
+                    authority, _id(action["accountId"]), allocation._uuid(action["candidateId"]),
+                    policy._match(action["requestSha256"], policy._DIGEST), _clock(action["clock"]),
+-                   hashlib.sha256(raw).hexdigest())
++                   hashlib.sha256(raw).hexdigest(), source, provider)
+
+
+ def ready_frame(initial: Initial) -> bytes:
+-    return encoded({"protocol": PROTOCOL, "id": initial.id, "ready": {"requestSha256": initial.digest}}, READY_LIMIT)
++    return encoded({"protocol": message_protocol(initial), "id": initial.id, "ready": {"requestSha256": initial.digest}}, READY_LIMIT)
+
+
+ @dataclass(frozen=True, slots=True, repr=False)
+@@ -109,11 +124,14 @@
+     require(type(request) is allocation.AllocationRequest and request.version_policy.mode == "automatic"
+             and request.sha256 == initial.request_sha256 and request.candidate_id == initial.candidate_id
+             and request.project_id == initial.authority.project_id)
++    if initial.source is not None:
++        require(request.version_policy.schema_version == 2 and request.enabled_platforms == ("ios",)
++                and initial.source.matches(request.source))
+
+
+ def parse_go(raw: bytes, initial: Initial) -> Go:
+     row = policy._object(frame(raw, GO_LIMIT), {"protocol", "id", "go"})
+-    require(row["protocol"] == PROTOCOL and row["id"] == initial.id)
++    require(row["protocol"] == message_protocol(initial) and row["id"] == initial.id)
+     go = policy._object(row["go"], {"requestSha256", "token", "request", "state", "observations"})
+     require(go["requestSha256"] == initial.digest)
+     token = go["token"]
+@@ -130,6 +148,11 @@
+         raise ProtocolError("Private allocation state was refused") from None
+     require(base64.b64encode(decoded).decode("ascii") == payload)
+     snapshot = state.NativeStateSnapshot(record["revision"], decoded)
++    if initial.source is not None:
++        # SAME finite native subset before the ordinary typed state parser.
++        # Neither an oversized namespace nor a tiny-map DOM bomb is truncated.
++        require(len(decoded) <= 256 * 1024 and decoded.endswith(b"\n"))
++        _decode_json(decoded[:-1], limit=256 * 1024 - 1, nodes=4096, depth=20, exact=True)
+     retained = state.AllocationState.parse(snapshot.payload)
+     selected = retained.enrolled(initial.local_project_id, initial.authority)
+     candidate = retained.candidate(initial.local_project_id)
+@@ -172,14 +195,14 @@
+     policy._integer(sequence, MAX_TRANSITIONS, 1)
+     policy._integer(expected_revision, state.MAX_REVISION - 1)
+     policy._match(payload_sha256, policy._DIGEST)
+-    return encoded({"protocol": PROTOCOL, "id": initial.id, "state": {
++    return encoded({"protocol": message_protocol(initial), "id": initial.id, "state": {
+         "requestSha256": initial.digest, "sequence": sequence, "expectedRevision": expected_revision,
+         "payloadSha256": payload_sha256, "transition": transition(change, initial, request)}}, STATE_FRAME_LIMIT)
+
+
+ def parse_ack(raw: bytes, initial: Initial, *, sequence: int, expected_revision: int, payload_sha256: str) -> None:
+     row = policy._object(frame(raw, ACK_LIMIT, nodes=64, depth=4), {"protocol", "id", "ack"})
+-    require(row["protocol"] == PROTOCOL and row["id"] == initial.id)
++    require(row["protocol"] == message_protocol(initial) and row["id"] == initial.id)
+     ack = policy._object(row["ack"], {"requestSha256", "sequence", "revision", "payloadSha256", "effect", "durability", "cleanup"})
+     require(type(ack["sequence"]) is int and ack["sequence"] == sequence
+             and type(ack["revision"]) is int and ack["revision"] == expected_revision + 1
+@@ -207,6 +230,6 @@
+         require(outcome.reason == "none" and outcome.reservation.request == request and selected.pending is None
+                 and selected.checkpoint == outcome.checkpoint and candidate is not None
+                 and candidate.reservation == outcome.reservation)
+-    return encoded({"protocol": PROTOCOL, "id": initial.id, "finished": {
++    return encoded({"protocol": message_protocol(initial), "id": initial.id, "finished": {
+         "requestSha256": initial.digest, "sequence": sequence, "revision": snapshot.revision,
+         "payloadSha256": hashlib.sha256(snapshot.payload).hexdigest(), "outcome": outcome.value()}}, FIN_LIMIT)
+--- a/src/mobile_release/_desktop_version_allocation_runtime.py
++++ b/src/mobile_release/_desktop_version_allocation_runtime.py
+@@ -302,21 +302,40 @@
+
+
+ class _CheckedTransport:
+-    def __init__(self, original, dialogue: _Dialogue) -> None:
++    def __init__(self, original, dialogue: _Dialogue, source=None, journal=None) -> None:
+         self.original, self.dialogue = original, dialogue
++        self.source, self.journal = source, journal
+         self.control = _control()
+
+     def exchange(self, step, request):
+         self.dialogue.checkpoint()
++        if self.source is not None:
++            self.source.held_checkpoint()
++            if step == "write":
++                # Only this fixed PUT boundary consumes the seventh source
++                # command, AFTER the original Pending CAS/ACK returned.
++                self.source.before_put(self.journal)
+         result = self.original.exchange(step, request)
+         self.control = dict(_check_control(result.control))
+         self.dialogue.checkpoint()
++        if self.source is not None:
++            self.source.held_checkpoint()
+         return result
+
+
+-def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str) -> tuple[allocation.AllocationOutcome, _StatePort]:
++def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str, source=None,
++            retained_port=None) -> tuple[allocation.AllocationOutcome, _StatePort]:
+     dialogue.checkpoint()
+-    port = _StatePort(dialogue, go)
++    if source is not None:
++        from .version_allocation_source import AllocationSourceRun
++        wire.require(type(source) is AllocationSourceRun and source.input.dialogue is dialogue
++                     and source.selected is go.request and source.provider is not None
++                     and dialogue.initial.source is source.request and type(retained_port) is _StatePort
++                     and retained_port.dialogue is dialogue and retained_port.go is go)
++        source.held_checkpoint()
++    else:
++        wire.require(dialogue.initial.source is None and retained_port is None)
++    port = _StatePort(dialogue, go) if retained_port is None else retained_port
+     journal = _Journal(port)
+     initial = dialogue.initial
+     journal.admit_request(initial.authority, go.request)
+@@ -336,10 +355,13 @@
+                                          go.request.version_policy, now=math.floor(time.time()))
+         except policy.VersionPolicyError as error:
+             return allocation.AllocationOutcome("rejected", error.reason, control=_control()), port
+-    original = _make_allocation_transport(go.token, started=dialogue.started, runtime_dir=runtime_dir,
++    # The native 60/70 began BEFORE its state/source stages. No fresh HTTP
++    # minute is granted by the worker launch or by completion of source reads.
++    started = dialogue.started if source is None else min(dialogue.started, dialogue.work_end - wire.WORK_SECONDS)
++    original = _make_allocation_transport(go.token, started=started, runtime_dir=runtime_dir,
+         selected=go.request, authority=initial.authority, checkpoint=journal.checkpoint(initial.authority),
+         reconcile=initial.kind == "reconcile")
+-    transport = _CheckedTransport(original, dialogue)
++    transport = _CheckedTransport(original, dialogue, source, journal)
+     result = allocation.allocate_version(go.request, initial.authority, transport, journal,
+         observations=go.observations, clock=lambda: math.floor(time.time()))
+     dialogue.checkpoint()
+@@ -351,6 +373,7 @@
+     """Borrow the existing bootstrap originals; it alone consumes their closes."""
+     wire.require(type(runtime_dir) is str and os.path.isabs(runtime_dir))
+     initial = wire.parse_initial(raw_initial)
++    wire.require(initial.source is None)  # Native SOURCE/Reserve has its own closed composition.
+     dialogue = _Dialogue(control, output, initial, started)
+     dialogue.bind()
+     go = dialogue.go()
+--- a/src/mobile_release/_desktop_version_allocation_source_control.py
++++ b/src/mobile_release/_desktop_version_allocation_source_control.py
+@@ -38,6 +38,13 @@
+     @property
+     def work_end(self):
+         return self.dialogue.work_end
++
++    @property
++    def provider_selection(self):
++        return self.dialogue.initial.provider
++
++    def source_time(self):
++        self.dialogue._time()
+
+     def _owner(self):
+         wire.require(self.pid == os.getpid() and self.thread is threading.current_thread()
+@@ -165,9 +172,12 @@
+         self.guard._remove_saved_command_source(self)
+
+     def terminal_bounds(self):
+-        """Actual SOURCE-only closed originals; never a caller-supplied grace."""
++        """Actual SOURCE/Reserve closed originals; never caller-supplied grace."""
++        from . import _desktop_version_allocation_protocol as reserve_wire
+         self._owner()
+-        wire.require(type(self.dialogue.initial) is wire.Initial and self.dialogue.initial.source is self.request
++        initial = self.dialogue.initial
++        wire.require((type(initial) is wire.Initial or type(initial) is reserve_wire.Initial
++                      and initial.provider is not None) and initial.source is self.request
+                      and self.acquired and self.borrow_ended and not self.unknown
+                      and self.guard is not None and self.guard.handler_state == "RESTORED"
+                      and self.guard._saved_command_input() is None and self.originals_closed())
+--- a/src/mobile_release/_desktop_version_allocation_source_provider.py
++++ b/src/mobile_release/_desktop_version_allocation_source_provider.py
+@@ -97,10 +97,17 @@
+ class HeldProvider:
+     def __init__(self, operation, selection):
+         from .version_allocation_source import AllocationSourceRun
++        from . import _desktop_version_allocation_protocol as reserve_wire
++        from .reserved_version_edit import BorrowedReservedVersionInput
++        editing = type(operation.input) is BorrowedReservedVersionInput
++        initial = None if editing else operation.input.dialogue.initial
+         wire.require(type(operation) is AllocationSourceRun and type(selection) is Provider
+-                     and operation.input.operation is operation and operation.selected is None
+-                     and type(operation.input.dialogue.initial) is wire.Initial
+-                     and operation.input.dialogue.initial.provider is selection
++                     and operation.input.operation is operation
++                     and (editing and operation.input.admits_provider(selection)
++                          or (operation.selected is None and type(initial) is wire.Initial)
++                          or (operation.selected is not None and type(initial) is reserve_wire.Initial
++                              and initial.source is operation.request))
++                     and operation.input.provider_selection is selection
+                      and Provider.parse(selection.value(), operation.request) == selection)
+         wire.require((os.getuid(), os.geteuid(), os.getgid(), os.getegid()) ==
+                      (selection.uid, selection.uid, selection.gid, selection.gid))
+@@ -113,7 +120,7 @@
+     def _owner(self):
+         run = self.operation
+         run._owner()
+-        wire.require(run.provider is self and run.input.dialogue.initial.provider is self.selection
++        wire.require(run.provider is self and run.input.provider_selection is self.selection
+                      and not self.close_claimed and not run.failed and not run.close_claimed)
+         run.checkpoint()
+         wire.require((os.getuid(), os.geteuid(), os.getgid(), os.getegid()) ==
+--- a/src/mobile_release/build_inputs.py
++++ b/src/mobile_release/build_inputs.py
+@@ -1765,8 +1765,11 @@
+               "allocation source requires its original cancellation borrower")
+         if allocation is not None:
+             from ._desktop_version_allocation_source_control import BorrowedAllocationInput
+-            _need(type(guard) is DefaultCancellation and type(allocation) is BorrowedAllocationInput
+-                  and allocation.guard is guard and guard._saved_command_input() is allocation,
++            from .reserved_version_edit import BorrowedReservedVersionInput
++            _need(type(guard) is DefaultCancellation and allocation.guard is guard
++                  and (type(allocation) is BorrowedAllocationInput and guard._saved_command_input() is allocation
++                       or type(allocation) is BorrowedReservedVersionInput
++                       and guard._edit_source is allocation.owner.input and allocation.owner.active is allocation),
+                   "allocation source borrower is not original")
+         _need((mode == "store") == (lane_evidence is not None),
+               "Store invocation requires exactly its original composite record")
+--- a/src/mobile_release/cancellation.py
++++ b/src/mobile_release/cancellation.py
+@@ -386,6 +386,13 @@
+
+     @property
+     def _version_allocation_source(self) -> Any:
++        if self._edit_source is not None:
++            from .reserved_version_edit import BorrowedReservedVersionInput, ReservedVersionEdit
++            owner = self._edit_source.reserved
++            if type(owner) is ReservedVersionEdit and owner.input is self._edit_source:
++                source = owner.active
++                if type(source) is BorrowedReservedVersionInput and source.owner is owner:
++                    return source
+         source = self._saved_command_input()
+         if source is None:
+             return None
+--- a/src/mobile_release/init_workspace_custody.py
++++ b/src/mobile_release/init_workspace_custody.py
+@@ -273,6 +273,7 @@
+         self.identity: dict[str, int] | None = None
+         self.meta_identity: dict[str, int] | None = None
+         self.workspace: InitWorkspace | None = None
++        self.reserved_version = None
+         self.locked = False
+         self.claimed = False
+         self.closed = False
+@@ -295,7 +296,13 @@
+             raise _failure("stale_revision")
+         try:
+             with guard.deferred(check_on_exit=False):
+-                fcntl.flock(number, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                from .reserved_version_edit import BorrowedReservedVersionInput
++                reserved = guard._version_allocation_source
++                if type(reserved) is BorrowedReservedVersionInput:
++                    reserved.borrow_workspace(self)
++                    self.reserved_version = reserved
++                else:
++                    fcntl.flock(number, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                 self.locked = True
+         except BlockingIOError as error:
+             raise _failure("busy", error) from None
+@@ -333,6 +340,8 @@
+
+     def check(self) -> None:
+         self.lease.check()
++        if self.reserved_version is not None:
++            self.reserved_version.check_workspace(self)
+         number = self.fd
+         if _directory(os.fstat(number)) != self.identity:
+             raise _failure("stale_revision")
+--- a/src/mobile_release/owned_process.py
++++ b/src/mobile_release/owned_process.py
+@@ -157,6 +157,16 @@
+     from ._command_process import CommandCallEvidence, run_command
+
+     source = None if cancellation is None else getattr(cancellation, "_saved_command_source", None)
++    reserved = None if cancellation is None else getattr(cancellation, "_version_allocation_source", None)
++    from .reserved_version_edit import BorrowedReservedVersionInput
++    if type(reserved) is BorrowedReservedVersionInput:
++        if source is not None or type(cancellation) is not DefaultCancellation:
++            raise ValueError("Reserved edit requires its original input")
++        reserved.admit_selected(reserved.owner.data.reservation.request)
++        reserved.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
++            capture=capture, text=text, output_limit=output_limit, on_start=on_start,
++            cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding, evidence=_evidence)
++        timeout, output_limit = reserved.command_limits(timeout, capture, output_limit)
+     if source is not None:
+         from ._desktop_saved_command_control import SavedCommandDomain, source_domain
+         domain = source_domain(source)
+--- a/src/mobile_release/version_allocation_source.py
++++ b/src/mobile_release/version_allocation_source.py
+@@ -55,10 +55,15 @@
+                  source: BorrowedAllocationInput, *, selected=None) -> None:
+         from . import version_allocation as allocation
+         from . import _desktop_version_allocation_protocol as dialogue_wire
++        from .reserved_version_edit import BorrowedReservedVersionInput
++        editing = type(source) is BorrowedReservedVersionInput
+         wire.require(type(request) is wire.SourceRequest and type(guard) is DefaultCancellation
+-                     and type(source) is BorrowedAllocationInput and source.request is request
++                     and (type(source) is BorrowedAllocationInput or editing) and source.request is request
+                      and source.guard is guard and guard._version_allocation_source is source)
+-        if selected is None:
++        if editing:
++            source.admit_selected(selected)
++            kind = "reserved-edit"
++        elif selected is None:
+             wire.require(type(source.dialogue.initial) is wire.Initial and source.dialogue.initial.source is request)
+             kind = "probe"
+         else:
+@@ -73,14 +78,15 @@
+         self.configuration_bytes = self.version_bytes = None
+         self.readers, self.reader_closes, self.commands = [], [], []
+         self.pending = None
++        self.command_base = guard.lifetime_ledger.verdict().commands if editing else 0
+         self.phase = "new"
+         self.started = self.close_claimed = self.failed = self.pre_put_spent = False
+         self.primary = None
+         # Original operation retained before environment/root acquisition.
+         source.bind_operation(self)
+-        if selected is None:
++        if selected is None or source.provider_selection is not None:
+             from ._desktop_version_allocation_source_provider import HeldProvider
+-            self.provider = HeldProvider(self, source.dialogue.initial.provider)
++            self.provider = HeldProvider(self, source.provider_selection)
+
+     def _owner(self):
+         self.input._owner()
+@@ -91,7 +97,7 @@
+         self._owner()
+         wire.require(not self.close_claimed and not self.failed and not self.input.borrow_ended)
+         self.guard.check()
+-        self.input.dialogue._time()
++        self.input.source_time()
+
+     def remember(self, error):
+         self._owner()
+@@ -166,6 +172,16 @@
+             raise SourceRefused() from error
+         _saved_need(config["version"]["source"] == r.version_path)
+         self._read_saved(r.version_path, MAX_VERSION_BYTES, r.version_size, r.version_sha256)
++        if self.selected is not None:
++            from .config import parse_key_value_text, release_version_from_values
++            enabled = tuple(name for name in ("android", "ios") if config.get(name, {}).get("enabled", False))
++            try:
++                values = parse_key_value_text(self.version_bytes.decode("utf-8"))
++                actual = release_version_from_values(values, name_key=config["version"]["nameKey"],
++                    build_key=config["version"]["buildKey"], ios_enabled="ios" in enabled, source_label="saved version")
++            except (ConfigurationError, UnicodeError) as error:
++                raise SourceRefused() from error
++            _saved_need(enabled == self.selected.enabled_platforms and actual == self.selected.base_version)
+         # No descriptor credit for a return-lost close. Both preliminary reads
+         # must actually close before the continuous LocalSource scope opens.
+         for reader in self.readers:
+@@ -194,7 +210,7 @@
+                          or (index in {6, 7} and self.phase == "final")))
+         facts = self.guard.lifetime_ledger.verdict()
+         wire.require(facts.complete and facts.cleanup_complete and facts.contained and not facts.fatal
+-                     and facts.profile_calls == 0 and facts.commands == index and self.commands_settled())
++                     and facts.profile_calls == 0 and facts.commands == self.command_base + index and self.commands_settled())
+         row = {"attempted": False, "settled": False, "slot": None, "command": None, "timeout": timeout, "limit": limit}
+         self.commands.append(row)
+         self.pending = row
+@@ -208,7 +224,6 @@
+         self._owner()
+         wire.require(source is self.observation and source._composition is self)
+         if self.provider is not None:
+-            wire.require(self.selected is None)
+             return self.provider.executable(source)
+         # Existing held allocation composition is not a native SOURCE launch.
+         # Its native allocating caller remains unavailable; do not silently
+@@ -263,7 +278,7 @@
+         actual, facts = self._outcome(row), self.guard.lifetime_ledger.verdict()
+         wire.require(actual is not None and actual.result_integrity == "complete" and actual.termination == "normal-exit"
+                      and actual.returncode == result.returncode and facts.complete and facts.cleanup_complete
+-                     and facts.contained and not facts.fatal and facts.commands == len(self.commands) and facts.profile_calls == 0)
++                     and facts.contained and not facts.fatal and facts.commands == self.command_base + len(self.commands) and facts.profile_calls == 0)
+         row["settled"] = True
+         self.pending = None
+         if result.returncode != 0:
+@@ -289,7 +304,7 @@
+     def before_put(self, journal):
+         from ._desktop_version_allocation_runtime import _Journal
+         self.held_checkpoint()
+-        wire.require(self.kind == "reserve" and not self.pre_put_spent and type(journal) is _Journal
++        wire.require(type(self.input) is BorrowedAllocationInput and self.kind == "reserve" and not self.pre_put_spent and type(journal) is _Journal
+                      and journal._native.dialogue is self.input.dialogue and journal._native.active is None
+                      and journal._native.attempted is None and not journal._native.poisoned)
+         initial = self.input.dialogue.initial
+@@ -313,8 +328,12 @@
+                 with invocation.project(signing_lease=None):
+                     self._saved()
+                     with self.provider.hold() if self.provider is not None else nullcontext():
+-                        self.observation = LocalSourceObservation(invocation, self.configuration_bytes, self.version_bytes,
+-                                                                  self.input.work_end, None)
++                        if self.kind == "reserved-edit":
++                            from .reserved_version_edit import ReservedVersionSource
++                            self.observation = ReservedVersionSource(self)
++                        else:
++                            self.observation = LocalSourceObservation(invocation, self.configuration_bytes, self.version_bytes,
++                                                                      self.input.work_end, None)
+                         self.observation._composition = self
+                         self.phase = "capture"
+                         with _retain_source(self.observation):
+@@ -374,7 +393,8 @@
+         facts = self.guard.lifetime_ledger.verdict()
+         return (self.pending is None and self.commands_settled() and facts.complete and facts.cleanup_complete
+                 and facts.contained and not facts.fatal and facts.profile_calls == 0
+-                and facts.commands == sum(row["settled"] for row in self.commands)
++                and (self.input.closed_command_count(self, facts.commands) if self.kind == "reserved-edit" else
++                     facts.commands == sum(row["settled"] for row in self.commands))
+                 and (self.provider is None or self.provider.originals_closed())
+                 and (self.observation is None or self.observation.closed)
+                 and (not self.started if self.invocation is None else self.invocation._allocation_source_closed(self)))

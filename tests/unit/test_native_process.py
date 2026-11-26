@@ -1517,6 +1517,7 @@ class NativeProcessCompatibilityTests(unittest.TestCase):
                 raise cleanup
 
     def test_native_helper_and_validator_fd_maps(self):
+        """Use a fresh interpreter so the inherited sentinel occupies a low map slot."""
         code = ("import fcntl,json,os,stat,sys\n"
                 "n,output,low,high=map(int,sys.argv[1:5])\n"
                 "rows=[]\n"

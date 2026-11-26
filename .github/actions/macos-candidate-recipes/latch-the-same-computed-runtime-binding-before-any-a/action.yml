@@ -1,0 +1,44 @@
+name: "Latch the same computed runtime binding before any application compilation"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Latch the same computed runtime binding before any application compilation"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py finalize-runtime-binding \
+          --target "$MRK_MACOS_TARGET" --work-root "$MRK_MACOS_WORK" > "$MRK_MACOS_WORK/runtime-binding-result.json"
+        "$MRK_PYTHON" -I -S -B - <<'PY_COMPOSED_BINDING'
+        import json, os, re, stat
+        root = os.environ["MRK_MACOS_WORK"]
+        fd = os.open(root + "/runtime-binding-result.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+                raise ValueError("computed runtime result original")
+            value = json.loads(os.read(fd, 4097))
+        finally: os.close(fd)
+        keys = {"sourceInputsSha256": "MRK_BUNDLED_RUNTIME_SOURCE_SHA256",
+                "runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
+                "runtimeBindingSha256": "MRK_MACOS_RUNTIME_BINDING_SHA256"}
+        if type(value) is not dict or set(value) != set(keys): raise ValueError("computed runtime binding shape")
+        if any(type(v) is not str or not re.fullmatch(r"[0-9a-f]{64}", v) or v == "0" * 64 for v in value.values()):
+            raise ValueError("computed runtime binding digest")
+        fd = os.open(os.environ["GITHUB_ENV"], os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise ValueError("workflow environment original")
+            body = "".join(keys[k] + "=" + value[k] + "\n" for k in keys).encode("ascii")
+            while body:
+                written = os.write(fd, body)
+                if written <= 0: raise OSError("workflow binding write")
+                body = body[written:]
+            os.fsync(fd)
+        finally: os.close(fd)
+        PY_COMPOSED_BINDING

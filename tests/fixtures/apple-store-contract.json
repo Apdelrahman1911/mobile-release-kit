@@ -19,10 +19,120 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "channel": "testflight-internal"
+        },
+        "signing": [
+          {
+            "platform": "ios",
+            "kind": "apple-distribution",
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "teamId": "ABCDE12345",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "profileExpiresAt": "2027-01-01T00:00:00Z"
+          }
+        ],
+        "predecessors": {},
         "stage": "candidate",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic",
+          "runId": "111",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-candidate.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-candidate.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "candidate:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "1abfc525895aee1b1fb9ba2fc8ec2fd1aa66fd265f2c9984a94cdb0ba73a9e21",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "kind": "ipa",
+            "fileName": "candidate.ipa",
+            "size": 57,
+            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0",
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678",
+            "fileName": "archive.zip",
+            "size": 55,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "platform": "ios",
+            "kind": "dsym",
+            "fileName": "dsyms.zip",
+            "architectures": [],
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
+          },
+          {
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "kind": "metadata",
+            "fileName": "store-metadata.zip",
+            "size": 34567,
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "architectures": []
+          },
+          {
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "kind": "validation-report",
+            "fileName": "validation-report.json",
+            "size": 2345,
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "architectures": []
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -39,39 +149,10 @@
             "build": null
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic",
-          "runId": "111",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-candidate.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-candidate.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {},
-        "artifacts": [
-          {
-            "logicalName": "ios-ipa",
-            "size": 57,
-            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
-          },
-          {
-            "logicalName": "ios-archive",
-            "size": 55,
-            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
-          },
-          {
-            "logicalName": "ios-dsyms",
-            "size": 55,
-            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
-          }
-        ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03"
+          "sha256": "d3ffb2ad64ed661e84d480c6da123c85e10874a1ebdd1e34e4e295fa987b0496"
         }
       },
       "receipt": {
@@ -83,7 +164,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03",
+        "operationIntentSha256": "d3ffb2ad64ed661e84d480c6da123c85e10874a1ebdd1e34e4e295fa987b0496",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-candidate.yml",
@@ -133,10 +214,120 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "channel": "testflight-internal"
+        },
+        "signing": [
+          {
+            "platform": "ios",
+            "kind": "apple-distribution",
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "teamId": "ABCDE12345",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "profileExpiresAt": "2027-01-01T00:00:00Z"
+          }
+        ],
+        "predecessors": {},
         "stage": "candidate",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic",
+          "runId": "111",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-candidate.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-candidate.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "candidate:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "1abfc525895aee1b1fb9ba2fc8ec2fd1aa66fd265f2c9984a94cdb0ba73a9e21",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "kind": "ipa",
+            "fileName": "candidate.ipa",
+            "size": 57,
+            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0",
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678",
+            "fileName": "archive.zip",
+            "size": 55,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "platform": "ios",
+            "kind": "dsym",
+            "fileName": "dsyms.zip",
+            "architectures": [],
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
+          },
+          {
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "kind": "metadata",
+            "fileName": "store-metadata.zip",
+            "size": 34567,
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "architectures": []
+          },
+          {
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "kind": "validation-report",
+            "fileName": "validation-report.json",
+            "size": 2345,
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "architectures": []
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -153,39 +344,10 @@
             "build": null
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic",
-          "runId": "111",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-candidate.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-candidate.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {},
-        "artifacts": [
-          {
-            "logicalName": "ios-ipa",
-            "size": 57,
-            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
-          },
-          {
-            "logicalName": "ios-archive",
-            "size": 55,
-            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
-          },
-          {
-            "logicalName": "ios-dsyms",
-            "size": 55,
-            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
-          }
-        ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03"
+          "sha256": "d3ffb2ad64ed661e84d480c6da123c85e10874a1ebdd1e34e4e295fa987b0496"
         }
       },
       "receipt": {
@@ -197,7 +359,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:10:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03",
+        "operationIntentSha256": "d3ffb2ad64ed661e84d480c6da123c85e10874a1ebdd1e34e4e295fa987b0496",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-candidate.yml",
@@ -314,10 +476,123 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "channel": "testflight-external"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
         "stage": "external-testing",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic",
+          "runId": "111",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-external-testing.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-external-testing.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "external-testing:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "1abfc525895aee1b1fb9ba2fc8ec2fd1aa66fd265f2c9984a94cdb0ba73a9e21",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0",
+            "size": 57
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678",
+            "fileName": "archive.zip",
+            "size": 55,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "platform": "ios",
+            "kind": "dsym",
+            "fileName": "dsyms.zip",
+            "architectures": [],
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -401,18 +676,6 @@
             }
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic",
-          "runId": "111",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-external-testing.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-external-testing.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "test-v1",
@@ -423,26 +686,9 @@
             }
           }
         },
-        "artifacts": [
-          {
-            "logicalName": "ios-ipa",
-            "size": 57,
-            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
-          },
-          {
-            "logicalName": "ios-archive",
-            "size": 55,
-            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
-          },
-          {
-            "logicalName": "ios-dsyms",
-            "size": 55,
-            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
-          }
-        ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6"
+          "sha256": "927c5fe293209199d263968c9320953c3ddfa270f133a6683b7776f239c39abd"
         }
       },
       "receipt": {
@@ -454,7 +700,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6",
+        "operationIntentSha256": "927c5fe293209199d263968c9320953c3ddfa270f133a6683b7776f239c39abd",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-external-testing.yml",
@@ -573,10 +819,123 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "channel": "testflight-external"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
         "stage": "external-testing",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic",
+          "runId": "111",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-external-testing.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-external-testing.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "external-testing:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "1abfc525895aee1b1fb9ba2fc8ec2fd1aa66fd265f2c9984a94cdb0ba73a9e21",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0",
+            "size": 57
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678",
+            "fileName": "archive.zip",
+            "size": 55,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "platform": "ios",
+            "kind": "dsym",
+            "fileName": "dsyms.zip",
+            "architectures": [],
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -660,18 +1019,6 @@
             }
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic",
-          "runId": "111",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-external-testing.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-external-testing.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "test-v1",
@@ -682,26 +1029,9 @@
             }
           }
         },
-        "artifacts": [
-          {
-            "logicalName": "ios-ipa",
-            "size": 57,
-            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
-          },
-          {
-            "logicalName": "ios-archive",
-            "size": 55,
-            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
-          },
-          {
-            "logicalName": "ios-dsyms",
-            "size": 55,
-            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
-          }
-        ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6"
+          "sha256": "927c5fe293209199d263968c9320953c3ddfa270f133a6683b7776f239c39abd"
         }
       },
       "receipt": {
@@ -713,7 +1043,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:02:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6",
+        "operationIntentSha256": "927c5fe293209199d263968c9320953c3ddfa270f133a6683b7776f239c39abd",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-external-testing.yml",
@@ -747,11 +1077,11 @@
         "state": "submitted-for-review",
         "createRetry": {
           "mode": "operator-authorized-create-retry",
-          "inventorySha256": "c05420ba33ae33500a0784d6c9bbf9574c0211d7632b907ff4bd36c9a0d55efc",
+          "inventorySha256": "ddcdf039a23a16c7054711be19577e9fc68dd7dabad477a8ac29eadccebc9641",
           "inventory": {
             "documentType": "ios-create-retry-inventory",
             "schemaVersion": 1,
-            "operationIntentSha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6",
+            "operationIntentSha256": "927c5fe293209199d263968c9320953c3ddfa270f133a6683b7776f239c39abd",
             "stage": "external-testing",
             "platform": "ios",
             "application": {
@@ -958,10 +1288,123 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "channel": "testflight-external"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
         "stage": "external-testing",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic",
+          "runId": "112",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-external-testing.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-external-testing.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "external-testing:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "1abfc525895aee1b1fb9ba2fc8ec2fd1aa66fd265f2c9984a94cdb0ba73a9e21",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0",
+            "size": 57
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678",
+            "fileName": "archive.zip",
+            "size": 55,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "platform": "ios",
+            "kind": "dsym",
+            "fileName": "dsyms.zip",
+            "architectures": [],
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -1045,18 +1488,6 @@
             }
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic",
-          "runId": "112",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-external-testing.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-external-testing.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "test-v1",
@@ -1067,26 +1498,9 @@
             }
           }
         },
-        "artifacts": [
-          {
-            "logicalName": "ios-ipa",
-            "size": 57,
-            "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
-          },
-          {
-            "logicalName": "ios-archive",
-            "size": 55,
-            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
-          },
-          {
-            "logicalName": "ios-dsyms",
-            "size": 55,
-            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
-          }
-        ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "6e8d27ab6dd186d34c57e67b2fe2dcb3dfad1897d79715add468f54ad9fdbaef"
+          "sha256": "7e31a80031096b92858d1e19da2f756cb95f0d0f381921f634a7eb74f858c76a"
         }
       },
       "receipt": {
@@ -1098,7 +1512,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "6e8d27ab6dd186d34c57e67b2fe2dcb3dfad1897d79715add468f54ad9fdbaef",
+        "operationIntentSha256": "7e31a80031096b92858d1e19da2f756cb95f0d0f381921f634a7eb74f858c76a",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-external-testing.yml",
@@ -1395,10 +1809,116 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "automaticRelease": false,
+          "channel": "app-store-review"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "externalReceiptSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stage": "production-submit",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic production",
+          "runId": "333",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-production-submit.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-production-submit.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "production-submit:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "055f7fdeabe5bad8cc6433bb0e7c023baf75e414d63d3f0d4091e6a2b6fac161",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size": 12345678
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+            "fileName": "archive.zip",
+            "size": 23456789,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -1660,18 +2180,6 @@
             ]
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic production",
-          "runId": "333",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-production-submit.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-production-submit.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "fictional-v1",
@@ -1685,7 +2193,7 @@
         },
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d"
+          "sha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498"
         }
       },
       "receipt": {
@@ -1697,7 +2205,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d",
+        "operationIntentSha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-production-submit.yml",
@@ -1996,10 +2504,116 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "automaticRelease": false,
+          "channel": "app-store-review"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "externalReceiptSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stage": "production-submit",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic production",
+          "runId": "333",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-production-submit.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-production-submit.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "production-submit:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "055f7fdeabe5bad8cc6433bb0e7c023baf75e414d63d3f0d4091e6a2b6fac161",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size": 12345678
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+            "fileName": "archive.zip",
+            "size": 23456789,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -2261,18 +2875,6 @@
             ]
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic production",
-          "runId": "333",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-production-submit.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-production-submit.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "fictional-v1",
@@ -2286,7 +2888,7 @@
         },
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d"
+          "sha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498"
         }
       },
       "receipt": {
@@ -2298,7 +2900,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d",
+        "operationIntentSha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-production-submit.yml",
@@ -2334,11 +2936,11 @@
         "state": "submitted-for-review",
         "createRetry": {
           "mode": "operator-authorized-create-retry",
-          "inventorySha256": "f774d14df1d965c1daf15207eddbdb1895741c3d431f6ef13f878e253308f0cf",
+          "inventorySha256": "1ca77beeac1333a5f334f83e0c52459adc67cd43e3634886dd83f270b009392c",
           "inventory": {
             "documentType": "ios-create-retry-inventory",
             "schemaVersion": 1,
-            "operationIntentSha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d",
+            "operationIntentSha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498",
             "stage": "production-submit",
             "platform": "ios",
             "application": {
@@ -2871,10 +3473,116 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "automaticRelease": false,
+          "channel": "app-store-review"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "externalReceiptSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stage": "production-submit",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic production",
+          "runId": "333",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-production-submit.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-production-submit.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "production-submit:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "055f7fdeabe5bad8cc6433bb0e7c023baf75e414d63d3f0d4091e6a2b6fac161",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size": 12345678
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+            "fileName": "archive.zip",
+            "size": 23456789,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -3136,18 +3844,6 @@
             ]
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic production",
-          "runId": "333",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-production-submit.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-production-submit.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "fictional-v1",
@@ -3161,7 +3857,7 @@
         },
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d"
+          "sha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498"
         }
       },
       "receipt": {
@@ -3173,7 +3869,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "reconciled",
-        "operationIntentSha256": "3a530c8fec17c2d2ae643bce00f0a734e10beb2a7227c487b035de3074d1d88d",
+        "operationIntentSha256": "8e159d66fec4b4dfeedb380d605298708b58f814edd599b5562b949455c2d498",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-production-submit.yml",
@@ -3491,10 +4187,116 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "automaticRelease": false,
+          "channel": "app-store-review"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "externalReceiptSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stage": "production-submit",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic production",
+          "runId": "333",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-production-submit.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-production-submit.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "production-submit:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "055f7fdeabe5bad8cc6433bb0e7c023baf75e414d63d3f0d4091e6a2b6fac161",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size": 12345678
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+            "fileName": "archive.zip",
+            "size": 23456789,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -3775,18 +4577,6 @@
             ]
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic production",
-          "runId": "333",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-production-submit.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-production-submit.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "fictional-v1",
@@ -3800,7 +4590,7 @@
         },
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "4f75fd3e754adec4b8dcaaf1507c05fa89b36b05c049c33eafea3458f59cfd79"
+          "sha256": "2932212595f54518f5aec9cd53badaa3408b90be37ca9ee4d67dee840e6bf61e"
         }
       },
       "receipt": {
@@ -3812,7 +4602,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "4f75fd3e754adec4b8dcaaf1507c05fa89b36b05c049c33eafea3458f59cfd79",
+        "operationIntentSha256": "2932212595f54518f5aec9cd53badaa3408b90be37ca9ee4d67dee840e6bf61e",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-production-submit.yml",
@@ -3848,11 +4638,11 @@
         "state": "submitted-for-review",
         "createRetry": {
           "mode": "operator-authorized-create-retry",
-          "inventorySha256": "3a76cb70e6df7aed4c5a7fb9519593cd47c9688b3f1a75cacff53599e093d222",
+          "inventorySha256": "e71249bad1e23b5fdb09f7b584b1b1b35e59a3e77b9d7586202d8588ef806bb0",
           "inventory": {
             "documentType": "ios-create-retry-inventory",
             "schemaVersion": 1,
-            "operationIntentSha256": "4f75fd3e754adec4b8dcaaf1507c05fa89b36b05c049c33eafea3458f59cfd79",
+            "operationIntentSha256": "2932212595f54518f5aec9cd53badaa3408b90be37ca9ee4d67dee840e6bf61e",
             "stage": "production-submit",
             "platform": "ios",
             "application": {
@@ -4495,10 +5285,116 @@
         }
       },
       "intent": {
-        "schemaVersion": 1,
         "documentType": "store-operation-intent",
+        "schemaVersion": 1,
+        "tooling": {
+          "version": "0.2.0",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "repository": {
+          "fullName": "example/mobile-app",
+          "id": "100000000"
+        },
+        "candidateSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "operationSource": {
+          "commit": "2222222222222222222222222222222222222222",
+          "tree": "3333333333333333333333333333333333333333",
+          "ref": "refs/heads/main"
+        },
+        "createdAt": "2026-01-01T00:00:00Z",
+        "destination": {
+          "automaticRelease": false,
+          "channel": "app-store-review"
+        },
+        "signing": [
+          {
+            "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "apple-distribution",
+            "platform": "ios",
+            "profileExpiresAt": "2027-01-01T00:00:00Z",
+            "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+            "teamId": "ABCDE12345"
+          }
+        ],
+        "predecessors": {
+          "candidateManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidateReceiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "externalReceiptSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stage": "production-submit",
         "platform": "ios",
+        "authorizedBy": {
+          "workflow": "Synthetic production",
+          "runId": "333",
+          "attempt": 1,
+          "callerPath": ".github/workflows/mobile-production-submit.yml",
+          "reusableRepository": "test/toolkit",
+          "reusablePath": ".github/workflows/reusable-production-submit.yml",
+          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "event": "workflow_dispatch",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "ref": "refs/heads/main"
+        },
+        "confirmation": "production-submit:ios:1.2.3:123",
+        "application": {
+          "id": "test.example.release",
+          "storeAppId": "12345"
+        },
+        "version": {
+          "marketing": "1.2.3",
+          "build": 123
+        },
+        "configuration": {
+          "path": "release/mobile-release.json",
+          "sha256": "055f7fdeabe5bad8cc6433bb0e7c023baf75e414d63d3f0d4091e6a2b6fac161",
+          "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "artifacts": [
+          {
+            "architectures": [
+              "arm64"
+            ],
+            "fileName": "candidate.ipa",
+            "kind": "ipa",
+            "logicalName": "ios-ipa",
+            "platform": "ios",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size": 12345678
+          },
+          {
+            "logicalName": "ios-archive",
+            "platform": "ios",
+            "kind": "xcarchive",
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+            "fileName": "archive.zip",
+            "size": 23456789,
+            "architectures": [
+              "arm64"
+            ]
+          },
+          {
+            "architectures": [],
+            "fileName": "store-metadata.zip",
+            "kind": "metadata",
+            "logicalName": "store-metadata",
+            "platform": "shared",
+            "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "size": 34567
+          },
+          {
+            "architectures": [],
+            "fileName": "validation-report.json",
+            "kind": "validation-report",
+            "logicalName": "validation-report",
+            "platform": "shared",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+            "size": 2345
+          }
+        ],
         "storePrecondition": {
           "schemaVersion": 1,
           "documentType": "store-precondition",
@@ -4728,18 +5624,6 @@
             ]
           }
         },
-        "authorizedBy": {
-          "workflow": "Synthetic production",
-          "runId": "333",
-          "attempt": 1,
-          "callerPath": ".github/workflows/mobile-production-submit.yml",
-          "reusableRepository": "test/toolkit",
-          "reusablePath": ".github/workflows/reusable-production-submit.yml",
-          "reusableCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "event": "workflow_dispatch",
-          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "ref": "refs/heads/main"
-        },
         "privateStateCommitments": {
           "algorithm": "hmac-sha256",
           "keyVersion": "fictional-v1",
@@ -4753,7 +5637,7 @@
         },
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "587c16864c99f4ee8cbdb76f7c1925f5029d9cd3be68285568bb5aff34d6022b"
+          "sha256": "e6ffc7e483c158417c6dc21104293c4e5e0e48ef20e28ed4b9dad09abd0bff97"
         }
       },
       "receipt": {
@@ -4765,7 +5649,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "587c16864c99f4ee8cbdb76f7c1925f5029d9cd3be68285568bb5aff34d6022b",
+        "operationIntentSha256": "e6ffc7e483c158417c6dc21104293c4e5e0e48ef20e28ed4b9dad09abd0bff97",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-production-submit.yml",
@@ -4801,11 +5685,11 @@
         "state": "submitted-for-review",
         "createRetry": {
           "mode": "operator-authorized-create-retry",
-          "inventorySha256": "c3070464419305826baf258b3ccb782dec3f1eececf913687f893b2286a9b077",
+          "inventorySha256": "248215f4a793151306b310031a5b8b988b59186a28152ed8e3d3d51a49c11084",
           "inventory": {
             "documentType": "ios-create-retry-inventory",
             "schemaVersion": 1,
-            "operationIntentSha256": "587c16864c99f4ee8cbdb76f7c1925f5029d9cd3be68285568bb5aff34d6022b",
+            "operationIntentSha256": "e6ffc7e483c158417c6dc21104293c4e5e0e48ef20e28ed4b9dad09abd0bff97",
             "stage": "production-submit",
             "platform": "ios",
             "application": {

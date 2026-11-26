@@ -26,13 +26,14 @@ from mobile_release.owned_process import ProcessError
 def fork_registry_model():
     """Route only inert model registrations, never discard real fork custody.
 
-    Both profile modules import the registry by value. Import them before the
-    boundary so their aliases are restored too, including nested/error exits.
+    The profile and build-input modules import the registry by value. Import
+    them before the boundary so nested and failed models restore every alias.
     Real resource/process tests must not use this model-only context.
     """
-    from mobile_release import _profile_process, ios_profiles
+    from mobile_release import _profile_process, build_inputs, ios_profiles
     registry = weakref.WeakSet()
     with patch.object(cancellation, "_FORK_RESOURCES", registry), \
+            patch.object(build_inputs, "_FORK_RESOURCES", registry), \
             patch.object(ios_profiles, "_FORK_RESOURCES", registry), \
             patch.object(_profile_process, "_FORK_RESOURCES", registry):
         yield registry
@@ -272,8 +273,8 @@ class LifetimeEvidenceTests(unittest.TestCase):
 
 class InertCancellationLifecycleTests(unittest.TestCase):
     def test_model_registries_restore_original_aliases_without_repairing_retained_failures(self):
-        from mobile_release import _profile_process, ios_profiles
-        modules = (cancellation, ios_profiles, _profile_process)
+        from mobile_release import _profile_process, build_inputs, ios_profiles
+        modules = (cancellation, build_inputs, ios_profiles, _profile_process)
         originals = tuple(module._FORK_RESOURCES for module in modules)
         members = tuple(tuple(registry) for registry in originals)  # Keep original members alive.
         unsafe_before = cancellation._FORK_UNSAFE
@@ -291,6 +292,9 @@ class InertCancellationLifecycleTests(unittest.TestCase):
                                 self.assertIs(module._FORK_RESOURCES, registry)
                             owner = guard()
                             retained.append(owner)
+                            slot = build_inputs._FD(owner)
+                            retained.append(slot)
+                            self.assertIn(slot, registry)
                             owner._abort(CredentialError("modeled cleanup failure"))
                             owner.restore()
                             self.assertEqual(owner.handler_state, "RESTORED")

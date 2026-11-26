@@ -115,6 +115,7 @@ POISON_PARTITIONS = (
 FRESH_PARTITIONS = (
     ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
     ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+    ("fresh-native-fd-maps", "unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps"),
 )
 SINGLETON_PARTITIONS = POISON_PARTITIONS + FRESH_PARTITIONS
 ISOLATED_PROFILE_PRODUCTS = frozenset({
@@ -124,6 +125,15 @@ ISOLATED_PROFILE_PRODUCTS = frozenset({
 })
 # Historical private names are retained; these fixed families serve both
 # intentional-UNKNOWN proofs and clean fresh-interpreter prerequisites.
+ISOLATED_POLICY_PRODUCTS = frozenset({
+    "mobile_release.credential_policy", "mobile_release.credential_requirements",
+    "mobile_release.github_workflow_candidate_compat", "mobile_release.toolchain_policy",
+    "mobile_release.workflow_payloads",
+})
+ISOLATED_DISPATCH_PRODUCTS = ISOLATED_POLICY_PRODUCTS | {
+    "mobile_release._store_runtime", "mobile_release.android_zip", "mobile_release.config_payloads",
+    "mobile_release.initialization_payloads", "mobile_release.release_confirmation",
+}
 ISOLATED_NEGATIVE_IMPORTS = (
     ("unit.test_native_process", ("unit",),
      frozenset({"unit", "unit.test_native_process"}),
@@ -161,7 +171,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release._store_lane_contract",
                 "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | ISOLATED_POLICY_PRODUCTS),
     ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
@@ -176,7 +186,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release._store_lane_contract",
                 "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | ISOLATED_POLICY_PRODUCTS),
     ("unit.test_local_signing_persistent", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
                 "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
@@ -189,7 +199,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | ISOLATED_POLICY_PRODUCTS),
     ("unit.test_local_signing_composition", ("workflow", "unit"),
      frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
                 "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
@@ -208,7 +218,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | ISOLATED_DISPATCH_PRODUCTS),
     ("unit.test_ios_entitlements", ("unit",),
      frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -219,7 +229,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
                 "mobile_release.reporting", "mobile_release.tooling",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | ISOLATED_POLICY_PRODUCTS),
     ("unit.test_operation_recovery", ("unit",),
      frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
                 "unit.ios_entitlement_helpers", "unit.test_operation_recovery",
@@ -238,7 +248,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | ISOLATED_DISPATCH_PRODUCTS),
     ("unit.test_ios_profile_authority", ("unit",),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -254,7 +264,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | ISOLATED_POLICY_PRODUCTS),
     ("unit.test_local_signing_failures", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -273,7 +283,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | ISOLATED_DISPATCH_PRODUCTS),
     ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -292,7 +302,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release._store_lane_evidence",
                 "mobile_release._store_lane_files",
                 "mobile_release.build_inputs",
-                "mobile_release.checked_files"})),
+                "mobile_release.checked_files"}) | ISOLATED_DISPATCH_PRODUCTS),
     ("unit.test_owned_process", ("unit",),
      frozenset({"unit", "unit.test_owned_process"}),
      frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
@@ -301,7 +311,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release._store_lane_contract",
                 "mobile_release.build_inputs",
                 "mobile_release.checked_files",
-                "mobile_release.init_transaction"})),
+                "mobile_release.init_transaction"}) | ISOLATED_POLICY_PRODUCTS),
 )
 # These selected methods reach fixed lazy dependencies. Own them before the
 # singleton proof; never import the rest of a family just because it is allowed.

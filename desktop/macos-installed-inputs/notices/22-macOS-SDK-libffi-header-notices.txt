@@ -1,0 +1,135 @@
+macOS selected SDK libffi header notices — DRAFT / EVIDENCE ONLY
+Run 35588640704, attempt 1; Apple CLT SDK MacOSX26.5.sdk.
+This is a conservative notice union from four copied header comments,
+not license clearance, a recipient-ready package, or a statement that
+the armv7/x86 code or the OS libffi binary was shipped or linked.
+The libffi 3.4-rc1 label below is the literal ffi.h label only.
+Each original comment block is reproduced byte-for-byte, with separate
+editorial origin labels outside it. No header implementation is copied.
+
+Origin: /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/ffi/ffi.h
+Evidence member: evidence/vendor/input-03.h
+Complete header: 16507 bytes; SHA256 cfc632aa9411334f99e14681008b2db105bc52b834f31b4d714d4326deac3a85
+Original comment: lines 1–26; 1366 bytes; SHA256 b2ce18d36ba3b08accfaea25d50db00baf306c6cdda088bc3519eef682686f47
+
+/* -----------------------------------------------------------------*-C-*-
+   libffi 3.4-rc1
+     - Copyright (c) 2011, 2014, 2019, 2021 Anthony Green
+     - Copyright (c) 1996-2003, 2007, 2008 Red Hat, Inc.
+
+   Permission is hereby granted, free of charge, to any person
+   obtaining a copy of this software and associated documentation
+   files (the ``Software''), to deal in the Software without
+   restriction, including without limitation the rights to use, copy,
+   modify, merge, publish, distribute, sublicense, and/or sell copies
+   of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be
+   included in all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+   ----------------------------------------------------------------------- */
+
+Origin: /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/ffi/ffitarget_armv7.h
+Evidence member: evidence/vendor/input-06.h
+Complete header: 2793 bytes; SHA256 7ead8742a629c6a6133419c8d81c1f11097acf50865c0962b17b8a2573be026f
+Original comment: lines 3–30; 1431 bytes; SHA256 62cb82c6bfa2b796ad7185304522b0ab5b96d6bc36ce9d0ce7f5c9eaf1b8d63e
+
+/* -----------------------------------------------------------------*-C-*-
+   ffitarget.h - Copyright (c) 2012  Anthony Green
+                 Copyright (c) 2010  CodeSourcery
+                 Copyright (c) 1996-2003  Red Hat, Inc.
+
+   Target configuration macros for ARM.
+
+   Permission is hereby granted, free of charge, to any person obtaining
+   a copy of this software and associated documentation files (the
+   ``Software''), to deal in the Software without restriction, including
+   without limitation the rights to use, copy, modify, merge, publish,
+   distribute, sublicense, and/or sell copies of the Software, and to
+   permit persons to whom the Software is furnished to do so, subject to
+   the following conditions:
+
+   The above copyright notice and this permission notice shall be included
+   in all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+   ----------------------------------------------------------------------- */
+
+Origin: /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/ffi/ffitarget_arm64.h
+Evidence member: evidence/vendor/input-07.h
+Complete header: 2879 bytes; SHA256 a3767c8be3d1add23ef20b70e516806336dde8103fbe798e975df18cf0cc0d39
+Original comment: lines 3–22; 1080 bytes; SHA256 8c7af4b6523c3d96502463c8b71094f0931ccfcfc60419e594c5b5ddeec454e3
+
+/* Copyright (c) 2009, 2010, 2011, 2012 ARM Ltd.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+``Software''), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
+
+Origin: /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/ffi/ffitarget_x86.h
+Evidence member: evidence/vendor/input-08.h
+Complete header: 4437 bytes; SHA256 7527641deb2d2bda5686b3d84e06a5ba2e429ae3e63da483275fbd16aca92c3e
+Original comment: lines 3–30; 1478 bytes; SHA256 85d248c5229cfdc8ea226606ba82551662b7f3d0144fc003e67d802ed6c19489
+
+/* -----------------------------------------------------------------*-C-*-
+   ffitarget.h - Copyright (c) 2012, 2014, 2018  Anthony Green
+                 Copyright (c) 1996-2003, 2010  Red Hat, Inc.
+                 Copyright (C) 2008  Free Software Foundation, Inc.
+
+   Target configuration macros for x86 and x86-64.
+
+   Permission is hereby granted, free of charge, to any person obtaining
+   a copy of this software and associated documentation files (the
+   ``Software''), to deal in the Software without restriction, including
+   without limitation the rights to use, copy, modify, merge, publish,
+   distribute, sublicense, and/or sell copies of the Software, and to
+   permit persons to whom the Software is furnished to do so, subject to
+   the following conditions:
+
+   The above copyright notice and this permission notice shall be included
+   in all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+   ----------------------------------------------------------------------- */
+

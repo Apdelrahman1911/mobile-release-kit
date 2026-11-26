@@ -1,0 +1,24 @@
+[package]
+name = "mrk-linux-mount-observation"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+description = "Private read-only Linux mount observation for installed-runtime custody"
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
+libc = "=0.2.189"
+linux-raw-sys = { version = "=0.12.1", default-features = false, features = ["general", "std"] }
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs"] }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

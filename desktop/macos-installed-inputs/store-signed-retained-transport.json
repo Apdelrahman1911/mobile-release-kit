@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "aarch64-apple-darwin": {
+      "original": {
+        "source": "ac30ab2603dc8f478bbea6b4dc70a1778f7b2570",
+        "runId": "44873133037",
+        "runAttempt": "1",
+        "artifactId": "14694658093",
+        "digest": "sha256:8757b68590af81b28c80d0b3c1c3e62e9a03dd299e520623c5866e4410545ec0",
+        "bytes": 34910321
+      },
+      "transport": {
+        "kind": "retained-actions",
+        "source": "dc12e0f380c9cbdacffd48cd49c86c6cb63ec815",
+        "runId": "44873570232",
+        "runAttempt": "1",
+        "artifactId": "14694359352",
+        "digest": "sha256:b9ca9933eb6b9386c719b1295d05b95e247819dc26436fe1df5180e293161cb8",
+        "bytes": 34910471
+      }
+    },
+    "x86_64-apple-darwin": null
+  }
+}

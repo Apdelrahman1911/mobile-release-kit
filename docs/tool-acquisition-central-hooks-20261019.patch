@@ -1,0 +1,131 @@
+--- a/desktop/src-tauri/src/asset_source.rs
++++ b/desktop/src-tauri/src/asset_source.rs
+@@ -81,6 +81,12 @@
+ pub(crate) type ApplicationDirectoryFields = (u64, u64, u32, u32, u32);
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ impl ApplicationDirectoryExclusion {
++    pub(crate) fn retained_bytes(&self) -> Option<usize> {
++        let mut bytes = std::mem::size_of::<Self>().checked_add(self.path.capacity())?
++            .checked_add(self.projects.capacity().checked_mul(std::mem::size_of::<RegisteredRoot>())?)?;
++        for project in &self.projects { bytes = bytes.checked_add(project.path.capacity())?; }
++        Some(bytes)
++    }
+     pub(crate) fn matches(&self, path: &Path, projects: &[RegisteredRoot]) -> bool {
+         self.path == path && self.projects == projects
+     }
+--- a/desktop/src-tauri/src/asset_session_saved_observation.rs
++++ b/desktop/src-tauri/src/asset_session_saved_observation.rs
+@@ -14,6 +14,15 @@
+     stage: std::sync::atomic::AtomicU8, completion_returned: AtomicBool,
+ }
+ impl SavedObservationLane {
++    // Called by the same prepared tool Input on its blocking worker. This
++    // never reacquires the Document or Edit Registry held by Start admission.
++    pub(super) fn tool_acquisition_current(&self, document: &Inner, registration: u32,
++        root: &asset_source::RegisteredRoot, project_id: &str) -> bool {
++        self.returned() && self.registration == registration && self.root == *root
++            && self.project_id == project_id
++            && document.android_registration_control.matches_epoch(self.epoch)
++            && document.bridge.registry_generation() == registration
++    }
+     pub(super) fn returned(&self) -> bool {
+         self.stage.load(Ordering::SeqCst) == RETURNED && self.completion_returned.load(Ordering::SeqCst)
+     }
+@@ -235,6 +244,7 @@
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?; self.inner.bridge.ios_archive.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
++        self.inner.bridge.tool_acquisition.ensure_idle()?;
+         Ok(())
+     }
+     pub(crate) fn saved_observation(&self, bridge: &DesktopBridge, project_id: &str) -> Result<crate::supervisor::SavedObservationQuery, BridgeError> {
+@@ -262,6 +272,22 @@
+         }
+         result
+     }
++    // The caller already holds the SAME Doc and the borrowed original Edit
++    // guard. Only existing returned saved bytes enter the new tool intent.
++    // Draft/baseline counters remain request/comparison DATA, not native facts.
++    pub(super) fn tool_acquisition_saved_lane(&self, state: &DocumentState,
++        input: &crate::tool_acquisition_protocol::Context, edit: &crate::edit_owner::SavedEditGuard<'_>,
++        registration: u32, root: &asset_source::RegisteredRoot) -> Result<Arc<SavedObservationLane>, BridgeError> {
++        let binding = state.saved_input.as_ref().ok_or_else(stale)?;
++        if !state.saved_observation.as_ref().is_some_and(|current| Arc::ptr_eq(current, &binding.lane))
++            || !binding.lane.tool_acquisition_current(&self.inner, registration, root, &input.project_id)
++            || !edit.matches(&binding.lane.stamp)
++            || binding.comparison.config_bytes != input.saved_config.bytes
++            || SavedComparisonData::digest(&input.saved_config.sha256) != Some(binding.comparison.config_sha256) {
++            return Err(stale());
++        }
++        Ok(binding.lane.clone())
++    }
+     pub(super) fn validated_saved_input(&self, state: &DocumentState, input: &crate::android_build_protocol::Prepare) -> Result<ValidatedSavedInput, BridgeError> {
+         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+         self.validated_saved_input_with_edit(state,input,&edit)
+--- a/desktop/src-tauri/src/android_build_owner.rs
++++ b/desktop/src-tauri/src/android_build_owner.rs
+@@ -192,6 +192,12 @@
+     pub(crate) fn cancel_catalog(&self,input:crate::android_toolchain_catalog::Cancel,gate:Availability)
+         -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+         self.saved.cancel_android_catalog(input,gate)
++    }
++    // Closed sibling facet only: never exposes a SavedCommandOwner/path as
++    // renderer authority or lends an Android build permit to another command.
++    pub(crate) fn bind_tool_acquisition(&self, tools: &crate::saved_command_owner::SavedCommandOwner,
++        document: &std::sync::Arc<()>, native_application_data: &std::path::Path) -> Result<(), BridgeError> {
++        tools.bind_tool_acquisition_document(&self.saved, document, native_application_data)
+     }
+     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
+     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -219,6 +219,7 @@
+     pub(crate) project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner,
+     pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
+     pub(crate) artifact_inspection: crate::saved_command_owner::SavedCommandOwner,
++    pub(crate) tool_acquisition: crate::saved_command_owner::SavedCommandOwner,
+     installed_project_selection_available: bool,
+     installed_project_path_selection_available: bool,
+     installed_android_source_selection_available: bool,
+@@ -288,6 +289,7 @@
+             // custody or qualification. The renderer cannot select this profile.
+             android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled()),
+             artifact_inspection: crate::saved_command_owner::SavedCommandOwner::artifact_inspection(runtime.clone()),
++            tool_acquisition: crate::saved_command_owner::SavedCommandOwner::tool_acquisition(runtime.clone()),
+             ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
+             installed_project_selection_available,
+             installed_project_path_selection_available,
+@@ -715,6 +717,9 @@
+                     Reason::CleanupUnknown
+                 } else { Reason::SourceRefused }))?;
+         }
++        self.tool_acquisition.tool_acquisition_check_project_root(&proof).map_err(|error|
++            AssetError::new(if error.code == "cleanup_unknown" { Reason::CleanupUnknown }
++                else { Reason::ExclusionUnconfirmed }))?;
+         let mut projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+         if self.project_generation.load(Ordering::SeqCst) != expected_generation { return Err(AssetError::new(Reason::ContextStale)); }
+         if let Some(existing) = projects.values().find(|entry| entry.root == proof.path()) {
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -82,6 +82,9 @@
+ #[path = "asset_session_tool_memory.rs"]
+ mod tool_memory;
+ pub(crate) use tool_memory::ToolAcquisitionMemoryAdmission;
++#[path = "asset_session_tool_acquisition.rs"]
++mod tool_acquisition;
++pub(crate) use tool_acquisition::ToolAcquisitionDocumentInput;
+ #[path = "asset_session_store_material.rs"]
+ mod store_material;
+ pub(crate) use store_material::{SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
+@@ -6032,10 +6035,7 @@
+         // admits this picker. Its SourceBook proves both physical directions;
+         // publication rematches that marker against the then-current host.
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        let application = self.inner.bridge.application_service.native_exclusion_root().map_err(|error|
+-            AssetError::new(if error == crate::service_protocol::Error::StateUnknown {
+-                Reason::CleanupUnknown
+-            } else { Reason::ExclusionUnconfirmed }))?;
++        let application = self.tool_application_exclusion_root(&state)?;
+         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+         let application = None;
+         let mut origins = Vec::new(); origins.try_reserve_exact(state.records.len()).map_err(|_| AssetError::new(Reason::Capacity))?;

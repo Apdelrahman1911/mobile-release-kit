@@ -647,5 +647,163 @@ class IosArtifactTests(unittest.TestCase):
                     owner.restore()
 
 
+    def test_artifact_observation_keeps_actual_signing_dates_and_saved_policy_separate(self) -> None:
+        """Real observer/pure policy bodies, inert original native/snapshot ports."""
+        from contextlib import nullcontext
+        from mobile_release import ios
+        from mobile_release.ios_artifacts import _Application, _File
+
+        fixed_now = datetime(2026, 10, 9, tzinfo=timezone.utc)
+        certificate = b"actual signer certificate"
+        signer = hashlib.sha256(certificate).hexdigest()
+        root = Path("/owned-snapshot/Payload/Reader.app")
+        fields = {
+            "CFBundleIdentifier": ("str", "com.example.reader"),
+            "CFBundleShortVersionString": ("str", "1.2.3"),
+            "CFBundleVersion": ("str", "42"),
+            "CFBundleExecutable": ("str", "Reader"),
+        }
+        member = _File(1, "1" * 64, b"none")
+        macho = types.SimpleNamespace(cpu=16777228, subtype=0)
+        application = _Application({}, {"Reader": (macho,)}, (macho,),
+            {"Info.plist": ("dict", tuple(sorted(fields.items())))},
+            {"Info.plist": member, "Reader": member, "embedded.mobileprovision": member})
+        guard, saved = object(), object()
+        events = []
+        deadline = types.SimpleNamespace(check=lambda: events.append("deadline-check"))
+        operation = types.SimpleNamespace(inspection_deadline=deadline,
+            inputs=types.SimpleNamespace(config=saved), _ipa_layout=(root, application),
+            require=lambda config, cancellation: self.assertEqual((config, cancellation), (saved, guard)),
+            inspection_checkpoint=lambda: events.append("post"),
+            data_refusal=lambda error: events.append(("known-refusal", type(error))),
+            snapshot=types.SimpleNamespace(assert_unchanged=lambda: events.append("snapshot-post")))
+        profile = self._profile(certificate)
+        expiry = [False]
+
+        def actual_leaf_dates(*args, **kwargs):
+            self.assertNotIn("expected_team_id", kwargs)
+            self.assertNotIn("expected_fingerprint", kwargs)
+            kwargs["_observation"].interval(ios._certificate_validity_bounds,
+                ["Jan  1 00:00:00 2020 GMT"],
+                ["Jan  1 00:00:00 2021 GMT" if expiry[0] else "Jan  1 00:00:00 2099 GMT"])
+            return signer
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(ios, "_artifact_operation", return_value=operation))
+            stack.enter_context(patch.object(ios, "_artifact_tool", side_effect=lambda name, dl: "/owned/" + name))
+            stack.enter_context(patch.object(ios, "_utc_now", return_value=fixed_now))
+            scratch = stack.enter_context(patch.object(ios, "_native_scratch",
+                side_effect=lambda **kwargs: nullcontext((Path("/owned-scratch"), guard))))
+            leaf = stack.enter_context(patch.object(ios, "_codesign_fingerprint", side_effect=actual_leaf_dates))
+            stack.enter_context(patch.object(ios, "_codesign_team", return_value="ABCDE12345"))
+            stack.enter_context(patch.object(ios, "_nested_codesign_identities", return_value=[]))
+            profile_read = stack.enter_context(patch.object(ios, "_profile_details", return_value=profile))
+            stack.enter_context(patch.object(ios, "_codesign_entitlements", return_value=self._signed_entitlements()))
+            result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+            self.assertTrue(result.structure_ok)
+            self.assertEqual((result.bundle_id, result.version_name, result.version_build),
+                             ("com.example.reader", "1.2.3", "42"))
+            self.assertEqual((result.signer_sha256, result.team_id), (signer, "ABCDE12345"))
+            self.assertEqual((result.signature_ok, result.profile_ok, result.current_validity_ok), (True, True, True))
+            self.assertEqual((result.signature_reason, result.profile_reason, result.current_validity_reason),
+                             ("none", "none", "none"))
+            self.assertIn("snapshot-post", events)
+            self.assertIn("deadline-check", events)
+            expiry[0] = True
+            result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+            self.assertEqual((result.signature_ok, result.profile_ok, result.current_validity_ok), (True, True, False))
+            self.assertEqual(result.current_validity_reason, "signing-time-invalid")
+            expiry[0] = False
+            profile["ExpirationDate"] = datetime(2021, 1, 1, tzinfo=timezone.utc)
+            result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+            self.assertEqual((result.signature_ok, result.profile_ok, result.current_validity_ok), (True, True, False))
+            with self.assertRaises(ValidationError):
+                ios._profile_validity(profile)  # Ordinary validator never borrows the observation exception.
+            profile["ExpirationDate"] = datetime(2099, 1, 1, tzinfo=timezone.utc)
+            profile["Entitlements"]["beta-reports-active"] = False
+            result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+            self.assertTrue(result.signature_ok)
+            self.assertFalse(result.profile_ok)
+            self.assertEqual(result.profile_reason, "profile-invalid")
+            self.assertIsNone(result.current_validity_ok)
+            profile["Entitlements"]["beta-reports-active"] = True
+            with patch.object(ios, "_artifact_tool", return_value=None):
+                before = leaf.call_count, scratch.call_count, profile_read.call_count
+                result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+                self.assertEqual(before, (leaf.call_count, scratch.call_count, profile_read.call_count))
+                self.assertEqual((result.signature_ok, result.profile_ok, result.current_validity_ok), (None, None, None))
+                self.assertEqual(result.signature_reason, "tools-unavailable")
+            with patch.object(ios, "_artifact_tool", side_effect=lambda name, dl: None if name == "security" else "/owned/" + name):
+                result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+                self.assertTrue(result.signature_ok)
+                self.assertIsNone(result.profile_ok)
+                self.assertEqual(result.profile_reason, "tools-unavailable")
+            leaf.side_effect = ios._ArtifactIPARejection("signature", "known negative")
+            result = ios.inspect_artifact_ipa(operation, cancellation=guard)
+            self.assertFalse(result.signature_ok)
+            self.assertEqual(result.signature_reason, "signature-invalid")
+            self.assertIsNone(result.profile_ok)
+            for failure in (ValidationError("provider original failed"),
+                            ios.ProcessCleanupError("unconfirmed original cleanup")):
+                leaf.side_effect = failure
+                with self.assertRaises(type(failure)) as caught:
+                    ios.inspect_artifact_ipa(operation, cancellation=guard)
+                self.assertIs(caught.exception, failure)
+            refusal = ios.ProcessCleanupError("negative cannot settle original")
+            leaf.side_effect = ios._ArtifactIPARejection("signature", "known negative")
+            with patch.object(operation, "data_refusal", side_effect=refusal):
+                with self.assertRaises(ios.ProcessCleanupError) as caught:
+                    ios.inspect_artifact_ipa(operation, cancellation=guard)
+                self.assertIs(caught.exception, refusal)
+
+    def test_artifact_policy_extractions_and_layout_reuse_preserve_closed_boundaries(self) -> None:
+        from mobile_release import ios
+        from mobile_release.ios_artifacts import _Application, _File
+
+        profile = self._profile(b"certificate")
+        ios._ipa_profile_policy(profile, "com.example.reader", "ABCDE12345")
+        with self.assertRaises(ValidationError):
+            ios._ipa_profile_policy(profile, "com.different.app", "ABCDE12345")
+        with self.assertRaises(ValidationError):
+            ios._ipa_profile_policy(profile, "com.example.reader", "ZZZZZ12345")
+        self.assertTrue(ios._ipa_signed_entitlements_match(self._signed_entitlements(), "com.example.reader", "ABCDE12345"))
+        self.assertFalse(ios._ipa_signed_entitlements_match(self._signed_entitlements(**{"get-task-allow": 0}),
+                                                         "com.example.reader", "ABCDE12345"))
+        self.assertFalse(ios._ipa_signed_entitlements_match(self._signed_entitlements(), "com.different.app", "ABCDE12345"))
+        root = Path("/owned/Payload/Reader.app")
+        leaf = _File(8, "1" * 64, b"\xcf\xfa\xed\xfe")
+        slices = (types.SimpleNamespace(cpu=16777228, subtype=0), types.SimpleNamespace(cpu=12, subtype=9))
+        application = _Application({}, {"Reader": slices}, slices,
+            {"Info.plist": ("dict", (("CFBundleExecutable", ("str", "Reader")),))}, {"Reader": leaf})
+        operation = types.SimpleNamespace(inspection_deadline=object(), inputs=types.SimpleNamespace(config=object()),
+            _ipa_layout=(root, application), require=lambda *args: None,
+            inspection_checkpoint=lambda: None, data_refusal=lambda error: None)
+        with patch.object(ios, "_artifact_operation", return_value=operation), \
+                patch.object(Path, "rglob", side_effect=AssertionError("no second walker")), \
+                patch.object(Path, "read_bytes", side_effect=AssertionError("no second plist reader")):
+            observed = ios._ArtifactIPASigning(operation, object())
+            self.assertEqual(observed.executable(root), root / "Reader")
+            self.assertEqual(observed.architectures(root), ("16777228,0", "12,9"))
+            with self.assertRaises(ValidationError):
+                observed.relative(Path("/foreign/Reader"))
+            with patch.object(ios, "_ipa_native_tools", return_value=True), \
+                    patch.object(ios, "_run_native", return_value=types.SimpleNamespace(returncode=1)):
+                with self.assertRaises(ios._ArtifactIPARejection) as rejected:
+                    ios._codesign_fingerprint(root, Path("/scratch"), deadline=operation.inspection_deadline,
+                                              _observation=observed)
+                self.assertEqual(rejected.exception.kind, "signature")
+                with self.assertRaises(ValidationError) as legacy:
+                    ios._codesign_fingerprint(root, Path("/scratch"), deadline=operation.inspection_deadline)
+                self.assertIs(type(legacy.exception), ValidationError)
+            operation._ipa_layout = (root, _Application({}, {}, (), {}, {}))
+            with self.assertRaises(ValidationError):
+                observed.check()
+        for before, after in (([], []), (["bad"], ["bad"]),
+                              (["Jan  1 00:00:00 2099 GMT"], ["Jan  1 00:00:00 2020 GMT"])):
+            with self.assertRaises(ValidationError):
+                ios._certificate_validity_bounds(before, after)
+        with self.assertRaises(ValueError):
+            ios._ArtifactIPARejection("authority", "not a DATA rejection kind")
+
 if __name__ == "__main__":
     unittest.main()

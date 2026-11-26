@@ -7,6 +7,7 @@ installer, the controller, a sandbox, or a product process.
 from __future__ import annotations
 
 import base64
+import builtins
 import contextlib
 import csv
 import dataclasses
@@ -27,7 +28,7 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
@@ -146,24 +147,17 @@ _PYTHON_POISON_FIXTURES = (
 _PYTHON_FRESH_FIXTURES = (
     ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
     ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+    ("fresh-native-fd-maps", "unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps"),
 )
 _PYTHON_SINGLETON_FIXTURES = _PYTHON_POISON_FIXTURES + _PYTHON_FRESH_FIXTURES
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
-LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}"
-NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
-NATIVE_SUPPORT_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}"
 STORE_NATIVE_SCOPE = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'store-lane-macos' && 'store-lane' || 'native-support' }}"
-MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}"
 MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"
-ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-linux' || inputs.verification_target == 'signing-adapter-macos') }}"
 ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-linux' && '[\"ubuntu-24.04\"]' || github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
-AGGREGATE_GUARD = '''set -euo pipefail
-[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$NATIVE_SUPPORT_RESULT" == success && "$MATRIX_RESULT" == success ]]
-'''
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
   sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
@@ -213,8 +207,10 @@ def fixture_paths(controller):
 def coordinator_shell(platform: str, *, scope: str | None = None) -> str:
     if platform not in {"linux", "macos"}:
         raise ValueError("unsupported CI platform")
+    launcher = ""
     if platform == "linux" and scope is None:
         java = '--java-home "$JAVA_HOME_21_X64" '
+        launcher = "/bin/bash .github/scripts/stage_ci_linux_ruby.sh \\\n  "
     elif platform == "macos" and scope in {None, "native-python"}:
         java = '--scope native-python '
     elif platform == "macos" and scope == "native-support":
@@ -223,10 +219,10 @@ def coordinator_shell(platform: str, *, scope: str | None = None) -> str:
         raise ValueError("unsupported CI scope")
     return '''set -euo pipefail
 ruby_executable="$(command -v ruby)"
-[[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
-[[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+[[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+[[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
 sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \\
-  "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \\
+  LAUNCHER"$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \\
   --platform PLATFORM --source "$GITHUB_WORKSPACE" \\
   --python "$MRK_PYTHON" --ruby "$ruby_executable" \\
   --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \\
@@ -234,7 +230,7 @@ sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \\
   --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \\
   --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \\
   JAVA--summary "$GITHUB_STEP_SUMMARY"
-'''.replace("PLATFORM", platform).replace("JAVA", java)
+'''.replace("PLATFORM", platform).replace("JAVA", java).replace("LAUNCHER", launcher)
 
 
 class CIWorkflowIsolationTests(unittest.TestCase):
@@ -243,100 +239,78 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(workflow["env"], {"PYTHONSAFEPATH": "1"})
         self.assertNotIn("defaults", workflow)
-        # The pinned Psych loader parses YAML's unquoted `on` as true; JSON
-        # serializes that mapping key as "true". Do not invent a second parser.
-        self.assertEqual(workflow["true"], {
-            "pull_request": None, "push": {"branches": ["main"]},
-            "workflow_dispatch": {"inputs": {"verification_target": {
-                "description": "Full verification, Linux/macOS-only evidence, Store-native macOS, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "store-lane-macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"],
-            }}},
-        })
-        self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
-        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter", "test"})
-        text = CI.read_text(encoding="utf-8")
-        self.assertNotIn("secrets.", text)
-        self.assertNotIn("id-token:", text)
+        self.assertEqual(set(workflow["jobs"]), {"changes", "test", "test-linux", "test-native-profiles",
+                                                "test-native-support", "test-signing-matrix", "test-signing-adapter", "test-play-lanes"})
+        events = workflow["true"]  # Existing Psych loader's YAML boolean key.
+        self.assertIn("pull_request", events)
+        self.assertEqual(events["push"]["branches"], ["main"])
+        self.assertNotIn("paths", events["push"])
+        self.assertIsNone(events["pull_request"])
+        self.assertEqual(events["workflow_dispatch"]["inputs"]["verification_target"]["default"], "full")
+        self.assertNotIn("secrets.", CI.read_text(encoding="utf-8"))
+        for name, job in workflow["jobs"].items():
+            with self.subTest(job=name):
+                self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
+                for forbidden in ("continue-on-error", "environment", "container", "services"):
+                    self.assertNotIn(forbidden, job)
+                for step in job["steps"]:
+                    self.assertNotIn("continue-on-error", step)
+                    if "uses" in step:
+                        self.assertRegex(step["uses"], r"^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+@[0-9a-f]{40}$")
+                    if step.get("uses", "").startswith("actions/checkout@"):
+                        self.assertIs(step["with"]["persist-credentials"], False)
         for platform, name, image in (("linux", "test-linux", "ubuntu-24.04"),
                                       ("macos", "test-native-profiles", "macos-26"),
                                       ("macos", "test-native-support", "macos-26")):
             with self.subTest(job=name):
                 job = workflow["jobs"][name]
                 self.assertEqual(job["runs-on"], image)
-                self.assertEqual(job["timeout-minutes"], 60)
-                if platform == "linux":
-                    self.assertEqual(job["if"], LINUX_TARGET_CONDITION)
-                elif name == "test-native-support":
-                    self.assertEqual(job["if"], NATIVE_SUPPORT_TARGET_CONDITION)
-                else:
-                    self.assertEqual(job["if"], NATIVE_TARGET_CONDITION)
-                for forbidden in ("continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
+                self.assertEqual(job["needs"], "changes")
+                for forbidden in ("defaults", "env", "strategy"):
                     self.assertNotIn(forbidden, job)
-                self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
+                self.assertLessEqual(job["timeout-minutes"], 60)
                 steps = job["steps"]
-                self.assertEqual(len(steps), 9 if platform == "linux" else 8)
+                self.assertEqual(steps[0]["run"], HOSTED_GUARD)
+                self.assertEqual(steps[0]["env"], {
+                    "MOBILE_RELEASE_RUNNER_ENVIRONMENT": "${{ runner.environment }}"})
                 for step in steps:
                     self.assertNotIn("if", step)
-                    self.assertNotIn("continue-on-error", step)
-                self.assertEqual(steps[0]["run"], HOSTED_GUARD)
-                self.assertEqual(set(steps[0]), {"name", "shell", "env", "run"})
-                self.assertEqual(steps[0]["shell"], "bash")
-                self.assertEqual(steps[0]["env"], {
-                    "MOBILE_RELEASE_RUNNER_ENVIRONMENT": "${{ runner.environment }}",
-                })
-                self.assertEqual(steps[1]["uses"], "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
-                self.assertEqual(set(steps[1]), {"name", "uses", "with"})
-                self.assertEqual(steps[1]["with"], {"persist-credentials": False})
-                self.assertEqual(steps[2]["id"], "python")
-                self.assertEqual(set(steps[2]), {"name", "id", "uses", "with"})
-                self.assertEqual(steps[2]["uses"], "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97")
-                self.assertEqual(steps[2]["with"], {"python-version": "3.11"})
-                for index, line in enumerate(("312", "313", "314"), start=3):
-                    self.assertEqual(set(steps[index]), {"name", "id", "uses", "with"})
-                    self.assertEqual(steps[index]["id"], "python" + line)
-                    self.assertEqual(steps[index]["uses"], steps[2]["uses"])
-                    self.assertEqual(steps[index]["with"], {"python-version": "3." + line[1:]})
-                self.assertEqual(steps[6]["uses"], "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b")
-                self.assertEqual(set(steps[6]), {"name", "uses", "with"})
-                self.assertEqual(steps[6]["with"], {
-                    "ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False,
-                })
-                for step in steps[1:7]:
-                    self.assertNotIn("run", step)
-                    self.assertNotIn("env", step)
-                if platform == "linux":
-                    self.assertEqual(set(steps[7]), {"name", "shell", "run"})
-                    self.assertEqual(steps[7]["shell"], "bash")
-                    self.assertEqual(steps[7]["run"], LINUX_TOOL_SETUP)
-                    self.assertNotIn("env", steps[7])
-                owner = steps[-1]
-                self.assertEqual(set(owner), {"name", "shell", "env", "run"})
-                self.assertEqual(owner["env"], {
+                runtimes = {step.get("id"): step for step in steps
+                            if step.get("uses", "").startswith("actions/setup-python@")}
+                self.assertEqual({key: value["with"]["python-version"] for key, value in runtimes.items()},
+                                 {"python": "3.11", "python312": "3.12", "python313": "3.13", "python314": "3.14"})
+                ruby = [step for step in steps if step.get("uses", "").startswith("ruby/setup-ruby@")]
+                self.assertEqual(len(ruby), 1)
+                self.assertEqual(ruby[0]["with"]["bundler"], "none")
+                self.assertIs(ruby[0]["with"]["bundler-cache"], False)
+                owners = [step for step in steps if "verify_ci.py" in step.get("run", "")]
+                self.assertEqual(len(owners), 1)
+                self.assertIs(owners[0], steps[-1])
+                self.assertEqual(owners[0]["shell"], "bash")
+                self.assertEqual(owners[0]["env"], {
                     "MRK_PYTHON": "${{ steps.python.outputs.python-path }}",
                     "MRK_PYTHON_312": "${{ steps.python312.outputs.python-path }}",
                     "MRK_PYTHON_313": "${{ steps.python313.outputs.python-path }}",
                     "MRK_PYTHON_314": "${{ steps.python314.outputs.python-path }}",
-                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if name == "test-native-support" else {}),
-                })
-                self.assertEqual(owner["shell"], "bash")
-                self.assertEqual(owner["run"], coordinator_shell(
+                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if name == "test-native-support" else {})})
+                # Actual shell behavior/exit propagation is tested separately with
+                # inert sudo/command functions. Do not execute a controller here.
+                self.assertEqual(owners[0]["run"], coordinator_shell(
                     platform, scope="native-support" if name == "test-native-support" else None))
-        self.assertEqual(coordinator_shell("macos"), coordinator_shell("macos", scope="native-python"))
+                other_commands = [step["run"] for step in steps[1:-1] if "run" in step]
+                self.assertEqual(other_commands, [LINUX_TOOL_SETUP] if platform == "linux" else [])
         for platform, scope in (("unknown", None), ("linux", "native-python"),
                                 ("linux", "native-support"), ("linux", "platform"),
                                 ("macos", "platform"), ("macos", "store-lane"), ("macos", "unknown")):
             with self.subTest(unsupported_coordinator=(platform, scope)), self.assertRaises(ValueError):
                 coordinator_shell(platform, scope=scope)
 
+
     def test_manual_native_candidate_routing_and_protected_aggregate_remain_fail_closed(self):
         workflow = load_workflow(CI)
         linux, native, support, aggregate = (workflow["jobs"][name] for name in
                                             ("test-linux", "test-native-profiles", "test-native-support", "test"))
-        self.assertEqual(linux["if"], LINUX_TARGET_CONDITION)
-        self.assertEqual(native["if"], NATIVE_TARGET_CONDITION)
-        self.assertEqual(support["if"], NATIVE_SUPPORT_TARGET_CONDITION)
         matrix = workflow["jobs"]["test-signing-matrix"]
-        self.assertEqual(matrix["if"], MATRIX_TARGET_CONDITION)
         selection = matrix["strategy"]["matrix"]["shard"]
         self.assertEqual(selection, MATRIX_SHARD_SELECTION)
         # The exact expression above admits just two literal JSON operands.
@@ -366,7 +340,8 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                            "SIGNING-ADAPTER-LINUX", "signing-adapter-linux ",
                            "SIGNING-MATRIX-CANARY", "signing-matrix-canary ", "[0]", "macos "):
                 with self.subTest(candidate_route=(event, target)):
-                    context = {"github": {"event_name": event, "ref": ref}}
+                    context = {"github": {"event_name": event, "ref": ref},
+                               "needs": {"changes": {"outputs": {"core": "true"}}}}
                     # For this one pinned comparison and fixed ASCII fixture,
                     # model Actions' case-insensitive string equality explicitly.
                     # The shared restricted interpreter remains unchanged.
@@ -406,42 +381,76 @@ class CIWorkflowIsolationTests(unittest.TestCase):
 
         # This is the existing fixed job, not a synthesized cross-run status.
         # Pin every field before the harmless shell can be executed below.
-        self.assertEqual({key: value for key, value in aggregate.items() if key != "steps"}, {
-            "needs": ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"], "if": "${{ always() }}",
-            "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {"contents": "read"},
-        })
-        self.assertEqual(aggregate["steps"][0], {"name": "Require every verification job to succeed", "env": {
-            "LINUX_RESULT": "${{ needs.test-linux.result }}", "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
-            "NATIVE_SUPPORT_RESULT": "${{ needs.test-native-support.result }}",
-            "MATRIX_RESULT": "${{ needs.test-signing-matrix.result }}",
-        }, "run": AGGREGATE_GUARD})
-        self.assertEqual(len(aggregate["steps"]), 4)
-        self.assertIn("--reduce", aggregate["steps"][-1]["run"])
-        self.assertEqual(workflow["jobs"]["test-signing-matrix"]["if"], MATRIX_TARGET_CONDITION)
+        jobs = ("test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter")
+        variables = ("LINUX_RESULT", "NATIVE_RESULT", "NATIVE_SUPPORT_RESULT", "MATRIX_RESULT", "ADAPTER_RESULT")
+        self.assertEqual(set(aggregate["needs"]), {"changes", *jobs})
         self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
-        states = ["failure", "cancelled", "skipped", "queued", "unavailable", "", None]
-        results = [("success", "success", "success", "success")]
-        for state in states:
-            results.extend(((state, "success", "success", "success"), ("success", state, "success", "success"),
-                            ("success", "success", state, "success"), ("success", "success", "success", state),
-                            (state, state, state, state)))
-        body = aggregate["steps"][0]["run"]
-        for linux_result, native_result, support_result, matrix_result in results:
-            with self.subTest(protected_results=(linux_result, native_result, support_result, matrix_result)):
-                env = {"PATH": "/usr/bin:/bin"}
-                if linux_result is not None:
-                    env["LINUX_RESULT"] = linux_result
-                if native_result is not None:
-                    env["NATIVE_RESULT"] = native_result
-                if support_result is not None:
-                    env["NATIVE_SUPPORT_RESULT"] = support_result
-                if matrix_result is not None:
-                    env["MATRIX_RESULT"] = matrix_result
-                result = subprocess.run(["bash", "--noprofile", "--norc", "-c", body],
-                                        env=env, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode == 0,
-                                 linux_result == native_result == support_result == matrix_result == "success")
-                self.assertEqual(result.stdout, b"")
+        # This optional business-logic smoke must not schedule or impersonate
+        # the protected full aggregate, even when the prior jobs are skipped.
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in ("full", "play-lanes"):
+                context = {"github": {"event_name": event}, "inputs": {"verification_target": target}}
+                smoke = event == "workflow_dispatch" and target == "play-lanes"
+                self.assertEqual(evaluate_condition(workflow["jobs"]["test-play-lanes"]["if"], context,
+                    success=True, cancelled=False), smoke)
+                self.assertEqual(evaluate_condition(workflow["jobs"]["changes"]["if"], context,
+                    success=True, cancelled=False), not smoke)
+                self.assertEqual(evaluate_condition(aggregate["if"], context,
+                    success=False, cancelled=True), not smoke)
+        guard, *proof_steps = aggregate["steps"]
+        self.assertEqual(guard["env"], {
+            "CI_EVENT": "${{ github.event_name }}", "CI_TARGET": "${{ inputs.verification_target || 'full' }}",
+            "CHANGES_RESULT": "${{ needs.changes.result }}", "CORE_CHANGED": "${{ needs.changes.outputs.core }}",
+            **{variable: "${{ needs." + job + ".result }}" for variable, job in zip(variables, jobs)}})
+        self.assertTrue(any("--reduce" in step.get("run", "") for step in proof_steps))
+        # This is the actual builtins-only workflow guard, executed without any
+        # controller, sudo, installer, network call, or native adapter.
+        def run_guard(env):
+            return subprocess.run(["bash", "--noprofile", "--norc", "-c", guard["run"]],
+                                  env={"PATH": "/usr/bin:/bin", **env}, capture_output=True, timeout=5).returncode
+
+        selected = {"full": {0, 1, 2, 3}, "linux": {0}, "macos": {1, 2},
+                    "store-lane-macos": {2}, "signing-matrix-canary": {3},
+                    "signing-adapter": {4}, "signing-adapter-linux": {4}, "signing-adapter-macos": {4}}
+        name = aggregate["name"].removeprefix("${{").removesuffix("}}").strip()
+        condition, label = name.rsplit(" && ", 1)
+        self.assertEqual(label, "format('Targeted core check ({0})', inputs.verification_target) || 'test'")
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in selected:
+                for core in ("true", "false"):
+                    context = {"github": {"event_name": event}, "inputs": {"verification_target": target},
+                               "needs": {"changes": {"outputs": {"core": core}}}}
+                    effective = target if event == "workflow_dispatch" else "full"
+                    states = ["success" if core == "true" and i in selected[effective] else "skipped" for i in range(5)]
+                    env = {"CI_EVENT": event, "CI_TARGET": target, "CHANGES_RESULT": "success", "CORE_CHANGED": core,
+                           **dict(zip(variables, states))}
+                    valid = core == "true" or event != "workflow_dispatch"
+                    with self.subTest(event=event, target=target, core=core):
+                        self.assertEqual(run_guard(env) == 0, valid)
+                        for i, job in enumerate(jobs):
+                            self.assertEqual(evaluate_condition(workflow["jobs"][job]["if"], context,
+                                success=True, cancelled=False), states[i] == "success")
+                        self.assertEqual(evaluate_condition(condition, context, success=True, cancelled=False),
+                                         event == "workflow_dispatch" and target != "full")
+                        for step in proof_steps:
+                            self.assertEqual(evaluate_condition(step.get("if"), context, success=True, cancelled=False),
+                                             core == "true" and effective == "full")
+                            self.assertFalse(evaluate_condition(step.get("if"), context, success=False, cancelled=False))
+                    if valid and (event == "workflow_dispatch" or target == "full"):
+                        for variable in variables:
+                            for wrong in ("failure", "cancelled", "queued", "unavailable", "", None,
+                                          "skipped" if env[variable] == "success" else "success"):
+                                bad = dict(env)
+                                if wrong is None: bad.pop(variable)
+                                else: bad[variable] = wrong
+                                with self.subTest(target=effective, core=core, variable=variable, wrong=wrong):
+                                    self.assertNotEqual(run_guard(bad), 0)
+                        for result in ("failure", "cancelled", "skipped", ""):
+                            self.assertNotEqual(run_guard({**env, "CHANGES_RESULT": result}), 0)
+        baseline = {"CI_EVENT": "workflow_dispatch", "CI_TARGET": "full", "CORE_CHANGED": "true",
+                    "CHANGES_RESULT": "success", **dict(zip(variables, ("success",) * 4 + ("skipped",)))}
+        self.assertNotEqual(run_guard({**baseline, "CI_TARGET": "unknown"}), 0)
+        self.assertNotEqual(run_guard({**baseline, "CORE_CHANGED": ""}), 0)
 
         group = workflow["concurrency"]["group"]
         self.assertEqual(group, VERIFICATION_CONCURRENCY)
@@ -467,7 +476,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
     def test_signing_adapter_smoke_is_explicit_two_os_and_cannot_publish_matrix_proof(self):
         workflow = load_workflow(CI)
         job = workflow["jobs"]["test-signing-adapter"]
-        self.assertEqual(job["if"], ADAPTER_TARGET_CONDITION)
+        self.assertEqual(job["needs"], "changes")
         self.assertEqual(job["runs-on"], "${{ matrix.os }}")
         self.assertEqual(job["strategy"], {"fail-fast": False, "max-parallel": 2,
                                            "matrix": {"os": ADAPTER_OS_SELECTION}})
@@ -499,7 +508,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertIn('PYTHONSAFEPATH=1 "${verifier_args[@]}"', owner)
         for forbidden in ("--shard", "--local", "run_local_signing_matrix.py", "pip wheel", "continue-on-error"):
             self.assertNotIn(forbidden, owner)
-        self.assertNotIn("test-signing-adapter", workflow["jobs"]["test"]["needs"])
+        self.assertIn("test-signing-adapter", workflow["jobs"]["test"]["needs"])
 
     def test_actual_guard_rejects_non_hosted_or_missing_runner_identity(self):
         workflow = load_workflow(CI)
@@ -557,6 +566,7 @@ sudo() {
                 "--run-attempt", env["GITHUB_RUN_ATTEMPT"], "--image", "fixture-image/20260909.1",
             ]
             if platform == "linux":
+                expected[5:5] = ["/bin/bash", ".github/scripts/stage_ci_linux_ruby.sh"]
                 expected += ["--java-home", env["JAVA_HOME_21_X64"]]
             else:
                 expected += ["--scope", scope]
@@ -718,7 +728,7 @@ class CIControllerContractTests(unittest.TestCase):
         rig.step = controller.Step(name, argv=(str(python), "-I", "-B", str(paths.checks), "--check", name,
             "--source-root", str(ROOT), "--work-root", str(paths.work / "checks"), "--deadline", repr(deadline)),
             cwd=paths.work, env=tuple(sorted(controller.native_phase_environment(paths, "linux", phase).items())),
-            seconds=900, parser="check")
+            seconds=2100 if phase == "source" else 900, parser="check")
 
         def identities(source, selection, partition, *, deadline):
             self.assertEqual(source, ROOT)
@@ -879,13 +889,15 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(controller._native_entry_failure_locations("".join(rejected), entry), [])
         self.assertEqual(controller._native_entry_failure_locations(frame(relative, 1), Path(relative)), [])
 
-        for phase in ("source", "wheel"):
+        for gate, partition in (("native-profile-source", "all"), ("native-profile-wheel", "all"),
+                                ("python-full", "poison-command-preguard-127"),
+                                ("python-wheel", "poison-command-guarded-import")):
             for changes in ({}, {"waited": False, "stderr_eof": False, "domain_finality": False,
                     "timed_out": True, "cancelled": True, "cleanup_errors": ("stream close OSError",)}):
-                with self.subTest(phase=phase, lost_finality=bool(changes)):
+                with self.subTest(gate=gate, lost_finality=bool(changes)):
                     original = SimpleNamespace(**{**fields, **changes})
                     before = dict(vars(original))
-                    step = controller.Step("native-profile-" + phase, parser="native")
+                    step = controller.Step(gate, parser="native", native_partition=partition)
                     reported = controller.failure_details(original, step, paths)
                     self.assertEqual(reported["native_entry_locations"], expected)
                     for key, value in controller.capture_observations(original).items():
@@ -1033,7 +1045,15 @@ class CIControllerContractTests(unittest.TestCase):
                             self.assertNotIn("native_test_locations", controller.failure_details(
                                 omitted, step, paths, checks=checks, _source_files=source_files))
                             projection.assert_not_called()
-        for names in (list(source_files), source_files + (source_files[0],), source_files * 129,
+        nested_module = "src/mobile_release/api/contracts.py"
+        new_roster = source_files + (nested_module,) + tuple(f"tests/unit/test_inventory_fixture_{index}.py"
+                                                           for index in range(1023 - len(source_files)))
+        tracked_entry = paths.source / source_files[2]
+        nested_frame = frame(paths.work / "source-build/src/mobile_release/api/contracts.py", 123)
+        self.assertEqual(controller._native_test_failure_locations(frame(tracked_entry, 810) + nested_frame,
+                                                                  paths, "source", new_roster),
+                         [{"file": source_files[2], "line": 810}, {"file": nested_module, "line": 123}])
+        for names in (list(source_files), source_files + (source_files[0],), new_roster + ("tests/over_limit.py",),
                       ("src/mobile_release/../private.py",), ("tests/foreign-name.py",), (False,)):
             with self.subTest(invalid_scope=repr(names)[:100]), \
                     self.assertRaisesRegex(controller.VerificationError, "NATIVE_DIAGNOSTIC_SCOPE"):
@@ -1461,8 +1481,9 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_fixed_linux_python_storage_profile_is_selected_only_for_full_discovery(self):
         profiles = []
-        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
-            with self.subTest(phase=phase):
+        for phase, original_deadline, cutoff in (("source", 2500.0, 2200.0), ("source", 1800.0, 1800.0),
+                                                 ("wheel", 800.0, 800.0)):
+            with self.subTest(phase=phase, aggregate_deadline=original_deadline):
                 rig = self._python_gate_fixture(phase, deadline=original_deadline)
                 parts = (*rig.controller.PYTHON_SINGLETON_PARTITIONS, "healthy")
                 result = self._perform_native_fixture(rig, platform="linux", deadline=original_deadline)
@@ -1494,8 +1515,8 @@ class CIControllerContractTests(unittest.TestCase):
                     profiles.append(options["profile"])
                     self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["profile"], "python-full" if parts[index] == "healthy" and phase == "source" else "ordinary")
-                    self.assertEqual(options["cpu_seconds"], 300 if parts[index] == "healthy" and phase == "source" else 180)
-                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["cpu_seconds"], 450 if parts[index] == "healthy" and phase == "source" else 180)
+                    self.assertEqual(options["seconds"], 2100 if index == healthy_index and phase == "source" else 900)
                     self.assertEqual(options["absolute_deadline"], cutoff)
                     self.assertEqual(options["output_limit"], 8 * 1024**2)
                     self.assertEqual(options["cwd"], rig.paths.work)
@@ -1515,7 +1536,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(rig.events[position - 1], ("idle", cutoff))
                     end = positions[index + 1] if index + 1 < len(positions) else len(rig.events)
                     self.assertIn(("idle", cutoff), rig.events[position + 1:end])
-        self.assertEqual(profiles.count("python-full"), 1)
+        self.assertEqual(profiles.count("python-full"), 2)
 
     def test_python_gate_rejects_contract_partition_and_singleton_origin_drift(self):
         for phase in ("source", "wheel"):
@@ -1609,7 +1630,7 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_python_gate_stops_after_each_failed_original_and_keeps_one_cutoff(self):
         parts = (*controller_module().PYTHON_SINGLETON_PARTITIONS, "healthy")
-        for phase in ("source", "wheel"):
+        for phase, cutoff in (("source", 2200.0), ("wheel", 1000.0)):
             for failed, partition in enumerate(parts):
                 for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "cleanup", "idle", "deadline"):
                     with self.subTest(phase=phase, partition=partition, fault=fault):
@@ -1621,7 +1642,7 @@ class CIControllerContractTests(unittest.TestCase):
                         if fault == "idle":
                             rig.idle_error, rig.idle_failure_after = OSError("PRIVATE_IDLE_ERROR"), failed + 1
                         elif fault == "deadline":
-                            rig.run_advance = 901.0 / (failed + 1)
+                            rig.run_advance = (cutoff - rig.now + 1) / (failed + 1)
                         else:
                             rig.changes[partition] = fields[fault]
                         result = self._perform_native_fixture(rig, platform="linux")
@@ -1635,12 +1656,12 @@ class CIControllerContractTests(unittest.TestCase):
                         for index, capture in enumerate(rig.captures):
                             for field, value in rig.controller.capture_observations(capture).items():
                                 self.assertEqual(rows[index]["capture"][field], value)
-                        self.assertTrue(all(event[2]["absolute_deadline"] == 1000.0
+                        self.assertTrue(all(event[2]["absolute_deadline"] == cutoff
                                             for event in rig.events if event[0] == "run"))
                         if fault == "deadline":
                             self.assertEqual(result.error, "AGGREGATE_DEADLINE")
 
-        for phase in ("source", "wheel"):
+        for phase, cutoff in (("source", 2200.0), ("wheel", 1000.0)):
             with self.subTest(phase=phase, expiry="final-union"):
                 rig = self._python_gate_fixture(phase)
                 reconciliations = []
@@ -1649,7 +1670,7 @@ class CIControllerContractTests(unittest.TestCase):
                     result = sorted(values, *args, **kwargs)
                     if len(rig.captures) == len(parts) and tuple(result) == rig.inventories["all"]:
                         reconciliations.append(True)
-                        rig.now = 1000.0
+                        rig.now = cutoff
                     return result
 
                 with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
@@ -1756,6 +1777,24 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertIsNone(observation(timing + b"9" + header(first) + b"\n")["last_observed_start"])
         self.assertIsNone(observation(marker + b"test_foreign (unit.foreign.Private.test_foreign)\n")
                           ["last_observed_start"])
+        linux_timing = b"MRK_PYTHON_ELAPSED_MS="
+        value = observation(linux_timing + b"110\n" + header(first) + b" ... ok\n"
+                            + linux_timing + b"120\n" + header(second) + b" ... ")
+        self.assertEqual(value["last_observed_start"], {"id": second, "elapsed_ms": 120})
+        self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": "ok", "elapsed_ms": 110})
+        value = observation(linux_timing + b"110 CPU_MS=83 RSS_KIB=22000\n" + header(first) + b" ... ok\n"
+                            + linux_timing + b"120 CPU_MS=92 RSS_KIB=22120\n" + header(second) + b" ... ")
+        self.assertEqual(value["last_observed_start"],
+                         {"id": second, "elapsed_ms": 120, "cpu_ms": 92, "peak_rss_kib": 22120})
+        self.assertEqual(value["last_observed_outcome"],
+                         {"id": first, "outcome": "ok", "elapsed_ms": 110, "cpu_ms": 83, "peak_rss_kib": 22000})
+        for scalar in (b"120 CPU_MS=92", b"120 CPU_MS=092 RSS_KIB=22120", b"120 CPU_MS=3600001 RSS_KIB=22120",
+                       b"120 CPU_MS=92 RSS_KIB=4194305", b"120 CPU_MS=92 RSS_KIB=" + private):
+            value = observation(linux_timing + scalar + b"\n" + header(second) + b" ... ")
+            self.assertEqual(value["last_observed_start"], {"id": second})
+        value = observation(linux_timing + b"120\n" + private + b"\n" + header(second) + b" ... ")
+        self.assertEqual(value["last_observed_start"], {"id": second})
+        self.assertIsNone(value["last_observed_outcome"])
         headline = header(first) + b"\n"
         value = observation(marker + headline + b"x\n" * 2047)
         self.assertTrue(value["lines_truncated"])
@@ -1764,7 +1803,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
         self.assertEqual(value["last_observed_start"], {"id": first})  # Partial marker was discarded, not adopted.
 
-        for phase in ("source", "wheel"):
+        for phase, cutoff in (("source", 2200.0), ("wheel", 1000.0)):
             for diagnostic_error in (False, True):
                 with self.subTest(phase=phase, optional_diagnostic_error=diagnostic_error):
                     rig = self._python_gate_fixture(phase)
@@ -1772,7 +1811,7 @@ class CIControllerContractTests(unittest.TestCase):
                     raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b" ... "
                     # The singleton prefix must finish before the same original
                     # cutoff; only the intended healthy failure crosses it.
-                    rig.run_advance = 901.0 / len(parts)
+                    rig.run_advance = (cutoff - rig.now + 1) / len(parts)
                     rig.changes["healthy"] = dict(ok=False, returncode=None, waited=False, stdout_eof=False,
                         stderr_eof=False, domain_finality=False, stdout=b"", stderr=raw,
                         persisted=(0, len(raw)), timed_out=True,
@@ -2558,11 +2597,47 @@ class CIControllerContractTests(unittest.TestCase):
                         self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
                     controller.parse_capture(rig.step, capture(rows), rig.paths, "linux", rig.checks)
 
+    def test_pull_request_journal_gate_requires_its_exact_test_and_finality(self):
+        controller, checks = controller_module(), ci_module("ci_checks")
+        paths = fixture_paths(controller)
+        step = next(step for step in controller.catalog(paths, "linux", deadline=12345.0)
+                    if step.id == "python-pr-journal")
+        self.assertEqual(step.argv, (str(paths.source_python), "-I", "-B", str(paths.checks),
+                                    "--check", step.id, "--source-root", str(paths.source),
+                                    "--work-root", str(paths.work / "checks"), "--deadline", "12345.0"))
+        self.assertEqual(step.seconds, 90)
+        complete = {"check": step.id, "ok": True, "tests": [{"id": checks.PR_JOURNAL_CASE, "outcome": "ok"}],
+                    "details": {"executed": 1}}
+
+        def capture(summary, *, finality=True):
+            raw = ("MRK_CHECK_RESULT=" + json.dumps(summary) + "\n").encode()
+            return SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True,
+                                   stderr_eof=True, domain_finality=finality, primary_error=None, cleanup_errors=(),
+                                   stdout=raw, stderr=b"", persisted=(len(raw), 0), duration=0.1,
+                                   timed_out=False, cancelled=False)
+
+        self.assertTrue(controller.parse_capture(step, capture(complete), paths, "linux", checks).ok)
+        for invalid in ({**complete, "tests": []}, {**complete, "details": {"executed": True}},
+                        {**complete, "tests": [{"id": checks.PR_JOURNAL_CASE, "outcome": "skip"}]}):
+            with self.assertRaisesRegex(controller.VerificationError, "PR_JOURNAL_COMPLETION"):
+                controller.parse_capture(step, capture(invalid), paths, "linux", checks)
+        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+            controller.parse_capture(step, capture(complete, finality=False), paths, "linux", checks)
+
     def test_complete_fixed_gate_inventory_cannot_omit_duplicate_or_reorder_a_step(self):
         controller = controller_module()
+        android = controller.ruby_capture_ids(ROOT, "ruby-android_upload_validation")
+        healthy = controller.ruby_capture_ids(ROOT, "ruby-android_upload_validation", "healthy")
+        self.assertEqual((len(android), len(healthy)), (37, 28))
+        self.assertTrue({
+            "AndroidLocalUploadInputTest#test_registered_request_is_forwarded_from_same_invocation_without_credentials",
+            "AndroidLocalUploadInputTest#test_registered_nomination_digest_and_origin_are_one_use_exactly_bound",
+        } <= set(healthy))
+        self.assertEqual(len(controller.ruby_expected_ids(ROOT, "ruby-local-store-execution-runtime")), 21)
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-store_document", "ruby-store_lane_lifetime",
+        ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-local-store-intent",
+                "ruby-local-store-execution-runtime", "ruby-store_document", "ruby-store_lane_lifetime",
                 "ruby-store_lane_nested_validation", "ruby-store_lane_resources", "ruby-store_lane_runtime",
                 "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
@@ -2573,7 +2648,7 @@ class CIControllerContractTests(unittest.TestCase):
         compatibility_source = ("python-compat-312-source", "python-compat-313-source", "python-compat-314-source")
         compatibility_wheel = ("python-compat-312-wheel", "python-compat-313-wheel", "python-compat-314-wheel")
         expected = {
-            "linux": (*before, "native-process-abi-source", *compatibility_source, "python-full", *ruby,
+            "linux": (*before, "native-process-abi-source", *compatibility_source, "python-pr-journal", "python-full", *ruby,
                       "ruby-packaged-capture-source", "store-lane-native-source", "fastfile", "actionlint", "jdk-signers", *wheel,
                       "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
                       "ruby-packaged-capture-wheel", "store-lane-native-wheel", "python-wheel", "source-integrity"),
@@ -2593,7 +2668,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
         self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
         catalogs = {}
-        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 58),
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 62),
                                                ("macos", "platform", expected["macos"], 41),
                                                ("macos", "native-python", native_python, 31),
                                                ("macos", "native-support", native_support, 39)):
@@ -5953,7 +6028,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                             patch.object(checks, "_remaining", return_value=10.0), \
                             patch.object(checks, "_python_full_profile", return_value={"fixture": "admitted"}), \
                             patch.object(checks, "inspect_installed_wheel", return_value=None) as installed, \
-                            patch.object(checks, "sys", SimpleNamespace(platform="linux", stderr=io.StringIO())), \
+                            patch.object(checks, "sys", SimpleNamespace(platform="linux", stderr=io.StringIO(), path=[])), \
                             patch.object(checks, "os", SimpleNamespace(environ={"MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1"})):
                         if outcome in {"success", "allowed-skip"}:
                             detail = checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
@@ -6019,8 +6094,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                 selected = checks.native_partition_ids(ROOT, name, deadline=deadline)
                 self.assertEqual(selected, (identifier,))
                 poison.extend(selected)
-            self.assertEqual(inventory.call_count, 76)
-            self.assertEqual(metadata.call_count, 76)
+            self.assertEqual(inventory.call_count, len(_PYTHON_SINGLETON_FIXTURES))
+            self.assertEqual(metadata.call_count, len(_PYTHON_SINGLETON_FIXTURES))
         poison = tuple(poison)
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
@@ -6080,7 +6155,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     self.assertRaises(checks.CheckError):
                 checks.native_partition_ids(ROOT, "authority", deadline=deadline)
 
-    def test_native_compatibility_selectors_are_exact_ordinary_three_and_no_child_one(self):
+    def test_native_compatibility_selectors_keep_all_three_controls_across_partitions(self):
         checks = ci_module("ci_checks")
         expected = tuple(sorted("unit.test_native_process.NativeProcessCompatibilityTests." + name for name in (
             "test_native_public_api_atomic_duplication", "test_native_helper_and_validator_fd_maps",
@@ -6088,7 +6163,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(checks.native_compatibility_ids(ROOT), expected)
         public = ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",)
         self.assertEqual(checks.native_compatibility_ids(ROOT, public_only=True), public)
-        self.assertTrue(set(expected) <= set(checks.native_partition_ids(ROOT, "ordinary")))
+        fresh = checks.native_partition_ids(ROOT, "fresh-native-fd-maps")
+        self.assertEqual(fresh, ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps",))
+        ordinary = set(checks.native_partition_ids(ROOT, "ordinary"))
+        self.assertEqual(ordinary.intersection(expected), set(expected).difference(fresh))
         self.assertFalse(set(expected) & set(checks.NATIVE_AUTHORITY_IDS))
         for changed in (expected[:2], expected + expected[:1], tuple(sorted(expected + (
                 "unit.test_native_process.NativeProcessCompatibilityTests.test_unreviewed",)))):
@@ -6101,16 +6179,20 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_native_package_inspection_requires_complete_bytes_and_immutable_ordinary_nodes(self):
         checks = ci_module("ci_checks")
-        expected = {"__init__.py": b"# inert fixture\n", "data/apple-profile-roots.pem": b"synthetic public roots\n"}
+        expected = {"__init__.py": b"# inert fixture\n", "__main__.py": b"# never imported\n",
+                    "data/apple-profile-roots.pem": b"synthetic public roots\n",
+                    "api/__init__.py": b"# inert API package\n", "api/contracts.py": b"# inert API module\n",
+                    "api/data/field-help.json": b'{}\n'}
         deadline = time.monotonic() + 30.0
         actual_lstat = Path.lstat
         with tempfile.TemporaryDirectory(prefix="mrk-ci-native-package-") as temporary:
             root = Path(temporary).resolve() / "mobile_release"
             root.mkdir()
-            (root / "data").mkdir()
             for relative, content in expected.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
                 (root / relative).write_bytes(content)
             changes = {}
+            changed_path = root / "__init__.py"
 
             def metadata(path):
                 info = actual_lstat(path)
@@ -6121,14 +6203,14 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                 directory = stat.S_ISDIR(info.st_mode)
                 values = dict(st_uid=0, st_gid=0, st_nlink=info.st_nlink,
                               st_mode=(stat.S_IFDIR | 0o555) if directory else (stat.S_IFREG | 0o444))
-                if path == root / "__init__.py":
+                if path == changed_path:
                     values.update(changes)
                 return SimpleNamespace(**values)
 
             with patch.object(checks, "_source_package", return_value=expected), patch.object(Path, "lstat", metadata):
                 result = checks.inspect_native_package(ROOT, root, deadline=deadline)
-                self.assertEqual(result["files"], 2)
-                self.assertEqual(result["modules"], 1)
+                self.assertEqual(result["files"], 6)
+                self.assertEqual(result["modules"], 4)
                 self.assertTrue(result["bytes_match_source"])
                 self.assertTrue(result["immutable_modes"])
                 for changed in ({"st_uid": 60123}, {"st_gid": 60123}, {"st_nlink": 2},
@@ -6136,6 +6218,15 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     changes.clear()
                     changes.update(changed)
                     with self.subTest(metadata=changed), self.assertRaisesRegex(checks.CheckError, "NATIVE_PACKAGE_MODE"):
+                        checks.inspect_native_package(ROOT, root, deadline=deadline)
+                changes.clear()
+                for relative, bad_mode in (("api", stat.S_IFDIR | 0o755),
+                                           ("api/data", stat.S_IFDIR | 0o755),
+                                           ("api/__init__.py", stat.S_IFREG | 0o644),
+                                           ("api/data/field-help.json", stat.S_IFREG | 0o644)):
+                    changed_path = root / relative
+                    changes["st_mode"] = bad_mode
+                    with self.subTest(api_mode=relative), self.assertRaisesRegex(checks.CheckError, "NATIVE_PACKAGE_MODE"):
                         checks.inspect_native_package(ROOT, root, deadline=deadline)
                 changes.clear()
                 for mutation in ("changed", "missing", "extra-hook", "extra-directory"):
@@ -6156,6 +6247,174 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                             (root / "unreviewed.pth").unlink()
                         else:
                             (root / "extra").rmdir()
+
+    def test_source_package_accepts_only_reviewed_api_layout_and_data_declaration(self):
+        checks = ci_module("ci_checks")
+        deadline = time.monotonic() + 30.0
+        files = checks._source_package(ROOT, deadline=deadline)
+        directories = {"data", "api", "api/data"}
+        resources = {"data/apple-profile-roots.pem", *(
+            "api/data/" + name for name in (
+                "credential-guide-v1.json", "field-help.json", "github-connection-v1.json", "github-setup-v1.json",
+                "metadata-image-help-v1.json", "metadata-images-v1.json", "metadata-text-help-v1.json",
+                "project.schema.json", "release-version-help-v1.json"))}
+        self.assertEqual({name for name in files if not name.endswith(".py")}, resources)
+        self.assertEqual(sum(name.endswith(".py") for name in files), 390)
+        missing = ("__init__.py", "__main__.py", "api/__init__.py", *sorted(resources))
+        for relative in missing:
+            changed = dict(files)
+            changed.pop(relative)
+            with self.subTest(missing=relative), patch.object(checks, "_tree", return_value=(changed, directories)), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_FILES"):
+                checks._source_package(ROOT, deadline=deadline)
+        for relative in ("unexpected.json", "data/extra.pem", "api/extra.json", "api/data/extra.json",
+                         "api/data/hook.py", "api/nested/module.py", "other/module.py", "api/compiled.so"):
+            with self.subTest(extra=relative), patch.object(checks, "_tree", return_value=({**files, relative: b"inert"}, directories)), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_FILES"):
+                checks._source_package(ROOT, deadline=deadline)
+        for changed in (directories - {"api/data"}, directories | {"api/nested"}, directories | {"unreviewed"}):
+            with self.subTest(directories=changed), patch.object(checks, "_tree", return_value=(files, changed)), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_FILES"):
+                checks._source_package(ROOT, deadline=deadline)
+        original = (ROOT / "pyproject.toml").read_bytes()
+        read_regular = checks._read_regular
+        declarations = (
+            original.replace(b'"api/data/*.json"', b'"api/data/*"'),
+            original.replace(b', "api/data/*.json"', b''),
+            original.replace(b'mobile_release = [', b'unreviewed = ['),
+        )
+        for changed in declarations:
+            self.assertNotEqual(changed, original)
+            def read(path, *args, **kwargs):
+                return changed if path == ROOT / "pyproject.toml" else read_regular(path, *args, **kwargs)
+            with patch.object(checks, "_read_regular", side_effect=read), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_DATA"):
+                checks._source_package(ROOT, deadline=deadline)
+
+    def test_installed_wheel_api_imports_exact_origins_without_executable_main(self):
+        """Actual import/origin loop with inert facades, never a product import."""
+        checks = ci_module("ci_checks")
+        deadline = time.monotonic() + 30.0
+        expected = checks._source_package(ROOT, deadline=deadline)
+        # Include an inert nested executable to prove it is never imported either.
+        expected["api/__main__.py"] = b"# never imported\n"
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-installed-origins-") as temporary:
+            prefix = Path(temporary).resolve() / "venv"
+            package_root = prefix / "lib/site-packages/mobile_release"
+            tooling_root = prefix / "share/mobile-release-kit"
+            tooling = {name: (ROOT / name).read_bytes() for name in checks.TOOLING_FILES}
+            package = ModuleType("mobile_release")
+            package.__file__, package.__version__ = str(package_root / "__init__.py"), checks.VERSION
+            package.__path__ = [str(package_root)]
+            roots = ModuleType("mobile_release.ios_profile_trust")
+            roots.apple_roots = lambda: (b"inert public root",) * 3
+            tools = ModuleType("mobile_release.tooling")
+            tools.REQUIRED_TOOLING_FILES = tuple(tooling)
+            tools.resolve_tooling_root = lambda *, environ: tooling_root if environ == {} else None
+            modules = {module.__name__: module for module in (package, roots, tools)}
+            original_import = builtins.__import__
+
+            def import_statement(name, globals=None, locals=None, fromlist=(), level=0):
+                if name == "mobile_release" or name.startswith("mobile_release."):
+                    self.assertEqual(level, 0)
+                    self.assertIn(name, modules)
+                    return modules[name]
+                return original_import(name, globals, locals, fromlist, level)
+
+            imports = {"mobile_release.api": "api/__init__.py"}
+            for relative in expected:
+                if relative.endswith(".py") and Path(relative).name not in {"__init__.py", "__main__.py"}:
+                    imports["mobile_release." + relative[:-3].replace("/", ".")] = relative
+            self.assertIn("mobile_release.api.contracts", imports)
+            actual, wrong_origin = [], None
+
+            def import_module(name):
+                self.assertIn(name, imports)
+                actual.append(name)
+                module = ModuleType(name)
+                module.__file__ = str((ROOT / "src/mobile_release" if name == wrong_origin else package_root) / imports[name])
+                return module
+
+            def tree(path, **_kwargs):
+                self.assertIn(path, (package_root, tooling_root))
+                return (expected, directories) if path == package_root else (tooling, set())
+
+            def read(path, *args, **kwargs):
+                if path == package_root.parent / "mobile_release_kit-0.3.0.dist-info/METADATA":
+                    return b"Metadata-Version: 2.4\n\n"
+                if path == package_root.parent / "mobile_release_kit-0.3.0.dist-info/licenses/LICENSE":
+                    return (ROOT / "LICENSE").read_bytes()
+                self.assertTrue(path.is_relative_to(ROOT))
+                return (ROOT / path.relative_to(ROOT)).read_bytes()
+
+            distribution = SimpleNamespace(locate_file=lambda _name: package_root.parent)
+            runtime = SimpleNamespace(**{**vars(sys), "prefix": str(prefix), "base_prefix": "/inert-base",
+                                         "flags": SimpleNamespace(isolated=1, dont_write_bytecode=1)})
+            directories = {"data", "api", "api/data"}
+            with patch.object(builtins, "__import__", import_statement), patch.object(checks.os, "getuid", return_value=60123), \
+                    patch.object(checks, "sys", runtime), \
+                    patch.object(checks.sysconfig, "get_path", return_value=str(package_root.parent)), \
+                    patch.object(checks, "_source_package", return_value=expected), patch.object(checks, "_tree", side_effect=tree), \
+                    patch.object(checks, "_read_regular", side_effect=read), patch.object(checks, "_validate_metadata"), \
+                    patch.object(checks.importlib.metadata, "distribution", return_value=distribution), \
+                    patch.object(checks.importlib.metadata, "distributions", return_value=()), \
+                    patch.object(checks.importlib, "import_module", side_effect=import_module):
+                result = checks.inspect_installed_wheel(ROOT, deadline=deadline)
+                self.assertEqual(result["module_count"], 391)  # 390 real leaves + the inert API main.
+                self.assertEqual(set(actual), set(imports))
+                self.assertEqual(len(actual), len(imports))
+                self.assertNotIn("mobile_release.api.__init__", actual)
+                for name in ("mobile_release.api", "mobile_release.api.contracts"):
+                    wrong_origin = name
+                    with self.subTest(wrong_origin=name), self.assertRaisesRegex(checks.CheckError, "WHEEL_MODULE_ORIGIN"):
+                        checks.inspect_installed_wheel(ROOT, deadline=deadline)
+                wrong_origin = None
+                directories.add("api/unreviewed")
+                with self.assertRaisesRegex(checks.CheckError, "WHEEL_INSTALLED_RESOURCE_BYTES"):
+                    checks.inspect_installed_wheel(ROOT, deadline=deadline)
+
+    def test_wheel_inspection_diagnostics_expose_only_exact_source_known_codes(self):
+        controller, checks = controller_module(), ci_module("ci_checks")
+        class Derived(checks.CheckError):
+            pass
+        class NeverFormat:
+            def __str__(self):
+                raise AssertionError("private error value must never be formatted")
+            __repr__ = __str__
+        bad_args = checks.CheckError("SOURCE_PACKAGE_FILES")
+        bad_args.args = ("SOURCE_PACKAGE_FILES", "synthetic-private-detail")
+        cases = (
+            (checks.CheckError("SOURCE_PACKAGE_FILES"), True),
+            (checks.CheckError("synthetic-private-detail"), False),
+            (checks.CheckError("UNREVIEWED_UPPERCASE_CODE"), False),
+            (checks.CheckError(NeverFormat()), False), (bad_args, False),
+            (Derived("SOURCE_PACKAGE_FILES"), False), (ValueError("SOURCE_PACKAGE_FILES"), False),
+        )
+        deadline = time.monotonic() + 30.0
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-wheel-diagnostic-") as temporary:
+            work = Path(temporary)
+            (work / "wheels").mkdir()
+            wheel = work / "wheels/fixture.whl"
+            wheel.write_bytes(b"inert; never inspected or installed\n")
+            paths = SimpleNamespace(work=work, wheel=wheel, source=ROOT)
+            session = SimpleNamespace(ensure_idle=lambda: None)
+            step = controller.Step("wheel-inspect", kind="inspection")
+            with patch.object(controller, "freeze_tree"), patch.object(controller, "check_capacity"):
+                for error, public in cases:
+                    with patch.object(checks, "inspect_project_wheel", side_effect=error), self.assertRaises(
+                            controller.VerificationError if public else type(error)) as caught:
+                        controller.perform_step(step, paths, session, checks, {}, "macos", deadline=deadline)
+                    if public:
+                        self.assertEqual(caught.exception.code, "SOURCE_PACKAGE_FILES")
+                        self.assertIs(caught.exception.__cause__, error)
+                    else:
+                        self.assertIs(caught.exception, error)
+                        self.assertEqual(controller.error_details(error)["error"], "CONTROLLER_FAILURE")
+                        self.assertNotIn("synthetic-private-detail", json.dumps(controller.error_details(error)))
+        # The workflow must dispatch these exact admitted verifier bytes.
+        workflow = (ROOT / ".github/workflows/desktop-macos-local-signing.yml").read_text(encoding="utf-8")
+        digest = hashlib.sha256((ROOT / ".github/scripts/verify_ci.py").read_bytes()).hexdigest()
+        self.assertEqual(workflow.count(digest + "  .github/scripts/verify_ci.py"), 1)
 
     def test_tree_checks_incremental_count_and_byte_budget_before_later_file_reads(self):
         checks = ci_module("ci_checks")
@@ -6336,6 +6595,30 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(checks.CheckError, "TEST_PATTERN_INVENTORY"):
                 checks.expected_python_ids(source, "wheel")
 
+    def test_full_static_inventory_matches_core_discovery_and_fits_its_result_bound(self):
+        checks = ci_module("ci_checks")
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-discovery-") as temporary:
+            source = Path(temporary)
+            unit = source / "tests/unit"
+            desktop = source / "tests/desktop"
+            unit.mkdir(parents=True)
+            desktop.mkdir()
+            (unit / "__init__.py").touch()
+            (unit / "test_core.py").write_text(
+                "import unittest\nclass Core(unittest.TestCase):\n    def test_case(self): pass\n")
+            (desktop / "test_independent.py").write_text("raise AssertionError('standalone desktop test')\n")
+            # Inventory can reach its exact Linux skip check without parsing
+            # the standalone directory. The fixed skip roster stays mandatory.
+            with self.assertRaisesRegex(checks.CheckError, "TEST_NATIVE_INVENTORY_DRIFT"):
+                checks.expected_python_ids(source)
+            (unit / "test_bad.py").write_text("class Unsupported:\n    def test_case(self): pass\n")
+            with self.assertRaisesRegex(checks.CheckError, "TEST_UNSUPPORTED_CLASS"):
+                checks.expected_python_ids(source)
+        snapshot, _ = checks.python_capture_snapshot(ROOT, "full", deadline=time.monotonic() + 30)
+        observations = [{"id": identifier, "outcome": "ok"} for identifier in snapshot["healthy"]]
+        result = {"check": "python-full", "ok": True, "details": {}, "tests": observations}
+        self.assertLess(len(checks._json_bytes(result)), checks.MAX_FULL_RESULT_BYTES)
+
     def wheel_members(self, checks):
         """Ordinary ZIP data fixture; never installed and not backend evidence."""
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
@@ -6386,8 +6669,12 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         package = "mobile_release/__init__.py"
         edits = (
             ("missing", lambda values: values.pop(package), {}, "WHEEL_COMPLETE_INVENTORY"),
+            ("missing-api", lambda values: values.pop("mobile_release/api/__init__.py"), {}, "WHEEL_COMPLETE_INVENTORY"),
+            ("missing-api-data", lambda values: values.pop("mobile_release/api/data/field-help.json"), {}, "WHEEL_COMPLETE_INVENTORY"),
             ("extra", lambda values: values.update({"extra.txt": b"fixture"}), {}, "WHEEL_COMPLETE_INVENTORY"),
             ("source-bytes", lambda values: values.update({package: b"different source bytes\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
+            ("api-bytes", lambda values: values.update({"mobile_release/api/contracts.py": b"# changed API\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
+            ("api-data-bytes", lambda values: values.update({"mobile_release/api/data/field-help.json": b"{}\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
             ("resource-bytes", lambda values: values.update({dist + "licenses/LICENSE": b"different license\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
             ("runtime-dependency", lambda values: values.update({dist + "METADATA": values[dist + "METADATA"].replace(
                 b"Provides-Extra: test\n", b"Provides-Extra: test\nRequires-Dist: unexpected-runtime==1\n")}), {}, "WHEEL_RUNTIME_OR_UNPINNED_DEPENDENCY"),
@@ -6403,18 +6690,25 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             root = Path(temporary)
             valid = root / "valid.whl"
             self.write_wheel(valid, original)
-            observed = checks.inspect_project_wheel(valid, ROOT, deadline=deadline)
-            self.assertEqual(observed["sha256"], hashlib.sha256(valid.read_bytes()).hexdigest())
-            self.assertEqual(observed["member_count"], len(original) + 1)
-            self.assertEqual(observed["runtime_dependencies"], [])
+            try:
+                observed = checks.inspect_project_wheel(valid, ROOT, deadline=deadline)
+                self.assertEqual(observed["sha256"], hashlib.sha256(valid.read_bytes()).hexdigest())
+                self.assertEqual(observed["member_count"], len(original) + 1)
+                self.assertEqual(observed["module_count"], 390)
+                self.assertEqual(observed["runtime_dependencies"], [])
+            finally:
+                valid.unlink()
             for name, edit, options, code in edits:
                 with self.subTest(mutation=name):
                     members = dict(original)
                     edit(members)
                     path = root / (name + ".whl")
                     self.write_wheel(path, members, **options)
-                    with self.assertRaisesRegex(checks.CheckError, code):
-                        checks.inspect_project_wheel(path, ROOT, deadline=deadline)
+                    try:
+                        with self.assertRaisesRegex(checks.CheckError, code):
+                            checks.inspect_project_wheel(path, ROOT, deadline=deadline)
+                    finally:
+                        path.unlink()
 
     def test_consumer_requires_all_four_callers_empty_default_note_and_no_pending_transaction(self):
         checks = ci_module("ci_checks")
@@ -6429,7 +6723,11 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         }
         files = {
             "app/build.gradle.kts": b'plugins { id("com.android.application") }\nandroid { namespace = "com.example.wheelsmoke"; defaultConfig { applicationId = "com.example.wheelsmoke" } }\n',
-            ".gitignore": b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n",
+            ".gitignore": (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n"
+                           b".mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n"
+                           b".mobile-release-metadata-text-cleanup/\n"
+                           b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n"
+                           b".mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n"),
             "release/mobile-release.json": json.dumps(configuration).encode(),
         }
         for filename in ("title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt"):

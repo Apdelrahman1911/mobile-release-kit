@@ -1,0 +1,160 @@
+--- a/desktop/src-tauri/src/saved_command_agent_store_release.rs
++++ b/desktop/src-tauri/src/saved_command_agent_store_release.rs
+@@ -3,7 +3,7 @@
+ use super::*;
+ use p::release::{Basis, Mode, Review as ReleaseReview};
+ 
+-fn details(c: &Context) -> Option<ReleaseReview> {
++pub(super) fn details(c: &Context) -> Option<ReleaseReview> {
+     match c {
+         Context::LocalStoreExecute(c) => Some(ReleaseReview {
+             mode: match c.later.as_ref().map(|s| s.stage) {
+--- a/desktop/src-tauri/src/asset_session_store_reconcile.rs
++++ b/desktop/src-tauri/src/asset_session_store_reconcile.rs
+@@ -23,6 +23,8 @@
+     pub(crate) fn start_local_store_reconcile(&self,args:wire::Start)->Result<wire::Status,BridgeError>{
+         let admitted_at=Instant::now(); // Original endpoint begins before lock/lookup/queue.
+         let mut state=self.lock();
++        self.inner.bridge.local_store_reconcile.agent_store_original()
++            .ordinary_store_start_allowed(&args.operation_id,&args.owner_generation)?;
+         let original=self.inner.bridge.local_store_reconcile.prepared_material(&args.operation_id,&args.owner_generation)?;
+         let project=self.inner.bridge.local_store_reconcile.prepared_project(&args.operation_id,&args.owner_generation)?;
+         let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -2,7 +2,7 @@
+ import { AgentLocalHistoryController } from './agentLocalHistoryController.ts';
+ import { AgentStorePreparation } from './components/AgentStorePreparation.tsx';
+ import { StorePreparationController } from './agentStorePreparationController.ts';
+-import { storePreparationInput, storePreparationPeerReason, storePreparationPreparesIntent, storePreparationExecutesCandidate } from './agentStorePreparation.ts';
++import { storePreparationInput, storePreparationPeerReason, storePreparationNativeOperation, storePreparationRelease } from './agentStorePreparation.ts';
+ import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
+ import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
+ import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
+@@ -1179,15 +1179,20 @@
+     const service=cliService.current,w=workspaceRef.current;
+     const project=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
+     const tools=androidBuild.getSnapshot();
+-    const observation=project?(kind==='android-candidate-upload'?(tools.project?.projectId===project.project.id?tools.project:null):localStoreProjectObservation(project,releaseVersion.getSnapshot())):null;
++    // Reconcile uses this original Android application observation too, but
++    // never its tool catalogue/selection/loan. Candidate upload alone needs tools.
++    const androidObservation=kind==='android-candidate-upload'||kind.startsWith('android-')&&storePreparationRelease(kind)?.kind==='reconcile';
++    const observation=project?(androidObservation?(tools.project?.projectId===project.project.id?tools.project:null):localStoreProjectObservation(project,releaseVersion.getSnapshot())):null;
+     const input=storePreparationInput(kind,observation,assetSession.getSnapshot(),localHistory.getSnapshot(),tools);
+     const peer=storePreparationControllerRef.current?.peer()??null;
+-    const peers=storePreparationPeerReason(peer&&!storePreparationPreparesIntent(peer.input.kind)&&!storePreparationExecutesCandidate(peer.input.kind)?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
+-      storePreparationPeerReason(peer&&storePreparationPreparesIntent(peer.input.kind)?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()))??
+-      storePreparationPeerReason(peer&&storePreparationExecutesCandidate(peer.input.kind)?peer.input:null,peer?.review??null,localStoreExecuteControllerRef.current?.getSnapshot()??null,storeExecuteBusy());
++    const domain=peer?storePreparationNativeOperation(peer.input.kind):null;
++    const peers=storePreparationPeerReason(peer&&domain==='local-store-preflight'?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
++      storePreparationPeerReason(peer&&domain==='local-store-prepare'?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()))??
++      storePreparationPeerReason(peer&&domain==='local-store-execute'?peer.input:null,peer?.review??null,localStoreExecuteControllerRef.current?.getSnapshot()??null,storeExecuteBusy())??
++      storePreparationPeerReason(peer&&(domain==='local-store-reconcile'||domain==='local-store-recovery-settle')?peer.input:null,peer?.review??null,localStoreReconcileControllerRef.current?.getSnapshot()??null,storeReconcileBusy());
+     return {port:service.api?.mode==='native'?service.api.agentStorePreparation??null:null,nativeSession:service.api?.mode==='native'?service:null,
+       projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',input,
+-      blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??storeReconcileBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
++      blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+   }}));
+   storePreparationControllerRef.current=storePreparationAccess;
+   useSyncExternalStore(storePreparationAccess.subscribe,storePreparationAccess.getSnapshot,storePreparationAccess.getSnapshot);
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -366,7 +366,7 @@
+                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
+                 "nativePrepareCommand":"store-prepare","separateStartCommand":"store-start","prepareAuthorizesStart":false,
+-                "nativePrepareKinds":["android-access","ios-access","android-candidate","ios-candidate","android-versions","ios-versions","paired-versions","android-external-testing","ios-external-testing","android-production-submit","ios-production-submit","android-candidate-upload","ios-candidate-upload"],"stagePreparationIsExecution":false,
++                "nativePrepareKinds":["android-access","ios-access","android-candidate","ios-candidate","android-versions","ios-versions","paired-versions","android-external-testing","ios-external-testing","android-production-submit","ios-production-submit","android-candidate-upload","ios-candidate-upload","android-external-testing-execute","ios-external-testing-execute","android-production-submit-execute","ios-production-submit-execute","android-current-internal","ios-current-internal","android-recovery-settlement","ios-external-readiness"],"stagePreparationIsExecution":false,
+                 "currentInventory":["android","ios","paired"],"inventoryIsAllocationAuthority":false,"pairedInventoryRequiresTwoCurrentLoans":true,
+                 "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
+                 "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":true,"oldSubmitQueryVariants":false,"nativeAvailabilityChecked":false},
+@@ -420,7 +420,7 @@
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+         }
+-        text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Candidate-upload preparation requires the original reviewed intent, current credential and native tools; a fresh separate Store Start permission authorizes the internal upload. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
++        text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Candidate-upload preparation requires the original reviewed intent, current credential and native tools; a fresh separate Store Start permission authorizes the internal upload. Later Execute and current/recovery/readiness Reconcile preparation also retain the exact original intent and credentials, without HTTP; a fresh separate Start approves only the reviewed promotion/draft/submission or readback/checkpoint. Checkpoints do not prove earlier finality or permit retry. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+         text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop review for empty repository creation, draft PR, failed-job retry, five-file setup Publish or GET-only original-intent Reconcile. Load/Prepare remain explicit Desktop actions; Counter setup is excluded. No token/URL/CLI Prepare; uncertain requests must not be replayed.\n");
+--- a/desktop/src-tauri/src/installed_cli_store_prepare_tests.rs
++++ b/desktop/src-tauri/src/installed_cli_store_prepare_tests.rs
+@@ -20,6 +20,7 @@
+             candidate: None,
+             later: None,
+             execute: None,
++            release: None,
+         },
+         phase: flow::Phase::Queued,
+         settlement: p::Settlement::Pending,
+@@ -77,7 +78,7 @@
+         assert!(output(&r, &q, Some((&id(9), &native)), true).is_err()); // old store-submit cannot adopt it.
+     }
+     let catalogue: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+-    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 13);
++    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 21);
+     assert_eq!(catalogue["store"]["stagePreparationIsExecution"], false);
+     assert_eq!(catalogue["store"]["kinds"], serde_json::json!(["access-check","candidate-prepare","execute","reconcile"]));
+ }
+@@ -237,10 +238,49 @@
+     assert!(caps.len() <= crate::installed_cli::CAPABILITIES_BYTES);
+     let catalogue: serde_json::Value = serde_json::from_slice(&caps).unwrap();
+     let kinds = catalogue["store"]["nativePrepareKinds"].as_array().unwrap();
+-    assert_eq!(kinds.len(), 13);
++    assert_eq!(kinds.len(), 21);
+     for k in ["android-candidate-upload", "ios-candidate-upload"] { assert!(kinds.iter().any(|v| v == k)); }
+-    assert!(!kinds.iter().any(|v| v.as_str().unwrap().contains("reconcile")));
++    for unsupported in ["ios-recovery-settlement", "android-external-readiness", "android-production-reconcile", "ios-production-reconcile"] { assert!(!kinds.iter().any(|v|v==unsupported)); }
+     assert_eq!(catalogue["store"]["prepareAuthorizesStart"], false);
+     assert_eq!(catalogue["store"]["automaticRetry"], false);
+     assert_eq!(catalogue["store"]["nativeAvailabilityChecked"], false);
+ }
++#[test]
++fn store_prepare_cli_lifecycle_receipts_keep_same_id_only_output_and_closed_catalogue() {
++    use flow::Kind::*;
++    use store::release::{Mode,ResultKind,StoreState};
++    let kinds=[AndroidExternalTestingExecute,IosExternalTestingExecute,AndroidProductionSubmitExecute,IosProductionSubmitExecute,
++        AndroidCurrentInternal,IosCurrentInternal,AndroidRecoverySettlement,IosExternalReadiness];
++    let catalogue:serde_json::Value=serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
++    let names=catalogue["store"]["nativePrepareKinds"].as_array().unwrap();assert_eq!(names.len(),21);
++    for kind in kinds {
++        let (domain,platform,mode)=kind.release_mode().unwrap();let mut s=status();
++        let candidate="12345678-1234-4234-8234-123456789abc";
++        let stage=match mode {Mode::ExternalTesting|Mode::ExternalReadiness=>Some("22345678-1234-4234-8234-123456789abc"),Mode::ProductionSubmit=>Some("32345678-1234-4234-8234-123456789abc"),_=>None};
++        let basis=stage.map(|_|store::release::Basis{operation_id:if mode==Mode::ExternalTesting{candidate}else{"22345678-1234-4234-8234-123456789abc"}.into(),receipt_sha256:"f".repeat(64)});
++        s.selection.kind=kind;s.selection.candidate=Some(store::Candidate{operation_id:candidate.into(),sha256:"a".repeat(64)});
++        s.selection.release=Some(store::release::Review{mode,intent_sha256:"b".repeat(64),stage_operation_id:stage.map(str::to_owned),basis:basis.clone()});
++        let review=flow::Review{review_id:id(10),operation:store::Operation{operation_id:id(10),owner_generation:id(11),status_revision:3}};
++        s.prepared=Some(review.clone());s.operation=Some(review.operation);s.phase=flow::Phase::Final;s.settlement=p::Settlement::Settled;
++        s.prepare_returned=true;s.start_grant_id=Some(id(9));s.start_submitted=true;s.outcome=Some(store::Outcome::Complete);
++        let release=store::release::Receipt{mode,head_sequence:*mode.heads().start(),operation_id:stage.unwrap_or(candidate).into(),candidate_operation_id:candidate.into(),
++            candidate_sha256:"a".repeat(64),intent_sha256:"b".repeat(64),receipt_sha256:"c".repeat(64),basis,target:mode.target(platform),
++            result:if domain==store::Kind::Execute{ResultKind::Accepted}else if mode==Mode::ExternalReadiness{ResultKind::Ready}else{ResultKind::Reconciled},
++            state:match(domain,platform,mode){(store::Kind::Execute,store::Platform::Ios,_)=>Some(StoreState::SubmittedForReview),
++                (store::Kind::Execute,store::Platform::Android,Mode::ProductionSubmit)=>Some(StoreState::Draft),
++                (store::Kind::Execute,store::Platform::Android,_)|(_,_,Mode::ExternalReadiness)=>Some(StoreState::AvailableToTesters),_=>None},limitations:mode.limitations()};
++        s.result=Some(flow::Report::Ordinary{report:if domain==store::Kind::Execute{store::Report::Execute{release}}else{store::Report::Reconcile{release}}});
++        s.validate().unwrap();let query=s.origin.clone();let r=response(s);
++        for json in [false,true] {
++            let (code,bytes)=preparation::output(&r,&query,Some((true,&id(9),&id(10))),json).unwrap();assert_eq!(code,0);assert!(!bytes.is_empty());
++            if json {let parsed=p::decode_response(&bytes[..bytes.len()-1],&r.request_id,&r.service_instance).unwrap();assert_eq!(parsed.response,r.response);}
++        }
++        assert!(preparation::output(&r,&query,Some((false,&id(3),&id(4))),true).is_err());
++        assert!(output(&r,&query,Some((&id(9),&id(10))),true).is_err()); // no old Submit adoption
++        assert!(names.contains(&serde_json::to_value(kind).unwrap()));
++    }
++    assert_eq!(catalogue["store"]["prepareAuthorizesStart"],false);
++    assert_eq!(catalogue["store"]["automaticRetry"],false);
++    assert_eq!(catalogue["store"]["nativeAvailabilityChecked"],false);
++    assert!(capabilities(false).unwrap().len()<=crate::installed_cli::CAPABILITIES_BYTES);
++}
+--- a/desktop/src-tauri/src/service_local_history_tests.rs
++++ b/desktop/src-tauri/src/service_local_history_tests.rs
+@@ -318,6 +318,7 @@
+         candidate: None,
+         later: None,
+         execute: None,
++        release: None,
+     };
+     let ps = crate::service_store_requests::preparation::Scope::new(
+         id('1'),

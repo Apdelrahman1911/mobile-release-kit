@@ -1,0 +1,2007 @@
+diff --git a/desktop/git_push_helper_bootstrap.py b/desktop/git_push_helper_bootstrap.py
+--- a/desktop/git_push_helper_bootstrap.py
++++ b/desktop/git_push_helper_bootstrap.py
+@@ -16,7 +16,7 @@
+     if len(sys.argv) == 6 and sys.argv[3] == "push-helper":
+         from mobile_release.desktop_git_push_helper import main as helper
+         return helper(remote=sys.argv[4], url=sys.argv[5], runtime_dir=Path(sys.argv[2]), started=started)
+-    if len(sys.argv) == 11 and sys.argv[3] == "push-hook":
++    if len(sys.argv) == 11 and sys.argv[3] in ("push-hook", "push-new-branch-hook"):
+         from mobile_release._git_push_private_protocol import Clock
+         from mobile_release.desktop_git_push_hook import main as hook
+         for value in sys.argv[7:9]:
+@@ -24,6 +24,7 @@
+                 return 78
+         return hook(mode=sys.argv[4], clock=Clock(sys.argv[5], int(sys.argv[7]), int(sys.argv[8])),
+                     review_digest=sys.argv[6], remote=sys.argv[9], url=sys.argv[10],
++                    kind="push" if sys.argv[3] == "push-hook" else "push-new-branch",
+                     runtime_dir=Path(sys.argv[2]), started=started)
+     return 78
+ 
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-push.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1,3 +1,4 @@
++import { GitPushNewBranch } from './components/GitPushNewBranch.tsx';
+ import { GitPush } from './components/GitPush.tsx';
+ import { LocalStoreReconcileController, localStoreReconcileOwnerReason } from './localStoreReconcile.ts';
+ import { LocalStoreReconcile } from './components/LocalStoreReconcile.tsx';
+@@ -2233,6 +2234,7 @@
+               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+               <GitFetch controller={gitLocal} repository={gitRepository} connection={connectionState} originalProjectName={gitLocalProjectName} />
+               <GitPush controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />
++              <GitPushNewBranch controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />
+               <ServiceGitIndexAccess controller={agentGitIndex} />
+               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
+             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+diff --git a/desktop/src/components/GitLocalChanges.tsx b/desktop/src/components/GitLocalChanges.tsx
+--- a/desktop/src/components/GitLocalChanges.tsx
++++ b/desktop/src/components/GitLocalChanges.tsx
+@@ -32,21 +32,22 @@
+   const result = op?.phase === 'apply' && op.result ? op.result as GitLocalMutationResult : null;
+   const title = state.uncertain ? 'Git action needs attention' : state.recovery ? 'Git recovery is needed' : state.pending ? 'Waiting for the original Git request' :
+     state.review ? 'Review before changing Git' : active ? 'Git action is still running' : result?.state === 'succeeded' ?
+-      result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
++      result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push-new-branch' ? 'New GitHub branch published' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
+         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
+   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
+     <div><h3>{title}</h3>
+       {state.projectId && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
+       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files. Do not repeat the action, reconnect to dismiss it, or remove Git lock files.</p>}
+       {state.recovery && <p className="review-caution" role="alert">Preserve the original task and project files. This screen cannot prove recovery or safely repeat the change.</p>}
+-      {result?.action === 'push' && <GitPushRecovery result={result} />}
++      {(result?.action === 'push' || result?.action === 'push-new-branch') && <GitPushRecovery result={result} />}
+       {result?.action === 'fast-forward' && <GitFastForwardRecovery result={result} />}
+       {result?.action === 'fetch' && <GitFetchRecovery result={result} />}
+       {result?.action === 'branch-rename' && <GitRenameRecovery result={result} />}
+       {result?.action === 'branch-switch' && <GitSwitchRecovery result={result} />}
+       {state.issue && !state.uncertain && !state.recovery && <p className="review-caution" role="status">{gitLocalIssueHelp(state.issue)}</p>}
+       {result?.action === 'initialize' && result.state === 'succeeded' && !active && <p>No files were staged or committed. Git is local only; no remote was configured.</p>}
+-      {result?.state === 'succeeded' && result.action !== 'push' && !active && <p>Your drafts are kept. Refresh changes explicitly to read the files again; nothing was pushed to GitHub.</p>}
++      {result?.state === 'succeeded' && result.action !== 'push' && result.action !== 'push-new-branch' && !active && <p>Your drafts are kept. Refresh changes explicitly to read the files again; nothing was pushed to GitHub.</p>}
++      {result?.action === 'push-new-branch' && result.state === 'succeeded' && !active && <p>This records the original first publication, not GitHub’s current state. Local files, staging, refs and upstream settings were kept. Link an upstream and fetch separately when needed.</p>}
+       {result?.action === 'push' && result.state === 'succeeded' && !active && <p>This records the original reviewed push, not the current state of GitHub. Working files, staging and local refs were kept; refresh and fetch separately when needed.</p>}
+       {!active && (!state.status || !state.status.available) && <p className="save-note">{state.status ?
+         'Local Git changes are not enabled in this installed session. You can still keep a draft and use your Git client; a read-only view does not enable writes.' :
+diff --git a/desktop/src/components/GitPush.tsx b/desktop/src/components/GitPush.tsx
+--- a/desktop/src/components/GitPush.tsx
++++ b/desktop/src/components/GitPush.tsx
+@@ -1,3 +1,4 @@
++import type { GitPushNewBranchMutation } from '../gitPushNewBranchProtocol.ts';
+ import { useState, useSyncExternalStore } from 'react';
+ import type { GitLocalController } from '../gitLocalController.ts';
+ import type { GitRepositoryController } from '../gitRepositoryController.ts';
+@@ -81,7 +82,7 @@
+     </details>
+   </ProgressiveDisclosure>;
+ }
+-export function GitPushRecovery({ result }: { result: GitPushMutationResult }) {
++export function GitPushRecovery({ result }: { result: GitPushMutationResult | GitPushNewBranchMutation }) {
+   if (result.state !== 'recovery-required') return null;
+   return <div className="review-caution" role="status">
+     <p>Last reported Push step: {GIT_PUSH_EFFECT_LABELS[result.effectPhase]}. GitHub may already have changed. Do not send again.</p>
+diff --git a/desktop/src/gitLocalController.ts b/desktop/src/gitLocalController.ts
+--- a/desktop/src/gitLocalController.ts
++++ b/desktop/src/gitLocalController.ts
+@@ -1,3 +1,4 @@
++import { gitPushNewBranchActionFor } from './gitPushNewBranchProtocol.ts';
+ import type { GitPushReadbackSource } from './gitPushRecovery.ts';
+ import type { ActivitySelection } from './githubActivityProtocol.ts';
+ import { gitPushAccount, sameGitPushAccount, gitPushLocalSource, gitPushActionFor, pushReviewMatchesAccount } from './gitPushSelection.ts';
+@@ -27,7 +28,7 @@
+ 
+ export type GitLocalAdmissionScope = 'git-fetch' | 'git-push' | 'git-status';
+ const actionScope = (action: GitLocalAction | undefined): GitLocalAdmissionScope | undefined =>
+-  action?.kind === 'push' ? 'git-push' : action?.kind === 'fetch' ? 'git-fetch' : undefined;
++  action?.kind === 'push' || action?.kind === 'push-new-branch' ? 'git-push' : action?.kind === 'fetch' ? 'git-fetch' : undefined;
+ export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
+   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
+   readonly reader?: GitReadController | null; readonly pushConnection?: GitHubConnectionViewState | null; readonly fetchConnection?: GitHubConnectionViewState | null }
+@@ -61,7 +62,7 @@
+   (o.reason === 'cleanup-unknown' || appliedResult(o)?.reason === 'unknown' || appliedResult(o)?.reason === 'cleanup-unknown');
+ // A contradictory child cleanup reason never releases an original Push, even
+ // if its outer DATA incorrectly labels that result as settled.
+-const pushUnknown = (o: GitLocalOperation | null): boolean => o?.action.kind === 'push' &&
++const pushUnknown = (o: GitLocalOperation | null): boolean => (o?.action.kind === 'push' || o?.action.kind === 'push-new-branch') &&
+   (o.reason === 'cleanup-unknown' || appliedResult(o)?.reason === 'unknown' || appliedResult(o)?.reason === 'cleanup-unknown');
+ 
+ export class GitLocalController {
+@@ -109,7 +110,8 @@
+     }
+     if (!a || !a.entered || !a.returned || a.hardUnknown || a.uncertain || !a.recovery || this.state.uncertain ||
+         this.works.size || !a.pushReadbackBinding || !same(a.pushReadbackBinding, now) || a.request.phase !== 'apply' ||
+-        a.action.kind !== 'push' || !c?.push || review?.action !== 'push' || !op || op.stage !== 'settled' || op.outcome !== 'ok' ||
++        (a.action.kind !== 'push' && a.action.kind !== 'push-new-branch') || !c?.push ||
++        (review?.action !== 'push' && review?.action !== 'push-new-branch') || review.action !== a.action.kind || !op || op.stage !== 'settled' || op.outcome !== 'ok' ||
+         op !== this.state.original || appliedResult(op)?.state !== 'recovery-required' || pushUnknown(op) ||
+         !sameGitPushAccount(c.push.account, now.pushConnection, now.projectId ?? '') ||
+         c.repository.getSnapshot().observation !== c.observation || !pushReviewMatchesAccount(review, c.push.account)) return null;
+@@ -162,7 +164,7 @@
+   }
+   private captureCurrent(c: Capture, peers = true): boolean {
+     const now = this.current(actionScope(c.action)), r = c.repository.getSnapshot();
+-    if (c.action.kind === 'push') {
++    if (c.action.kind === 'push' || c.action.kind === 'push-new-branch') {
+       const p = c.push, local = gitPushLocalSource(now.reader?.getSnapshot(), r, now.projectId ?? '');
+       const matched = same(c.binding, now) && (!peers || !now.blocked) && !!p && local === p.local && r.observation === c.observation &&
+         sameGitPushAccount(p.account, now.pushConnection, now.projectId ?? '');
+@@ -245,7 +247,9 @@
+     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+   }
+-  preparePushReason(): GitLocalIssue | null {
++  preparePushReason(): GitLocalIssue | null { return this.pushReason('push'); }
++  preparePushNewBranchReason(): GitLocalIssue | null { return this.pushReason('push-new-branch'); }
++  private pushReason(kind: 'push' | 'push-new-branch'): GitLocalIssue | null {
+     if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+     const reason = this.currentReason('git-push'); if (reason) return reason;
+     const binding = this.current('git-push'), r = binding.repository!.getSnapshot();
+@@ -254,15 +258,18 @@
+     const account = gitPushAccount(binding.pushConnection, binding.projectId!);
+     if (!account) return 'push-connection-required';
+     const t = local.tracking;
++    if (kind === 'push-new-branch') return gitPushNewBranchActionFor(local, account) ? null : 'push-upstream';
+     if (t.state !== 'complete' || t.behind !== 0 || t.ahead === null || t.ahead < 1 || t.ahead > 64) return 'push-history';
+     return gitPushActionFor(local, account) ? null : 'push-upstream';
+   }
+-  async preparePush(): Promise<boolean> {
+-    const reason = this.preparePushReason(); if (reason) return this.report(reason);
++  async preparePush(): Promise<boolean> { return this.preparePushKind('push'); }
++  async preparePushNewBranch(): Promise<boolean> { return this.preparePushKind('push-new-branch'); }
++  private async preparePushKind(kind: 'push' | 'push-new-branch'): Promise<boolean> {
++    const reason = this.pushReason(kind); if (reason) return this.report(reason);
+     const binding = this.current('git-push'), repository = binding.repository!, r = repository.getSnapshot();
+     const local = gitPushLocalSource(binding.reader?.getSnapshot(), r, binding.projectId!), account = gitPushAccount(binding.pushConnection, binding.projectId!);
+     if (!local || !account) return this.report(!local ? 'push-read-required' : 'push-connection-required');
+-    const action = gitPushActionFor(local, account); if (!action) return this.report('push-upstream');
++    const action = kind === 'push' ? gitPushActionFor(local, account) : gitPushNewBranchActionFor(local, account); if (!action) return this.report('push-upstream');
+     const request: GitLocalStartRequest = Object.freeze({ phase: 'prepare', projectId: binding.projectId!,
+       expectedDocumentRevision: this.state.status!.documentRevision, action, reviewId: null });
+     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
+@@ -447,7 +454,7 @@
+     const r = prepared.review;
+     if (capture.action.kind === 'initialize') return r.action === 'initialize' && capture.observation === null && !!capture.initialization;
+     if (r.action === 'initialize' || !capture.observation || r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
+-    if (capture.action.kind === 'push') return r.action === 'push' && !!capture.push &&
++    if (capture.action.kind === 'push' || capture.action.kind === 'push-new-branch') return r.action === capture.action.kind && !!capture.push &&
+       r.expectedReferenceRevision === capture.push.local.referenceRevision && pushReviewMatchesAccount(r, capture.push.account);
+     if (capture.action.kind === 'fast-forward') return r.action === 'fast-forward' && !!capture.tracking &&
+       r.targetRef === capture.action.targetRef && r.targetOid === capture.action.targetOid &&
+@@ -460,7 +467,7 @@
+       r.expectedReferenceRevision === capture.branches.referenceRevision &&
+       capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
+     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
+-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fetch' && r.action !== 'push' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
++      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
+   }
+   reviewReason(): GitLocalIssue | null {
+     const h = this.held;
+@@ -562,7 +569,7 @@
+             // It permits a later read, never another Apply or a currentness
+             // exception. Later context/account ABA permanently removes it.
+             const now = this.current(actionScope(a.action)), c = a.capture;
+-            if (a.action.kind === 'push' && c?.push && a.applied && a.binding.api === now.api &&
++            if ((a.action.kind === 'push' || a.action.kind === 'push-new-branch') && c?.push && a.applied && a.binding.api === now.api &&
+                 a.binding.session === now.session && a.binding.projectId === now.projectId &&
+                 a.binding.repository === now.repository && a.binding.reader === now.reader &&
+                 sameGitPushAccount(c.push.account, now.pushConnection, now.projectId ?? '') &&
+diff --git a/desktop/src/gitLocalProtocol.ts b/desktop/src/gitLocalProtocol.ts
+--- a/desktop/src/gitLocalProtocol.ts
++++ b/desktop/src/gitLocalProtocol.ts
+@@ -1,3 +1,5 @@
++import { isGitPushNewBranchAction, isGitPushNewBranchReview, isGitPushNewBranchIntent, isGitPushNewBranchMutation, pushNewBranchIntentMatchesReview } from './gitPushNewBranchProtocol.ts';
++import type { GitPushNewBranchAction, GitPushNewBranchReview, GitPushNewBranchIntent, GitPushNewBranchMutation } from './gitPushNewBranchProtocol.ts';
+ import { pushIntentMatchesReview, gitPushIssueHelp, isGitPushAction, isGitPushReview, isGitPushIntent, isGitPushMutation, isGitPushReason } from './gitPushProtocol.ts';
+ import type { GitPushAction, GitPushReview, GitPushIntent, GitPushMutationResult, GitPushReason, GitPushIssue } from './gitPushProtocol.ts';
+ import { fastForwardIntentMatchesReview, gitFastForwardIssueHelp, isGitFastForwardAction, isGitFastForwardIntent, isGitFastForwardMutation, isGitFastForwardReason, isGitFastForwardReview } from './gitFastForwardProtocol.ts';
+@@ -37,20 +39,20 @@
+     discard: (raw: Uint8Array) => call('discard', raw), status: (raw: Uint8Array) => call('status', raw), cancel: (raw: Uint8Array) => call('cancel', raw) });
+ }
+ export interface GitLocalFileAction { readonly kind: GitAction; readonly expectedRevision: string; readonly paths: readonly string[] }
+-export type GitLocalAction = GitLocalFileAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction;
++export type GitLocalAction = GitLocalFileAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction | GitPushNewBranchAction;
+ export interface GitLocalFileInput extends GitLocalFileAction { readonly message: string | null; readonly identity: { readonly name: string; readonly email: string } | null }
+-export type GitLocalInput = GitLocalFileInput | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction;
++export type GitLocalInput = GitLocalFileInput | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction | GitInitAction | GitFetchAction | GitPushAction | GitPushNewBranchAction;
+ export interface GitLocalFileReview { readonly action: GitAction; readonly expectedRevision: string; readonly paths: readonly string[];
+   readonly wholeIndex: boolean; readonly head: string | null; readonly branch: string | null; readonly expectedIndex: string; readonly reviewDigest: string }
+-export type GitLocalReview = GitLocalFileReview | GitBranchReview | GitSwitchReview | GitRenameReview | GitFastForwardReview | GitInitReview | GitFetchReview | GitPushReview;
+-export type GitLocalIntent = GitIntent | GitBranchIntent | GitSwitchIntent | GitRenameIntent | GitFastForwardIntent | GitInitIntent | GitFetchIntent | GitPushIntent;
+-export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult | GitSwitchMutationResult | GitRenameMutationResult | GitFastForwardMutationResult | GitInitMutationResult | GitFetchMutationResult | GitPushMutationResult;
++export type GitLocalReview = GitLocalFileReview | GitBranchReview | GitSwitchReview | GitRenameReview | GitFastForwardReview | GitInitReview | GitFetchReview | GitPushReview | GitPushNewBranchReview;
++export type GitLocalIntent = GitIntent | GitBranchIntent | GitSwitchIntent | GitRenameIntent | GitFastForwardIntent | GitInitIntent | GitFetchIntent | GitPushIntent | GitPushNewBranchIntent;
++export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult | GitSwitchMutationResult | GitRenameMutationResult | GitFastForwardMutationResult | GitInitMutationResult | GitFetchMutationResult | GitPushMutationResult | GitPushNewBranchMutation;
+ export type GitLocalReason = GitReason | GitBranchReason | GitSwitchReason | GitRenameReason | GitFastForwardReason | GitInitReason | GitFetchReason | GitPushReason;
+ export type GitLocalIssue = GitIssue | GitBranchIssue | GitSwitchIssue | GitRenameIssue | GitFastForwardIssue | GitInitReason | GitFetchIssue | GitPushIssue;
+-export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview } | { readonly review: GitSwitchReview } | { readonly review: GitRenameReview } | { readonly review: GitFastForwardReview } | { readonly review: GitInitReview } | { readonly review: GitFetchReview; readonly diff: null } | { readonly review: GitPushReview };
++export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview } | { readonly review: GitSwitchReview } | { readonly review: GitRenameReview } | { readonly review: GitFastForwardReview } | { readonly review: GitInitReview } | { readonly review: GitFetchReview; readonly diff: null } | { readonly review: GitPushReview } | { readonly review: GitPushNewBranchReview };
+ export type GitLocalPrepared = { readonly reviewId: string; readonly context: GitReadContext } &
+   ({ readonly action: GitLocalFileAction; readonly review: GitLocalFileReview; readonly diff: GitDiff } |
+-   { readonly action: GitBranchAction; readonly review: GitBranchReview } | { readonly action: GitSwitchAction; readonly review: GitSwitchReview } | { readonly action: GitRenameAction; readonly review: GitRenameReview } | { readonly action: GitFastForwardAction; readonly review: GitFastForwardReview } | { readonly action: GitInitAction; readonly review: GitInitReview } | { readonly action: GitFetchAction; readonly review: GitFetchReview } | { readonly action: GitPushAction; readonly review: GitPushReview });
++   { readonly action: GitBranchAction; readonly review: GitBranchReview } | { readonly action: GitSwitchAction; readonly review: GitSwitchReview } | { readonly action: GitRenameAction; readonly review: GitRenameReview } | { readonly action: GitFastForwardAction; readonly review: GitFastForwardReview } | { readonly action: GitInitAction; readonly review: GitInitReview } | { readonly action: GitFetchAction; readonly review: GitFetchReview } | { readonly action: GitPushAction; readonly review: GitPushReview } | { readonly action: GitPushNewBranchAction; readonly review: GitPushNewBranchReview });
+ export interface GitLocalOperation { readonly operationId: string; readonly context: GitReadContext; readonly phase: 'prepare' | 'apply';
+   readonly action: GitLocalAction; readonly stage: 'starting' | 'running' | 'stopping' | 'settled' | 'cleanup-unknown';
+   readonly outcome: 'ok' | 'refused' | 'cancelled' | 'timed-out' | 'cleanup-unknown' | null; readonly reason: GitLocalReason | null;
+@@ -72,7 +74,7 @@
+ const kind = (v: unknown): v is GitAction => v === 'stage' || v === 'unstage' || v === 'commit';
+ const nullable = (v: unknown, check: (value: unknown) => boolean) => v === null || check(v);
+ const reason = (v: unknown, expected: GitLocalAction): v is GitLocalReason => typeof v === 'string' &&
+-  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'fetch' && isGitFetchReason(v) || expected.kind === 'push' && isGitPushReason(v) || expected.kind === 'branch-create' && isGitBranchReason(v) || expected.kind === 'branch-switch' && isGitSwitchReason(v) || expected.kind === 'branch-rename' && isGitRenameReason(v) || expected.kind === 'fast-forward' && isGitFastForwardReason(v) || expected.kind === 'initialize' && isGitInitReason(v));
++  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'fetch' && isGitFetchReason(v) || (expected.kind === 'push' || expected.kind === 'push-new-branch') && isGitPushReason(v) || expected.kind === 'branch-create' && isGitBranchReason(v) || expected.kind === 'branch-switch' && isGitSwitchReason(v) || expected.kind === 'branch-rename' && isGitRenameReason(v) || expected.kind === 'fast-forward' && isGitFastForwardReason(v) || expected.kind === 'initialize' && isGitInitReason(v));
+ function text(v: unknown, max: number, multiline = false): v is string {
+   return typeof v === 'string' && v.length <= max && utf8.encode(v).length <= max && !/\p{Cs}/u.test(v) &&
+     !(multiline ? /[\x00-\x08\x0b-\x1f\x7f]/ : /[\x00-\x1f\x7f]/).test(v);
+@@ -91,9 +93,9 @@
+   return connectionKeys(v, ['kind', 'expectedRevision', 'paths']) && kind(v.kind) && digest(v.expectedRevision) &&
+     (v.kind === 'commit' ? Array.isArray(v.paths) && v.paths.length === 0 : paths(v.paths));
+ }
+-function action(v: unknown): v is GitLocalAction { return isGitFetchAction(v) || isGitPushAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v) || fileAction(v); }
++function action(v: unknown): v is GitLocalAction { return isGitFetchAction(v) || isGitPushAction(v) || isGitPushNewBranchAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v) || fileAction(v); }
+ function input(v: unknown): v is GitLocalInput {
+-  if (isGitFetchAction(v) || isGitPushAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v)) return true;
++  if (isGitFetchAction(v) || isGitPushAction(v) || isGitPushNewBranchAction(v) || isGitInitAction(v) || isGitFastForwardAction(v) || isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v)) return true;
+   if (!connectionKeys(v, ['kind', 'expectedRevision', 'paths', 'message', 'identity']) ||
+       !fileAction({ kind: v.kind, expectedRevision: v.expectedRevision, paths: v.paths })) return false;
+   if (v.kind !== 'commit') return v.message === null && v.identity === null;
+@@ -110,6 +112,7 @@
+ }
+ function reviewed(v: unknown, expected: GitLocalAction): boolean {
+   if (expected.kind === 'fetch') return connectionKeys(v, ['review', 'diff']) && v.diff === null && isGitFetchReview(v.review, expected);
++  if (expected.kind === 'push-new-branch') return connectionKeys(v, ['review']) && isGitPushNewBranchReview(v.review, expected);
+   if (expected.kind === 'push') return connectionKeys(v, ['review']) && isGitPushReview(v.review, expected);
+   if (expected.kind === 'initialize') return connectionKeys(v, ['review']) && isGitInitReview(v.review, expected);
+   if (expected.kind === 'fast-forward') return connectionKeys(v, ['review']) && isGitFastForwardReview(v.review, expected);
+@@ -122,6 +125,7 @@
+ }
+ function intent(v: unknown, expected: GitLocalAction): v is GitLocalIntent {
+   if (expected.kind === 'fetch') return isGitFetchIntent(v, expected);
++  if (expected.kind === 'push-new-branch') return isGitPushNewBranchIntent(v, expected);
+   if (expected.kind === 'push') return isGitPushIntent(v, expected);
+   if (expected.kind === 'initialize') return isGitInitIntent(v, expected);
+   if (expected.kind === 'fast-forward') return isGitFastForwardIntent(v, expected);
+@@ -136,6 +140,7 @@
+ }
+ function mutation(v: unknown, expected: GitLocalAction, operationId: string): boolean {
+   if (expected.kind === 'fetch') return isGitFetchMutation(v, expected, operationId);
++  if (expected.kind === 'push-new-branch') return isGitPushNewBranchMutation(v, expected, operationId);
+   if (expected.kind === 'push') return isGitPushMutation(v, expected, operationId);
+   if (expected.kind === 'initialize') return isGitInitMutation(v, expected, operationId);
+   if (expected.kind === 'fast-forward') return isGitFastForwardMutation(v, expected, operationId);
+@@ -163,23 +168,24 @@
+ function prepared(v: unknown): boolean {
+   if (connectionKeys(v, ['reviewId', 'context', 'action', 'review'])) return id(v.reviewId) && context(v.context) &&
+     (isGitFetchAction(v.action) ? isGitFetchReview(v.review, v.action) :
+-      (isGitPushAction(v.action) || isGitInitAction(v.action) || isGitFastForwardAction(v.action) || isGitBranchAction(v.action) || isGitSwitchAction(v.action) || isGitRenameAction(v.action)) && reviewed({ review: v.review }, v.action));
++      (isGitPushAction(v.action) || isGitPushNewBranchAction(v.action) || isGitInitAction(v.action) || isGitFastForwardAction(v.action) || isGitBranchAction(v.action) || isGitSwitchAction(v.action) || isGitRenameAction(v.action)) && reviewed({ review: v.review }, v.action));
+   return connectionKeys(v, ['reviewId', 'context', 'action', 'review', 'diff']) && id(v.reviewId) && context(v.context) && fileAction(v.action) &&
+     reviewed({ review: v.review, diff: v.diff }, v.action);
+ }
+ export function gitLocalPreparedResult(v: GitLocalPrepared): GitLocalPrepareResult {
+   return 'diff' in v ? { review: v.review, diff: v.diff } :
+-    v.review.action === 'fetch' ? { review: v.review, diff: null } : v.review.action === 'push' ? { review: v.review } : v.review.action === 'initialize' ? { review: v.review } : v.review.action === 'fast-forward' ? { review: v.review } : v.review.action === 'branch-switch' ? { review: v.review } : v.review.action === 'branch-rename' ? { review: v.review } : { review: v.review };
++    v.review.action === 'fetch' ? { review: v.review, diff: null } : v.review.action === 'push-new-branch' ? { review: v.review } : v.review.action === 'push' ? { review: v.review } : v.review.action === 'initialize' ? { review: v.review } : v.review.action === 'fast-forward' ? { review: v.review } : v.review.action === 'branch-switch' ? { review: v.review } : v.review.action === 'branch-rename' ? { review: v.review } : { review: v.review };
+ }
+ export function gitLocalIntentMatchesReview(v: GitLocalIntent, r: GitLocalReview): boolean {
+   if (v.action === 'fetch') return r.action === 'fetch' && fetchIntentMatchesReview(v, r);
++  if (v.action === 'push-new-branch') return r.action === 'push-new-branch' && pushNewBranchIntentMatchesReview(v, r);
+   if (v.action === 'push') return r.action === 'push' && pushIntentMatchesReview(v, r);
+   if (v.action === 'fast-forward') return r.action === 'fast-forward' && fastForwardIntentMatchesReview(v, r);
+   if (v.action === 'initialize') return r.action === 'initialize' && initIntentMatchesReview(v, r);
+   if (v.action === 'branch-rename') return r.action === 'branch-rename' && renameIntentMatchesReview(v, r);
+   if (v.action === 'branch-switch') return r.action === 'branch-switch' && switchIntentMatchesReview(v, r);
+   if (v.action === 'branch-create') return r.action === 'branch-create' && branchIntentMatchesReview(v, r);
+-  return r.action !== 'fetch' && r.action !== 'push' && r.action !== 'fast-forward' && r.action !== 'initialize' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
++  return r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'initialize' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
+     v.expectedIndex === r.expectedIndex && v.expectedHead === r.head && v.expectedRef === r.branch;
+ }
+ function immutable<T>(v: unknown): T {
+@@ -222,7 +228,7 @@
+ export function sameGitLocalAction(a: GitLocalAction, b: GitLocalAction): boolean {
+   if (a.kind === 'fetch') return b.kind === 'fetch' && a.expectedRevision === b.expectedRevision && a.expectedReferenceRevision === b.expectedReferenceRevision &&
+     a.remote === b.remote && a.reference === b.reference && a.connectionSessionId === b.connectionSessionId && a.expectedConnectionRevision === b.expectedConnectionRevision;
+-  if (a.kind === 'push') return b.kind === 'push' && a.expectedRevision === b.expectedRevision && a.expectedReferenceRevision === b.expectedReferenceRevision &&
++  if (a.kind === 'push' || a.kind === 'push-new-branch') return b.kind === a.kind && a.expectedRevision === b.expectedRevision && a.expectedReferenceRevision === b.expectedReferenceRevision &&
+     a.remote === b.remote && a.localRef === b.localRef && a.remoteRef === b.remoteRef && a.oldOid === b.oldOid && a.newOid === b.newOid &&
+     a.connectionSessionId === b.connectionSessionId && a.expectedConnectionRevision === b.expectedConnectionRevision;
+   if (a.kind === 'initialize') return b.kind === 'initialize';
+@@ -234,7 +240,7 @@
+     a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+   if (a.kind === 'branch-create') return b.kind === 'branch-create' && a.expectedRevision === b.expectedRevision &&
+     a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+-  return b.kind !== 'fetch' && b.kind !== 'push' && b.kind !== 'fast-forward' && b.kind !== 'initialize' && b.kind !== 'branch-create' && b.kind !== 'branch-switch' && b.kind !== 'branch-rename' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
++  return b.kind !== 'fetch' && b.kind !== 'push' && b.kind !== 'push-new-branch' && b.kind !== 'fast-forward' && b.kind !== 'initialize' && b.kind !== 'branch-create' && b.kind !== 'branch-switch' && b.kind !== 'branch-rename' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
+ }
+ export function gitLocalIssueHelp(issue: GitLocalIssue): string {
+   return gitFetchIssueHelp(issue) ?? gitPushIssueHelp(issue) ?? gitInitIssueHelp(issue) ?? gitFastForwardIssueHelp(issue) ?? gitRenameIssueHelp(issue) ?? gitSwitchIssueHelp(issue) ?? previousIssueHelp(issue as GitIssue | GitBranchIssue);
+diff --git a/desktop/src/gitPushRecovery.ts b/desktop/src/gitPushRecovery.ts
+--- a/desktop/src/gitPushRecovery.ts
++++ b/desktop/src/gitPushRecovery.ts
+@@ -1,3 +1,4 @@
++import type { GitPushNewBranchReview } from './gitPushNewBranchProtocol.ts';
+ // Later GET-only comparison through the EXISTING Activity owner. This object
+ // owns no invocation, clock, grant, native proof or journal settlement.
+ import type { GitLocalController, GitLocalBinding } from './gitLocalController.ts';
+@@ -8,7 +9,7 @@
+ 
+ export interface GitPushReadbackSource {
+   readonly operation: GitLocalOperation;
+-  readonly review: GitPushReview;
++  readonly review: GitPushReview | GitPushNewBranchReview;
+   readonly account: GitPushAccount;
+   readonly binding: GitLocalBinding;
+ }
+diff --git a/desktop/src/gitPushSelection.ts b/desktop/src/gitPushSelection.ts
+--- a/desktop/src/gitPushSelection.ts
++++ b/desktop/src/gitPushSelection.ts
+@@ -53,7 +53,7 @@
+   return !!b && a.sessionId === b.sessionId && a.revision === b.revision && a.accountId === b.accountId && a.login === b.login &&
+     a.repositoryId === b.repositoryId && a.repository === b.repository;
+ }
+-export function pushReviewMatchesAccount(review: GitPushReview, a: GitPushAccount): boolean {
++export function pushReviewMatchesAccount(review: Pick<GitPushReview, 'accountId' | 'login' | 'repositoryId' | 'repository'>, a: GitPushAccount): boolean {
+   return review.accountId === a.accountId && review.login === a.login && review.repositoryId === a.repositoryId && review.repository === a.repository;
+ }
+ export function gitPushLocalSource(read: GitReadView | null | undefined, files: GitRepositoryView, projectId: string): GitReadObservation | null {
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -2210,7 +2210,7 @@
+     }
+     pub(super) fn git_local_admission_bytes_for(document:&Arc<Inner>,state:&DocumentState,future:usize,kind:crate::git_local_protocol::Kind)->Result<usize,Problem>{
+         let retained=retained_document_bytes(document,state)?;
+-        if kind==crate::git_local_protocol::Kind::Push {
++        if kind.is_push() {
+             crate::git_local_protocol::push_worker::admission_bytes(retained,future)
+         } else if kind==crate::git_local_protocol::Kind::Fetch {
+             crate::git_local_protocol::fetch_worker::admission_bytes(retained,future)
+diff --git a/desktop/src-tauri/src/asset_session_git_local.rs b/desktop/src-tauri/src/asset_session_git_local.rs
+--- a/desktop/src-tauri/src/asset_session_git_local.rs
++++ b/desktop/src-tauri/src/asset_session_git_local.rs
+@@ -413,8 +413,8 @@
+         self.passive_query_gate_locked(state,self.inner.bridge.as_ref())?;
+         if pending(state)||!self.inner.bridge.supervisor.can_exit()||!self.inner.bridge.edits.can_exit()
+             ||self.inner.bridge.edits.preflight_attention()||state.slot.as_ref().is_some_and(|s|s.phase!=Phase::Idle||!s.owner.resources_settled())
+-            ||state.github.native_work_pending()||(!matches!(kind,wire::Kind::Fetch|wire::Kind::Push)&&state.github.registration().is_some()) {return Err(BridgeError::new("busy","Finish the original task before changing local Git state."))}
+-        if !self.inner.bridge.supervisor.git_local_profile_available()||kind==wire::Kind::Fetch&&!self.inner.bridge.supervisor.git_fetch_profile_available()||kind==wire::Kind::Push&&!self.inner.bridge.supervisor.git_push_profile_available() {return Err(BridgeError::unavailable("The fixed local Git writer is unavailable."))}Ok(())
++            ||state.github.native_work_pending()||(!matches!(kind,wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch)&&state.github.registration().is_some()) {return Err(BridgeError::new("busy","Finish the original task before changing local Git state."))}
++        if !self.inner.bridge.supervisor.git_local_profile_available()||kind==wire::Kind::Fetch&&!self.inner.bridge.supervisor.git_fetch_profile_available()||kind.is_push()&&!self.inner.bridge.supervisor.git_push_profile_available_for(kind) {return Err(BridgeError::unavailable("The fixed local Git writer is unavailable."))}Ok(())
+     }
+     fn git_local_snapshot(&self,state:&DocumentState)->wire::Status {wire::Status {schema_version:1,document_revision:state.revision,
+         available:self.inner.bridge.supervisor.git_local_profile_available()&&state.lifetime.original_bound()&&!state.lost_observed,
+diff --git a/desktop/src-tauri/src/asset_session_git_push.rs b/desktop/src-tauri/src/asset_session_git_push.rs
+--- a/desktop/src-tauri/src/asset_session_git_push.rs
++++ b/desktop/src-tauri/src/asset_session_git_push.rs
+@@ -38,7 +38,7 @@
+                 .git_push_review_current(pins, action, details, Instant::now(), work)?;
+             Ok(Some(pins.clone()))
+         }
+-        (_, _, None) if review.action.kind() != wire::Kind::Push => Ok(None),
++        (_, _, None) if !review.action.kind().is_push() => Ok(None),
+         _ => Err(changed()),
+     }
+ }
+@@ -49,7 +49,7 @@
+                 .github
+                 .git_push_prepared_current(pins, details, Instant::now())
+         }
+-        (_, None) => review.action.kind() != wire::Kind::Push,
++        (_, None) => !review.action.kind().is_push(),
+         _ => false,
+     }
+ }
+diff --git a/desktop/src-tauri/src/git_fetch_state_tests.rs b/desktop/src-tauri/src/git_fetch_state_tests.rs
+--- a/desktop/src-tauri/src/git_fetch_state_tests.rs
++++ b/desktop/src-tauri/src/git_fetch_state_tests.rs
+@@ -105,7 +105,7 @@
+     let mut state = State::empty();
+     state.reserve(row(1)).unwrap();
+     let good: Value = serde_json::from_slice(&state.bytes().unwrap()).unwrap();
+-    for version in [0, 1, 2, 3, 4, 5, 9, 255] {
++    for version in [0, 1, 2, 3, 4, 5, 10, 255] {
+         let mut v = good.clone();
+         v["schemaVersion"] = json!(version);
+         assert!(State::decode(&Snapshot {
+diff --git a/desktop/src-tauri/src/git_local_protocol.rs b/desktop/src-tauri/src/git_local_protocol.rs
+--- a/desktop/src-tauri/src/git_local_protocol.rs
++++ b/desktop/src-tauri/src/git_local_protocol.rs
+@@ -61,7 +61,8 @@
+ 
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="lowercase")]
+-pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename, #[serde(rename="fast-forward")] FastForward, Fetch, Push, Initialize }
++pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename, #[serde(rename="fast-forward")] FastForward, Fetch, Push, #[serde(rename="push-new-branch")] PushNewBranch, Initialize }
++impl Kind { pub(crate) fn is_push(self)->bool { matches!(self,Self::Push|Self::PushNewBranch) } }
+ #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all="lowercase")]
+ pub(crate) enum Phase { Prepare, Apply }
+@@ -98,7 +99,7 @@
+         if matches!(kind, Kind::Stage | Kind::Unstage) && action.valid() { Ok(action) }
+         else { Err(BridgeError::invalid()) }
+     }
+-    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename, Self::Fetch(_)=>Kind::Fetch,Self::Push(_)=>Kind::Push, Self::Initialize(_)=>Kind::Initialize } }
++    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename, Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.kind.local_kind(), Self::Initialize(_)=>Kind::Initialize } }
+     pub(crate) fn expected_revision(&self) -> Option<&str> { match self { Self::Files(v)=>Some(&v.expected_revision), Self::Branch(v)=>Some(&v.expected_revision), Self::Switch(v)=>Some(&v.expected_revision), Self::FastForward(v)=>Some(&v.expected_revision), Self::Rename(v)=>Some(&v.expected_revision), Self::Fetch(v)=>Some(&v.expected_revision),Self::Push(v)=>Some(&v.expected_revision), Self::Initialize(_)=>None } }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+@@ -108,7 +109,7 @@
+                     && v.identity.as_ref().is_some_and(Identity::valid)
+                     && v.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
+                 Kind::Stage|Kind::Unstage => paths(&v.paths) && v.message.is_none() && v.identity.is_none(),
+-                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize => false,
++                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize => false,
+             },
+         }
+     }
+@@ -149,7 +150,7 @@
+     }
+     need(match name {
+         "git_local_prepare" => keys(&body,&["projectId","expectedDocumentRevision","action"])
+-            && if body["action"]["kind"]=="push" {keys(&body["action"],push::ACTION_KEYS)} else if body["action"]["kind"]=="fetch" {keys(&body["action"],fetch::ACTION_KEYS)} else if body["action"]["kind"]=="initialize" {keys(&body["action"],&["kind"])} else if body["action"]["kind"]=="fast-forward" {keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","targetRef","targetOid"])} else if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
++            && if matches!(body["action"]["kind"].as_str(),Some("push"|"push-new-branch")) {keys(&body["action"],push::ACTION_KEYS)} else if body["action"]["kind"]=="fetch" {keys(&body["action"],fetch::ACTION_KEYS)} else if body["action"]["kind"]=="initialize" {keys(&body["action"],&["kind"])} else if body["action"]["kind"]=="fast-forward" {keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","targetRef","targetOid"])} else if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
+                 keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","name"])
+             } else { keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]) },
+         "git_local_apply" => keys(&body,&["projectId","expectedDocumentRevision","reviewId"]),
+@@ -179,7 +180,7 @@
+     pub(crate) expected_index: String, pub(crate) review_digest: String,
+ }
+ impl Review {
+-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(_)=>Kind::Push,Self::Initialize(_)=>Kind::Initialize} }
++    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Initialize(_)=>Kind::Initialize} }
+     pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
+     pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head), Self::FastForward(v)=>Some(&v.head), Self::Rename(v)=>Some(&v.head),Self::Fetch(v)=>v.head.as_deref(),Self::Push(v)=>Some(&v.head),Self::Initialize(_)=>None} }
+     pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch), Self::FastForward(v)=>Some(&v.branch), Self::Rename(v)=>Some(&v.branch),Self::Fetch(v)=>v.branch.as_deref(),Self::Push(v)=>Some(&v.branch),Self::Initialize(_)=>None} }
+@@ -196,7 +197,7 @@
+     pub(crate) fn valid(&self) -> bool {
+         match self {
+             Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(),Self::Initialize(v)=>v.valid(),
+-            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize) && read::digest(&v.expected_revision)
++            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) && read::digest(&v.expected_revision)
+                 && read::digest(&v.expected_index) && read::digest(&v.review_digest)
+                 && paths(&v.paths) && v.whole_index == (v.action == Kind::Commit)
+                 && v.head.as_deref().is_none_or(read::oid) && v.branch.as_deref().is_none_or(read::branch)
+@@ -218,7 +219,7 @@
+         }
+     }
+     fn decode(value:&Value) -> Result<Self,BridgeError> {
+-        need(if value["action"] == "push" {keys(value,push::REVIEW_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::REVIEW_KEYS)} else if value["action"] == "initialize" {keys(value,init::REVIEW_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::REVIEW_KEYS)} else if value["action"] == "branch-switch" {
++        need(if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::REVIEW_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::REVIEW_KEYS)} else if value["action"] == "initialize" {keys(value,init::REVIEW_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::REVIEW_KEYS)} else if value["action"] == "branch-switch" {
+             keys(value,switch::REVIEW_KEYS)
+         } else if value["action"] == "branch-rename" {
+             keys(value,rename::REVIEW_KEYS)
+@@ -239,7 +240,7 @@
+     pub(crate) candidate_index: Option<String>, pub(crate) candidate_commit: Option<String>,
+ }
+ impl Intent {
+-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(_)=>Kind::Push,Self::Initialize(_)=>Kind::Initialize} }
++    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Initialize(_)=>Kind::Initialize} }
+     pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
+     pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref),Self::FastForward(v)=>Some(&v.expected_ref), Self::Rename(v)=>Some(&v.expected_ref),Self::Fetch(v)=>v.expected_ref.as_deref(),Self::Push(v)=>Some(&v.local_ref),Self::Initialize(_)=>None} }
+     pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head),Self::FastForward(v)=>Some(&v.expected_head), Self::Rename(v)=>Some(&v.expected_head),Self::Fetch(v)=>v.expected_head.as_deref(),Self::Push(v)=>Some(&v.new_oid),Self::Initialize(_)=>None} }
+@@ -264,7 +265,7 @@
+                         && v.candidate_commit.as_deref().is_some_and(|oid|read::oid(oid)
+                             && v.expected_head.as_ref().is_none_or(|h|h.len() == oid.len())),
+                     Kind::Stage|Kind::Unstage => v.candidate_commit.is_none() && v.candidate_index.as_deref().is_some_and(read::digest),
+-                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize=>false,
++                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize=>false,
+                 },
+         }
+     }
+@@ -283,7 +284,7 @@
+         }
+     }
+     fn decode(value:&Value) -> Result<Self,BridgeError> {
+-        need(if value["action"] == "push" {keys(value,push::INTENT_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::INTENT_KEYS)} else if value["action"] == "initialize" {keys(value,init::INTENT_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::INTENT_KEYS)} else if value["action"] == "branch-switch" {
++        need(if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::INTENT_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::INTENT_KEYS)} else if value["action"] == "initialize" {keys(value,init::INTENT_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::INTENT_KEYS)} else if value["action"] == "branch-switch" {
+             keys(value,switch::INTENT_KEYS)
+         } else if value["action"] == "branch-rename" {
+             keys(value,rename::INTENT_KEYS)
+@@ -324,7 +325,7 @@
+     fn from_sources(id:&str,action:&Action,context:&Context,native:&Native,
+         clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>,rename_sources:Option<rename::Sources>,fast_forward_sources:Option<ff::Sources>)->Result<Self,BridgeError> {
+         need(valid_id(id) && action.valid() && valid_id(&context.project_id) && valid_id(&context.revision)
+-            && !matches!(action.kind(),Kind::Fetch|Kind::Push|Kind::Initialize) && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
++            && !matches!(action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
+             && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000))?;
+         let phase = if let Some(selected) = &binding {
+             let index = native.files.index.as_ref().map(|v|v.sha256.clone()).unwrap_or_else(||hash(b"absent"));
+@@ -373,7 +374,7 @@
+         Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest:hash(&bytes),
+             native:None,initialization:Some(native.clone()),switch_sources:None,rename_sources:None,fast_forward_sources:None,fetch_target:None,push_target:None,bytes})
+     }
+-    fn protocol(&self)->&str {if self.action.kind()==Kind::Push {push_worker::PROTOCOL} else if self.action.kind()==Kind::Fetch {fetch_worker::PROTOCOL} else {PROTOCOL}}
++    fn protocol(&self)->&str {if self.action.kind().is_push() {push_worker::PROTOCOL} else if self.action.kind()==Kind::Fetch {fetch_worker::PROTOCOL} else {PROTOCOL}}
+     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
+     pub(crate) fn go(&self) -> Vec<u8> { format!("MRK-GIT-LOCAL-GO/1 {}\n",self.digest).into_bytes() }
+     pub(crate) fn ready(&self, bytes:&[u8]) -> Result<(),BridgeError> {
+@@ -394,12 +395,12 @@
+     /// and rematched Doc/consent. The codec cannot confer that permission.
+     pub(crate) fn ack(&self, candidate:&Candidate, revision:u64) -> Result<Vec<u8>,BridgeError> {
+         let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
+-        need(!matches!(self.action.kind(),Kind::Fetch|Kind::Push) && candidate.request_digest == self.digest && candidate.intent.matches(&binding.review)
++        need(!matches!(self.action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch) && candidate.request_digest == self.digest && candidate.intent.matches(&binding.review)
+             && revision == binding.journal_revision + 1)?;
+         Ok(format!("MRK-GIT-LOCAL-ACK/1 {} {} {}\n",self.digest,candidate.digest,revision).into_bytes())
+     }
+     pub(crate) fn terminal(&self, bytes:&[u8], candidate:Option<&Candidate>) -> Result<Terminal,BridgeError> {
+-        if self.action.kind()==Kind::Push {return self.push_terminal(bytes,candidate)}
++        if self.action.kind().is_push() {return self.push_terminal(bytes,candidate)}
+         if self.action.kind()==Kind::Fetch {return self.fetch_terminal(bytes,candidate)}
+         if let Some(candidate) = candidate {
+             let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
+@@ -423,7 +424,7 @@
+             if self.phase == Phase::Prepare {
+                 need(candidate.is_none() && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns
+                     && terminal.publication == Publication::NotReported
+-                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize) {&["review"]} else {&["review","diff"]}))?;
++                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) {&["review"]} else {&["review","diff"]}))?;
+                 let review = Review::decode(&terminal.result["review"])?;
+                 need(review.matches(&self.action))?;
+                 if let Some(review) = review.file() {
+@@ -462,7 +463,7 @@
+             need(candidate.is_some() && terminal.publication == match self.action.kind() {
+                 Kind::Commit=>Publication::RefReturned,Kind::BranchCreate=>Publication::BranchRefReturned,
+                 Kind::Stage|Kind::Unstage=>Publication::IndexReturned,
+-                Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize=>return Err(BridgeError::protocol()),
++                Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize=>return Err(BridgeError::protocol()),
+             })?;
+         }
+         if state == "succeeded" {
+diff --git a/desktop/src-tauri/src/git_local_sources_macos.rs b/desktop/src-tauri/src/git_local_sources_macos.rs
+--- a/desktop/src-tauri/src/git_local_sources_macos.rs
++++ b/desktop/src-tauri/src/git_local_sources_macos.rs
+@@ -369,7 +369,7 @@
+             if let Some(publication) = publication {
+                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
+-                if review.action()==wire::Kind::Push {self.push_returned(publication,stop)?;return self.post_inner(stop)}
++                if review.action().is_push() {self.push_returned(publication,stop)?;return self.post_inner(stop)}
+                 if review.action()==wire::Kind::Fetch {
+                     self.fetch_returned(publication,stop)?;return self.post_inner(stop)
+                 }
+@@ -397,7 +397,7 @@
+                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
+                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
+                     },
+-                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push=>return Err(Reason::SourceChanged),
++                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch=>return Err(Reason::SourceChanged),
+                 };
+                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
+                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
+@@ -517,7 +517,7 @@
+             }
+             self.native = Some(native);
+             if kind==wire::Kind::Fetch {self.capture_fetch(objects,stop)?;}
+-            if kind==wire::Kind::Push {self.capture_push(stop)?;}
++            if kind.is_push() {self.capture_push(kind,stop)?;}
+             if review.is_some_and(|v|v.action()==wire::Kind::FastForward) {self.capture_fast_forward(project,stop)?;}
+             if review.is_some_and(|v|v.action()==wire::Kind::BranchRename) {self.capture_rename(stop)?;}
+             if review.is_some_and(|v|v.action()==wire::Kind::BranchSwitch) {self.capture_switch(project,stop)?;}
+diff --git a/desktop/src-tauri/src/git_local_state.rs b/desktop/src-tauri/src/git_local_state.rs
+--- a/desktop/src-tauri/src/git_local_state.rs
++++ b/desktop/src-tauri/src/git_local_state.rs
+@@ -45,15 +45,24 @@
+     fetch:Option<fetch::Journal>,
+     #[serde(default,skip_serializing_if="Option::is_none")]
+     push:Option<push::Journal>,
++    #[serde(default,skip_serializing_if="Option::is_none")]
++    push_new_branch:Option<push::Journal>,
+ }
+ impl Row {
++    fn push_details(&self)->Option<&push::Journal> {
++        match self.action {wire::Kind::Push=>self.push.as_ref(),wire::Kind::PushNewBranch=>self.push_new_branch.as_ref(),_=>None}
++    }
++    fn push_details_mut(&mut self)->Option<&mut push::Journal> {
++        match self.action {wire::Kind::Push=>self.push.as_mut(),wire::Kind::PushNewBranch=>self.push_new_branch.as_mut(),_=>None}
++    }
+     fn preparing(project:&ProjectBinding,id:&str,review:&wire::Review)->Result<Self> {
+         need(project_id(project.project_id.as_str()) && project.device!=0 && project.inode!=0 && std::path::Path::new(&project.canonical_root).is_absolute()
+             && valid_id(id) && review.valid())?;
+         let row=Self {project_id:project.project_id.as_str().to_owned(),operation_id:id.into(),action:review.action(),
+             review_digest:review.review_digest().into(),expected_revision:review.expected_revision().into(),expected_ref:review.branch().map(str::to_owned),
+             expected_head:review.head().map(str::to_owned),expected_index:review.expected_index().map(str::to_owned),candidate_index:None,candidate_commit:None,
+-            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing),rename:review.rename_details().map(rename::Journal::preparing),fast_forward:review.fast_forward_details().map(ff::Journal::preparing),initialization:review.init_details().map(init::Journal::preparing),fetch:review.fetch_details().map(fetch::Journal::preparing),push:review.push_details().map(push::Journal::preparing)};
++            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing),rename:review.rename_details().map(rename::Journal::preparing),fast_forward:review.fast_forward_details().map(ff::Journal::preparing),initialization:review.init_details().map(init::Journal::preparing),fetch:review.fetch_details().map(fetch::Journal::preparing),push:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::Push).map(push::Journal::preparing),
++            push_new_branch:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::PushNewBranch).map(push::Journal::preparing)};
+         row.validate()?;Ok(row)
+     }
+     fn has_candidate(&self)->bool {
+@@ -62,10 +71,10 @@
+             ||self.rename.as_ref().is_some_and(|r|r.candidate.is_some())
+             ||self.initialization.as_ref().is_some_and(|i|i.candidate.is_some())
+             ||self.fetch.as_ref().is_some_and(|f|f.candidate.is_some())
+-            ||self.push.as_ref().is_some_and(|p|p.candidate.is_some())
++            ||self.push_details().is_some_and(|p|p.candidate.is_some())
+     }
+     fn intent(&self)->Option<wire::Intent> {
+-        if let Some(p)=&self.push {p.candidate.clone().map(wire::Intent::Push)}
++        if let Some(p)=self.push_details() {p.candidate.clone().map(wire::Intent::Push)}
+         else if let Some(f)=&self.fetch {f.candidate.clone().map(wire::Intent::Fetch)}
+         else if let Some(i)=&self.initialization {i.candidate.clone().map(wire::Intent::Initialize)}
+         else if let Some(f)=&self.fast_forward {
+@@ -99,10 +108,11 @@
+             && (self.action==wire::Kind::Initialize || self.initialization.is_none())
+             && (self.action==wire::Kind::Fetch || self.fetch.is_none())
+             && (self.action==wire::Kind::Push || self.push.is_none())
++            && (self.action==wire::Kind::PushNewBranch || self.push_new_branch.is_none())
+             && match self.action {
+-                wire::Kind::Push=>self.initialization.is_none() && self.fetch.is_none() && self.fast_forward.is_none() && self.branch.is_none()
++                wire::Kind::Push|wire::Kind::PushNewBranch=>self.initialization.is_none() && self.fetch.is_none() && self.fast_forward.is_none() && self.branch.is_none()
+                     && self.switch.is_none() && self.rename.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
+-                    && self.push.as_ref().is_some_and(|p|self.expected_index.as_deref().is_some_and(|index|
++                    && self.push_details().is_some_and(|p|p.reviewed.action.local_kind()==self.action && self.expected_index.as_deref().is_some_and(|index|
+                         p.valid(&self.expected_revision,self.expected_head.as_deref(),self.expected_ref.as_deref(),index,&self.review_digest))),
+                 wire::Kind::Fetch=>self.initialization.is_none() && self.fast_forward.is_none() && self.branch.is_none()
+                     && self.switch.is_none() && self.rename.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
+@@ -144,12 +154,12 @@
+                 Some(Completion::RecoveryRequired)=>d.valid(f.candidate.as_ref()),_=>false})))?;
+         need(self.action!=wire::Kind::Fetch || self.outcome!=Some(Completion::Succeeded)
+             || self.fetch.as_ref().is_some_and(|f|f.final_state.as_ref().is_some_and(|d|d.successful(f.candidate.as_ref()))))?;
+-        need(self.push.as_ref().is_none_or(|p|p.final_state.as_ref().is_none_or(|d|
++        need(self.push_details().is_none_or(|p|p.final_state.as_ref().is_none_or(|d|
+             self.phase==Phase::Finished && self.has_candidate()
+             && match self.outcome {Some(Completion::Succeeded)=>d.successful(p.candidate.as_ref()),
+                 Some(Completion::RecoveryRequired)=>d.valid(p.candidate.as_ref()),_=>false})))?;
+-        need(self.action!=wire::Kind::Push || self.outcome!=Some(Completion::Succeeded)
+-            || self.push.as_ref().is_some_and(|p|p.final_state.as_ref().is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
++        need(!self.action.is_push() || self.outcome!=Some(Completion::Succeeded)
++            || self.push_details().is_some_and(|p|p.final_state.as_ref().is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
+         need(match self.phase {
+             Phase::Preparing=> !self.has_candidate() && self.outcome.is_none(),
+             Phase::Candidate=> self.has_candidate() && self.outcome.is_none(),
+@@ -176,6 +186,8 @@
+                 (Some(r),Some(o))=>r.same_original(o),(None,None)=>true,_=>false,
+             } && match (&self.push,&original.push) {
+                 (Some(p),Some(o))=>p.same_original(o),(None,None)=>true,_=>false,
++            } && match (&self.push_new_branch,&original.push_new_branch) {
++                (Some(p),Some(o))=>p.same_original(o),(None,None)=>true,_=>false,
+             } && match (&self.fetch,&original.fetch) {
+                 (Some(f),Some(o))=>f.same_original(o),(None,None)=>true,_=>false,
+             } && match (&self.initialization,&original.initialization) {
+@@ -186,7 +198,7 @@
+         need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action() && self.expected_revision==intent.expected_revision()
+             && self.expected_ref.as_deref()==intent.expected_ref() && self.expected_head.as_deref()==intent.expected_head()
+             && self.expected_index.as_deref()==intent.expected_index())?;
+-        if let Some(p)=&mut self.push {
++        if let Some(p)=self.push_details_mut() {
+             let proposed=intent.push_details().ok_or_else(||StateError::from(Error::Conflict))?;
+             need(p.accepts(proposed))?;p.candidate=Some(proposed.clone());
+         } else if let Some(f)=&mut self.fetch {
+@@ -249,11 +261,11 @@
+             && self.fetch.as_ref().is_some_and(|f|f.final_state.is_none() && fetched.is_some_and(|d|d.valid(f.candidate.as_ref()))))?;
+         need(self.action!=wire::Kind::Fetch || outcome!=Completion::Succeeded
+             || self.fetch.as_ref().is_some_and(|f|fetched.is_some_and(|d|d.successful(f.candidate.as_ref()))))?;
+-        need(pushed.is_none() || self.action==wire::Kind::Push && self.has_candidate()
++        need(pushed.is_none() || self.action.is_push() && self.has_candidate()
+             && matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
+-            && self.push.as_ref().is_some_and(|p|p.final_state.is_none() && pushed.is_some_and(|d|d.valid(p.candidate.as_ref()))))?;
+-        need(self.action!=wire::Kind::Push || outcome!=Completion::Succeeded
+-            || self.push.as_ref().is_some_and(|p|pushed.is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
++            && self.push_details().is_some_and(|p|p.final_state.is_none() && pushed.is_some_and(|d|d.valid(p.candidate.as_ref()))))?;
++        need(!self.action.is_push() || outcome!=Completion::Succeeded
++            || self.push_details().is_some_and(|p|pushed.is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
+         // A persisted candidate makes a cancelled/refused child uncertain with
+         // respect to publication. No negative result is upgraded to unsent.
+         need(!matches!(outcome,Completion::Failed|Completion::Cancelled)||!self.has_candidate())?;
+@@ -271,7 +283,7 @@
+             self.fetch.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
+         }
+         if let Some(details)=pushed {
+-            self.push.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
++            self.push_details_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
+         }
+         self.phase=Phase::Finished;self.outcome=Some(outcome);self.validate()
+     }
+@@ -282,7 +294,7 @@
+ impl State {
+     fn empty()->Self {Self {schema_version:1,protocol:PROTOCOL.into(),rows:vec![]}}
+     fn bytes(&self)->Result<Vec<u8>> {
+-        need((1..=8).contains(&self.schema_version) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
++        need((1..=9).contains(&self.schema_version) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
+             && self.rows.windows(2).all(|p|p[0].project_id<p[1].project_id))?;
+         // Supervisor text is process-local, not a global or durable operation
+         // identity. Rows are partitioned by the service's stable project ID;
+@@ -295,6 +307,7 @@
+             need(self.schema_version>=6 || row.fetch.is_none() && row.action!=wire::Kind::Fetch)?;
+             need(self.schema_version>=7 || row.initialization.is_none() && row.action!=wire::Kind::Initialize)?;
+             need(self.schema_version>=8 || row.push.is_none() && row.action!=wire::Kind::Push)?;
++            need(self.schema_version>=9 || row.push_new_branch.is_none() && row.action!=wire::Kind::PushNewBranch)?;
+             row.validate()?;
+         }
+         let value=serde_json::to_value(self).map_err(|_|StateError::from(Error::InvalidRequest))?;
+@@ -313,7 +326,7 @@
+     }
+     fn reserve(&mut self,row:Row)->Result<()> {
+         need(row.phase==Phase::Preparing)?;
+-        let schema = match row.action {wire::Kind::FastForward=>5,wire::Kind::Fetch=>6,wire::Kind::Initialize=>7,wire::Kind::Push=>8,wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
++        let schema = match row.action {wire::Kind::FastForward=>5,wire::Kind::Fetch=>6,wire::Kind::Initialize=>7,wire::Kind::Push=>8,wire::Kind::PushNewBranch=>9,wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
+         if let Some(index)=self.rows.iter().position(|r|r.project_id==row.project_id) {
+             if !self.rows[index].replaceable() {return Err(Error::RecoveryRequired.into());}
+             self.rows[index]=row;
+@@ -449,3 +462,7 @@
+ #[cfg(test)]
+ #[path="git_fetch_state_tests.rs"]
+ mod fetch_tests;
++
++#[cfg(test)]
++#[path="git_push_new_branch_state_tests.rs"]
++mod push_new_branch_tests;
+diff --git a/desktop/src-tauri/src/git_push_connection.rs b/desktop/src-tauri/src/git_push_connection.rs
+--- a/desktop/src-tauri/src/git_push_connection.rs
++++ b/desktop/src-tauri/src/git_push_connection.rs
+@@ -41,7 +41,6 @@
+             &self.target.repository_id,
+             &self.action.expected_revision,
+             &self.action.expected_reference_revision,
+-            &self.action.remote,
+             &self.action.local_ref,
+             &self.action.remote_ref,
+             &self.action.old_oid,
+@@ -50,7 +49,7 @@
+         ] {
+             bytes = bytes.checked_add(text.capacity())?;
+         }
+-        Some(bytes)
++        bytes.checked_add(self.action.remote.as_ref().map_or(0, String::capacity))
+     }
+ }
+ pub(super) struct Hold {
+@@ -544,7 +543,7 @@
+         // A changed upstream with the old tracking ref is not a valid review.
+         assert!(!changed.valid());
+         assert!(!changed.matches(&wrong));
+-        changed.tracking_ref = push::tracking(&changed.remote, &changed.upstream_ref).unwrap();
++        changed.tracking_ref = changed.remote.as_deref().and_then(|alias| push::tracking(alias, &changed.upstream_ref));
+         assert!(changed.valid());
+         assert!(changed.matches(&wrong));
+         assert!(s
+diff --git a/desktop/src-tauri/src/git_push_protocol.rs b/desktop/src-tauri/src/git_push_protocol.rs
+--- a/desktop/src-tauri/src/git_push_protocol.rs
++++ b/desktop/src-tauri/src/git_push_protocol.rs
+@@ -110,7 +110,12 @@
+ pub(crate) enum Kind {
+     #[serde(rename = "push")]
+     Push,
+-}
++    #[serde(rename = "push-new-branch")]
++    PushNewBranch,
++}
++
++#[path = "git_push_new_branch_protocol.rs"]
++pub(crate) mod new_branch;
+ 
+ #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -118,7 +123,8 @@
+     pub(crate) kind: Kind,
+     pub(crate) expected_revision: String,
+     pub(crate) expected_reference_revision: String,
+-    pub(crate) remote: String,
++    #[serde(deserialize_with = "new_branch::nullable")]
++    pub(crate) remote: Option<String>,
+     pub(crate) local_ref: String,
+     pub(crate) remote_ref: String,
+     pub(crate) old_oid: String,
+@@ -130,12 +136,8 @@
+     pub(crate) fn valid(&self) -> bool {
+         read::digest(&self.expected_revision)
+             && read::digest(&self.expected_reference_revision)
+-            && remote::remote(&self.remote)
+-            && remote::reference(&self.local_ref)
+-            && remote::reference(&self.remote_ref)
+-            && remote::oid(&self.old_oid)
+-            && remote::oid(&self.new_oid)
+-            && self.old_oid != self.new_oid
++            && self.kind.source(self.remote.as_deref(), &self.local_ref,
++                &self.remote_ref, &self.old_oid, &self.new_oid)
+             && valid_id(&self.connection_session_id)
+             && (1..u32::MAX).contains(&self.expected_connection_revision)
+     }
+@@ -145,7 +147,8 @@
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct Review {
+     pub(crate) action: Kind,
+-    pub(crate) remote: String,
++    #[serde(deserialize_with = "new_branch::nullable")]
++    pub(crate) remote: Option<String>,
+     pub(crate) repository: String,
+     pub(crate) account_id: String,
+     pub(crate) repository_id: String,
+@@ -154,7 +157,8 @@
+     pub(crate) head: String,
+     pub(crate) upstream_ref: String,
+     pub(crate) expected_remote_oid: String,
+-    pub(crate) tracking_ref: String,
++    #[serde(deserialize_with = "new_branch::nullable")]
++    pub(crate) tracking_ref: Option<String>,
+     pub(crate) commits: Vec<String>,
+     pub(crate) expected_revision: String,
+     pub(crate) expected_reference_revision: String,
+@@ -165,14 +169,13 @@
+ }
+ impl Review {
+     pub(crate) fn valid(&self) -> bool {
+-        tracking(&self.remote, &self.upstream_ref).as_deref() == Some(self.tracking_ref.as_str())
++        self.action.review_source(self)
+             && github::coordinate(&self.repository)
+             && github::numeric_id(&self.account_id)
+             && github::numeric_id(&self.repository_id)
+             && remote::login(&self.login)
+             && remote::reference(&self.branch)
+             && remote::oid(&self.head)
+-            && remote::oid(&self.expected_remote_oid)
+             && self.head != self.expected_remote_oid
+             && (1..=COMMIT_LIMIT).contains(&self.commits.len())
+             && self.commits.last() == Some(&self.head)
+@@ -183,12 +186,12 @@
+             && read::digest(&self.expected_reference_revision)
+             && read::digest(&self.expected_index)
+             && read::digest(&self.review_digest)
+-            && self.basis == "existing-configured-upstream"
+             && self.withheld == ["messages", "authors", "emails", "signatures", "objects"]
+     }
+     pub(crate) fn matches(&self, action: &Action) -> bool {
+         self.valid()
+             && action.valid()
++            && self.action == action.kind
+             && self.remote == action.remote
+             && self.expected_revision == action.expected_revision
+             && self.expected_reference_revision == action.expected_reference_revision
+@@ -215,7 +218,8 @@
+     pub(crate) expected_revision: String,
+     pub(crate) expected_reference_revision: String,
+     pub(crate) expected_index: String,
+-    pub(crate) remote: String,
++    #[serde(deserialize_with = "new_branch::nullable")]
++    pub(crate) remote: Option<String>,
+     pub(crate) repository: String,
+     pub(crate) account_id: String,
+     pub(crate) repository_id: String,
+@@ -232,19 +236,16 @@
+             && read::digest(&self.expected_reference_revision)
+             && read::digest(&self.expected_index)
+             && read::digest(&self.commits_sha256)
+-            && remote::remote(&self.remote)
+             && github::coordinate(&self.repository)
+             && github::numeric_id(&self.account_id)
+             && github::numeric_id(&self.repository_id)
+-            && remote::reference(&self.local_ref)
+-            && remote::reference(&self.remote_ref)
+-            && remote::oid(&self.old_oid)
+-            && remote::oid(&self.new_oid)
+-            && self.old_oid != self.new_oid
++            && self.action.source(self.remote.as_deref(), &self.local_ref,
++                &self.remote_ref, &self.old_oid, &self.new_oid)
+     }
+     pub(crate) fn matches(&self, r: &Review) -> bool {
+         self.valid()
+             && r.valid()
++            && self.action == r.action
+             && self.review_digest == r.review_digest
+             && self.expected_revision == r.expected_revision
+             && self.expected_reference_revision == r.expected_reference_revision
+@@ -262,6 +263,7 @@
+     pub(crate) fn matches_action(&self, a: &Action) -> bool {
+         self.valid()
+             && a.valid()
++            && self.action == a.kind
+             && self.expected_revision == a.expected_revision
+             && self.expected_reference_revision == a.expected_reference_revision
+             && self.remote == a.remote
+@@ -319,6 +321,7 @@
+         valid_id(id)
+             && self.operation_id == id
+             && action.valid()
++            && self.action == action.kind
+             && self.observation.is_none()
+             && self.settlement == "settled"
+             && self
+diff --git a/desktop/src-tauri/src/git_push_protocol_tests.rs b/desktop/src-tauri/src/git_push_protocol_tests.rs
+--- a/desktop/src-tauri/src/git_push_protocol_tests.rs
++++ b/desktop/src-tauri/src/git_push_protocol_tests.rs
+@@ -6,7 +6,7 @@
+         kind: Kind::Push,
+         expected_revision: "a".repeat(64),
+         expected_reference_revision: "b".repeat(64),
+-        remote: "origin".into(),
++        remote: Some("origin".into()),
+         local_ref: "refs/heads/main".into(),
+         remote_ref: "refs/heads/main".into(),
+         old_oid: "1".repeat(40),
+@@ -28,7 +28,7 @@
+         head: a.new_oid.clone(),
+         upstream_ref: a.remote_ref,
+         expected_remote_oid: a.old_oid,
+-        tracking_ref: "refs/remotes/origin/main".into(),
++        tracking_ref: Some("refs/remotes/origin/main".into()),
+         commits: vec![a.new_oid],
+         expected_revision: a.expected_revision,
+         expected_reference_revision: a.expected_reference_revision,
+@@ -100,7 +100,7 @@
+     bad.expected_remote_oid = bad.head.clone();
+     assert!(!bad.valid());
+     let mut bad = r.clone();
+-    bad.tracking_ref = "refs/remotes/other/main".into();
++    bad.tracking_ref = Some("refs/remotes/other/main".into());
+     assert!(!bad.valid());
+     let mut bad = r.clone();
+     bad.account_id = "99".into();
+diff --git a/desktop/src-tauri/src/git_push_runtime_macos.rs b/desktop/src-tauri/src/git_push_runtime_macos.rs
+--- a/desktop/src-tauri/src/git_push_runtime_macos.rs
++++ b/desktop/src-tauri/src/git_push_runtime_macos.rs
+@@ -6,14 +6,33 @@
+ // Only Root's independently reviewed actual protected-CLT behavioral evidence
+ // may nominate this fixed build. Source/inert tests are deliberately not it.
+ const NOMINATED_CLT_GIT_SHA256: Option<&str> = None;
++// Existing-target Push/observer evidence cannot nominate empty-advertisement
++// parsing, full reachable-history review or expected-zero creation.
++const NOMINATED_NEW_BRANCH_CLT_GIT_SHA256: Option<&str> = None;
++fn nomination(kind: crate::git_local_protocol::Kind) -> Option<&'static str> {
++    match kind {
++        crate::git_local_protocol::Kind::Push => NOMINATED_CLT_GIT_SHA256,
++        crate::git_local_protocol::Kind::PushNewBranch => NOMINATED_NEW_BRANCH_CLT_GIT_SHA256,
++        _ => None,
++    }
++}
++pub(super) fn available_for(kind: crate::git_local_protocol::Kind) -> bool {
++    macos_bindings() && nomination(kind).is_some_and(crate::git_read_protocol::digest)
++}
++pub(crate) fn matches_tool_for(kind: crate::git_local_protocol::Kind, snapshot: &crate::git_local_protocol::Snapshot) -> bool {
++    available_for(kind) && nomination(kind) == Some(snapshot.sha256.as_str())
++}
+ pub(super) fn available() -> bool {
+-    macos_bindings() && NOMINATED_CLT_GIT_SHA256.is_some_and(crate::git_read_protocol::digest)
++    available_for(crate::git_local_protocol::Kind::Push)
+ }
+ pub(crate) fn matches_tool(snapshot: &crate::git_local_protocol::Snapshot) -> bool {
+-    available() && NOMINATED_CLT_GIT_SHA256 == Some(snapshot.sha256.as_str())
++    matches_tool_for(crate::git_local_protocol::Kind::Push, snapshot)
+ }
+ pub(super) fn selection() -> Result<VerifiedRuntime, BridgeError> {
+-    if !available() {
++    selection_for(crate::git_local_protocol::Kind::Push)
++}
++pub(super) fn selection_for(kind: crate::git_local_protocol::Kind) -> Result<VerifiedRuntime, BridgeError> {
++    if !available_for(kind) {
+         return Err(BridgeError::unavailable("Push needs a reviewed protected Apple Command Line Tools Git provider. No remote update was started."));
+     }
+     let cwd = crate::installed_runtime::runtime_root();
+@@ -31,5 +50,7 @@
+     fn fetch_or_public_source_evidence_never_nominates_a_push_provider() {
+         assert!(NOMINATED_CLT_GIT_SHA256.is_none());
+         assert!(!available());
++        assert!(NOMINATED_NEW_BRANCH_CLT_GIT_SHA256.is_none());
++        assert!(!available_for(crate::git_local_protocol::Kind::PushNewBranch));
+     }
+ }
+diff --git a/desktop/src-tauri/src/git_push_sources_macos.rs b/desktop/src-tauri/src/git_push_sources_macos.rs
+--- a/desktop/src-tauri/src/git_push_sources_macos.rs
++++ b/desktop/src-tauri/src/git_push_sources_macos.rs
+@@ -10,6 +10,7 @@
+     maximum: u64,
+ }
+ pub(super) struct State {
++    kind: wire::Kind,
+     shell: (usize, wire::Snapshot),
+     current: Option<Edge>,
+     tracking: Option<Edge>,
+@@ -17,16 +18,16 @@
+ }
+ impl State {
+     pub(super) fn extra(kind: wire::Kind, review: Option<&wire::Review>) -> Option<usize> {
+-        if kind != wire::Kind::Push {
++        if !kind.is_push() {
+             return Some(0);
+         }
+         match review {
+             None => Some(2), // protected /bin/sh, same Book root
+-            Some(wire::Review::Push(r)) => r
++            Some(wire::Review::Push(r)) if r.action.local_kind() == kind && r.valid() => r
+                 .branch
+                 .split('/')
+                 .count()
+-                .checked_add(r.tracking_ref.split('/').count())?
++                .checked_add(r.tracking_ref.as_deref().map_or(0, |v| v.split('/').count()))?
+                 .checked_add(8),
+             _ => None,
+         }
+@@ -114,14 +115,14 @@
+             stop,
+         )
+     }
+-    pub(super) fn capture_push(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+-        if self.push.is_some() {
++    pub(super) fn capture_push(&mut self, kind: wire::Kind, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
++        if self.push.is_some() || !kind.is_push() {
+             return Err(Reason::SourceChanged);
+         }
+         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
+-        let mut nominated=crate::runtime::git_push::matches_tool(&native.tool);
++        let mut nominated=crate::runtime::git_push::matches_tool_for(kind, &native.tool);
+         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-        {if self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
++        {if kind==wire::Kind::Push && self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
+         if !nominated {
+             return Err(Reason::SourceRefused);
+         }
+@@ -132,6 +133,7 @@
+         }
+         let shell = self.file(bin, b"sh", 0, wire::TOOL_LIMIT, true, stop)?;
+         self.push = Some(State {
++            kind,
+             shell: (shell, self.snapshot(shell, wire::TOOL_LIMIT, stop)?),
+             current: None,
+             tracking: None,
+@@ -145,7 +147,7 @@
+         else {
+             return Ok(());
+         };
+-        if !review.valid()
++        if !review.valid() || review.action.local_kind() != kind
+             || native.files.head.sha256 != hash(format!("ref: {}\n", review.branch).as_bytes())
+         {
+             return Err(Reason::SourceChanged);
+@@ -153,10 +155,12 @@
+         let git = self.git.ok_or(Reason::SourceChanged)?;
+         let packed = self.push_edge(git, b"packed-refs", native.uid, 65536, stop)?;
+         self.push.as_mut().ok_or(Reason::SourceChanged)?.packed = Some(packed);
+-        for (name, expected, is_current) in [
+-            (&review.branch, &review.head, true),
+-            (&review.tracking_ref, &review.expected_remote_oid, false),
+-        ] {
++        // First publication has NO configured remote/tracking source. The
++        // same original current ref and packed/config/HEAD/index sources stay
++        // mandatory; no invented tracking path or expected-zero local file.
++        let references = [Some((review.branch.as_str(), &review.head, true)),
++            review.tracking_ref.as_deref().map(|name| (name, &review.expected_remote_oid, false))];
++        for (name, expected, is_current) in references.into_iter().flatten() {
+             let edge = self.push_reference(name, native.uid, stop)?;
+             if let Some((_, snapshot)) = &edge.original {
+                 if snapshot.sha256 != hash(format!("{expected}\n").as_bytes()) {
+@@ -227,7 +231,12 @@
+             native,
+             review,
+         )?;
+-        if state.current.is_none() || state.tracking.is_none() || state.packed.is_none() {
++        if state.kind != review.action() || state.current.is_none() || state.packed.is_none()
++            || match state.kind {
++                wire::Kind::Push => state.tracking.is_none(),
++                wire::Kind::PushNewBranch => state.tracking.is_some(),
++                _ => true,
++            } {
+             return Err(Reason::SourceChanged);
+         }
+         self.post_push(stop) // NO source successor exception or original write.
+diff --git a/desktop/src-tauri/src/git_push_state.rs b/desktop/src-tauri/src/git_push_state.rs
+--- a/desktop/src-tauri/src/git_push_state.rs
++++ b/desktop/src-tauri/src/git_push_state.rs
+@@ -1,4 +1,4 @@
+-//! Schema8 DATA within the original GitOperations row, not another journal.
++//! Schema8/9 closed-kind DATA within the original GitOperations row, not another journal.
+ //! A decoded row cannot recover an old send permit, original Connection, or
+ //! native join. Candidate/unknown remains a fence even after a matching GET.
+ use crate::{error::BridgeError, git_local_protocol as local, git_push_protocol as push};
+@@ -40,7 +40,7 @@
+             serde_json::from_value(terminal.result.clone()).map_err(|_| BridgeError::protocol())?;
+         if request.phase != local::Phase::Apply
+             || terminal.phase != local::Phase::Apply
+-            || terminal.action != local::Kind::Push
++            || terminal.action != request.action.kind()
+             || terminal.status != crate::git_read_protocol::Outcome::Ok
+             || !terminal.child_declared_settled()
+             || terminal.push_transmission.as_ref() != Some(returned)
+diff --git a/desktop/src-tauri/src/git_push_state_tests.rs b/desktop/src-tauri/src/git_push_state_tests.rs
+--- a/desktop/src-tauri/src/git_push_state_tests.rs
++++ b/desktop/src-tauri/src/git_push_state_tests.rs
+@@ -115,7 +115,7 @@
+     let mut state = State::empty();
+     state.reserve(row(1)).unwrap();
+     let good: Value = serde_json::from_slice(&state.bytes().unwrap()).unwrap();
+-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9, 255] {
++    for version in [0, 1, 2, 3, 4, 5, 6, 7, 10, 255] {
+         let mut v = good.clone();
+         v["schemaVersion"] = json!(version);
+         assert!(State::decode(&raw(v)).is_err());
+diff --git a/desktop/src-tauri/src/git_push_worker.rs b/desktop/src-tauri/src/git_push_worker.rs
+--- a/desktop/src-tauri/src/git_push_worker.rs
++++ b/desktop/src-tauri/src/git_push_worker.rs
+@@ -134,8 +134,8 @@
+                 && clock.hard_end_ns <= i64::MAX as u64
+                 && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000),
+         )?;
+-        // Attached born HEAD is mandatory even in Review; no initial/new ref
+-        // or detached fallback. Selected OIDs remain DATA, checked by Git too.
++        // Attached born HEAD is mandatory in both closed Push kinds; no
++        // detached or unborn fallback. Selected OIDs remain DATA, checked by Git too.
+         need(
+             native.files.head.sha256 == hash(format!("ref: {}\n", selected.local_ref).as_bytes()),
+         )?;
+@@ -191,7 +191,7 @@
+     /// claim. No token clone, JSON Value, debug representation or renderer path.
+     pub(crate) fn push_go(&self, token: &str) -> Result<Zeroizing<Vec<u8>>, BridgeError> {
+         need(
+-            self.action.kind() == Kind::Push
++            self.action.kind().is_push()
+                 && self.push_target.as_ref().is_some_and(Target::valid)
+                 && !token.is_empty()
+                 && token.len() <= 4096
+@@ -241,7 +241,7 @@
+     ) -> Result<Vec<u8>, BridgeError> {
+         let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
+         need(
+-            self.action.kind() == Kind::Push
++            self.action.kind().is_push()
+                 && matches!(candidate.intent, Intent::Push(_))
+                 && candidate.request_digest == self.digest
+                 && candidate.intent.matches(&binding.review)
+@@ -330,7 +330,7 @@
+         terminal.push_control = Some(control);
+         need(
+             terminal.phase == self.phase
+-                && terminal.action == Kind::Push
++                && terminal.action == self.action.kind()
+                 && terminal.cleanup_end_ns > 0
+                 && terminal.cleanup_end_ns <= self.clock.hard_end_ns,
+         )?;
+@@ -421,3 +421,7 @@
+ #[cfg(test)]
+ #[path = "git_push_worker_tests.rs"]
+ pub(crate) mod tests;
++
++#[cfg(test)]
++#[path="git_push_new_branch_worker_tests.rs"]
++mod new_branch_tests;
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_git_push.rs b/desktop/src-tauri/src/installed_shell_observation_macos_git_push.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_git_push.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_git_push.rs
+@@ -794,7 +794,7 @@
+                                 .reference_revision
+                                 .clone()
+                                 .ok_or_else(invalid)?,
+-                            remote: "origin".into(),
++                            remote: Some("origin".into()),
+                             local_ref: "refs/heads/main".into(),
+                             remote_ref: "refs/heads/main".into(),
+                             old_oid: r
+@@ -867,7 +867,7 @@
+                             || review.expected_remote_oid != f.base()
+                             || review.branch != "refs/heads/main"
+                             || review.upstream_ref != "refs/heads/main"
+-                            || review.tracking_ref != "refs/remotes/origin/main"
++                            || review.tracking_ref.as_deref() != Some("refs/remotes/origin/main")
+                             || review.commits != [f.target()]
+                             || !review.valid()
+                         {
+diff --git a/desktop/src-tauri/src/runtime.rs b/desktop/src-tauri/src/runtime.rs
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -437,10 +437,10 @@
+             if let Some(c)=&self.observation{return fetch_observation::selection(c,false)}
+             return git_fetch::selection();
+         }
+-        if self.kind==crate::git_local_protocol::Kind::Push {
++        if self.kind.is_push() {
+             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-            if let Some(c)=&self.push_observation{if self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
+-            return git_push::selection();
++            if let Some(c)=&self.push_observation{if self.kind!=crate::git_local_protocol::Kind::Push||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
++            return git_push::selection_for(self.kind);
+         }
+         if !macos_bindings() { return Err(unavailable()); }
+         let cwd = crate::installed_runtime::runtime_root();
+@@ -1947,10 +1947,13 @@
+         self.resolve_git_local_installed_for(crate::git_local_protocol::Kind::Stage,originals,end,stop)
+     }
+     pub(crate) fn git_push_profile_available(&self)->bool {
++        self.git_push_profile_available_for(crate::git_local_protocol::Kind::Push)
++    }
++    pub(crate) fn git_push_profile_available_for(&self,kind:crate::git_local_protocol::Kind)->bool {
+         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-        if self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
++        if kind==crate::git_local_protocol::Kind::Push && self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+-        {git_push::available()}
++        {git_push::available_for(kind)}
+         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {false}
+     }
+@@ -1967,7 +1970,7 @@
+         originals:&mut crate::installed_runtime::GitLocalRuntimeSlots,end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError> {
+         if !self.git_local_profile_available()
+             || kind==crate::git_local_protocol::Kind::Fetch&&!self.git_fetch_profile_available()
+-            || kind==crate::git_local_protocol::Kind::Push&&!self.git_push_profile_available(){return Err(unavailable())}
++            || kind.is_push()&&!self.git_push_profile_available_for(kind){return Err(unavailable())}
+         originals.inspect_once(GitLocalInstalledProfile {_private:(),kind, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()?, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:self.push_observation()? },end,stop)
+     }
+     pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
+diff --git a/desktop/src-tauri/src/service_git_remote_native.rs b/desktop/src-tauri/src/service_git_remote_native.rs
+--- a/desktop/src-tauri/src/service_git_remote_native.rs
++++ b/desktop/src-tauri/src/service_git_remote_native.rs
+@@ -135,7 +135,7 @@
+             kind: push::Kind::Push,
+             expected_revision: expected_revision.clone(),
+             expected_reference_revision: expected_reference_revision.clone(),
+-            remote: remote.clone(),
++            remote: Some(remote.clone()),
+             local_ref: local_ref.clone(),
+             remote_ref: remote_ref.clone(),
+             old_oid: old_oid.clone(),
+diff --git a/desktop/src-tauri/src/supervisor_git_local.rs b/desktop/src-tauri/src/supervisor_git_local.rs
+--- a/desktop/src-tauri/src/supervisor_git_local.rs
++++ b/desktop/src-tauri/src/supervisor_git_local.rs
+@@ -70,7 +70,7 @@
+         let bad=crate::asset_commands::Reason::SourceChanged;
+         let intent=self.candidate.intent.push_details().ok_or(bad)?;
+         let returned=self.push_returned.as_ref().ok_or(bad)?;
+-        if self.request.action.kind()!=wire::Kind::Push || self.request.id!=id || self.request.native.as_ref()!=Some(native)
++        if !self.request.action.kind().is_push() || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+             || self.request.initialization.is_some() || self.request.fetch_target.is_some()
+             || self.fetch_keep.is_some() || self.fetch_returned.is_some()
+             || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+@@ -101,7 +101,7 @@
+ 
+     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
+         ->Result<&wire::Intent,crate::asset_commands::Reason> {
+-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
++        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
+             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
+         Ok(&self.candidate.intent)
+@@ -209,13 +209,14 @@
+         {crate::installed_runtime::GitLocalRuntimeSlots::working_reservation_bytes()?
+             .checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<Owner>()+std::mem::size_of::<Resources>())?
+             .checked_add(if kind==wire::Kind::Initialize {crate::git_init_protocol::MANIFEST_BACKING}else{0})?
+-            .checked_add(match kind {wire::Kind::Fetch=>wire::fetch_worker::REMOTE_BACKING,wire::Kind::Push=>wire::push_worker::REMOTE_BACKING,_=>0})}
++            .checked_add(match kind {wire::Kind::Fetch=>wire::fetch_worker::REMOTE_BACKING,wire::Kind::Push|wire::Kind::PushNewBranch=>wire::push_worker::REMOTE_BACKING,_=>0})}
+         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {let _=kind;None}
+     }
+ }
+ impl Supervisor {
+-    pub(crate) fn git_push_profile_available(&self)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_push_profile_available()}
++    pub(crate) fn git_push_profile_available(&self)->bool {self.git_push_profile_available_for(wire::Kind::Push)}
++    pub(crate) fn git_push_profile_available_for(&self,kind:wire::Kind)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_push_profile_available_for(kind)}
+     pub(crate) fn git_fetch_profile_available(&self)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_fetch_profile_available()}
+     pub(crate) fn git_local_profile_available(&self)->bool {
+         selected(Profile::GitLocal)&&self.inner.runtime.git_local_profile_available()
+@@ -223,7 +224,7 @@
+     pub(crate) fn start_git_local(&self,admission:GitLocalAdmission)->Result<GitLocalTicket,BridgeError> {
+         if !self.git_local_profile_available()
+             || admission.invocation.action.kind()==wire::Kind::Fetch && !self.inner.runtime.git_fetch_profile_available()
+-            || admission.invocation.action.kind()==wire::Kind::Push && !self.inner.runtime.git_push_profile_available() {
++            || admission.invocation.action.kind().is_push() && !self.inner.runtime.git_push_profile_available_for(admission.invocation.action.kind()) {
+             return Err(BridgeError::unavailable("The fixed local Git writer or selected remote runtime is unavailable."))}
+         let receipt=admission.invocation.receipt.clone();
+         let owner=self.admit(AdmissionRequest::GitLocal(admission),CompletionTarget::GitLocal)?;
+@@ -282,7 +283,7 @@
+             let Some(control)=control.filter(|v|v.valid()) else {*receipt=GitLocalReceipt::RetainedUnknown;return};
+             if self.fetch_joined.set(fetch::joined_control(Instant::now(),control)).is_err() {*receipt=GitLocalReceipt::RetainedUnknown;return}
+         }
+-        if self.action.kind()==wire::Kind::Push {
++        if self.action.kind().is_push() {
+             let control=reply.as_ref().and_then(|v|v.push_control.clone()).or_else(||
+                 (!self.push_go_claimed.load(Ordering::SeqCst)).then_some(crate::github_connection_protocol::GitHubReadControl {
+                     reason:crate::github_connection_protocol::Reason::None,credential_expires_at:None,cooldown_seconds:None,cooldown_blocked:false }));
+@@ -310,7 +311,7 @@
+         let root=self.gate.check_current(&owner.id)?;let stop=owner.stop.subscribe();
+         let selected={let mut native=self.slots.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+             if self.action.kind()==wire::Kind::Fetch {native.arm_fetch_once().map_err(|_|BridgeError::cleanup_unknown())?;}
+-            if self.action.kind()==wire::Kind::Push {native.arm_push_once().map_err(|_|BridgeError::cleanup_unknown())?;}
++            if self.action.kind().is_push() {native.arm_push_once().map_err(|_|BridgeError::cleanup_unknown())?;}
+             let armed=native.arm_acl_once(owner.endpoint(),&stop);owner.observe_native_failure(native.first_failure());
+             armed.map_err(|_|BridgeError::cleanup_unknown())?;
+             let result=runtime.resolve_git_local_installed_for(self.action.kind(),&mut native,owner.endpoint(),&stop);
+@@ -358,7 +359,7 @@
+             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
+         let request=Arc::new(if self.action.kind()==wire::Kind::Initialize {
+             wire::Request::from_init_original(&owner.id,&self.action,&self.context,initialization.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?
+-        } else if self.action.kind()==wire::Kind::Push {
++        } else if self.action.kind().is_push() {
+             wire::Request::from_push_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,
+                 clock_data,binding,self.gate.push_target(&owner.id)?)?
+         } else if self.action.kind()==wire::Kind::Fetch {
+@@ -528,7 +529,7 @@
+         invocation.gate.check_current(&owner.id)?;
+         if owner.failed()||Instant::now()>=owner.endpoint() {return Err(BridgeError::timeout())}
+         let request=invocation.request()?;
+-        if invocation.action.kind()==wire::Kind::Push {
++        if invocation.action.kind().is_push() {
+             request.push_ack(&candidate,ack.revision.0)
+         } else if invocation.action.kind()==wire::Kind::Fetch {
+             let keep=invocation.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+@@ -607,7 +608,7 @@
+                 None=>None,
+             }
+         } else {None};
+-        let push_final=if invocation.action.kind()==wire::Kind::Push {
++        let push_final=if invocation.action.kind().is_push() {
+             let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+             match publication.as_ref() {
+                 Some(p)=>Some(crate::git_push_state::FinalData::from_returned(&p.request,&p.candidate,
+@@ -738,7 +739,7 @@
+     let posted=tokio::select! {biased;_=stop.changed()=>return WriteEnd {complete:false},v=returned=>v};
+     if !matches!(posted,Ok(Ok(()))) {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}}
+     let Some(local)=owner.git_local.as_ref() else {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}};
+-    let go=if request.action.kind()==wire::Kind::Push {
++    let go=if request.action.kind().is_push() {
+         match local.gate.push_go(&owner.id,&request,|| {
+             if local.push_go_claimed.swap(true,Ordering::SeqCst) {return false}
+             claim_preflight_go(&inner,&owner,Profile::GitLocal)
+@@ -771,7 +772,7 @@
+                     Err(_)=>{},
+                     Ok(Err(error))=>{owner.fail(error);break None},
+                     Ok(Ok(bytes))=>{
+-                        if bytes.len()>match request.action.kind() {wire::Kind::Push=>wire::push_worker::ACK_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::ACK_LIMIT,_=>512}||local.gate.check_current(&owner.id).is_err()||owner.failed()||Instant::now()>=owner.endpoint() {
++                        if bytes.len()>match request.action.kind() {wire::Kind::Push|wire::Kind::PushNewBranch=>wire::push_worker::ACK_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::ACK_LIMIT,_=>512}||local.gate.check_current(&owner.id).is_err()||owner.failed()||Instant::now()>=owner.endpoint() {
+                             owner.fail(BridgeError::cleanup_unknown());break None
+                         }
+                         let sent=tokio::select! {biased;_=stop.changed()=>false,v=stdin.write_all(&bytes)=>v.is_ok()};
+@@ -805,7 +806,7 @@
+             Ok(0)=>{eof=true;break},
+             Ok(count)=>{
+                 total=total.saturating_add(count);
+-                let limit=match request.action.kind() {wire::Kind::Push=>wire::push_worker::OUTPUT_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::OUTPUT_LIMIT,_=>wire::RESPONSE_LIMIT};
++                let limit=match request.action.kind() {wire::Kind::Push|wire::Kind::PushNewBranch=>wire::push_worker::OUTPUT_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::OUTPUT_LIMIT,_=>wire::RESPONSE_LIMIT};
+                 if total>limit {overflow=true;let _=faults.try_send(BridgeError::protocol());continue}
+                 bytes.extend_from_slice(&buffer[..count]);
+                 if ready.is_some() {
+diff --git a/desktop/src-tauri/src/supervisor_git_push.rs b/desktop/src-tauri/src/supervisor_git_push.rs
+--- a/desktop/src-tauri/src/supervisor_git_push.rs
++++ b/desktop/src-tauri/src/supervisor_git_push.rs
+@@ -30,7 +30,7 @@
+             .owner
+             .git_local
+             .as_ref()
+-            .filter(|i| i.action.kind() == wire::Kind::Push)
++            .filter(|i| i.action.kind().is_push())
+             .ok_or_else(BridgeError::cleanup_unknown)?;
+         let ends = self
+             .owner
+@@ -49,7 +49,7 @@
+         self.owner.upgrade().is_some_and(|o| {
+             o.id == id
+                 && o.git_local.as_ref().is_some_and(|v| {
+-                    v.action.kind() == wire::Kind::Push
++                    v.action.kind().is_push()
+                         && v.gate.same_original(gate)
+                         && Arc::ptr_eq(&v.receipt, &self.receipt)
+                         && Arc::ptr_eq(&v.push_joined, &self.joined)
+diff --git a/src/mobile_release/_desktop_git_push_protocol.py b/src/mobile_release/_desktop_git_push_protocol.py
+--- a/src/mobile_release/_desktop_git_push_protocol.py
++++ b/src/mobile_release/_desktop_git_push_protocol.py
+@@ -47,8 +47,8 @@
+ class Action:
+     expected_revision: str
+     expected_reference_revision: str
+-    remote: str
+-    selected: packets.Selection
++    remote: str | None
++    selected: packets.Selection | packets.first.Selection
+     connection_session_id: str
+     expected_connection_revision: int
+     kind: str = "push"
+@@ -65,11 +65,12 @@
+ def action(value):
+     row = fields._keys(value, ("kind", "expectedRevision", "expectedReferenceRevision", "remote", "localRef", "remoteRef",
+                                "oldOid", "newOid", "connectionSessionId", "expectedConnectionRevision"))
+-    require(row["kind"] == "push")
+-    selected = packets.Selection(row["localRef"], row["remoteRef"], row["oldOid"], row["newOid"])
++    selected = packets.selection(row["kind"], row["localRef"], row["remoteRef"], row["oldOid"], row["newOid"])
++    remote = push.remote_name(row["remote"]) if row["kind"] == "push" else row["remote"]
++    require(row["kind"] == "push" or remote is None)
+     return Action(fields._hex(row["expectedRevision"]), fields._hex(row["expectedReferenceRevision"]),
+-        push.remote_name(row["remote"]), selected, fields._id(row["connectionSessionId"]),
+-        fields._integer(row["expectedConnectionRevision"], 1, (1 << 32) - 2))
++        remote, selected, fields._id(row["connectionSessionId"]),
++        fields._integer(row["expectedConnectionRevision"], 1, (1 << 32) - 2), row["kind"])
+ 
+ 
+ @dataclass(frozen=True, slots=True, repr=False)
+@@ -155,10 +156,10 @@
+ 
+ 
+ def matches_review(request, review):
+-    require(type(request) is Request and type(review) is push.PushReview and type(review.plan) is push.PushPlan
++    require(type(request) is Request and type(review) is push.PushReview and push._plan(review.plan)
+             and review.digest == push._review_digest(review.plan))
+     plan = review.plan
+-    require(plan.remote == request.action.remote and plan.reference_revision == request.action.expected_reference_revision
++    require(plan.action == request.action.kind and plan.remote == request.action.remote and plan.reference_revision == request.action.expected_reference_revision
+             and plan._snapshot.public.revision == request.action.expected_revision and plan.target == request.target)
+     if request.phase == "apply":
+         require(review.digest == request.review_digest)
+@@ -174,7 +175,7 @@
+ 
+ def candidate(request, review, intent):
+     matches_review(request, review)
+-    require(request.phase == "apply" and type(intent) is push.PushIntent
++    require(request.phase == "apply" and push._intent(intent)
+             and intent == push.PushIntent.from_plan(review.plan, review.digest))
+     raw = _encode({"protocol": PROTOCOL, "kind": "candidate", "id": request.id, "digest": request.digest,
+                    "reviewDigest": review.digest, "intent": intent.as_dict()}, CANDIDATE_LIMIT)
+@@ -203,7 +204,7 @@
+ 
+ def _matches_intent(request, intent):
+     """Closed request comparisons; not another candidate or send permission."""
+-    require(type(intent) is push.PushIntent)
++    require(push._intent(intent) and intent.action == request.action.kind)
+     selected, target = request.action.selected, request.target
+     require((intent.review_digest, intent.expected_revision, intent.expected_reference_revision,
+              intent.remote, intent.repository, intent.account_id, intent.repository_id,
+@@ -237,7 +238,7 @@
+             data = {"review": review.as_dict(), "diff": None}
+         else:
+             require(review is None and type(result) is core.MutationResult and result.operation_id == request.id
+-                    and result.action == "push" and result.settlement == "settled" and result.observation is None
++                    and result.action == request.action.kind and result.settlement == "settled" and result.observation is None
+                     and result.state in ("succeeded", "failed", "recovery-required") and effect_phase in EFFECTS
+                     and type(retained_paths) is tuple and len(retained_paths) <= 1
+                     and all(type(path) is str and re.fullmatch(r"(?:mrk-git-[a-z0-9_]{1,32}/)?mrk-git-push-[a-z0-9_]{1,32}", path) is not None
+@@ -261,6 +262,6 @@
+                 and effect_phase == "not-sent" and not retained_paths
+                 and (first_failure_ns is not None or status == "cleanup-unknown"))
+     return _encode({"protocol": PROTOCOL, "kind": "terminal", "id": request.id, "digest": request.digest,
+-        "phase": request.phase, "action": "push", "status": status, "reason": reason, "result": data,
++        "phase": request.phase, "action": request.action.kind, "status": status, "reason": reason, "result": data,
+         "transmission": receipt, "firstFailureNs": first_failure_ns, "cleanupEndNs": cleanup_end_ns, "control": safe_control},
+         RESPONSE_LIMIT - READY_LIMIT - CANDIDATE_LIMIT)
+diff --git a/src/mobile_release/_git_push_private_protocol.py b/src/mobile_release/_git_push_private_protocol.py
+--- a/src/mobile_release/_git_push_private_protocol.py
++++ b/src/mobile_release/_git_push_private_protocol.py
+@@ -112,9 +112,11 @@
+     remote: str
+     url: str
+     line: bytes
++    kind: str = "push"
+ 
+     def __post_init__(self):
+-        require(type(self.clock) is Clock and self.mode in ("review", "apply"))
++        require(type(self.clock) is Clock and self.mode in ("review", "apply")
++                and self.kind in ("push", "push-new-branch"))
+         _hex(self.review_digest)
+         require(type(self.remote) is type(self.url) is str and self.remote == self.url
+                 and self.url.startswith("mrk::https://github.com/") and self.url.endswith(".git")
+@@ -125,7 +127,8 @@
+     def request(self):
+         return _encode({"protocol": PROTOCOL, "phase": "hook", "digest": self.clock.digest,
+             "nonce": self.clock.nonce.hex(), "review": self.review_digest, "mode": self.mode,
+-            "remote": self.remote, "url": self.url, "line": self.line.decode("ascii")})
++            "remote": self.remote, "url": self.url, "line": self.line.decode("ascii"),
++            **({"kind": self.kind} if self.kind == "push-new-branch" else {})})
+ 
+     def reply(self):
+         return _encode({"protocol": PROTOCOL, "phase": "compared" if self.mode == "review" else "armed",
+@@ -171,7 +174,7 @@
+     clock: Clock
+     mode: str
+     review_digest: str
+-    remote: str
++    remote: str | None
+     target: transport.Target
+     identity: tuple[int, int, int]
+     path: Path
+@@ -182,8 +185,10 @@
+         try:
+             fields._id(self.operation_id)
+             require(type(self.clock) is Clock and self.mode in ("review", "apply")
+-                    and type(self.target) is transport.Target and type(self.remote) is str
+-                    and base._REMOTE.fullmatch(self.remote) is not None)
++                    and type(self.target) is transport.Target)
++            kind = wire.selection_kind(self.target.selected)
++            require((kind == "push" and type(self.remote) is str and base._REMOTE.fullmatch(self.remote) is not None)
++                    or (kind == "push-new-branch" and self.remote is None))
+             _hex(self.review_digest)
+             require(type(self.identity) is tuple and len(self.identity) == 3)
+             for item, maximum in zip(self.identity, ((1 << 32) - 1, (1 << 64) - 1, (1 << 64) - 1)):
+@@ -219,7 +224,8 @@
+             remote=self.remote, target={"repository": target.repository, "login": target.login,
+                 "accountId": target.account_id, "repositoryId": target.repository_id,
+                 "localRef": selected.local_ref, "remoteRef": selected.remote_ref,
+-                "oldOid": selected.old_oid, "newOid": selected.new_oid},
++                "oldOid": selected.old_oid, "newOid": selected.new_oid,
++                **({"kind": "push-new-branch"} if wire.selection_kind(selected) == "push-new-branch" else {})},
+             clock={"workEndNs": self.work_end_ns, "hardEndNs": self.hard_end_ns}, socket=list(self.identity),
+             path=str(self.path), parent=list(self.parent_stamp), body=None if self.body_stamp is None else list(self.body_stamp)))
+ 
+@@ -238,7 +244,7 @@
+         selected = self.target.selected
+         url = "mrk::https://github.com/" + self.target.repository + ".git"
+         line = (selected.local_ref + " " + selected.new_oid + " " + selected.remote_ref + " " + selected.old_oid + "\n").encode("ascii")
+-        return Hook(self.clock, self.mode, self.review_digest, url, url, line)
++        return Hook(self.clock, self.mode, self.review_digest, url, url, line, wire.selection_kind(selected))
+ 
+     def send(self, value, stamp):
+         require(self.mode == "apply")
+@@ -308,9 +314,13 @@
+         row = _keys(_decode(raw), ("protocol", "phase", "digest", "nonce", "id", "mode", "review", "remote",
+                                   "target", "clock", "socket", "path", "parent", "body"))
+         clock = _keys(row["clock"], ("workEndNs", "hardEndNs"))
++        require(type(row["target"]) is dict)
++        kind = row["target"].get("kind", "push")
++        require(kind in ("push", "push-new-branch"))
+         target = _keys(row["target"], ("repository", "login", "accountId", "repositoryId",
+-                                       "localRef", "remoteRef", "oldOid", "newOid"))
+-        selected = wire.Selection(target["localRef"], target["remoteRef"], target["oldOid"], target["newOid"])
++                                       "localRef", "remoteRef", "oldOid", "newOid")
++                       + (("kind",) if kind == "push-new-branch" else ()))
++        selected = wire.selection(kind, target["localRef"], target["remoteRef"], target["oldOid"], target["newOid"])
+         target = transport.Target(target["repository"], target["login"], target["accountId"], target["repositoryId"], selected)
+         require(type(row["path"]) is str and type(row["socket"]) is list)
+         result = Binding(row["id"], Clock(row["digest"], clock["workEndNs"], clock["hardEndNs"]),
+diff --git a/src/mobile_release/desktop_git_push.py b/src/mobile_release/desktop_git_push.py
+--- a/src/mobile_release/desktop_git_push.py
++++ b/src/mobile_release/desktop_git_push.py
+@@ -13,6 +13,7 @@
+ from . import _git_push_private_protocol as private
+ from . import git_push_transaction as transaction
+ from . import git_repository_push as push
++from . import git_repository_push_new_branch as first
+ from . import git_service as core
+ from ._desktop_git_push_control import GitPushInput
+ from ._desktop_saved_command_engine import _Output
+@@ -38,9 +39,11 @@
+         source.bind_operation(self)
+ 
+     def _session(self):
+-        wire.require(type(self.repository) is push.GitPushRepository)
++        repository_type, session_type = ((push.GitPushRepository, push._Session) if self.request.action.kind == "push"
++                                        else (first.GitPushNewBranchRepository, first._Session))
++        wire.require(type(self.repository) is repository_type)
+         sessions = self.repository._active_sessions
+-        wire.require(len(sessions) == 1 and type(sessions[0]) is push._Session
++        wire.require(len(sessions) == 1 and type(sessions[0]) is session_type
+                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
+         return sessions[0]
+ 
+@@ -66,21 +69,22 @@
+     def check_current(self, root, action, expected_revision):
+         wire.require(self.request.phase == "apply" and self.entered and not self.returned
+                      and self.source.go_returned and self.review is not None and root == self.request.root
+-                     and action == "push" and expected_revision == self.request.action.expected_revision)
++                     and action == self.request.action.kind and expected_revision == self.request.action.expected_revision)
+         self.source_post(hash_files=False)
+ 
+     def record_intent(self, intent):
+-        self.check_current(self.request.root, "push", self.request.action.expected_revision)
++        self.check_current(self.request.root, self.request.action.kind, self.request.action.expected_revision)
+         sent = wire.candidate(self.request, self.review, intent)
+         self.source.handoff(sent)
+-        self.check_current(self.request.root, "push", self.request.action.expected_revision)
++        self.check_current(self.request.root, self.request.action.kind, self.request.action.expected_revision)
+ 
+     def run(self):
+         self.source_post(hash_files=True)
+         wire.require(self.source.go_returned and not self.entered)
+         self.entered = True
+         selected = self.request.action
+-        self.repository = push.GitPushRepository(self.request.root, git_executable=wire.TOOL_PATH,
++        repository_type = push.GitPushRepository if selected.kind == "push" else first.GitPushNewBranchRepository
++        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
+             work_end=self.source.work_end, launch=self.launch, cancellation=self.guard,
+             _run=self.command, _remote=self.remote_command)
+         try:
+diff --git a/src/mobile_release/desktop_git_push_hook.py b/src/mobile_release/desktop_git_push_hook.py
+--- a/src/mobile_release/desktop_git_push_hook.py
++++ b/src/mobile_release/desktop_git_push_hook.py
+@@ -37,9 +37,9 @@
+     binding_type = private.Clock
+     pipe_io_type = _PipeIO
+ 
+-    def __init__(self, mode, clock, review_digest, remote, url, runtime_dir, started):
++    def __init__(self, mode, clock, review_digest, remote, url, runtime_dir, started, *, kind="push"):
+         super().__init__(remote, url, runtime_dir, started)
+-        self.mode, self.context, self.review_digest = mode, clock, review_digest
++        self.mode, self.context, self.review_digest, self.kind = mode, clock, review_digest, kind
+         self.hook = None
+         self.input_eof = self.reply_entered = self.reply_returned = False
+ 
+@@ -57,7 +57,8 @@
+         self.entered = True
+         transport.require(type(self.started) in (int, float) and math.isfinite(self.started)
+                           and isinstance(self.runtime_dir, Path) and self.runtime_dir.is_absolute()
+-                          and self.mode in ("review", "apply") and type(self.context) is private.Clock)
++                          and self.mode in ("review", "apply") and type(self.context) is private.Clock
++                          and self.kind in ("push", "push-new-branch"))
+         private._hex(self.review_digest)
+         self.current()
+         self._bridge(self.context)  # Same native raw endpoints, not hook-launch +45/+55.
+@@ -83,7 +84,7 @@
+             line.extend(block)
+             transport.require(len(line) <= 1024 and line.count(b"\n") <= 1
+                               and (b"\n" not in line or line.endswith(b"\n")), "response-limit")
+-        self.hook = private.Hook(self.context, self.mode, self.review_digest, self.remote, self.url, bytes(line))
++        self.hook = private.Hook(self.context, self.mode, self.review_digest, self.remote, self.url, bytes(line), self.kind)
+         self.current(); self.endpoint.check()
+         self.reply_entered = True  # Before writing the request; never replay after a lost ACK.
+         self._private_write(self.hook.request())
+@@ -102,8 +103,8 @@
+                      and self.input_eof and self.reply_returned) else 74
+ 
+ 
+-def main(*, mode, clock, review_digest, remote, url, runtime_dir, started):
+-    entry = _Entry(mode, clock, review_digest, remote, url, runtime_dir, started)
++def main(*, mode, clock, review_digest, remote, url, runtime_dir, started, kind="push"):
++    entry = _Entry(mode, clock, review_digest, remote, url, runtime_dir, started, kind=kind)
+     try:
+         try:
+             entry.acquire()
+diff --git a/src/mobile_release/git_push_body.py b/src/mobile_release/git_push_body.py
+--- a/src/mobile_release/git_push_body.py
++++ b/src/mobile_release/git_push_body.py
+@@ -133,7 +133,7 @@
+     There is intentionally no public issuer or open-by-path fallback here.
+     """
+     def __init__(self, io: _BodyIO, selected: wire.Selection, offered: wire.Advertisement):
+-        wire._need(type(io) is _BodyIO and type(selected) is wire.Selection)
++        wire._need(type(io) is _BodyIO and wire.selection_kind(selected) in ("push", "push-new-branch"))
+         wire._original(offered, selected)
+         self.io, self.selected, self.offered = io, selected, offered
+         self.request = self.stream = self.digest = self.sealed_stamp = None
+diff --git a/src/mobile_release/git_push_transaction.py b/src/mobile_release/git_push_transaction.py
+--- a/src/mobile_release/git_push_transaction.py
++++ b/src/mobile_release/git_push_transaction.py
+@@ -55,7 +55,7 @@
+ 
+ 
+ def hook_line(selected):
+-    core._need(type(selected) is wire.Selection, "invalid-input")
++    core._need(wire.selection_kind(selected) in ("push", "push-new-branch"), "invalid-input")
+     return (selected.local_ref + " " + selected.new_oid + " " + selected.remote_ref
+             + " " + selected.old_oid + "\n").encode("ascii")
+ 
+@@ -80,7 +80,7 @@
+     after_sha256: str | None
+ 
+     def __post_init__(self):
+-        core._need(self.mode in ("review", "apply") and type(self.selected) is wire.Selection
++        core._need(self.mode in ("review", "apply") and wire.selection_kind(self.selected) in ("push", "push-new-branch")
+                    and _digest_valid(self.advertisement_sha256), "response-invalid")
+         if self.mode == "review":
+             core._need(self.body is self.status is self.after_sha256 is None, "response-invalid")
+@@ -131,7 +131,8 @@
+         self.write("exec/git-remote-mrk", prefix + b' push-helper "$@"\n')
+         hook_context = " ".join((self.tx.mode, launch.context.digest, self.tx.review_digest,
+                                  str(launch.context.work_end_ns), str(launch.context.hard_end_ns)))
+-        self.write("hooks/pre-push", prefix + b" push-hook " + hook_context.encode("ascii") + b' "$@"\n')
++        hook_role = b"push-hook" if plan.action == "push" else b"push-new-branch-hook"
++        self.write("hooks/pre-push", prefix + b" " + hook_role + b" " + hook_context.encode("ascii") + b' "$@"\n')
+         for name in ("exec/git", "exec/git-remote-mrk", "hooks/pre-push"):
+             path = self.root / name
+             os.chmod(path, 0o700)
+@@ -220,7 +221,7 @@
+ 
+ class PushTransaction(local._LocalTransaction):
+     def __init__(self, session, original, plan, owner, review_digest, mode):
+-        core._need(mode in ("review", "apply") and type(plan) is push.PushPlan
++        core._need(mode in ("review", "apply") and push._plan(plan)
+                    and (owner is None) == (mode == "review"), "invalid-input")
+         super().__init__(session, original, plan, owner)
+         self.mode, self.review_digest = mode, review_digest
+diff --git a/src/mobile_release/git_push_transport.py b/src/mobile_release/git_push_transport.py
+--- a/src/mobile_release/git_push_transport.py
++++ b/src/mobile_release/git_push_transport.py
+@@ -65,8 +65,7 @@
+         try:
+             _coordinate(self.repository); _id(self.account_id); _id(self.repository_id)
+             require(type(self.login) is str and _LOGIN.fullmatch(self.login) is not None)
+-            require(type(self.selected) is wire.Selection)
+-            wire.Selection(self.selected.local_ref, self.selected.remote_ref,
++            wire.selection(wire.selection_kind(self.selected), self.selected.local_ref, self.selected.remote_ref,
+                            self.selected.old_oid, self.selected.new_oid)
+         except ValueError:
+             raise PushError() from None
+@@ -142,7 +141,8 @@
+ 
+     def __init__(self, role, mode, selected, offered, body, current, failure, *, _key):
+         require(_key is _KEY and role in BINARY_ROLES and mode in {"before", "after", "reconcile", "send"}
+-                and (role == SEND) == (mode == "send") and type(selected) is wire.Selection
++                and (role == SEND) == (mode == "send")
++                and wire.selection_kind(selected) in ("push", "push-new-branch")
+                 and callable(current) and callable(failure))
+         require((role == SEND and type(body) is bodies._PushBody and body.selected is selected
+                  and body.offered is offered and body.io.current is current)
+diff --git a/src/mobile_release/git_push_wire.py b/src/mobile_release/git_push_wire.py
+--- a/src/mobile_release/git_push_wire.py
++++ b/src/mobile_release/git_push_wire.py
+@@ -12,6 +12,7 @@
+ import hmac
+ 
+ from . import git_remote_wire as framing
++from . import git_push_new_branch as first
+ from .git_repository_read import _full_ref
+ from .git_service import _ref
+ 
+@@ -49,6 +50,18 @@
+     def __post_init__(self):
+         _need(_branch(self.local_ref) and _branch(self.remote_ref) and _oid(self.old_oid)
+               and _oid(self.new_oid) and self.old_oid != self.new_oid)
++
++
++def selection_kind(selected):
++    _need(type(selected) in (Selection, first.Selection))
++    return "push" if type(selected) is Selection else first.KIND
++
++
++def selection(kind, local_ref, remote_ref, old_oid, new_oid):
++    """Closed variant decoder; zero never selects an action implicitly."""
++    _need(kind in ("push", first.KIND))
++    constructor = Selection if kind == "push" else first.Selection
++    return constructor(local_ref, remote_ref, old_oid, new_oid)
+ 
+ 
+ @dataclass(frozen=True, slots=True, repr=False)
+@@ -96,7 +109,7 @@
+     return values
+ 
+ 
+-def _advertisement(raw: bytes) -> Advertisement:
++def _advertisement(raw: bytes, selected=None) -> Advertisement:
+     rows = _packets(raw, MAX_METADATA, MAX_REFS + 3)
+     _need(len(rows) >= 4 and rows[0] == _SERVICE and rows[1] == 0 and rows[-1] == 0
+           and all(type(row) is bytes for row in rows[2:-1]), "unsupported-protocol")
+@@ -112,7 +125,10 @@
+         else:
+             _need(b"\0" not in row)
+         fields = framing._line(row, 2048).split(b" ")
+-        _need(len(fields) == 2 and framing._oid(fields[0]), "unsupported-protocol")
++        _need(len(fields) == 2, "unsupported-protocol")
++        if type(selected) is first.Selection and first.empty_row(fields, index, len(rows) - 3):
++            continue
++        _need(framing._oid(fields[0]), "unsupported-protocol")
+         reference = fields[1].decode("ascii")
+         # No empty-repository capabilities^{}, .have, pseudo-ref, peel or
+         # symbolic fallback can establish this existing-branch update.
+@@ -124,15 +140,20 @@
+ 
+ 
+ def advertisement(raw: bytes, selected: Selection) -> Advertisement:
+-    _need(type(selected) is Selection)
+-    value = _advertisement(raw)
+-    _need(dict(value.refs).get(selected.remote_ref) == selected.old_oid, "target-changed")
++    kind = selection_kind(selected)
++    value = _advertisement(raw, selected)
++    if kind == first.KIND:
++        # Even already-NEW refuses before Git can skip its pre-push hook.
++        # Unadvertised is not absence; the server must still compare ZERO.
++        _need(selected.remote_ref not in dict(value.refs), "target-changed")
++    else:
++        _need(dict(value.refs).get(selected.remote_ref) == selected.old_oid, "target-changed")
+     return value
+ 
+ 
+ def after_advertisement(raw: bytes, selected: Selection) -> Advertisement:
+-    _need(type(selected) is Selection)
+-    value = _advertisement(raw)
++    selection_kind(selected)
++    value = _advertisement(raw, selected)
+     _need(dict(value.refs).get(selected.remote_ref) == selected.new_oid, "target-changed")
+     return value
+ 
+@@ -146,8 +167,8 @@
+ 
+ def reconcile_advertisement(raw: bytes, selected: Selection) -> Reconciliation:
+     """Historical GET comparison only; absence/another tip never grants retry."""
+-    _need(type(selected) is Selection)
+-    value = _advertisement(raw)
++    selection_kind(selected)
++    value = _advertisement(raw, selected)
+     oid = dict(value.refs).get(selected.remote_ref)
+     state = ("matches-intended" if oid == selected.new_oid else "still-old" if oid == selected.old_oid
+              else "not-returned" if oid is None else "other")
+@@ -166,7 +187,7 @@
+ 
+ 
+ def command(raw: bytes, selected: Selection, offered: Advertisement) -> Command:
+-    _need(type(selected) is Selection)
++    selection_kind(selected)
+     _original(offered, selected)
+     rows = _packets(raw, MAX_COMMAND, 2)
+     _need(len(rows) == 2 and type(rows[0]) is bytes and rows[1] == 0)
+diff --git a/src/mobile_release/git_repository_push.py b/src/mobile_release/git_repository_push.py
+--- a/src/mobile_release/git_repository_push.py
++++ b/src/mobile_release/git_repository_push.py
+@@ -68,6 +68,18 @@
+     exact = ("+" + selected.remote_ref + ":" + tracking_ref(remote, selected)).encode("ascii")
+     require(config.get(prefix + "fetch") in ((wildcard,), (wildcard[1:],), (exact,), (exact[1:],)), "push-upstream")
+     allowed = {prefix + "url", prefix + "fetch", prefix + "pushurl", prefix + "tagopt"}
++    _configuration_policy(config)
++    for key, values in config.items():
++        if key.startswith(prefix):
++            require(key in allowed)
++            if key == prefix + "pushurl":
++                require(values == (url,))
++            elif key == prefix + "tagopt":
++                require(values == (b"--no-tags",))
++
++
++def _configuration_policy(config):
++    # Same policy for both closed Push variants, never copied into the view.
+     fixed = {"push.default": ((b"simple",), (b"upstream",), (b"current",)),
+              "push.followtags": ((b"false",),), "push.gpgsign": ((b"false",),),
+              "push.recursesubmodules": ((b"no",),), "push.negotiate": ((b"false",),),
+@@ -78,12 +90,6 @@
+         require(key not in ("core.gitproxy", "core.askpass", "core.alternaterefscommand"))
+         if key.startswith("push."):
+             require(key in fixed and values in fixed[key])
+-        if key.startswith(prefix):
+-            require(key in allowed)
+-            if key == prefix + "pushurl":
+-                require(values == (url,))
+-            elif key == prefix + "tagopt":
+-                require(values == (b"--no-tags",))
+     require(config.get("extensions.objectformat", (b"sha1",)) == (b"sha1",)
+             and config.get("core.repositoryformatversion", (b"0",)) == (b"0",))
+ 
+@@ -117,8 +123,13 @@
+                 "withheld": ["messages", "authors", "emails", "signatures", "objects"]}
+ 
+ 
++def _plan(plan):
++    from .git_repository_push_new_branch import PushNewBranchPlan
++    return type(plan) in (PushPlan, PushNewBranchPlan)
++
++
+ def _review_digest(plan):
+-    core._need(type(plan) is PushPlan, "invalid-input")
++    core._need(_plan(plan), "invalid-input")
+     raw = json.dumps({"review": plan.public(), "trees": plan._trees, "hooks": plan._hooks},
+                      sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+     return hashlib.sha256(b"mrk-git-push-review/1\0" + raw).hexdigest()
+@@ -157,7 +168,10 @@
+ 
+     @classmethod
+     def from_plan(cls, plan, digest):
+-        core._need(type(plan) is PushPlan and digest == _review_digest(plan), "authorization")
++        core._need(_plan(plan) and digest == _review_digest(plan), "authorization")
++        from .git_repository_push_new_branch import PushNewBranchPlan, PushNewBranchIntent
++        if type(plan) is PushNewBranchPlan:
++            cls = PushNewBranchIntent
+         selected, target = plan.target.selected, plan.target
+         commits = b"".join((oid + "\n").encode("ascii") for oid in plan.commits)
+         return cls(digest, plan._snapshot.public.revision, plan.reference_revision,
+@@ -172,6 +186,11 @@
+                 "accountId": self.account_id, "repositoryId": self.repository_id,
+                 "localRef": self.local_ref, "remoteRef": self.remote_ref,
+                 "oldOid": self.old_oid, "newOid": self.new_oid, "commitsSha256": self.commits_sha256}
++
++
++def _intent(intent):
++    from .git_repository_push_new_branch import PushNewBranchIntent
++    return type(intent) in (PushIntent, PushNewBranchIntent)
+ 
+ 
+ class _Session(local._LocalSession):
+@@ -226,6 +245,9 @@
+                 and len(set(commits)) == len(commits) and commits[-1] == selected.new_oid
+                 and selected.old_oid not in commits
+                 and all(_OID.fullmatch(oid) is not None and oid != "0" * 40 for oid in commits), "push-history")
++        return commits, self._inspect_trees(commits)
++
++    def _inspect_trees(self, commits):
+         trees, total = [], 0
+         for oid in commits:
+             self.push_tree = oid
+@@ -250,7 +272,7 @@
+             trees.append(hashlib.sha256(body).hexdigest())
+         self.push_tree = None
+         self.check_original(); self.guard_current()
+-        return commits, tuple(trees)
++        return tuple(trees)
+ 
+ 
+ class GitPushRepository(local.GitLocalRepository):
+@@ -270,7 +292,7 @@
+         return session
+ 
+     def _capture(self, session, target, revision, reference_revision):
+-        core._need(type(target) is Target, "invalid-input")
++        core._need(type(target) is Target and type(target.selected) is Selection, "invalid-input")
+         before = session.snapshot()
+         self._expected(before, revision)
+         core._need(session.reference_revision(before.public) == reference_revision, "stale-observation")
+@@ -351,7 +373,7 @@
+     @core._session_boundary
+     def apply_push(self, review, owner, *, expected_digest):
+         from .git_push_transaction import PushTransaction
+-        core._need(type(review) is PushReview and type(review.plan) is PushPlan and review.plan._key is self._key
++        core._need(type(review) is PushReview and _plan(review.plan) and review.plan._key is self._key
+                    and not review.plan._used and not self._apply_entered and not self._retained, "already-used")
+         core._need(review.digest == expected_digest == _review_digest(review.plan), "stale-observation")
+         self._apply_entered = True
+@@ -359,7 +381,7 @@
+         self._active_plan, self._active_owner = plan, owner
+         state, settlement, reason, tx = "failed", "settled", None, None
+         try:
+-            owner.check_current(self.root, "push", plan._snapshot.public.revision)
++            owner.check_current(self.root, plan.action, plan._snapshot.public.revision)
+             session = self._session()
+             current = self._capture(session, plan.target, plan._snapshot.public.revision, plan.reference_revision)
+             core._need(_review_digest(current) == review.digest, "stale-observation")
+@@ -403,7 +425,7 @@
+         finally:
+             if not self._unknown:
+                 self._active_plan = self._active_owner = None
+-        return core.MutationResult(core._text(owner.operation_id, 128), "push", state, settlement, reason, None,
++        return core.MutationResult(core._text(owner.operation_id, 128), plan.action, state, settlement, reason, None,
+                                    None if tx is None else tx.intent)
+ 
+     def _refuse_other_write(self, *args, **kwargs):
+diff --git a/tests/unit/test_desktop_git_push.py b/tests/unit/test_desktop_git_push.py
+--- a/tests/unit/test_desktop_git_push.py
++++ b/tests/unit/test_desktop_git_push.py
+@@ -39,27 +39,34 @@
+ 
+ 
+ @contextmanager
+-def original(*, phase="apply"):
++def original(*, phase="apply", first_publication=False):
+     world = existing.GitPushRepositoryTests("test_review_then_one_apply_keeps_every_original_dirty_index_ref_and_config_byte")
+     world.setUp()
+     op = None
+     try:
+         root, fake = world.root, world.fake
++        repository_type, target, selected = push.GitPushRepository, existing.TARGET, existing.SELECTED
++        if first_publication:
++            from mobile_release import git_repository_push_new_branch as first
++            import test_git_repository_push_new_branch as first_fixture
++            world.fake = fake = first_fixture.FakeFirst(root)
++            repository_type, target, selected = first.GitPushNewBranchRepository, first_fixture.TARGET, first_fixture.SELECTED
+         observer = read.GitReadRepository(root, git_executable=wire.TOOL_PATH,
+             work_end=time.monotonic() + 45, _run=fake)
+         observed = observer.observe()
+-        seed = push.GitPushRepository(root, git_executable=wire.TOOL_PATH, work_end=time.monotonic() + 45,
++        seed = repository_type(root, git_executable=wire.TOOL_PATH, work_end=time.monotonic() + 45,
+             launch=existing.LAUNCH, _run=fake, _remote=world.remote)
+         world.repositories.append(seed)
+         # Local-only DATA digest preparation; not a native Prepare/consent.
+         session = seed._session()
+-        plan = seed._capture(session, existing.TARGET, observed.observation.revision, observed.reference_revision)
++        plan = seed._capture(session, target, observed.observation.revision, observed.reference_revision)
+         reviewed = push.PushReview(plan, push._review_digest(plan))
+         assert seed._finish_sessions(False)
+         row = fixture(phase=phase)
+         row["action"].update(expectedRevision=observed.observation.revision,
+             expectedReferenceRevision=observed.reference_revision,
+-            localRef=existing.BRANCH, remoteRef=existing.BRANCH, oldOid=existing.OLD, newOid=existing.HEAD)
++            localRef=selected.local_ref, remoteRef=selected.remote_ref, oldOid=selected.old_oid, newOid=selected.new_oid,
++            kind=packets.selection_kind(selected), remote=None if first_publication else "origin")
+         if phase == "apply":
+             row["reviewDigest"] = reviewed.digest
+         inert_tool = world.base / "inert-tool"
+@@ -137,11 +144,11 @@
+                     if phase == "apply":
+                         assert source.candidate_returned and tx.acknowledged and not op.remote_returned
+                         offered = packets.advertisement(packet(b"# service=git-receive-pack\n") + b"0000"
+-                            + packet((existing.OLD + " " + existing.BRANCH).encode() + b"\0report-status\n") + b"0000",
+-                            existing.SELECTED)
+-                        update = packets.command(packet((existing.OLD + " " + existing.HEAD + " " + existing.BRANCH).encode()
+-                            + b"\0 report-status") + b"0000", existing.SELECTED, offered)
+-                        stream = packets.PackStream(update, existing.SELECTED, offered)
++                            + packet((selected.old_oid + " " + ("capabilities^{}" if first_publication else selected.remote_ref)).encode()
++                                     + b"\0report-status\n") + b"0000", selected)
++                        update = packets.command(packet((selected.old_oid + " " + selected.new_oid + " " + selected.remote_ref).encode()
++                            + b"\0 report-status") + b"0000", selected, offered)
++                        stream = packets.PackStream(update, selected, offered)
+                         body = pack(); stream.feed(body); digest = stream.finish()
+                         path = tx.view.root / bodies.NAME
+                         path.write_bytes(update.raw + body)  # Test-owned simulated helper, no pack-objects.
+@@ -151,7 +158,7 @@
+                         if mode.after_send is not None:
+                             mode.after_send(tx, channel)
+                         response = packets.status_response(packet(b"unpack ok\n")
+-                            + packet(("ok " + existing.BRANCH + "\n").encode()) + b"0000", existing.SELECTED, offered, update)
++                            + packet(("ok " + selected.remote_ref + "\n").encode()) + b"0000", selected, offered, update)
+                     else:
+                         response = None
+                         assert not source.candidate_claimed and tx.intent is None and tx.view.body_initial is None

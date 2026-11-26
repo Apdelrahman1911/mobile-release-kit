@@ -1,0 +1,4 @@
+Current Root parent SHA256: f9ed32483966262ec4424ddb8235578ca0df857838136e23f6b823b6b92fe3c5
+Produced parent SHA256: 99fb0d87df7542dee4b042def1efe34ff5d512c29a6c75ea9a4bde58d9f64b0b
+Adjusted patch SHA256: ab38aa9702fcfe804a6104c550748ecd3d15fae6d9ebf5b4781cff73347c73aa
+No Root files edited. Current-parent git apply --check PASS; syntax parse PASS; original Tools/identity guards+counter occurrences preserved, gh census exactly once.

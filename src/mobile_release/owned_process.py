@@ -28,10 +28,14 @@ class ProcessError(ValidationError, CredentialError):
     """No complete command result; dispatch/containment must not be guessed."""
 
     def __init__(self, message: str, *, dispatched: bool = False, contained: bool = True,
-                 cleanup_complete: bool = True):
+                 cleanup_complete: bool = True, owner_failure_mask: int | None = None):
         super().__init__(message)
         self.dispatched, self.contained = dispatched, contained
         self.cleanup_complete = cleanup_complete
+        # Optional closed predicate DATA from this original owner's final
+        # incomplete-result exception, never output or a lifetime capability.
+        self.owner_failure_mask = owner_failure_mask
+        self.owner_finality_diagnostic = None  # Optional DATA, never lifetime authority.
 
     @property
     def fatal(self) -> bool:
@@ -150,8 +154,102 @@ def run_owned(
     ``text=False`` preserves bounded stdout/stderr bytes without UTF-8 decoding;
     this parent-local result choice changes no native protocol or authority.
     """
-    from ._command_process import run_command
+    from ._command_process import CommandCallEvidence, run_command
 
+    source = None if cancellation is None else getattr(cancellation, "_saved_command_source", None)
+    reserved = None if cancellation is None else getattr(cancellation, "_version_allocation_source", None)
+    if reserved is not None:
+        from .reserved_version_edit import BorrowedReservedVersionInput
+        if type(reserved) is BorrowedReservedVersionInput:
+            if source is not None or type(cancellation) is not DefaultCancellation:
+                raise ValueError("Reserved edit requires its original input")
+            reserved.admit_selected(reserved.owner.data.reservation.request)
+            reserved.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding, evidence=_evidence)
+            timeout, output_limit = reserved.command_limits(timeout, capture, output_limit)
+    if source is not None:
+        from ._desktop_saved_command_control import SavedCommandDomain, source_domain
+        domain = source_domain(source)
+        if (type(cancellation) is not DefaultCancellation or cancellation._saved_command_input() is not source
+                or source.guard is not cancellation):
+            message = ("Offline preflight command has no original input binding"
+                       if domain is SavedCommandDomain.OfflinePreflight
+                       else "Saved build command has no original input binding")
+            raise ValueError(message)
+        if domain is SavedCommandDomain.IOSArchive and source.account_lifecycle:
+            operation = source.require_operation()
+            from ._desktop_ios_signed_operation import SignedIOSOperation
+            if type(operation.signing) is not SignedIOSOperation or _evidence is not None or on_start is not None:
+                raise ValueError("Signed iOS command lacks its original operation")
+            candidate = getattr(operation, "_local_candidate", None)
+            if candidate is not None and candidate._source_pending is not None:
+                from .local_ios_candidate_source import IOSCandidateComposition
+                if type(candidate) is not IOSCandidateComposition or candidate.run.operation is not operation:
+                    raise ValueError("Local iOS source lacks its original composition")
+                timeout, selected_limit = candidate.source_command(argv, environ=environ, cwd=cwd,
+                    timeout=timeout, capture=capture, text=text, cleanup=cleanup, scope=execution_scope,
+                    binding=journal_binding, evidence=_evidence, on_start=on_start)
+                if output_limit != selected_limit:
+                    raise ValueError("Local iOS source capture differs")
+                return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,
+                    output_limit=selected_limit, cancellation=cancellation, on_start=None,
+                    cleanup=False, execution_scope=None, journal_binding=None)
+            with operation.signing.command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+                    text=text, output_limit=output_limit, cleanup=cleanup, scope=execution_scope,
+                    binding=journal_binding) as (selected, environment, timeout, output_limit):
+                return run_command(selected, environ=environment, cwd=cwd, timeout=timeout, capture=capture, text=text,
+                    output_limit=output_limit, cancellation=cancellation, on_start=None,
+                    cleanup=cleanup and not source.recovery,
+                    execution_scope=execution_scope, journal_binding=journal_binding)
+        if cleanup:
+            raise ValueError("Saved command cleanup has no original signed account owner")
+        if domain is SavedCommandDomain.GenerateUploadKey:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.GitRemote:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.GitLocal:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.GitRead:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.GitHubAuth:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.VersionAllocationSource:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.AppleProvisioning:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding, evidence=_evidence)
+        if domain in (SavedCommandDomain.LocalStorePreflight,SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute,SavedCommandDomain.LocalStoreReconcile):
+            source.require_operation().command_arguments(argv, capture=capture, evidence=_evidence)
+        timeout, output_limit = source.command_limits(timeout, capture, output_limit)
+        if domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute,SavedCommandDomain.LocalStoreReconcile) and _evidence is not None:
+            if type(_evidence) is not CommandCallEvidence:raise ValueError("Store prepare requires its original lane")
+            _evidence._cap_local_store(source,timeout=timeout)
+        if domain is SavedCommandDomain.LocalStorePreflight and _evidence is not None:
+            if type(_evidence) is not CommandCallEvidence:
+                raise ValueError("Store access requires its original readback record")
+            _evidence._cap_store_preflight(source, timeout=timeout)
+        # Complete nonzero results remain ordinary policy DATA. This seam
+        # changes neither the C/A/W owner nor its original cleanup allowance.
     return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,
                        output_limit=output_limit, cancellation=cancellation, on_start=on_start,
                        cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding,

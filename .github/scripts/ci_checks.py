@@ -41,14 +41,29 @@ import zipfile
 
 VERSION = "0.3.0"
 RESULT_PREFIX = "MRK_CHECK_RESULT="
-CHECKS = ("python-full", "python-wheel", "wheel-smoke", "jdk-signers")
+CHECKS = ("python-pr-journal", "python-full", "python-wheel", "wheel-smoke", "jdk-signers")
+PR_JOURNAL_CASE = ("unit.test_github_pull_request_mode.PullRequestModeTests."
+                   "verify_actual_exclusive_journal_cold_reopen_preserves_ready_bytes_and_cross_mode_fence")
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_TREE_ENTRIES = 2048
 MAX_STREAM_BYTES = 8 * 1024 * 1024
 MAX_RESULT_BYTES = 256 * 1024
+MAX_FULL_RESULT_BYTES = 512 * 1024
 MAX_NATIVE_ABI_BYTES = 8192
+# The Desktop API is part of the same first-party distribution. Keep its
+# package/resource shape closed; a recursive wildcard is not package authority.
+PACKAGE_DIRECTORIES = frozenset({"data", "api", "api/data"})
+PACKAGE_RESOURCES = frozenset({
+    "data/apple-profile-roots.pem",
+    "api/data/credential-guide-v1.json", "api/data/field-help.json",
+    "api/data/github-connection-v1.json", "api/data/github-setup-v1.json",
+    "api/data/metadata-image-help-v1.json", "api/data/metadata-images-v1.json",
+    "api/data/metadata-text-help-v1.json", "api/data/project.schema.json",
+    "api/data/release-version-help-v1.json",
+})
 PYTHON_FULL_FSIZE = (1 << 32) + 1024 * 1024
+PYTHON_FULL_CPU_SECONDS = 450
 PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * 1024**2),) + tuple(
     (name, 16 * 1024**2) for name in
     ("home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")
@@ -224,6 +239,7 @@ PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASE
 PYTHON_FRESH_CASES = (
     ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
     ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+    ("fresh-native-fd-maps", "unit.test_native_process.NativeProcessCompatibilityTests.test_native_helper_and_validator_fd_maps"),
 )
 PYTHON_FRESH_PARTITIONS = tuple(name for name, _identifier in PYTHON_FRESH_CASES)
 PYTHON_FRESH_IDS = tuple(identifier for _name, identifier in PYTHON_FRESH_CASES)
@@ -256,7 +272,15 @@ LINUX_MACOS_SKIPS = frozenset({
 })
 TOOLING_FILES = (
     "Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb",
-    "fastlane/apple_store.rb", "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb",
+    "fastlane/apple_store.rb", "fastlane/apple_provisioning.rb",
+    "fastlane/apple_provisioning_bundle_registration.rb", "fastlane/apple_provisioning_bundle_read.rb",
+    "fastlane/apple_provisioning_profile_read.rb", "fastlane/apple_provisioning_p12.rb",
+    "fastlane/apple_provisioning_p12_assemble.rb", "fastlane/apple_provisioning_signing.rb",
+    "fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
+    "fastlane/apple_distribution_certificate_policy.rb", "fastlane/apple_distribution_certificate_prepare.rb",
+    "fastlane/apple_distribution_certificate_verify.rb", "fastlane/apple_provisioning_certificate_issuance.rb",
+    "fastlane/apple_store_versions.rb", "fastlane/android_store_versions.rb", "fastlane/play_edit_recovery.rb",
+    "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb",
     "fastlane/apple_create_retry.rb", "fastlane/ios_upload_validation.rb",
     "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
     "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
@@ -279,6 +303,10 @@ APPLE_ROOTS_SHA256 = "c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca44
 IGNORE_LINES = (
     ".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/",
     ".mobile-release-init-cleanup/",
+    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/",
+    ".mobile-release-metadata-text-cleanup/",
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/",
+    ".mobile-release-metadata-images-prepare/", ".mobile-release-metadata-images/", ".mobile-release-metadata-images-cleanup/",
 )
 SKELETON_FILES = (
     "title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt",
@@ -291,8 +319,10 @@ TOOLING_REPOSITORY = "example/mobile-release-kit"
 TOOLING_SHA = "1" * 40
 HELP_OPTIONS = {
     "workflow": {"--help"},
-    "android_upload_validation": {"--aab", "--app-root", "--config-path", "--help", "--intent-sha256", "--operation-intent"},
-    "ios_upload_validation": {"--ipa", "--app-root", "--config-path", "--help", "--intent-sha256", "--operation-intent"},
+    "android_upload_validation": {"--aab", "--app-root", "--config-path", "--help", "--intent-sha256",
+                                  "--local-operation-intent", "--local-registered-tools-json", "--operation-intent"},
+    "ios_upload_validation": {"--ipa", "--app-root", "--config-path", "--help", "--intent-sha256",
+                              "--local-operation-intent", "--local-registered-tools-json", "--operation-intent"},
 }
 JDK_CASES = (
     ("outside-warning-window", "-1d", "209", True),
@@ -810,7 +840,7 @@ def _python_full_profile(work_root: Path, *, deadline: float) -> dict:
     _profile_userns_zero(deadline)
     limits = ((resource.RLIMIT_FSIZE, PYTHON_FULL_FSIZE), (resource.RLIMIT_CORE, 0),
               (resource.RLIMIT_NOFILE, 1024), (resource.RLIMIT_NPROC, 256),
-              (resource.RLIMIT_CPU, 300), (resource.RLIMIT_AS, 4 * 1024**3))
+              (resource.RLIMIT_CPU, PYTHON_FULL_CPU_SECONDS), (resource.RLIMIT_AS, 4 * 1024**3))
     file_limit = None
     for which, wanted in limits:
         _remaining(deadline, 3300)
@@ -944,7 +974,12 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
     tests = Path(source_root) / "tests"
     patterns = WHEEL_PATTERNS if selection == "wheel" else NATIVE_PATTERNS
     paths = sorted(tests.rglob("test*.py"))
-    if selection != "full":
+    if selection == "full":
+        # unittest descends into Python packages. The desktop workflow runs
+        # its own standalone modules from the non-package desktop directory.
+        paths = [path for path in paths if all((parent / "__init__.py").is_file()
+                 for parent in path.parents if parent != tests and parent.is_relative_to(tests))]
+    else:
         paths = [path for path in paths if path.name in patterns]
         _require(sorted(path.name for path in paths) == sorted(patterns), "TEST_PATTERN_INVENTORY")
     result = []
@@ -1130,9 +1165,11 @@ def native_compatibility_ids(source_root: Path, *, public_only: bool = False,
                              deadline: float | None = None) -> tuple[str, ...]:
     """Closed source-known controls, never a generic selector or native role."""
     _require(type(public_only) is bool, "NATIVE_COMPATIBILITY_SELECTION")
-    ordinary = native_partition_ids(source_root, "ordinary", deadline=deadline)
+    # Compatibility runs in its own interpreter, so its fixed controls include
+    # the descriptor-map test regardless of its full-suite partition.
+    complete = native_partition_ids(source_root, "all", deadline=deadline)
     prefix = "unit.test_native_process.NativeProcessCompatibilityTests."
-    actual = tuple(identifier for identifier in ordinary if identifier.startswith(prefix))
+    actual = tuple(identifier for identifier in complete if identifier.startswith(prefix))
     _require(actual == NATIVE_COMPATIBILITY_IDS, "NATIVE_COMPATIBILITY_INVENTORY")
     return NATIVE_PUBLIC_API_IDS if public_only else actual
 
@@ -1188,6 +1225,40 @@ def _failure_callback(identifier: str, outcome: str, error, expected) -> dict:
             "errno": number if type(number) is int and 0 < number < 4096 else None}
 
 
+@contextlib.contextmanager
+def _core_test_imports(source_root: Path):
+    """Resolve shared test fixtures from the admitted, immutable source view."""
+    original = sys.path[:]
+    sys.path.extend(str(source_root / "tests" / name) for name in ("unit", "workflow", "desktop"))
+    try:
+        yield
+    finally:
+        sys.path[:] = original
+
+
+def run_pr_journal_check(source_root: Path, work_root: Path, deadline: float, observations: list) -> dict:
+    """Run the real journal under ordinary isolation with its private temp root."""
+    _remaining(deadline, 3300)
+    _require(sys.platform == "linux" and work_root.name == "checks"
+             and os.environ.get("TMPDIR") == str(work_root.parent / "tmp"), "PR_JOURNAL_CONTEXT")
+    with _core_test_imports(source_root), contextlib.redirect_stdout(sys.stderr):
+        sys.path.insert(0, str(source_root / "tests"))
+        loader = unittest.TestLoader()
+        suite = loader.loadTestsFromName(PR_JOURNAL_CASE)
+        _require(not loader.errors and tuple(test.id() for test in suite) == (PR_JOURNAL_CASE,),
+                 "PR_JOURNAL_INVENTORY")
+        fixture = sys.modules[PR_JOURNAL_CASE.rsplit(".", 2)[0]]
+        journal = sys.modules["mobile_release._github_pull_request_journal"]
+        _require(Path(fixture.__file__).resolve() == source_root / "tests/unit/test_github_pull_request_mode.py"
+                 and Path(journal.__file__).resolve() == work_root.parent / "source-build/src/mobile_release"
+                 / "_github_pull_request_journal.py", "PR_JOURNAL_ORIGIN")
+        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True).run(suite)
+    _remaining(deadline, 3300)
+    _require(result.wasSuccessful() and result.testsRun == 1 and not result.skipped, "PR_JOURNAL_TEST_RESULT")
+    observations.append({"id": PR_JOURNAL_CASE, "outcome": "ok"})
+    return {"executed": 1}
+
+
 def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list,
                      *, work_root: Path | None = None) -> dict:
     failures, callbacks, profile = [], [], None
@@ -1206,6 +1277,11 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
         if selection != "full":
             inspect_installed_wheel(source_root, deadline=deadline)
         allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
+        monotonic_ns = time.monotonic_ns
+        started_ns = monotonic_ns()
+        if selection == "full":
+            process_time_ns = time.process_time_ns
+            getrusage, rusage_self = resource.getrusage, resource.RUSAGE_SELF
 
         class Result(unittest.TextTestResult):
             def startTest(self, test):
@@ -1217,6 +1293,12 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 _require(type(identifier) is str and identifier in expected
                          and identifier not in {item["id"] for item in observations}, "TEST_STARTED_ID")
                 observations.append({"id": identifier, "outcome": "incomplete"})
+                if selection == "full":
+                    # Stderr survives abrupt exit before the final JSON report.
+                    elapsed_ms = (monotonic_ns() - started_ns) // 1_000_000
+                    cpu_ms = process_time_ns() // 1_000_000
+                    rss_kib = getrusage(rusage_self).ru_maxrss  # Linux reports KiB.
+                    self.stream.writeln(f"\nMRK_PYTHON_ELAPSED_MS={elapsed_ms} CPU_MS={cpu_ms} RSS_KIB={rss_kib}")
                 super().startTest(test)
 
             def record(self, test, outcome, error=None):
@@ -1280,7 +1362,8 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 else:
                     yield test
 
-        with contextlib.redirect_stdout(sys.stderr):
+        imports = _core_test_imports(source_root) if selection == "full" else contextlib.nullcontext()
+        with imports, contextlib.redirect_stdout(sys.stderr):
             suite = unittest.TestSuite()
             for pattern in ("test*.py",) if selection == "full" else WHEEL_PATTERNS:
                 loader = unittest.TestLoader()
@@ -1346,9 +1429,17 @@ def _source_package(source_root: Path, *, deadline: float) -> dict[str, bytes]:
                           ("optional-dependencies", {"test": list(TEST_REQUIREMENTS)}),
                           ("scripts", {"mobile-release": "mobile_release.cli:main"})):
         _require(_exact(fields.get(key), expected), "SOURCE_PACKAGE_CONTRACT")
+    tool = project.get("tool")
+    setuptools = tool.get("setuptools") if type(tool) is dict else None
+    _require(type(setuptools) is dict and _exact(setuptools.get("package-data"),
+             {"mobile_release": ["data/apple-profile-roots.pem", "api/data/*.json"]}),
+             "SOURCE_PACKAGE_DATA")
     files, directories = _tree(source_root / "src/mobile_release", deadline=deadline)
-    _require(directories == {"data"} and "__init__.py" in files and "__main__.py" in files
-             and set(files) == {name for name in files if "/" not in name and name.endswith(".py")} | {"data/apple-profile-roots.pem"},
+    python_files = {name for name in files if name.endswith(".py")
+                    and ("/" not in name or name.startswith("api/") and name.count("/") == 1)}
+    _require(directories == PACKAGE_DIRECTORIES
+             and {"__init__.py", "__main__.py", "api/__init__.py"} <= files.keys()
+             and set(files) == python_files | PACKAGE_RESOURCES,
              "SOURCE_PACKAGE_FILES")
     _require(hashlib.sha256(files["data/apple-profile-roots.pem"]).hexdigest() == APPLE_ROOTS_SHA256
              and hashlib.sha256(_read_regular(source_root / "LICENSE", deadline=deadline)).hexdigest() == LICENSE_SHA256,
@@ -1368,7 +1459,7 @@ def inspect_native_package(source_root: Path, package_root: Path, *, deadline: f
              "NATIVE_PACKAGE_ROOT")
     expected = _source_package(source_root, deadline=deadline)
     actual, directories = _tree(package_root, deadline=deadline)
-    _require(actual == expected and directories == {"data"}, "NATIVE_PACKAGE_BYTES")
+    _require(actual == expected and directories == PACKAGE_DIRECTORIES, "NATIVE_PACKAGE_BYTES")
     for relative in ("", *sorted(directories), *sorted(actual)):
         _remaining(deadline, 3300)
         path = package_root / relative
@@ -1453,7 +1544,8 @@ def inspect_project_wheel(wheel_path: Path, source_root: Path, *, deadline: floa
              and members[dist + "entry_points.txt"] == b"[console_scripts]\nmobile-release = mobile_release.cli:main\n",
              "WHEEL_ENTRY_CONTRACT")
     return {"sha256": hashlib.sha256(data).hexdigest(), "member_count": len(members),
-            "module_count": len(package) - 1, "tooling_count": len(TOOLING_FILES), "generator": generator,
+            "module_count": sum(name.endswith(".py") for name in package),
+            "tooling_count": len(TOOLING_FILES), "generator": generator,
             "runtime_dependencies": [], "license_sha256": LICENSE_SHA256, "roots_sha256": APPLE_ROOTS_SHA256}
 
 
@@ -1473,10 +1565,13 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
              and Path(mobile_release.__file__).resolve() == package_root / "__init__.py"
              and resolve_tooling_root(environ={}) == tooling_root, "WHEEL_INSTALLED_ORIGIN")
     expected_package = _source_package(source_root, deadline=deadline)
-    package, _ = _tree(package_root, deadline=deadline)
+    package, directories = _tree(package_root, deadline=deadline)
     tooling, _ = _tree(tooling_root, deadline=deadline)
-    _require(package == expected_package and set(tooling) == set(TOOLING_FILES)
-             and set(REQUIRED_TOOLING_FILES) == set(TOOLING_FILES)
+    _require(package == expected_package and directories == PACKAGE_DIRECTORIES
+             and set(tooling) == set(TOOLING_FILES)
+             # The installed bundle must also carry the hosted Play recovery
+             # helper. External tooling may omit it until that route is used.
+             and set(REQUIRED_TOOLING_FILES) | {"fastlane/play_edit_recovery.rb"} == set(TOOLING_FILES)
              and all(tooling[name] == _read_regular(source_root / name, deadline=deadline) for name in TOOLING_FILES),
              "WHEEL_INSTALLED_RESOURCE_BYTES")
     distribution = importlib.metadata.distribution("mobile-release-kit")
@@ -1486,9 +1581,12 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
     _require(hashlib.sha256(_read_regular(dist_info / "licenses/LICENSE", deadline=deadline)).hexdigest() == LICENSE_SHA256,
              "WHEEL_INSTALLED_LICENSE")
     for name in expected_package:
-        if name.endswith(".py") and name not in {"__main__.py", "__init__.py"}:
+        if name.endswith(".py") and name != "__init__.py" and PurePosixPath(name).name != "__main__.py":
             _remaining(deadline, 3300)
-            module = importlib.import_module("mobile_release." + name[:-3])
+            parts = PurePosixPath(name).with_suffix("").parts
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            module = importlib.import_module(".".join(("mobile_release", *parts)))
             _require(Path(module.__file__).resolve() == package_root / name, "WHEEL_MODULE_ORIGIN")
     _require(len(apple_roots()) == 3 and mobile_release.__version__ == VERSION, "WHEEL_ACTUAL_ROOTS_OR_VERSION")
     installed = {}
@@ -1497,7 +1595,8 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
         name = re.sub(r"[-_.]+", "-", _header(item.metadata, "Name")).lower()
         _require(name not in installed and Path(item.locate_file("")).resolve().is_relative_to(prefix), "WHEEL_DISTRIBUTION_ORIGIN")
         installed[name] = item.version
-    return {"module_count": len(expected_package) - 1, "tooling_count": len(tooling), "roots_count": 3,
+    return {"module_count": sum(name.endswith(".py") for name in expected_package),
+            "tooling_count": len(tooling), "roots_count": 3,
             "runtime_dependencies": [], "distributions": installed}
 
 
@@ -1823,7 +1922,9 @@ def main(argv: list[str] | None = None) -> int:
         _require((args.check == "wheel-smoke") == (args.ruby is not None), "CHECK_RUBY_ARGUMENT")
         os.umask(0o077)
         os.chdir(work)
-        if args.check in {"python-full", "python-wheel"}:
+        if args.check == "python-pr-journal":
+            details = run_pr_journal_check(source, work, args.deadline, observations)
+        elif args.check in {"python-full", "python-wheel"}:
             details = run_python_tests(source, "full" if args.check == "python-full" else "wheel",
                                        args.deadline, observations, work_root=work)
         elif args.check == "wheel-smoke":
@@ -1854,7 +1955,8 @@ def main(argv: list[str] | None = None) -> int:
             if profile is not None:
                 report["details"]["storage_profile"] = profile
     encoded = _json_bytes(report)
-    _require(len(encoded) <= MAX_RESULT_BYTES, "CHECK_RESULT_LIMIT")
+    result_limit = MAX_FULL_RESULT_BYTES if args.check == "python-full" else MAX_RESULT_BYTES
+    _require(len(encoded) <= result_limit, "CHECK_RESULT_LIMIT")
     sys.stdout.write(RESULT_PREFIX + encoded.decode("ascii") + "\n")
     sys.stdout.flush()
     return 0 if report["ok"] else 1

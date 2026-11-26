@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "fields": [
+    {
+      "id": "name",
+      "label": "Marketing version",
+      "requiredness": "required",
+      "requiredWhen": "Both values are required for every edit or creation.",
+      "what": "The human-readable release version stored under the saved name key.",
+      "why": "Keeps release consumers on one explicit version spelling.",
+      "where": "Dashboard, after Open saved version. The source and key come only from saved Settings.",
+      "format": "1-64 ASCII characters in shared dotted numeric form. Saved iOS policy requires two or three numeric components. Example: 1.2.3.",
+      "failure": "Format validity is not Store approval, artifact agreement or provenance. Unsupported source grammar is refused, not repaired."
+    },
+    {
+      "id": "build",
+      "label": "Build number",
+      "requiredness": "required",
+      "requiredWhen": "Both values are required for every edit or creation.",
+      "what": "The build identifier stored as a string under the saved build key.",
+      "why": "Makes the shared positive integer policy explicit without silently converting or incrementing it.",
+      "where": "The same saved version source. Choose the intended value; the app never auto-bumps.",
+      "format": "Canonical decimal digits from 1 through 2100000000, at most 10 bytes. No spaces, signs or leading zeros. Example: 42.",
+      "failure": "A valid number is not evidence of Store monotonicity. Existing unambiguous invalid values may be opened so you can correct them."
+    }
+  ],
+  "actions": [
+    {
+      "id": "open",
+      "label": "Open saved version",
+      "requiredness": "optional",
+      "requiredWhen": "Only when explicitly chosen.",
+      "what": "Load the two saved values through the original finite editor without writing.",
+      "why": "Separates ordinary Read from a deliberate create/edit session.",
+      "where": "Dashboard. Save missing or invalid configuration in Settings first.",
+      "format": "Only the native-selected project ID is supplied. Source, keys, iOS policy and absence are derived from saved configuration.",
+      "failure": "Missing ignore coverage needs the normal Settings Save review. Empty, malformed, unreadable or unsafe files are not Create permission."
+    },
+    {
+      "id": "review",
+      "label": "Validate and review values",
+      "requiredness": "optional",
+      "requiredWhen": "Only when explicitly chosen.",
+      "what": "Ask the core to validate both exact strings and freeze one complete before/after review.",
+      "why": "Binds the proposal to the original saved config, ignore proof and selected file.",
+      "where": "Edit the two fields, then choose Validate and review.",
+      "format": "Existing files change only the two selected inner spans. Create emits two KEY=VALUE lines, UTF-8/LF, with a final newline.",
+      "failure": "A changed baseline refuses. Reopening carries the old baseline; it is not automatic rebase. Invalid Prepare is consumed once."
+    },
+    {
+      "id": "save",
+      "label": "Confirm local version save",
+      "requiredness": "optional",
+      "requiredWhen": "Only when explicitly chosen.",
+      "what": "Submit only the exact original one-use plan after acknowledgement and typed SAVE.",
+      "why": "Prevents incidental text editing from changing release inputs.",
+      "where": "The full native review, including source, hashes, modes, directories and line-ending facts.",
+      "format": "Edit preserves unrelated bytes and mode. Create requests mode 0644 and parent modes 0755, subject to native umask.",
+      "failure": "No build, native-project rewrite, Git/index operation or Store request is included. Uncertainty preserves the original owner and blocks retry."
+    },
+    {
+      "id": "reload",
+      "label": "Reload saved values",
+      "requiredness": "optional",
+      "requiredWhen": "Only when explicitly chosen.",
+      "what": "Explicitly discard the current value draft and load a fresh original after settlement.",
+      "why": "Makes reconciliation intentional instead of silently replacing your baseline.",
+      "where": "Close the original session, then confirm Reload saved values and discard draft.",
+      "format": "Confirmation is tied to the displayed project and exact draft revision.",
+      "failure": "A failed or late reload does not erase the old draft. Recovery-required or unknown settlement cannot be bypassed."
+    },
+    {
+      "id": "discard",
+      "label": "Discard value changes",
+      "requiredness": "optional",
+      "requiredWhen": "Only when explicitly chosen.",
+      "what": "Reset the local two-value draft to its retained original values.",
+      "why": "Keeps Close editor separate from losing work.",
+      "where": "After the original owner settles, confirm Discard value changes.",
+      "format": "In-memory only. No values or source text are persisted in app storage, logs or telemetry.",
+      "failure": "Discard does not reread, rebase, recover or delete any file. Previously submitted outcomes stay visible."
+    }
+  ],
+  "limits": {
+    "maxNameBytes": 64,
+    "maxBuildBytes": 10,
+    "maxSourceBytes": 65536
+  }
+}

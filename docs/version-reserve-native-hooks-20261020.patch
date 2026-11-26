@@ -1,0 +1,2161 @@
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -49,6 +49,8 @@
+ import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
+ import { VersionEnrollmentController } from './versionEnrollmentController.ts';
+ import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
++import { VersionReserveController } from './versionReserveController.ts';
++import { VersionReservePanel } from './components/VersionReservePanel.tsx';
+ import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
+ import { AgentIdentityActionController } from './agentIdentityActions.ts';
+ import type { AgentIdentityActionView } from './agentIdentityActions.ts';
+@@ -226,7 +228,11 @@
+   const cliReadAccessControllerRef = useRef<CliReadAccessController | null>(null);
+   const versionEnrollmentRef = useRef<VersionEnrollmentController | null>(null);
+   const versionEnrollmentAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+-  const versionEnrollmentBusy = useCallback(() => versionEnrollmentRef.current?.ownerReason() ?? null, []);
++  const versionReserveRef = useRef<VersionReserveController | null>(null);
++  const versionReserveAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
++  // Both counter owners participate in every existing admission. Each one's
++  // own callback below excludes only itself, never its peer or the editor.
++  const versionEnrollmentBusy = useCallback(() => versionEnrollmentRef.current?.ownerReason() ?? versionReserveRef.current?.ownerReason() ?? null, []);
+   const repositoryCreateRef = useRef<GitHubRepositoryCreateController | null>(null);
+   const repositoryCreateAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+   const repositoryCreateBusy = useCallback(() => repositoryCreateRef.current?.ownerReason() ?? null, []);
+@@ -274,6 +280,7 @@
+     : identityRef.current?.actions?.pendingReason() ?? identityRef.current?.native.ownerReason() ?? null, []);
+   const retireIdentity = useCallback(() => {
+     versionEnrollmentRef.current?.beforeContextIntent();
++    versionReserveRef.current?.beforeContextIntent();
+     repositoryCreateRef.current?.beforeWorkspaceAction();
+     activityRef.current?.beforeWorkspaceAction();
+     pullRequestRef.current?.beforeWorkspaceAction();
+@@ -364,6 +371,7 @@
+       } : null);
+     githubGhEntryRef.current?.syncContext();
+     versionEnrollmentRef.current?.syncContext();
++    versionReserveRef.current?.syncContext();
+     repositoryCreateRef.current?.syncContext();
+     activityRef.current?.syncContext();
+     pullRequestRef.current?.syncContext();
+@@ -416,6 +424,7 @@
+     identityRef.current?.ui.sync();
+     cliReadAccessControllerRef.current?.syncContext();
+     versionEnrollmentRef.current?.syncContext();
++    versionReserveRef.current?.syncContext();
+     externalObserverRef.current?.syncContext();
+     environmentControllerRef.current?.syncProject();
+     releaseVersionControllerRef.current?.syncProject();
+@@ -642,6 +651,11 @@
+       configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
+       metadataOwnerReason(metadataText.getSnapshot(), projectId),
+     otherOperationReason: () => localHistoryBusy() ?? storeBusy() ?? savedCommandPrerequisiteReason(true),
++    // Only the native-reserved branch may retain an idle connected account.
++    // All other owners, connection uncertainty and history work still block;
++    // native rematches its exact original pins at every publisher transition.
++    reservedOperationReason: () => localHistoryBusy() ?? storeBusy() ?? historyBusy() ??
++      savedCommandPrerequisiteReason(true, false, undefined, false, true),
+     onSaveBoundary: () => {
+       retireGitRead();
+       // Retire before the submitted intent/outcome can notify subscribers, even
+@@ -653,6 +667,15 @@
+   }));
+   versionEditControllerRef.current = versionEdit;
+   const versionEditState = useSyncExternalStore(versionEdit.subscribe, versionEdit.getSnapshot, versionEdit.getSnapshot);
++  const [versionReserve] = useState(() => new VersionReserveController({ current: () => {
++    const service = pathService.current, selected = workspaceRef.current.selectedId;
++    return { port: service.api?.mode === 'native' ? service.api.versionReserve ?? null : null,
++      nativeSession: service.api?.mode === 'native' ? service : null,
++      projectId: selected && !connectionPicking.current && Object.hasOwn(workspaceRef.current.projects, selected) ? selected : null,
++      preview: service.api?.mode === 'preview', blockedReason: versionReserveAdmission.current(), editor: versionEditControllerRef.current };
++  } }));
++  versionReserveRef.current = versionReserve;
++  useEffect(() => { versionReserve.syncContext(); });
+   const [assetSession] = useState(() => new AssetSessionController(() => {
+     const current = workspaceRef.current;
+     return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+@@ -726,7 +749,7 @@
+   // This one action borrows the current authenticated connection, not a
+   // saved-code grant. Exclude only enrollment itself from reciprocal busy checks.
+   versionEnrollmentAdmission.current = () => {
+-    const blocked = gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
++    const blocked = versionReserveRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+       savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ??
+       cliReadAccessControllerRef.current?.pendingReason();
+     if (blocked) return blocked;
+@@ -737,6 +760,19 @@
+     return current?.session?.state === 'connected' && current.session.projectId === selected &&
+       connection.context?.projectId === selected && current.account.state === 'observed' &&
+       current.repository.state === 'observed' ? null : 'Connect the intended GitHub account and repository first.';
++  };
++  // Reserve reads the SAME connected account and retains a real native Store
++  // receipt. UI data only explains prerequisites; it cannot supply a floor.
++  versionReserveAdmission.current = () => {
++    const blocked = pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
++      savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason();
++    if (blocked) return blocked;
++    if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
++      return 'Finish the prepared GitHub review before reserving a version.';
++    const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
++    return current?.session?.state === 'connected' && current.session.projectId === selected &&
++      connection.context?.projectId === selected && current.account.state === 'observed' && current.repository.state === 'observed'
++      ? null : 'Connect the enrolled shared counter with the intended GitHub account first.';
+   };
+   // Draft PR creation has its own exact-text consent on the same connection.
+   // It excludes only itself, not reads, other reviews or uncertain originals.
+@@ -1352,10 +1388,18 @@
+     let original = key();
+     return githubConnection.subscribe(() => {
+       const next = key();
+-      if (next !== original) { original = next; versionEnrollment.beforeContextIntent(); }
+-      versionEnrollment.syncContext();
++      if (next !== original) { original = next; versionEnrollment.beforeContextIntent(); versionReserve.beforeContextIntent(); }
++      versionEnrollment.syncContext(); versionReserve.syncContext();
+     });
+-  }, [githubConnection, versionEnrollment]);
++  }, [githubConnection, versionEnrollment, versionReserve]);
++  // Fresh reads, changed assignments and observation retirement invalidate UI
++  // consent synchronously. They do not cancel/drop an already retained native
++  // reservation or the consume-once handoff now owned by the version editor.
++  useEffect(() => {
++    const retire = () => { versionReserve.beforeContextIntent(); versionReserve.syncContext(); };
++    const a = releaseVersion.subscribe(retire), b = assetSession.subscribe(retire), c = localStore.subscribe(retire);
++    return () => { a(); b(); c(); };
++  }, [releaseVersion, assetSession, localStore, versionReserve]);
+   useEffect(() => githubConnection.subscribe(repositoryCreate.syncContext), [githubConnection, repositoryCreate]);
+   useEffect(() => githubConnection.subscribe(githubActivity.syncContext), [githubConnection, githubActivity]);
+   useEffect(() => githubConnection.subscribe(githubPullRequest.syncContext), [githubConnection, githubPullRequest]);
+@@ -1398,6 +1442,7 @@
+   useEffect(() => () => configEdit.dispose(), [configEdit]);
+   useEffect(() => () => cliReadAccess.dispose(), [cliReadAccess]);
+   useEffect(() => () => versionEnrollment.dispose(), [versionEnrollment]);
++  useEffect(() => () => versionReserve.dispose(), [versionReserve]);
+   useEffect(() => () => { identityRef.current?.ui.dispose(); identityRef.current?.native.dispose(); }, []);
+   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
+   useEffect(() => () => environment.dispose(), [environment]);
+@@ -1891,6 +1936,7 @@
+         {page !== 'github' && <GitHubActivity controller={githubActivity} state={activityState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubPullRequest controller={githubPullRequest} state={pullRequestState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <VersionEnrollmentPanel controller={versionEnrollment} compact />}
++        <VersionReservePanel controller={versionReserve} compact />
+         {page !== 'github' && <GitHubPublication state={githubPublicationState} controller={githubPublication} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} compact onShow={() => navigate('github')} onHelp={setHelp} />}
+         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
+@@ -1919,7 +1965,7 @@
+           appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+           initializationState={initializationState} versionEditState={versionEditState}
+           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
+-          versionEditor={<ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} />}
++          versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} /></>}
+           releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }}
+           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
+         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="Set up your project" description="Change your app settings one group at a time. Review the proposed file changes before saving." />{editor()}
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -89,6 +89,7 @@
+ import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
++import { createVersionReservePort } from './versionReserve.ts';
+ import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+ import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+ import { createGitHubActivityPort } from './githubActivityProtocol.ts';
+@@ -382,7 +383,8 @@
+     try {
+       if (mode !== 'native') throw { code: 'VersionEditUnavailable' };
+       if (!versionEditRequestFits(command, args)) throw { code: 'VersionEditInvalid' };
+-      const status = parseVersionEditStatus(await invoke<unknown>(command, structuredClone(args) as Record<string, unknown>));
++      const status = parseVersionEditStatus(await invoke<unknown>(command, command === 'version_reserve_edit' ?
++        new TextEncoder().encode(JSON.stringify(args)) : structuredClone(args) as Record<string, unknown>));
+       if (!status) throw { code: 'VersionEditStatusInvalid' };
+       return status;
+     } catch (error) { throw versionEditError(error); }
+@@ -409,6 +411,7 @@
+     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
+     githubGhEntry: createGitHubGhApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
++    versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+@@ -726,7 +729,7 @@
+         return await listen('github-workflow-edit-status', onStatus);
+       } catch (error) { throw workflowEditError(error); }
+     },
+-    openReleaseVersionEdit: (request) => versionCall('release_version_edit_open', request),
++    openReleaseVersionEdit: (request) => versionCall('reservationId' in request ? 'version_reserve_edit' : 'release_version_edit_open', request),
+     prepareReleaseVersionEdit: (request) => versionCall('release_version_edit_prepare', request),
+     applyReleaseVersionEdit: (sessionId, planToken, intent) => versionCall('release_version_edit_apply',
+       intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }),
+--- a/desktop/src/components/ReleaseVersionEditor.tsx
++++ b/desktop/src/components/ReleaseVersionEditor.tsx
+@@ -136,10 +136,11 @@
+         <code className="version-digest">Saved config: {entry.original.baseline.savedConfig.bytes} bytes · SHA256 {entry.original.baseline.savedConfig.sha256}</code>
+         {entry.original.baseline.savedVersion.state === 'present' && <code className="version-digest">Saved source: {entry.original.baseline.savedVersion.bytes} bytes · SHA256 {entry.original.baseline.savedVersion.sha256}</code>}
+       </div>
++      {attempt?.binding.reserved && !attempt.handled && <p className="save-note">These exact values belong to the retained shared-counter candidate. They are locked for this review; closing never recycles the number. Review the file, then confirm Save separately.</p>}
+       <div className="version-values"><div><label htmlFor={nameId}>Marketing version <span>Required</span>{help('name') && <HelpButton content={help('name')!} onHelp={onHelp} />}</label>
+-        <input id={nameId} type="text" inputMode="decimal" value={entry.values.name} maxLength={64} autoComplete="off" spellCheck={false} placeholder="Example: 1.2.3" onChange={(event) => controller.editField('name', event.target.value)} /></div>
++        <input id={nameId} type="text" inputMode="decimal" value={entry.values.name} readOnly={!!attempt?.binding.reserved && !attempt.handled} maxLength={64} autoComplete="off" spellCheck={false} placeholder="Example: 1.2.3" onChange={(event) => controller.editField('name', event.target.value)} /></div>
+         <div><label htmlFor={buildId}>Build number <span>Required</span>{help('build') && <HelpButton content={help('build')!} onHelp={onHelp} />}</label>
+-          <input id={buildId} type="text" inputMode="numeric" value={entry.values.build} maxLength={10} autoComplete="off" spellCheck={false} placeholder="Example: 42" onChange={(event) => controller.editField('build', event.target.value)} /></div></div>
++          <input id={buildId} type="text" inputMode="numeric" value={entry.values.build} readOnly={!!attempt?.binding.reserved && !attempt.handled} maxLength={10} autoComplete="off" spellCheck={false} placeholder="Example: 42" onChange={(event) => controller.editField('build', event.target.value)} /></div></div>
+       {entry.error && <ErrorNotice error={entry.error} />}
+       {entry.stale && <p role="alert" className="review-caution">Earlier baseline retained. Close the original session, then explicitly reload saved values and discard this draft; no automatic rebase.</p>}
+       <div className="button-row"><button type="button" className="button primary" disabled={reviewReason !== null} title={reviewReason ?? undefined} onClick={() => controller.review()}>Validate and review {entry.original.values === null ? 'creation' : 'values'}</button>
+--- a/desktop/src/releaseVersionEdit.ts
++++ b/desktop/src/releaseVersionEdit.ts
+@@ -40,7 +40,7 @@
+   sessionId: string; revision: string; expectedBaseline: VersionBaseline; intent: VersionIntent; values: VersionValues; draftRevision: number; baselineGeneration: number;
+ }
+ export interface ReleaseVersionEditApi {
+-  openReleaseVersionEdit(input: { projectId: string } | SavedTextRecoveryOpenRequest): Promise<VersionEditStatus>;
++  openReleaseVersionEdit(input: { projectId: string } | { projectId: string; reservationId: string } | SavedTextRecoveryOpenRequest): Promise<VersionEditStatus>;
+   prepareReleaseVersionEdit(input: PrepareVersionEditRequest | SavedTextRecoveryPrepareRequest): Promise<VersionEditStatus>;
+   applyReleaseVersionEdit(sessionId: string, planToken: string, intent?: 'recover'): Promise<VersionEditStatus>;
+   closeReleaseVersionEdit(sessionId: string): Promise<VersionEditStatus>;
+@@ -206,10 +206,11 @@
+     view.intent === (opened.baseline.savedVersion.state === 'absent' ? 'create' : 'edit') &&
+     equal(before.state === 'absent' ? { state: 'absent' } : { state: 'present', bytes: before.bytes, sha256: before.sha256 }, opened.baseline.savedVersion);
+ }
+-export type VersionEditCommand = 'release_version_edit_open' | 'release_version_edit_prepare' | 'release_version_edit_apply' | 'release_version_edit_close' | 'release_version_edit_status';
++export type VersionEditCommand = 'version_reserve_edit' | 'release_version_edit_open' | 'release_version_edit_prepare' | 'release_version_edit_apply' | 'release_version_edit_close' | 'release_version_edit_status';
+ export function versionEditRequestFits(command: VersionEditCommand, value: unknown): boolean {
+   if (!boundedJson(value, 16 * 1024, 256, 16)) return false;
+   switch (command) {
++    case 'version_reserve_edit': return keys(value, ['projectId', 'reservationId']) && projectId(value.projectId) && token(value.reservationId) && value.reservationId !== '0'.repeat(32);
+     case 'release_version_edit_open': return (keys(value, ['projectId']) ||
+       keys(value, ['projectId', 'intent']) && value.intent === 'recover') && projectId(value.projectId);
+     case 'release_version_edit_prepare':
+--- a/desktop/src/releaseVersionEditController.ts
++++ b/desktop/src/releaseVersionEditController.ts
+@@ -2,6 +2,8 @@
+ // all leases, one-use plans, processes, journals, cancellation and finality.
+ import { savedTextRecoveryApplyBinding, savedTextRecoveryPreparedMatches, savedTextRecoverySettled, savedTextRecoverySucceeded } from './savedTextRecovery.ts';
+ import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
++import { parseReservedVersion } from './versionReserve.ts';
++import type { ReservedVersion } from './versionReserve.ts';
+ import { isU32, U32_MAX } from './configEditProtocol.ts';
+ import { normalVersionEditResult, parseVersionEditGuide, parseVersionEditStatus, sameVersionData as same,
+   versionEditError, versionEditRequestFits, versionProjectionProgress, versionStatusProgress, versionValuesBounded,
+@@ -21,6 +23,8 @@
+   contextGeneration: number; connectionGeneration: number; windowGeneration: string;
+   startStatusRevision: number; previousTerminalId: string | null; reload: boolean;
+   expectedOriginal: VersionCheckout | null;
++  reserved?: ReservedVersion; // Display/input binding only; native owns the consume-once handoff.
++
+ }
+ interface Submission {
+   expectedBaseline: VersionBaseline; intent: VersionIntent; values: VersionValues; draftRevision: number; baselineGeneration: number;
+@@ -48,6 +52,9 @@
+   otherEditReason: (projectId: string) => string | null;
+   // Includes original passive queries, pickers, diagnostics and saved commands.
+   otherOperationReason: () => string | null;
++  // Closed reserved handoff may retain its idle selected GitHub connection;
++  // no other owner/uncertainty gate is waived. Ordinary manual path unchanged.
++  reservedOperationReason?: () => string | null;
+   onSaveBoundary: (projectId: string) => void;
+   now?: () => number;
+ }
+@@ -193,7 +200,10 @@
+       return 'An original binding counter is exhausted; no generation will be reused.';
+     return null; // Unsaved settings are permitted but never applied or inherited.
+   }
+-  private configuredOwnerReason(): string | null {
++  private operationReason(reserved = !!this.state.edit.attempt?.binding.reserved): string | null {
++    return reserved && this.context.reservedOperationReason ? this.context.reservedOperationReason() : this.context.otherOperationReason();
++  }
++  private configuredOwnerReason(reserved = false): string | null {
+     const edit = this.state.edit;
+     if (this.state.mode !== 'native' || edit.mode !== 'native') return 'Version Create/Edit needs the separately qualified native writer. Browser preview never loads or saves files.';
+     if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.observationIssue) return 'Original version edit authority or cleanup is unverified. Check the original status; do not retry.';
+@@ -203,7 +213,7 @@
+       'Version saving is unavailable in this build. It requires a supported, source-bound native writer; this status does not authorize recovery.';
+     if (edit.status.statusRevision >= U32_MAX) return 'The original native status counter is exhausted.';
+     if (!this.state.help) return 'Load the compatible saved-version help catalogue before editing.';
+-    return this.configReason() ?? this.context.otherEditReason(this.state.projectId ?? '') ?? this.context.otherOperationReason();
++    return this.configReason() ?? this.context.otherEditReason(this.state.projectId ?? '') ?? this.operationReason(reserved);
+   }
+   openReason(): string | null {
+     return this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+@@ -225,25 +235,44 @@
+       same(entry.values, input.values) && same(entry.original.baseline, input.expectedBaseline) && !entry.stale;
+   }
+   open(): boolean { return this.start(false, false); }
+-  private start(review: boolean, reload: boolean): boolean {
+-    if (this.disposed || !this.api || this.openReason()) return false;
++  reservedOpenReason(): string | null {
++    const entry = this.selectedEntry();
++    return this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
++      (!entry && Object.keys(this.state.entries).length >= 16 ? 'Existing version drafts are retained; no draft will be evicted.' : null) ??
++      (entry && (entry.stale || versionDraftDirty(entry)) ?
++      'Keep or explicitly discard the existing version draft before opening a reservation. It will not be overwritten.' : null);
++  }
++  openReserved(raw: ReservedVersion): boolean {
++    const reserved = parseReservedVersion(raw);
++    if (!reserved || this.reservedOpenReason()) return false;
++    return this.start(false, false, reserved);
++  }
++  private start(review: boolean, reload: boolean, reserved?: ReservedVersion): boolean {
++    if (this.disposed || !this.api || (reserved ? this.reservedOpenReason() : this.openReason())) return false;
+     const project = this.context.selectedProject(), status = this.state.edit.status, entry = this.selectedEntry();
+     if (!project || !status || review && (!entry || entry.stale || !versionValuesBounded(entry.values))) return false;
+     const binding = freeze<ContextBinding>({ projectId: project.project.id, configRevision: project.revision, configBaselineGeneration: project.baselineGeneration,
+       configObservationGeneration: project.observationGeneration, contextGeneration: this.state.contextGeneration, connectionGeneration: this.state.connectionGeneration,
+       windowGeneration: status.windowGeneration, startStatusRevision: status.statusRevision, previousTerminalId: status.lastTerminal?.sessionId ?? null,
+-      reload, expectedOriginal: reload ? null : entry?.original ?? null });
++      reload, expectedOriginal: reload ? null : entry?.original ?? null, ...(reserved ? { reserved } : {}) });
+     const submission = review && entry ? this.submission(entry) : null;
++    const originalApi = this.api;
+     this.publish({ ...this.state, error: null, edit: { ...this.state.edit, attempt: { binding, submission, sessionId: null, projection: null,
+       projectionRevision: status.statusRevision, openAdopted: false, prepareClaimed: false, applyClaimed: false, submittedPlanToken: null,
+       closeRequested: false, closeClaimed: false, invalidated: false, handled: false, outcomeNotified: false, outcomeFingerprint: null } } });
+-    if (review) this.context.onSaveBoundary(project.project.id);
++    if (review || reserved) this.context.onSaveBoundary(project.project.id);
+     if (this.state.edit.attempt?.binding !== binding || this.state.edit.attempt.closeRequested) return false;
+-    void this.command('open', binding, () => this.api!.openReleaseVersionEdit({ projectId: binding.projectId }));
++    if (reserved && (this.api !== originalApi || !this.sameContext(binding) || this.configReason() ||
++        this.context.otherEditReason(binding.projectId) || this.operationReason(true))) {
++      this.invalidate(); return false;
++    }
++    void this.command('open', binding, () => originalApi.openReleaseVersionEdit(reserved ?
++      { projectId: binding.projectId, reservationId: reserved.id } : { projectId: binding.projectId }));
+     return true;
+   }
+   editField(id: keyof VersionValues, value: string): boolean {
+     const entry = this.selectedEntry();
++    if (this.state.edit.attempt?.binding.reserved && !this.state.edit.attempt.handled) return false;
+     if (this.disposed || !entry || entry.revision >= U32_MAX - 1 || typeof value !== 'string' || !['name', 'build'].includes(id)) return false;
+     if (value.length > (id === 'name' ? 64 : 10) || !/^[\x00-\x7f]*(?![\s\S])/.test(value)) {
+       this.put({ ...entry, error: versionEditError({ code: 'VersionEditInvalid' }) }); return false;
+@@ -256,7 +285,7 @@
+     this.process(); return true;
+   }
+   reviewReason(): string | null {
+-    const reason = this.configuredOwnerReason(); if (reason) return reason;
++    const reason = this.configuredOwnerReason(!!this.state.edit.attempt?.binding.reserved && !this.state.edit.attempt.handled); if (reason) return reason;
+     const entry = this.selectedEntry(), attempt = this.state.edit.attempt;
+     if (!entry) return 'Open the saved version first. Only real observed absence permits Create.';
+     if (entry.stale) return 'The baseline is stale. Close, then explicitly reload saved values and discard the earlier draft.';
+@@ -279,15 +308,16 @@
+   canApply(binding?: VersionApplyBinding): boolean {
+     const current = currentVersionApplyBinding(this.state), attempt = this.state.edit.attempt;
+     return !!current && !!attempt && this.remainingReviewMs() > 0 && this.sameContext(attempt.binding) && this.matchesSubmission(attempt) &&
+-      !this.configReason() && !this.context.otherEditReason(attempt.binding.projectId) && !this.context.otherOperationReason() && (!binding || same(current, binding));
++      !this.configReason() && !this.context.otherEditReason(attempt.binding.projectId) && !this.operationReason() && (!binding || same(current, binding));
+   }
+   apply(binding: VersionApplyBinding): boolean {
+     if (!this.api || !this.canApply(binding)) return false;
+-    const original = this.state.edit.attempt!.binding;
++    const original = this.state.edit.attempt!.binding, api = this.api;
+     this.attempt({ applyClaimed: true, submittedPlanToken: binding.planToken });
+     this.context.onSaveBoundary(original.projectId);
+-    if (this.state.edit.attempt?.binding === original && !this.state.edit.attempt.closeRequested)
+-      void this.command('apply', original, () => this.api!.applyReleaseVersionEdit(binding.sessionId, binding.planToken));
++    if (this.state.edit.attempt?.binding === original && !this.state.edit.attempt.closeRequested &&
++        (!original.reserved || this.api === api && this.sameContext(original) && !this.configReason() && !this.context.otherEditReason(original.projectId) && !this.operationReason(true)))
++      void this.command('apply', original, () => api.applyReleaseVersionEdit(binding.sessionId, binding.planToken));
+     return true;
+   }
+   requestClose(): void {
+@@ -455,6 +485,13 @@
+         original: structuredClone(opened), values: structuredClone(opened.values ?? { name: '', build: '' }), stale: false, error: null, outcome: entry?.outcome ?? null };
+     }
+     if (!next) { this.observationFailed(true); return; }
++    const reserved = attempt.binding.reserved;
++    if (reserved) {
++      if (!opened.iosEnabled || opened.baseline.savedVersion.state !== 'present' || next.revision >= U32_MAX - 1) { this.invalidate(); return; }
++      // The original native Open must have returned this bound checkout first.
++      // Never autofill a detached manual draft or auto-prepare/auto-apply.
++      next = { ...next, revision: next.revision + 1, values: { name: reserved.name, build: String(reserved.build) } };
++    }
+     this.publish({ ...this.state, entries: { ...this.state.entries, [next.projectId]: next },
+       edit: { ...this.state.edit, attempt: { ...this.state.edit.attempt!, openAdopted: true } } });
+   }
+@@ -660,9 +697,12 @@
+             !attempt.prepareClaimed && !attempt.applyClaimed && !attempt.invalidated && !attempt.closeRequested && usable(this.state.edit)) {
+           const request = { sessionId, revision: attempt.projection.checkout.revision, ...attempt.submission };
+           if (!versionEditRequestFits('release_version_edit_prepare', request)) { this.observationFailed(true); continue; }
++          const api = this.api;
+           this.attempt({ prepareClaimed: true });
++          if (binding.reserved && (this.api !== api || !this.sameContext(binding) || this.configReason() ||
++              this.context.otherEditReason(binding.projectId) || this.operationReason(true))) { this.invalidate(); continue; }
+           if (this.state.edit.attempt?.binding === binding && !this.state.edit.attempt.closeRequested)
+-            void this.command('prepare', binding, () => this.api!.prepareReleaseVersionEdit(request));
++            void this.command('prepare', binding, () => api.prepareReleaseVersionEdit(request));
+         }
+       } while (this.processAgain);
+     } finally { this.processing = false; }
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -429,6 +429,7 @@
+   readonly agentIOSArchive?: import('./agentIOSArchive.ts').AgentIOSArchiveApi | null;
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
++  readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+   readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -329,6 +329,7 @@
+             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
+             "git_read_status", "git_read_start", "git_read_cancel",
+             "version_enrollment_status", "version_enrollment_review", "version_enrollment_confirm", "version_enrollment_cancel",
++            "version_reserve_status", "version_reserve_review", "version_reserve_start", "version_reserve_cancel", "version_reserve_edit",
+             "git_local_status", "git_local_prepare", "git_local_apply", "git_local_discard", "git_local_cancel",
+             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -62,6 +62,7 @@
+     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
+     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
+     "allow-version-enrollment-status", "allow-version-enrollment-review", "allow-version-enrollment-confirm", "allow-version-enrollment-cancel",
++    "allow-version-reserve-status", "allow-version-reserve-review", "allow-version-reserve-start", "allow-version-reserve-cancel", "allow-version-reserve-edit",
+     "allow-git-local-status", "allow-git-local-prepare", "allow-git-local-apply", "allow-git-local-discard", "allow-git-local-cancel",
+     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
+     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -14,7 +14,7 @@
+         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
+         maintenance: macos_maintenance::Closure::default(),
+-        saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, git_local: None, git_local_review: None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
++        saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, git_local: None, git_local_review: None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
+         quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         vault: None,
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -26,6 +26,11 @@
+ #[path = "asset_session_version_allocation.rs"]
+ mod version_allocation;
+ pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAllocationSourceCompletion};
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "asset_session_version_reserve.rs"]
++mod version_reserve;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use version_reserve::ReservedVersionEditGate;
+ #[path = "asset_session_version_enrollment.rs"]
+ mod version_enrollment;
+ pub(crate) use version_enrollment::VersionEnrollmentGoGate;
+@@ -824,6 +829,8 @@
+     apple_provisioning_ready: Option<Arc<crate::application_service_host::NativeStateReady>>,
+     version_allocation_source: Option<Arc<version_allocation::Lane>>,
+     version_enrollment: version_enrollment::State,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    version_reserve: version_reserve::State,
+     session_owner_reason: Option<Reason>,
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     first_origin: Option<installed_session_observation::FirstOrigin>,
+@@ -2021,6 +2028,8 @@
+             self.add(git_local::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(version_enrollment::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            self.add(version_reserve::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+             if let Some(context) = &state.context { self.context(context)?; }
+@@ -2760,7 +2769,7 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+             github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+@@ -8198,7 +8207,7 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+@@ -8336,7 +8345,7 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+@@ -8437,7 +8446,7 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+             github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -500,6 +500,8 @@
+             if let Some(ready) = &state.apple_provisioning_ready { self.native_state_ready(ready)?; }
+             self.add(capacity(version_allocation::retained_bytes(state))?)?;
+             self.add(capacity(version_enrollment::retained_bytes(state))?)?;
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            self.add(capacity(version_reserve::retained_bytes(state))?)?;
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+             if let Some(context) = &state.context { self.context(context)?; }
+             if let Some(slot) = &state.slot { self.slot(slot)?; }
+@@ -675,7 +677,7 @@
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+-                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, git_local: None, git_local_review: None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(),
++                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, git_local: None, git_local_review: None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(),
+                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+                 quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
+                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+--- a/desktop/src-tauri/src/asset_session_saved_observation.rs
++++ b/desktop/src-tauri/src/asset_session_saved_observation.rs
+@@ -108,6 +108,15 @@
+             && input.version_path.as_bytes() == &self.comparison.source[..usize::from(self.comparison.source_len)]
+             && document.bridge.native_project(&input.project_id).is_ok_and(|(registration, root)|
+                 registration == self.lane.registration && root == self.lane.root)
++    }
++    pub(super) fn reserved_version_prepublication(&self,document:&Inner,original:&Arc<SavedObservationLane>,
++        input:&crate::supervisor::VersionAllocationSourceInput,edit:&crate::edit_owner::SavedEditGuard<'_>,publisher:&RegistrationPublisher)->bool {
++        !publisher.accepted()&&publisher.same_slot(&document.android_registration_control)
++            &&publisher.tool_source_epoch().is_ok_and(|e|e==original.epoch)&&Arc::ptr_eq(&self.lane,original)
++            &&original.tool_source_matches(document,edit,original.registration,&input.root,&input.project_id)
++            &&input.configuration_size==self.comparison.config_bytes&&SavedComparisonData::digest(&input.configuration_sha256)==Some(self.comparison.config_sha256)
++            &&input.version_size==self.comparison.version_bytes&&SavedComparisonData::digest(&input.version_sha256)==Some(self.comparison.version_sha256)
++            &&input.version_path.as_bytes()==&self.comparison.source[..usize::from(self.comparison.source_len)]
+     }
+     pub(super) fn version_source_input(&self, document: &Inner, project_id: &str, reference: &str,
+         edit: &crate::edit_owner::SavedEditGuard<'_>)
+@@ -302,6 +311,14 @@
+
+ impl DocumentBinding {
+     pub(super) fn saved_observation_gate(&self, state: &DocumentState, exact: Option<&Arc<SavedObservationLane>>) -> Result<(), BridgeError> {
++        self.saved_observation_gate_mode(state,exact,false)
++    }
++    /// Fixed SOURCE read may coexist with an idle retained GitHub account; it
++    /// still gets no token or remote consent. Ordinary saved reads unchanged.
++    pub(super) fn version_source_observation_gate(&self,state:&DocumentState)->Result<(),BridgeError>{
++        self.saved_observation_gate_mode(state,None,true)
++    }
++    fn saved_observation_gate_mode(&self,state:&DocumentState,exact:Option<&Arc<SavedObservationLane>>,source:bool)->Result<(),BridgeError>{
+         passive_document_gate(state)?;
+         if !state.lifetime.original_bound() || state.lost_observed { return Err(stale()); }
+         if state.saved_observation.as_ref().is_some_and(|lane| !lane.returned()
+@@ -309,7 +326,8 @@
+             return Err(BridgeError::new("busy", "The original saved observation has not returned."));
+         }
+         if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+-            || state.github.registration().is_some() || !self.inner.bridge.supervisor.can_exit() {
++            || (if source {state.github.native_work_pending()}else{state.github.registration().is_some()})
++            || !self.inner.bridge.supervisor.can_exit() {
+             return Err(BridgeError::new("busy", "Finish the original native operation first."));
+         }
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.android_build.ensure_idle()?;
+--- a/desktop/src-tauri/src/asset_session_store_versions.rs
++++ b/desktop/src-tauri/src/asset_session_store_versions.rs
+@@ -40,7 +40,7 @@
+     pub(crate) fn matches_context(&self, context: &wire::Context) -> bool {
+         &self.context == context
+     }
+-    fn current(
++    pub(in crate::asset_session) fn current(
+         &self,
+         state: &DocumentState,
+         registration: u32,
+--- a/desktop/src-tauri/src/asset_session_version_allocation.rs
++++ b/desktop/src-tauri/src/asset_session_version_allocation.rs
+@@ -8,13 +8,13 @@
+ };
+ use std::sync::atomic::AtomicU8;
+
+-const RESERVED: u8 = 0;
+-const ARMED: u8 = 1;
+-const COMPLETING: u8 = 2;
+-const RETURNED: u8 = 3;
+-const UNKNOWN: u8 = 4;
+-
+-fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<MutexGuard<'a, T>> {
++pub(super) const RESERVED: u8 = 0;
++pub(super) const ARMED: u8 = 1;
++pub(super) const COMPLETING: u8 = 2;
++pub(super) const RETURNED: u8 = 3;
++pub(super) const UNKNOWN: u8 = 4;
++
++pub(super) fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<MutexGuard<'a, T>> {
+     let result = slot.lock();
+     if result.is_err() {
+         // Preserve the original slot and its poison. Only STOP/first ticket
+@@ -25,29 +25,47 @@
+ }
+
+ pub(super) struct Lane {
+-    saved: Arc<SavedObservationLane>,
+-    input: Arc<VersionAllocationSourceInput>,
+-    stage: AtomicU8,
+-    completion_returned: AtomicBool,
+-    request: Mutex<Option<(String, Arc<VersionAllocationSourceRequest>)>>,
+-    ticket: Mutex<Option<VersionAllocationSourceTicket>>,
+-    result: Mutex<Option<VersionAllocationSourceReceipt>>,
+-    reservation_bytes: usize,
++    pub(super) saved: Arc<SavedObservationLane>,
++    pub(super) input: Arc<VersionAllocationSourceInput>,
++    pub(super) stage: AtomicU8,
++    pub(super) completion_returned: AtomicBool,
++    pub(super) request: Mutex<Option<(String, Arc<VersionAllocationSourceRequest>)>>,
++    pub(super) ticket: Mutex<Option<VersionAllocationSourceTicket>>,
++    pub(super) result: Mutex<Option<VersionAllocationSourceReceipt>>,
++    pub(super) reservation_bytes: usize,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(super) reserve: Option<Arc<version_reserve::Lane>>,
+ }
+ impl Lane {
+-    fn returned(&self) -> bool {
++    pub(super) fn returned(&self) -> bool {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(reserve)=&self.reserve {
++            return self.stage.load(Ordering::SeqCst)!=UNKNOWN && reserve.returned()
++                && lock(&self.ticket,&self.stage).is_ok_and(|ticket|ticket.is_none());
++        }
+         self.stage.load(Ordering::SeqCst) == RETURNED
+             && self.completion_returned.load(Ordering::SeqCst)
+             && lock(&self.result, &self.stage).is_ok_and(|result| result.is_some())
+             && lock(&self.ticket, &self.stage).is_ok_and(|ticket| ticket.is_none())
+     }
+-    fn retained_bytes(&self) -> Option<usize> {
++    pub(super) fn retained_bytes(&self) -> Option<usize> {
+         // The whole original fixed reservation stays charged while this ticket
+         // is retained, even if its public result is much smaller. No shrinking
+         // clone or early FIN releases native/code backing for another owner.
+         let has_ticket = lock(&self.ticket, &self.stage).ok()?.is_some();
+-        let original = if has_ticket {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let reserve=self.reserve.as_ref();
++        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++        let reserving=false;
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let reserving=reserve.is_some();
++        let original = if has_ticket || reserving && !self.returned() {
+             self.reservation_bytes
++        } else if reserving {
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            { self.input.retained_bytes()?.checked_add(reserve?.keep_bytes()?)? }
++            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++            { return None; }
+         } else if self.returned() {
+             self.input.retained_bytes()?.checked_add(4096)?
+         } else {
+@@ -60,6 +78,8 @@
+     }
+     fn fail_unknown(&self, document: &DocumentBinding) {
+         self.stage.store(UNKNOWN, Ordering::SeqCst);
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(reserve)=&self.reserve {reserve.unknown();}
+         // Do not call ControlSlot.poisoned here: its read-host retirement may
+         // perform IO, and some callers still hold Doc. This original lane
+         // remains an absorbing busy/exit fence; no new control owner is minted.
+@@ -77,6 +97,8 @@
+ }
+ pub(super) fn stop(state: &DocumentState) {
+     if let Some(lane) = &state.version_allocation_source {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(reserve)=&lane.reserve {reserve.stop();}
+         // This is STOP on the same actual ticket; no fabricated terminal or
+         // lane removal. Unknown/late result keeps ordinary operations blocked.
+         let ticket = lock(&lane.ticket, &lane.stage).unwrap_or_else(|poison| poison.into_inner());
+@@ -90,8 +112,8 @@
+ /// original completion independently retains that same Document until its
+ /// actual return; loss/unknown never substitutes a new gate or completion.
+ pub(crate) struct VersionAllocationSourceGoGate {
+-    document: Weak<Inner>,
+-    lane: Weak<Lane>,
++    pub(super) document: Weak<Inner>,
++    pub(super) lane: Weak<Lane>,
+ }
+ impl VersionAllocationSourceGoGate {
+     fn original(&self, input: &Arc<VersionAllocationSourceInput>) -> Result<(DocumentBinding, Arc<Lane>), BridgeError> {
+@@ -103,7 +125,11 @@
+         Ok((document, lane))
+     }
+     pub(crate) fn current_control(&self, input: &Arc<VersionAllocationSourceInput>) -> bool {
+-        self.original(input).is_ok_and(|(document, lane)| lane.saved.current_version_source(&document.inner, input))
++        self.original(input).is_ok_and(|(document, lane)| {
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if lane.reserve.as_ref().is_some_and(|v|!v.current_control()) {return false;}
++            lane.saved.current_version_source(&document.inner, input)
++        })
+     }
+     pub(crate) fn check_current(&self, input: &Arc<VersionAllocationSourceInput>) -> Result<(), BridgeError> {
+         let (document, lane) = self.original(input)?;
+@@ -128,6 +154,31 @@
+         }
+         *slot = Some((id.to_owned(), request));
+         Ok(())
++    }
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(crate) fn claim_reserve(&self,input:&Arc<VersionAllocationSourceInput>,id:&str,
++        request:&Arc<VersionAllocationSourceRequest>,claim:impl FnOnce()->bool)
++        ->Result<zeroize::Zeroizing<Vec<u8>>,BridgeError> {
++        let(document,lane)=self.original(input)?;
++        let state=document.lock();
++        let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
++        document.version_source_current_with_edit(&state,&lane,&edit)?;
++        {
++            let original=lock(&lane.request,&lane.stage).map_err(|_|BridgeError::cleanup_unknown())?;
++            if !original.as_ref().is_some_and(|(key,bound)|key==id&&Arc::ptr_eq(bound,request))
++                ||!request.same_input(input) {return Err(changed());}
++        }
++        document.reserve_source_go(&state,&lane,request,claim)
++    }
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(crate) fn check_reserve(&self,input:&Arc<VersionAllocationSourceInput>,id:&str,
++        request:&Arc<VersionAllocationSourceRequest>)->Result<(),BridgeError> {
++        let(document,lane)=self.original(input)?;
++        let state=document.lock();
++        document.version_source_current(&state,&lane)?;
++        let original=lock(&lane.request,&lane.stage).map_err(|_|BridgeError::cleanup_unknown())?;
++        if lane.reserve.is_none()||!original.as_ref().is_some_and(|(key,bound)|key==id&&Arc::ptr_eq(bound,request))
++            ||!request.same_input(input){return Err(changed());}Ok(())
+     }
+     pub(crate) fn claim(
+         &self,
+@@ -158,8 +209,8 @@
+ }
+
+ pub(crate) struct VersionAllocationSourceCompletion {
+-    document: DocumentBinding,
+-    lane: Arc<Lane>,
++    pub(super) document: DocumentBinding,
++    pub(super) lane: Arc<Lane>,
+ }
+ impl VersionAllocationSourceCompletion {
+     pub(crate) fn arm(&self) -> Result<(), BridgeError> {
+@@ -218,11 +269,11 @@
+ }
+
+ impl DocumentBinding {
+-    fn version_source_current(&self, state: &DocumentState, lane: &Arc<Lane>) -> Result<(), BridgeError> {
++    pub(super) fn version_source_current(&self, state: &DocumentState, lane: &Arc<Lane>) -> Result<(), BridgeError> {
+         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+         self.version_source_current_with_edit(state, lane, &edit)
+     }
+-    fn version_source_current_with_edit(
++    pub(super) fn version_source_current_with_edit(
+         &self,
+         state: &DocumentState,
+         lane: &Arc<Lane>,
+@@ -245,12 +296,14 @@
+         if !input.matches_version_source(&self.inner, &lane.saved, &lane.input, edit) {
+             return Err(changed());
+         }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        self.reserve_source_current(state,lane,edit)?;
+         Ok(())
+     }
+     /// Native admission only. The root, saved hashes/path, account/provider
+     /// projection and private filesystem data are never renderer arguments.
+     /// This action does not select/mint a candidate or reserve/change a version.
+-    fn start_version_allocation_source(&self, project_id: &str, reference: &str) -> Result<Arc<Lane>, BridgeError> {
++    pub(super) fn start_version_allocation_source(&self, project_id: &str, reference: &str) -> Result<Arc<Lane>, BridgeError> {
+         let started = Instant::now();
+         if !crate::protocol::valid_id(project_id) || !crate::supervisor::version_allocation_source_branch(reference) {
+             return Err(BridgeError::invalid());
+@@ -259,7 +312,7 @@
+         if pending(&state) {
+             return Err(busy());
+         }
+-        self.saved_observation_gate(&state, None)?;
++        self.version_source_observation_gate(&state)?;
+         if !self.inner.android_registration_control.idle_for_saved_observation()
+             || !self.inner.bridge.supervisor.version_allocation_source_available()
+         {
+@@ -311,6 +364,8 @@
+                 ticket: Mutex::new(None),
+                 result: Mutex::new(None),
+                 reservation_bytes: quote,
++                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                reserve: None,
+             });
+             let gate =
+                 VersionAllocationSourceGoGate { document: Arc::downgrade(&self.inner), lane: Arc::downgrade(&lane) };
+@@ -357,6 +412,9 @@
+         reference: &str,
+     ) -> Result<VersionAllocationSource, BridgeError> {
+         let lane = self.start_version_allocation_source(project_id, reference)?;
++        self.finish_version_source_read(lane).await
++    }
++    pub(super) async fn finish_version_source_read(&self,lane:Arc<Lane>)->Result<VersionAllocationSource,BridgeError>{
+         let wait = lock(&lane.ticket, &lane.stage)
+             .map_err(|_| BridgeError::cleanup_unknown())?
+             .as_ref()
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -606,11 +606,21 @@
+     pub(crate) fn prepare_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+         args: crate::release_version_edit_protocol::PrepareReleaseVersionEdit) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+         let session_id = args.session_id.clone();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        return document.release_version_phase_admit(&session_id,crate::edit_owner::ReservedVersionStep::Prepare,|bridge,registration,publisher|
++            bridge.edits.prepare_release_version_published(publisher,window,args,registration));
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
+         document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
+             bridge.edits.prepare_release_version_published(publisher, window, args, registration))
+     }
+     pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if let Some(observed)=self.edits.reserved_version_apply_observation(window,session_id,plan_token)? {return Ok(observed);}
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        return document.release_version_phase_admit(session_id,crate::edit_owner::ReservedVersionStep::Apply,|bridge,registration,publisher|
++            bridge.edits.apply_release_version_published(publisher,window,session_id,plan_token,registration));
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
+         document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration, publisher|
+             bridge.edits.apply_release_version_published(publisher, window, session_id, plan_token, registration))
+     }
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -29,6 +29,12 @@
+     project_identity_edit_protocol::{self as identity_wire, IdentityStatus},
+     saved_text_recovery_protocol as saved_recovery,
+     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path="edit_owner_version_reserve.rs"]
++mod version_reserve;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use version_reserve::{NativeReservedVersionHandoff,ReservedVersionStep};
+
+ const NATIVE_EDIT_QUALIFIED: bool = false;
+ const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
+@@ -627,7 +633,9 @@
+ pub(crate) type WorkflowRegistration = RegisteredEditRoot;
+ pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    agent_identity: Option<Arc<agent_identity::Link>> }
++    agent_identity: Option<Arc<agent_identity::Link>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    reserved_version: Option<NativeReservedVersionHandoff> }
+ pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
+
+ // Only the ignored headless workflow fixture can construct this private value,
+@@ -960,6 +968,8 @@
+     domain: EditDomain, registration: Option<WorkflowRegistration>, saved_text_recovery: bool, configuration_recovery: bool,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_identity: Option<Arc<agent_identity::Link>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    reserved_version: Option<NativeReservedVersionHandoff>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_failure: Mutex<Option<(Reason, Instant)>>,
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -1578,6 +1588,8 @@
+             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+             target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         installed_macos_observation::retire(&a.session);
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if reason!=Reason::None {if let Some(handoff)=&a.session.reserved_version {handoff.fail(reason==Reason::CleanupUnknown,at);}}
+         let earlier = a.cleanup_start.is_none_or(|first| at < first);
+         if earlier { a.cleanup_start = Some(at); }
+         if (earlier || a.projection.native_reason == Reason::None) && reason != Reason::None { a.projection.native_reason = reason; }
+@@ -2097,6 +2109,8 @@
+         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
+         Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
++            reserved_version:None,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity: None })
+     }
+     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
+@@ -2194,7 +2208,7 @@
+             .map_err(|error| image_open_admission_error(recovery, claimed, error))
+     }
+     fn open_domain_attempt(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
+-        registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
++        registration: Option<RegisteredEditRoot>, mut ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
+         images: Option<ImageOpen>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
+         let mut publication = self.inner.publication(supplied, false)?;
+         let result = (|| {
+@@ -2226,6 +2240,11 @@
+             if ticket.as_ref().is_some_and(|ticket| ticket.agent_identity.is_some() && domain != EditDomain::ProjectIdentity) { return Err(invalid_owner()); }
+             ticket.as_ref().and_then(|ticket| ticket.agent_identity.clone())
+         };
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let reserved_version={
++            if ticket.as_ref().is_some_and(|t|t.reserved_version.is_some()&&(domain!=EditDomain::ReleaseVersion||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner());}
++            ticket.as_mut().and_then(|t|t.reserved_version.take())
++        };
+         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
+             (EditDomain::Configuration, None) => {
+                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
+@@ -2275,6 +2294,8 @@
+             _ => return Err(invalid_owner()),
+         };
+         if workflow_recovery || saved_text_recovery || configuration_recovery { params["intent"] = json!("recover"); }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(handoff)=&reserved_version {params["reservedVersion"]=handoff.open_data(&mut publication)?;}
+         let bytes = request_with_configuration_intent(domain, configuration_recovery, &id, 0, "open", params)?;
+         let (commands, receiver) = mpsc::channel(1);
+         let (stop, _) = watch::channel(false);
+@@ -2283,6 +2304,8 @@
+         let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            reserved_version,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2316,6 +2339,8 @@
+             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
+             error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None),
+             manager: AsyncMutex::new(None), observer: AsyncMutex::new(None) });
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(handoff)=&session.reserved_version {handoff.bind(&session)?;}
+         let admission = {
+             let mut r = self.inner.lock();
+             self.inner.admission(&r, window, domain)?;
+@@ -2339,7 +2364,7 @@
+             *claimed = true;
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity::claim_entered(&session);
+-            r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
++            r.active = Some(ActiveOwner { session: session.clone(), review_end: reserved_review_end(&session,now+REVIEW), phase_end: Some(reserved_review_end(&session,now+ACTIVE)), cleanup_start: None,
+                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 history: identity_history::Link::default(),
+@@ -2496,6 +2521,9 @@
+                     if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
+                 },
+                 (EditDomain::ReleaseVersion, Some(SavedTextSubmission::ReleaseVersion(submission))) => {
++                    #[cfg(any(target_os = "linux", target_os = "macos"))]
++                    if let Some(handoff)=&a.session.reserved_version {if !handoff.values(&submission.values)||submission.intent!=version_wire::Intent::Edit{return Err(invalid_owner());}
++                        handoff.publication(&mut publication,ReservedVersionStep::Prepare)?;}
+                     let valid = a.projection.release_version.as_ref().is_some_and(|detail| detail.recovery.is_none() && detail.submission.is_none() && submission.valid());
+                     if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                     if let Some(detail) = a.projection.release_version.as_mut() { detail.submission = Some(submission); }
+@@ -2646,6 +2674,8 @@
+             if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Start) {
+                 self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+             }
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
+             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
+             a.projection.phase = Phase::Applying;
+             a.claimed_seq = 2;
+@@ -2875,6 +2905,8 @@
+             _ = stop.changed() => break,
+             next = receiver.recv() => match next { Some(bytes) => bytes, None => { failed = true; break; } },
+         };
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
+         sent += 1;
+         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
+@@ -3081,12 +3113,16 @@
+
+ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
+     let mut publication = inner.mandatory_publication();
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    let reserved_current=owner.reserved_version.as_ref().is_none_or(|h|h.check_document(publication.ticket()).is_ok());
+     let result = (|| {
+     let mut r = inner.lock();
+     let now = Instant::now();
+     inner.expire_locked(&mut publication,&mut r, &owner.id, now); // Receipt and expiry serialize.
+     let Some(a) = r.active.as_mut().filter(|a| a.session.id == owner.id) else { return; };
+     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;} }
+     let mut terminal = false;
+     let mut uncertain = false;
+     if !invalid {
+@@ -3415,8 +3451,25 @@
+     result
+ }
+
++fn reserved_review_end(owner:&Session,end:Instant)->Instant {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    if let Some(h)=&owner.reserved_version{return end.min(h.work_end());}
++    end
++}
++fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    if let Some(h)=&owner.reserved_version{return h.cleanup_end(end);}
++    end
++}
++fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    if owner.reserved_version.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
++    end
++}
+ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+     loop {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(handoff)=&owner.reserved_version {if !*owner.stop.borrow()&&handoff.ready().is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());}}
+         inner.expire(&owner.id, Instant::now());
+         let (phase, review, applying, cleanup, unknown) = {
+             let r = inner.lock();
+@@ -3425,18 +3478,18 @@
+         };
+         let now = Instant::now();
+         return if let Some(start) = cleanup {
+-            if now >= start + FINALIZATION && !unknown { inner.unknown(&owner.id); continue; }
++            if now >= reserved_cleanup_end(owner,start + FINALIZATION) && !unknown { inner.unknown(&owner.id); continue; }
+             if now >= start + SOFT_STOP {
+                 if !owner.force_due.swap(true, Ordering::SeqCst) { owner.wake.notify_waiters(); }
+-                if unknown { None } else { Some(start + FINALIZATION) }
+-            } else { Some(start + SOFT_STOP) }
++                if unknown { None } else { Some(reserved_cleanup_end(owner,start + FINALIZATION)) }
++            } else { Some(reserved_cleanup_end(owner,start + SOFT_STOP)) }
+         } else {
+             let end = phase_deadline(review, phase, applying).unwrap_or(review);
+             if now >= end {
+                 inner.expire(&owner.id, now); // Recheck the live serialized phase.
+                 continue;
+             }
+-            Some(end)
++            Some(reserved_poll_end(owner,end))
+         };
+     }
+ }
+@@ -3497,6 +3550,8 @@
+ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
+     let mut publication = inner.mandatory_publication();
+     let result = (|| {
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    if version_reserve::post(owner,publication.ticket()).is_err(){inner.trigger_published(&mut publication,&owner.id,Reason::CallerLost,Instant::now());return;}
+     if !installed_edit_selected(owner.domain, &inner.runtime) {
+         inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now());
+         return;
+@@ -3749,6 +3804,8 @@
+         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+         let result = { let _ = stop; runtime.resolve_edit(endpoint) };
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        let result=result.and_then(|runtime|version_reserve::inspect(&inspection_owner).map(|()|runtime));
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+             || None, &mut |first| inspection_owner.observe_native_failure(first));
+         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+@@ -3818,6 +3875,8 @@
+ }
+
+ fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    if !version_reserve::settled(owner){return false;}
+     let selected = installed_edit_selected(owner.domain, &inner.runtime);
+     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+     { let _ = book; !selected }
+@@ -3892,14 +3951,17 @@
+                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                 let mut expired = |_first| {
+                     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-                    { closing_owner.native_cleanup_expired(cleanup_end, _first) }
++                    { closing_owner.native_cleanup_expired(reserved_cleanup_end(&closing_owner,cleanup_end), _first) }
+                     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+                     { let _ = &closing_owner; false }
+                 };
+-                match closing.lock() {
++                let runtime_close=match closing.lock() {
+                     Ok(mut slots) => slots.settle_originals(domain, &mut expired),
+                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals(domain, &mut expired) },
+-                }
++                };
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                if version_reserve::close(&closing_owner,cleanup_end)!=CloseOutcome::Settled{return CloseOutcome::Unknown;}
++                runtime_close
+             }));
+             let _ = release.send(()); // Original consuming close worker registered before ANY close.
+         }
+@@ -4351,14 +4413,21 @@
+         return;
+     }
+     let mut publication = inner.mandatory_publication();
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    let reserved_current=owner.reserved_version.as_ref().is_none_or(|h|h.check_document(publication.ticket()).is_ok());
+     let result = (|| {
+     let mut r = inner.lock();
+     inner.expire_locked(&mut publication,&mut r, &owner.id, Instant::now());
+     let Some(a) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)) else { guard.completed = true; return; };
+-    let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= start + FINALIZATION);
++    let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= reserved_cleanup_end(&owner,start + FINALIZATION));
+     if expired && !a.unknown { drop(r); inner.unknown_published(&mut publication, &owner.id); r = inner.lock(); }
+     if let Some(mut a) = r.active.take() {
+         if !Arc::ptr_eq(&a.session, &owner) { r.active = Some(a); guard.completed = true; return; }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if !version_reserve::retired(&owner,&mut publication,reserved_current){
++            if a.projection.native_reason==Reason::None{a.projection.native_reason=Reason::CallerLost;}
++            if owner.resource_unknown.load(Ordering::SeqCst){a.unknown=true;}
++        }
+         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
+             // IDs only, bounded by the native 64-project picker registry. No
+             // retained private history or guessed recovery controller.
+--- a/desktop/src-tauri/src/github_activity_session.rs
++++ b/desktop/src-tauri/src/github_activity_session.rs
+@@ -422,6 +422,7 @@
+             || self.publication.native_work_pending()
+             || self.pull_request.native_work_pending() || self.repository_create.native_work_pending()
+             || self.enrollment.is_some()
++            || self.version_reserve_pending()
+         {
+             return Err(refused(p::Reason::Busy));
+         }
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -21,6 +21,9 @@
+ pub(crate) mod pull_request;
+ #[path = "github_version_enrollment_session.rs"]
+ pub(crate) mod enrollment;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="github_version_reserve_session.rs"]
++pub(crate) mod reserve;
+ #[path = "github_auth_provider.rs"]
+ pub(crate) mod auth_provider;
+
+@@ -544,13 +547,17 @@
+     activity: activity::State,
+     pull_request: pull_request::State,
+     enrollment: Option<enrollment::Hold>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    reserve: Option<reserve::Hold>,
+     history: crate::github_history_session::State,
+ }
+ impl ConnectionState {
+     pub(crate) fn new() -> Self {
+         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
+             cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
+-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(), enrollment:None, history: crate::github_history_session::State::new() }
++            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(), enrollment:None,
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            reserve:None, history: crate::github_history_session::State::new() }
+     }
+     pub(crate) fn snapshot(&self) -> Status { self.status.clone() }
+     // Original idle-session generation, not a public status revision. Ordinary
+@@ -582,9 +589,13 @@
+         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
+     }
+     pub(crate) fn material_settled(&self) -> bool {
+-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none()
+-    }
+-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() }
++        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() && !self.version_reserve_pending()
++    }
++    fn version_reserve_pending(&self)->bool {
++        #[cfg(any(target_os="linux",target_os="macos"))] {self.reserve.is_some()}
++        #[cfg(not(any(target_os="linux",target_os="macos")))] {false}
++    }
++    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() }
+     fn fact_retirement(&mut self, reason: Reason) {
+         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
+     }
+@@ -643,6 +654,8 @@
+         self.preflight.stop(); self.release.stop();
+         self.publication.retired(reason);
+         self.repository_create.retired(reason);
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if let Some(hold)=&self.reserve {hold.stop(reason==Reason::CleanupUnknown);}
+         self.activity.retired(reason);
+         self.pull_request.retired(reason);
+         if let Some(hold)=&self.enrollment { hold.stop(reason==Reason::CleanupUnknown); }
+@@ -665,11 +678,12 @@
+         let reason = private.retirement.unwrap_or(reason);
+         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
+         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
+-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() { self.complete_retirement(); }
++        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
+     }
+     fn complete_retirement(&mut self) {
++        let version_reserve_pending = self.version_reserve_pending();
+         let Some(private) = &mut self.private else { return; };
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return; }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || version_reserve_pending { return; }
+         private.token = None;
+         if self.unknown {
+             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
+@@ -882,7 +896,7 @@
+         self.room()?;
+         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
+         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(refused(Reason::Busy)); }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
+         if let Some(reason) = private.retirement { return Err(refused(reason)); }
+         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
+         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
+@@ -1048,7 +1062,7 @@
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+         if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
++        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1294,7 +1308,7 @@
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+         if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
++        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1434,7 +1448,7 @@
+     }
+     pub(crate) fn setup_ensure_idle(&self) -> Result<(), BridgeError> {
+         if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
+-        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
++        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
+         Ok(())
+     }
+     pub(crate) fn setup_secret_work_pending(&self)->bool{
+@@ -1637,7 +1651,7 @@
+             && v.generation == generation && &v.root == root && edit.matches(&v.edit_stamp))
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+         if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() { return Err(s::refused(p::Reason::Busy)); }
++        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if active.consent_end.is_some_and(|end| now >= end) { return Err(s::refused(p::Reason::ConsentExpired)); }
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+@@ -1861,6 +1875,7 @@
+     }
+     fn history_session_current(&self,nomination:&crate::github_history_session::Nomination,now:Instant)->bool{
+         !self.unknown&&!self.exhausted&&!self.history.exhausted
++            &&!self.version_reserve_pending()
+             &&!self.preflight.native_work_pending()&&!self.release.native_work_pending()&&!self.setup.native_work_pending()
+             &&!self.cooldown_blocked&&!self.cooldown.is_some_and(|end|now<end)
+             &&crate::github_preflight_protocol::TOOLING_SHA==Some(nomination.tooling_sha.as_str())
+--- a/desktop/src-tauri/src/github_publication_session.rs
++++ b/desktop/src-tauri/src/github_publication_session.rs
+@@ -717,6 +717,7 @@
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+             || (self.history.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
++            || self.version_reserve_pending()
+         {
+             return Err(refused(p::Reason::Busy));
+         }
+--- a/desktop/src-tauri/src/github_pull_request_session.rs
++++ b/desktop/src-tauri/src/github_pull_request_session.rs
+@@ -728,6 +728,7 @@
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
+             || self.enrollment.is_some()
++            || self.version_reserve_pending()
+         {
+             return Err(refused(p::Reason::Busy));
+         }
+--- a/desktop/src-tauri/src/github_repository_create_session.rs
++++ b/desktop/src-tauri/src/github_repository_create_session.rs
+@@ -728,6 +728,7 @@
+             || self.publication.native_work_pending()
+             || self.pull_request.native_work_pending() || self.activity.native_work_pending()
+             || self.enrollment.is_some()
++            || self.version_reserve_pending()
+         {
+             return Err(refused(p::Reason::Busy));
+         }
+--- a/desktop/src-tauri/src/github_version_enrollment_session.rs
++++ b/desktop/src-tauri/src/github_version_enrollment_session.rs
+@@ -35,7 +35,7 @@
+         .unwrap_or(p::Reason::InvalidInput)
+ }
+ impl ConnectionState {
+-    fn enrollment_pins(
++    pub(super) fn enrollment_pins(
+         &self,
+         project_id: &str,
+         generation: u32,
+@@ -155,6 +155,7 @@
+         now: Instant,
+     ) -> Result<(), BridgeError> {
+         if !control.current()
++            || self.version_reserve_pending()
+             || !self
+                 .enrollment
+                 .as_ref()
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -1391,6 +1391,7 @@
+ slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::MetadataTextInstalledProfile);
+ slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::MetadataImagesInstalledProfile);
+ slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
++impl ReleaseVersionRuntimeSlots { pub(crate) fn source_runtime_fd_bound()->usize{MAC_RUNTIME_FDS} }
+ slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
+ slots!(LocalHistoryRuntimeSlots, LocalHistoryInstalledRuntime, runtime::LocalReleaseHistoryInstalledProfile);
+ slots!(ToolAcquisitionRuntimeSlots, ToolAcquisitionInstalledRuntime, runtime::ToolAcquisitionInstalledProfile);
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -105,6 +105,7 @@
+ pub mod protocol;
+ mod git_read_protocol;
+ mod version_enrollment_protocol;
++mod version_reserve_protocol;
+ mod git_local_protocol;
+ mod git_branch_protocol;
+ mod git_switch_protocol;
+--- a/desktop/src-tauri/src/local_store_preflight_owner.rs
++++ b/desktop/src-tauri/src/local_store_preflight_owner.rs
+@@ -39,6 +39,8 @@
+     }
+     pub(crate) fn document_lost(&self) { self.saved.document_lost(); }
+     pub(crate) fn context_changed(&self) { self.saved.context_changed(); }
++    pub(crate) fn current_versions_for_saved(&self,id:&str,registration:u32,root:&RegisteredRoot,configuration:&str,version:&str)
++        ->Result<Arc<crate::saved_command_owner::StoreVersionObservation>,BridgeError>{self.saved.current_store_versions_for_saved(id,registration,root,configuration,version)}
+     pub(crate) fn current_versions(&self, context:&crate::local_store_preflight_protocol::Context, registration:u32, root:&RegisteredRoot)
+         ->Result<Arc<crate::saved_command_owner::StoreVersionObservation>,BridgeError>{self.saved.current_store_versions(context,registration,root)}
+     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }
+--- a/desktop/src-tauri/src/release_version_edit_protocol.rs
++++ b/desktop/src-tauri/src/release_version_edit_protocol.rs
+@@ -243,7 +243,7 @@
+ }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+-struct PrivateOpen { root: String, registered_identity: RegisteredIdentity }
++struct PrivateOpen { root: String, registered_identity: RegisteredIdentity, #[serde(default)] reserved_version:Option<Value> }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ struct PrivatePrepare { revision: String, expected_baseline: Baseline, intent: Intent, values: Values }
+@@ -253,7 +253,8 @@
+     let legal = match (seq, op) {
+         (0, "open") | (1, "prepare") | (2, "apply") if params["intent"] == "recover" => recovery::private_request(seq, op, &params),
+         (0, "open") => PrivateOpen::deserialize(&params).is_ok_and(|p| p.root.len() > 1 && p.root.len() <= 4096
+-            && !p.root.contains('\0') && p.registered_identity.valid()),
++            && !p.root.contains('\0') && p.registered_identity.valid()
++            && p.reserved_version.as_ref().is_none_or(|v|v["schemaVersion"]==1&&bounded(v,12*1024).is_ok())),
+         (1, "prepare") => PrivatePrepare::deserialize(&params).is_ok_and(|p| token(&p.revision)
+             && p.expected_baseline.valid() && p.intent == p.expected_baseline.saved_version.intent() && p.values.proposed()),
+         (2, "apply") => keys(&params, &["planToken"]) && params["planToken"].as_str().is_some_and(token),
+--- a/desktop/src-tauri/src/saved_command_android_registration.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration.rs
+@@ -228,6 +228,21 @@
+     pub(crate) fn git_local_epoch(&self) -> Result<u64, BridgeError> {
+         // Same exact sole-publisher proof, no widening of ordinary epoch().
+         self.tool_source_epoch()
++    }
++    // Closed reserved-version chain comparison, not a new publisher/acceptance.
++    // Wait-only observation for the retained reserved-version native job.
++    // Other pending publishers are NOT acceptance; their eventual epoch is
++    // still compared exactly and never adopted. Existing strict API unchanged.
++    pub(crate) fn reserved_version_epoch(&self)->Result<Option<u64>,BridgeError>{
++        let book=match self.slot.book.try_lock(){Ok(b)=>b,Err(TryLockError::WouldBlock)=>return Ok(None),
++            Err(TryLockError::Poisoned(_))=>return Err(BridgeError::cleanup_unknown())};
++        if self.finished||self.index>=8||self.slot.is_unknown()
++            ||!book.pending[self.index].is_some_and(|p|p.serial==self.serial&&p.accepted==self.accepted){return Err(BridgeError::cleanup_unknown());}
++        if book.cancel.is_some()||book.pending.iter().enumerate().any(|(i,p)|i!=self.index&&p.is_some()){return Ok(None);}
++        Ok(Some(book.epoch))
++    }
++    pub(crate) fn reserved_version_serial(&self) -> Result<u64, BridgeError> {
++        self.tool_source_epoch()?; Ok(self.serial)
+     }
+     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
+         let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+--- a/desktop/src-tauri/src/saved_command_store_versions.rs
++++ b/desktop/src-tauri/src/saved_command_store_versions.rs
+@@ -91,6 +91,12 @@
+     }
+     pub(crate) fn matches_root(&self, registration: u32, project: &RegisteredRoot) -> bool {
+         self.registration == registration && self.project == *project
++    }
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    pub(crate) fn current_for_reserved_edit(&self,handoff:&crate::edit_owner::NativeReservedVersionHandoff,now:Instant,wall:SystemTime,max_age:u64)->bool {
++        // The original remains invalid globally; this exact consume-once
++        // handoff proves only its own finite registration publication chain.
++        handoff.permits_observation(self)&&self.clock.fresh(now,wall,max_age)
+     }
+     pub(crate) fn current(&self, now: Instant, wall: SystemTime, max_age: u64) -> bool {
+         !self.invalid.load(Ordering::SeqCst) && self.clock.fresh(now, wall, max_age)
+@@ -189,6 +195,18 @@
+     }
+ }
+ impl SavedCommandOwner {
++    pub(crate) fn current_store_versions_for_saved(&self,project_id:&str,registration:u32,project:&RegisteredRoot,
++        configuration:&str,version:&str)->Result<Arc<StoreVersionObservation>,BridgeError> {
++        self.require_domain(SavedCommandDomain::LocalStorePreflight)?;
++        let r=self.inner.lock();
++        if r.disabled||r.exhausted||r.stopping||r.document_lost||r.active.is_some()||r.prepared.is_some()
++            ||self.inner.poisoned.load(Ordering::SeqCst){return Err(store_wire::invalid());}
++        r.store_versions.observation.as_ref().filter(|o|o.context.project_id==project_id
++            &&o.context.saved_config.sha256==configuration&&o.context.saved_version.sha256==version
++            &&o.matches_root(registration,project)&&o.current(Instant::now(),SystemTime::now(),3600))
++            .cloned().ok_or_else(store_wire::invalid)
++    }
++
+     /// Native-only original. Caller must additionally rematch its actual Doc,
+     /// source and weak credential assignment immediately before CAS and edit.
+     pub(crate) fn current_store_versions(
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1960,6 +1960,67 @@
+     let crate::version_enrollment_protocol::Command::Cancel(id) = version_enrollment_command("version_enrollment_cancel", &webview, &request)?
+         else { return Err(BridgeError::invalid()); };
+     state.document.cancel_version_enrollment(&id)
++}
++
++// One closed reserve dialogue. The separate Edit command transfers only a
++// native retained reservation into the SAME existing version EditOwner.
++fn version_reserve_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::version_reserve_protocol::Command, BridgeError> {
++    edit_window(webview)?;
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
++    crate::version_reserve_protocol::decode(name, bytes)
++}
++#[tauri::command]
++async fn version_reserve_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
++    version_reserve_command("version_reserve_status", &webview, &request)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    { Ok(state.document.version_reserve_status()) }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { Err(crate::version_reserve_protocol::unavailable()) }
++}
++#[tauri::command]
++async fn version_reserve_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
++    let crate::version_reserve_protocol::Command::Review(input) = version_reserve_command("version_reserve_review", &webview, &request)?
++        else { return Err(BridgeError::invalid()); };
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    { state.document.review_version_reservation(input).await }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = input; Err(crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable())) }
++}
++#[tauri::command]
++async fn version_reserve_start(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
++    let crate::version_reserve_protocol::Command::Reserve { project_id, review_id } = version_reserve_command("version_reserve_start", &webview, &request)?
++        else { return Err(BridgeError::invalid()); };
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        // Fixed native app-data location only; no renderer path or CLI grant.
++        let location = app.path().app_local_data_dir().map_err(|_| crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable()))?;
++        state.document.reserve_version(&project_id, &review_id, &location).await
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (app, project_id, review_id); Err(crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable())) }
++}
++#[tauri::command]
++async fn version_reserve_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
++    let crate::version_reserve_protocol::Command::Cancel(id) = version_reserve_command("version_reserve_cancel", &webview, &request)?
++        else { return Err(BridgeError::invalid()); };
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    { state.document.cancel_version_reserve(&id) }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = id; Err(crate::version_reserve_protocol::unavailable()) }
++}
++#[tauri::command]
++async fn version_reserve_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
++    let crate::version_reserve_protocol::Command::Edit { project_id, reservation_id } = version_reserve_command("version_reserve_edit", &webview, &request)?
++        else { return Err(BridgeError::invalid()); };
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    { state.document.edit_reserved_version(&project_id, &reservation_id) }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (project_id, reservation_id); Err(crate::version_reserve_protocol::unavailable()) }
+ }
+
+ fn git_read_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::git_read_protocol::Command, BridgeError> {
+@@ -4892,6 +4953,7 @@
+             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
+             git_read_status, git_read_start, git_read_cancel,
+             version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
++            version_reserve_status, version_reserve_review, version_reserve_start, version_reserve_cancel, version_reserve_edit,
+             git_local_status, git_local_prepare, git_local_apply, git_local_discard, git_local_cancel,
+             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -44,6 +44,8 @@
+     VersionAllocationSourceInput, VersionAllocationSourceReceipt, VersionAllocationSourceRequest,
+     VersionAllocationSourceTicket};
+ pub(crate) use version_allocation::source_branch as version_allocation_source_branch;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use version_allocation::{VersionReserveControl,VersionReserveInvocation,VersionReserveJoined};
+ #[path = "supervisor_history.rs"]
+ mod history;
+ pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHistoryTicket};
+@@ -1191,7 +1193,7 @@
+                 let outcome = result.and_then(|value| match value {
+                     ReadOutcome::VersionAllocationSource => Ok(()), _ => Err(BridgeError::protocol()),
+                 });
+-                if let Some(source) = &self.version_allocation_source { source.retire(outcome, settled_at, was_unknown); }
++                if let Some(source) = &self.version_allocation_source { source.retire(outcome, settled_at, was_unknown, cleanup_endpoint); }
+             }
+             Profile::GitHubAuth => {
+                 drop(reply);
+@@ -1572,7 +1574,7 @@
+             // Arm immediately before the original roster insertion. Every normal
+             // Err above is known nonentry; an armed panic/loss retains the lane.
+             if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
+-            if let Some(source) = &owner.version_allocation_source { source.arm()?; }
++            if let Some(source) = &owner.version_allocation_source { source.arm(&owner)?; }
+             if let Some(enrollment) = &owner.version_enrollment { enrollment.arm(&owner)?; }
+             owners.insert(key, owner.clone());
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+@@ -3006,7 +3008,7 @@
+     true
+ }
+
+-enum Event { GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourcePost(Result<Result<(),BridgeError>,tokio::task::JoinError>), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
++enum Event { GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourceWork(version_allocation::Work), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
+
+ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
+     let mut resources = owner.resources.lock().await;
+@@ -3799,7 +3801,7 @@
+         let out_pending = resources.stdout.is_some();
+         let err_pending = resources.stderr.is_some();
+         let post_pending=resources.history_post.is_some();
+-        let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.before_go_pending());
++        let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.work_pending());
+         let local_candidate_pending=resources.git_local.as_ref().is_some_and(|local|local.candidate_pending());
+         if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none()
+             && !source_post_pending && source_post_receive.is_none() && !local_candidate_pending { break; }
+@@ -3810,8 +3812,8 @@
+                     if local_candidate_pending=>Event::GitLocalCandidate(candidate),
+                 request = async { match &mut source_post_receive { Some(value) => value.await, None => std::future::pending().await } },
+                     if source_post_receive.is_some() => Event::SourcePostRequest(request),
+-                result = async { match version_allocation_source { Some(source) => source.join_before_go().await, None => std::future::pending().await } },
+-                    if source_post_pending => Event::SourcePost(result),
++                result = async { match version_allocation_source { Some(source) => source.next_work().await, None => std::future::pending().await } },
++                    if source_post_pending => Event::SourceWork(result),
+                 request = async { match &mut history_post_receive {Some(value)=>value.await,None=>std::future::pending().await} }, if history_post_receive.is_some() => Event::HistoryPostRequest(request),
+                 result = join_slot(history_post), if post_pending => Event::HistoryPost(result),
+                 status = wait_original(child), if wait_pending => Event::Wait(status),
+@@ -3832,11 +3834,11 @@
+                     (Err(_), _) => owner.fail(BridgeError::cleanup_unknown()),
+                 }
+             },
+-            Event::SourcePost(result) => {
++            Event::SourceWork(result) => {
+                 let Some(source) = resources.version_allocation_source.as_mut() else {
+                     owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+                 };
+-                if !source.before_go_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
++                if !source.work_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
+             },
+             Event::HistoryPostRequest(request)=>{
+                 history_post_receive.take();
+--- a/desktop/src-tauri/src/supervisor_version_allocation.rs
++++ b/desktop/src-tauri/src/supervisor_version_allocation.rs
+@@ -7,6 +7,11 @@
+ use serde::{Deserialize, Serialize};
+ use serde_json::json;
+ use sha2::{Digest, Sha256};
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path="supervisor_version_reserve.rs"]
++pub(super) mod reserve;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use reserve::{VersionReserveControl,VersionReserveInvocation,VersionReserveJoined};
+
+ pub(crate) const SOURCE_PROTOCOL: &str = "mrk-version-allocation-source/1";
+ const PROVIDER: &str = "macos-clt-git/1";
+@@ -157,7 +162,7 @@
+             .checked_add(self.version_sha256.capacity())?
+             .checked_add(self.reference.capacity())
+     }
+-    fn matches(&self, source: &VersionAllocationSource) -> bool {
++    pub(crate) fn matches(&self, source: &VersionAllocationSource) -> bool {
+         self.configuration_sha256 == source.configuration_sha256
+             && self.version_sha256 == source.version_sha256
+             && self.reference == source.reference
+@@ -207,6 +212,8 @@
+     digest: String,
+     initial: Vec<u8>,
+     hard_ns: u64,
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++    allocation: Option<Arc<crate::version_allocation_state_native::dialogue::Request>>,
+ }
+ impl VersionAllocationSourceRequest {
+     fn from_original(
+@@ -241,7 +248,9 @@
+         // The whole native projection must fit the existing fixed child parser.
+         frame(&initial, INITIAL_LIMIT, 256, 8)?;
+         let digest = format!("{:x}", Sha256::digest(&initial));
+-        Ok(Self { input, id: id.into(), digest, initial, hard_ns })
++        Ok(Self { input, id: id.into(), digest, initial, hard_ns,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            allocation:None })
+     }
+     pub(crate) fn same_input(&self, input: &Arc<VersionAllocationSourceInput>) -> bool {
+         Arc::ptr_eq(&self.input, input)
+@@ -252,7 +261,11 @@
+                 == json!({"protocol":SOURCE_PROTOCOL,"id":self.id,"ready":{"requestSha256":self.digest}}),
+         )
+     }
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(crate) fn allocation_request(&self)->Option<&Arc<crate::version_allocation_state_native::dialogue::Request>> {self.allocation.as_ref()}
+     pub(crate) fn go(&self) -> Result<Vec<u8>, BridgeError> {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        need(self.allocation.is_none())?;
+         encoded(&json!({"protocol":SOURCE_PROTOCOL,"id":self.id,"go":{"requestSha256":self.digest}}), READY_LIMIT)
+     }
+     fn terminal(&self, raw: &[u8]) -> Result<Terminal, BridgeError> {
+@@ -300,12 +313,14 @@
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ enum Refusal {
++    Allocation,
+     Source,
+     Cancelled,
+ }
+ impl Refusal {
+     fn error(self) -> BridgeError {
+         match self {
++            Self::Allocation => BridgeError::new("version_reserve_refused", "The reservation needs attention; no saved version was changed."),
+             Self::Source => changed(),
+             Self::Cancelled => BridgeError::new("cancelled", "The original saved-source inspection was stopped."),
+         }
+@@ -375,6 +390,8 @@
+     completion: Mutex<Option<crate::asset_session::VersionAllocationSourceCompletion>>,
+     pub(super) mailbox: Arc<Mutex<Mailbox>>,
+     request: Mutex<Option<Arc<VersionAllocationSourceRequest>>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    reserve: Option<Arc<VersionReserveInvocation>>,
+ }
+ impl Invocation {
+     pub(super) fn request(&self) -> Result<Arc<VersionAllocationSourceRequest>, BridgeError> {
+@@ -384,7 +401,9 @@
+             .clone()
+             .ok_or_else(BridgeError::cleanup_unknown)
+     }
+-    pub(super) fn arm(&self) -> Result<(), BridgeError> {
++    pub(super) fn arm(&self,owner:&Arc<Owner>) -> Result<(), BridgeError> {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(reserve)=&self.reserve {reserve.control.arm(owner)?;}
+         self.completion
+             .lock()
+             .map_err(|_| BridgeError::cleanup_unknown())?
+@@ -393,6 +412,8 @@
+             .arm()
+     }
+     pub(super) fn unknown(&self) {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(reserve)=&self.reserve {reserve.control.unknown();}
+         lock(&self.mailbox).unknown();
+         if let Some(completion) = lock(&self.completion).as_ref() {
+             completion.unknown();
+@@ -400,7 +421,9 @@
+     }
+     // Called by Owner.retire OUTSIDE Supervisor/Resources locks, after all real
+     // driver/watchdog/IO/native joins. FIN reader never publishes completion.
+-    pub(super) fn retire(&self, result: Result<(), BridgeError>, settled_at: Instant, was_unknown: bool) {
++    pub(super) fn retire(&self, result: Result<(), BridgeError>, settled_at: Instant, was_unknown: bool, cutoff:Option<Instant>) {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let (Some(reserve),Some(cutoff))=(&self.reserve,cutoff) {reserve.control.retain_cutoff(cutoff);}
+         let retained_unknown = matches!(lock(&self.mailbox).receipt, VersionAllocationSourceReceipt::RetainedUnknown);
+         let mut outcome = result.and_then(|_| {
+             let mailbox = lock(&self.mailbox);
+@@ -510,6 +533,8 @@
+                     completion: Mutex::new(Some(completion)),
+                     mailbox: Arc::new(Mutex::new(Mailbox::new())),
+                     request: Mutex::new(None),
++                    #[cfg(any(target_os = "linux", target_os = "macos"))]
++                    reserve: None,
+                 },
+                 endpoints,
+                 originals,
+@@ -526,8 +551,58 @@
+             Err(unavailable())
+         }
+     }
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(crate) fn with_reserve(mut self,reserve:Arc<VersionReserveInvocation>)->Result<Self,BridgeError> {
++        need(reserve.control.current()&&reserve.control.work_end()==self.endpoints.work&&self.invocation.reserve.is_none())?;
++        self.bytes=self.bytes.checked_add(VersionReserveInvocation::reservation_bytes().ok_or_else(unavailable)?).ok_or_else(unavailable)?;
++        self.invocation.reserve=Some(reserve);Ok(self)
++    }
+     pub(crate) fn bytes(&self) -> usize {
+         self.bytes
++    }
++}
++
++pub(super) enum Work {
++    Post(Result<Result<(),BridgeError>,tokio::task::JoinError>),
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    State(Option<reserve::StateRequest>),
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    Joined(Result<crate::version_allocation_state_native::jobs::Joined,crate::version_allocation_state_native::jobs::Failure>),
++}
++impl SourceResources {
++    pub(super) fn work_pending(&self)->bool {
++        let pending=self.before_go_pending();
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        { return pending||self.remote.as_ref().is_some_and(reserve::RemoteJobs::pending); }
++        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++        { pending }
++    }
++    pub(super) async fn next_work(&mut self)->Work {
++        let post=&mut self.posts[0];let post_pending=post.handle.is_some()&&!post.failed;
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(remote)=&mut self.remote {
++            let join_pending=remote.jobs.join_pending();let receive=remote.requests.is_some()&&!join_pending;
++            return tokio::select! {
++                result=join_slot(&mut post.handle),if post_pending=>Work::Post(result),
++                request=async{match &mut remote.requests {Some(rx)=>rx.recv().await,None=>std::future::pending().await}},if receive=>Work::State(request),
++                result=remote.jobs.join_current(),if join_pending=>Work::Joined(result),
++            }
++        }
++        Work::Post(join_slot(&mut post.handle).await)
++    }
++    pub(super) fn work_returned(&mut self,work:Work,owner:&Arc<Owner>,inner:&Inner)->bool {
++        let result:Result<(),BridgeError>=match work {
++            Work::Post(result)=>return self.before_go_returned(result,owner,inner),
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            Work::State(request)=>self.remote.as_mut().ok_or_else(BridgeError::cleanup_unknown).and_then(|r|r.accept(request,owner)),
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            Work::Joined(result)=>self.remote.as_mut().ok_or_else(BridgeError::cleanup_unknown).and_then(|r|r.returned(result,owner)),
++        };
++        if let Err(error)=result {owner.fail(error);}
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        { return !owner.version_allocation_source.as_ref().and_then(|s|s.reserve.as_ref()).is_some_and(|r|r.control.uncertain()); }
++        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++        { true }
+     }
+ }
+
+@@ -804,13 +879,19 @@
+                 changed()
+             }
+         })?;
+-        let request = Arc::new(VersionAllocationSourceRequest::from_original(
++        let mut request = VersionAllocationSourceRequest::from_original(
+             self.input.clone(),
+             &owner.id,
+             original.source.native_snapshot().map_err(|_| changed())?,
+             work_ns,
+             hard_ns,
+-        )?);
++        )?;
++        // The same inspection original retains native custody, but drops its
++        // SourceBook mutex before Store/NativeUse IO or any final Doc gate.
++        drop(original);
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some(reserve)=&self.reserve {reserve.prepare(&mut request,work_ns,hard_ns)?;}
++        let request=Arc::new(request);
+         {
+             let mut slot = self.request.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+             if slot.is_some() {
+@@ -818,7 +899,6 @@
+             }
+             *slot = Some(request.clone());
+         }
+-        drop(original);
+         self.gate.bind_request(&self.input, &owner.id, request)?;
+         Ok(selected)
+     }
+@@ -1031,6 +1111,8 @@
+     ))]
+     pub(super) originals: Option<Arc<Mutex<Originals>>>,
+     posts: [Post; 2],
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++    remote: Option<reserve::RemoteJobs>,
+ }
+ impl SourceResources {
+     pub(super) fn from_admission(admission: &VersionAllocationSourceAdmission) -> Self {
+@@ -1052,6 +1134,13 @@
+     }
+     pub(super) fn jobs_settled(&self) -> bool {
+         self.posts.iter().all(|p| p.handle.is_none() && !p.failed && (!p.entered || p.returned.is_some()))
++            && self.remote_jobs_settled()
++    }
++    fn remote_jobs_settled(&self) -> bool {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        { return self.remote.as_ref().is_none_or(reserve::RemoteJobs::settled); }
++        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++        { true }
+     }
+     pub(super) fn before_go_pending(&self) -> bool {
+         self.posts[0].handle.is_some() && !self.posts[0].failed
+@@ -1423,6 +1512,10 @@
+     stderr: tokio::process::ChildStderr,
+     faults: &mpsc::Sender<BridgeError>,
+ ) -> Result<oneshot::Receiver<oneshot::Sender<Result<(), BridgeError>>>, BridgeError> {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    if owner.version_allocation_source.as_ref().is_some_and(|s|s.reserve.is_some()) {
++        return reserve::install_io(resources,inner,owner,stdin,stdout,stderr,faults);
++    }
+     need(resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none())?;
+     let request = owner.version_allocation_source.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.request()?;
+     let original =
+@@ -1498,6 +1591,8 @@
+             digest: "c".repeat(64),
+             initial: Vec::new(),
+             hard_ns: 70_000_000_000,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            allocation:None,
+         }
+     }
+     fn terminal_data(request: &VersionAllocationSourceRequest) -> Value {
+--- a/desktop/src-tauri/src/version_allocation_protocol_native.rs
++++ b/desktop/src-tauri/src/version_allocation_protocol_native.rs
+@@ -17,6 +17,7 @@
+ use zeroize::Zeroizing;
+
+ pub(crate) const PROTOCOL: &str = "mrk-version-allocation-runtime/1";
++pub(crate) const NATIVE_PROTOCOL: &str = "mrk-version-reserve/1";
+ pub(crate) const INITIAL_LIMIT: usize = 8192;
+ pub(crate) const READY_LIMIT: usize = 512;
+ pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
+@@ -74,10 +75,22 @@
+     selected: AllocationRequest, initial: Vec<u8>, initial_digest: String,
+     initial_revision: Revision, initial_state_sha256: String,
+     go_prefix: Vec<u8>, go_suffix: Vec<u8>,
++    native: bool, hard_ns: Option<u64>,
+ }
+ impl Request {
+     pub(crate) fn from_port(port: &VersionAllocationStatePort, id: &str, kind: Kind,
+         account_id: &str, clock: Clock, observations: &[Value]) -> Result<Self> {
++        Self::from_port_inner(port,id,kind,account_id,clock,observations,None)
++    }
++    /// Called by the original SOURCE inspection after its held native facet
++    /// and already-durable selection. These values do not create that custody.
++    pub(crate) fn from_source(port: &VersionAllocationStatePort, id: &str, kind: Kind,
++        account_id: &str, clock: Clock, observations: &[Value], source:Value, provider:Value) -> Result<Self> {
++        require(port.bounded)?;
++        Self::from_port_inner(port,id,kind,account_id,clock,observations,Some((source,provider)))
++    }
++    fn from_port_inner(port: &VersionAllocationStatePort, id: &str, kind: Kind,
++        account_id: &str, clock: Clock, observations: &[Value], native_source:Option<(Value,Value)>) -> Result<Self> {
+         require(valid_id(id) && numeric_id(account_id) && observations.len() <= 2)?;
+         let selected = AllocationRequest(data(port.selected_request())?.clone());
+         // Exact pending reconciliation is read-only and must remain possible
+@@ -92,9 +105,21 @@
+         require(!snapshot.bytes.is_empty() && snapshot.bytes.len() <= STATE_LIMIT)?;
+         let authority = port.authority.clone();
+         let local_project_id = port.project.project_id.as_str().to_owned();
+-        let initial = encoded(&json!({"protocol":PROTOCOL,"id":id,"action":{
++        let native = native_source.is_some();
++        let protocol = if native { NATIVE_PROTOCOL } else { PROTOCOL };
++        let hard_ns = if native { Some(clock.hard_end_ns.parse::<u64>().map_err(|_|BridgeError::protocol())?) } else { None };
++        let mut action = json!({
+             "kind":kind,"localProjectId":local_project_id,"authority":authority,"accountId":account_id,
+-            "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock}}), INITIAL_LIMIT)?;
++            "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock});
++        if let Some((source,provider)) = native_source {
++            require(selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"])
++                && source["ref"]==selected.0["source"]["ref"]
++                && source["savedConfig"]["sha256"]==selected.0["source"]["configurationSha256"]
++                && source["savedVersion"]["sha256"]==selected.0["source"]["versionSha256"]
++                && provider["kind"]=="macos-clt-git/1" && snapshot.bytes.len()<=256*1024)?;
++            action["source"]=source; action["provider"]=provider;
++        }
++        let initial = encoded(&json!({"protocol":protocol,"id":id,"action":action}), INITIAL_LIMIT)?;
+         let initial_digest = digest(&initial);
+         let public = json!({"observations":observations,"request":selected,
+             "requestSha256":initial_digest,"state":{"revision":snapshot.revision.0,"payload":base64(&snapshot.bytes)?}});
+@@ -105,20 +130,24 @@
+         let mut public = data(canonical(&public, GO_LIMIT - 2 * TOKEN_LIMIT - 256))?;
+         require(public.pop() == Some(b'}'))?;
+         go_prefix.extend(public); go_prefix.extend(b",\"token\":");
+-        let go_suffix = format!("}},\"id\":\"{id}\",\"protocol\":\"{PROTOCOL}\"}}\n").into_bytes();
++        let go_suffix = format!("}},\"id\":\"{id}\",\"protocol\":\"{protocol}\"}}\n").into_bytes();
+         require(go_prefix.len().checked_add(2 * TOKEN_LIMIT + 2).and_then(|n| n.checked_add(go_suffix.len()))
+             .is_some_and(|n| n <= GO_LIMIT))?;
+         Ok(Self { id:id.to_owned(), kind, authority, local_project_id, store:port.store.clone(), project:port.project.clone(),
+             selected, initial, initial_digest,
+-            initial_revision:snapshot.revision, initial_state_sha256:digest(&snapshot.bytes), go_prefix, go_suffix })
++            initial_revision:snapshot.revision, initial_state_sha256:digest(&snapshot.bytes), go_prefix, go_suffix, native, hard_ns })
+     }
+     pub(crate) fn initial(&self) -> &[u8] { &self.initial }
+     pub(crate) fn initial_digest(&self) -> &str { &self.initial_digest }
+     pub(crate) fn selected(&self) -> &Value { &self.selected.0 }
++    pub(crate) fn matches_repository(&self,repository:&str,id:&str)->bool {
++        self.authority.repository==repository&&self.authority.repository_id==id
++    }
+     pub(crate) fn kind(&self) -> Kind { self.kind }
++    fn protocol(&self)->&'static str { if self.native { NATIVE_PROTOCOL } else { PROTOCOL } }
+     pub(crate) fn ready(&self, raw: &[u8]) -> Result<()> {
+         let value = frame(raw, READY_LIMIT)?;
+-        require(value == json!({"protocol":PROTOCOL,"id":self.id,"ready":{"requestSha256":self.initial_digest}}))
++        require(value == json!({"protocol":self.protocol(),"id":self.id,"ready":{"requestSha256":self.initial_digest}}))
+     }
+     /// Called only from the native token/GO gate. Its successful return is still
+     /// bytes, not permission; the original owner separately claims and writes.
+@@ -166,7 +195,7 @@
+     pub(crate) fn ack(&self, request: &Request, ack: &WriteAck) -> Result<Vec<u8>> {
+         require(self.request_digest == request.initial_digest && self.expected_revision.0.checked_add(1) == Some(ack.revision.0)
+             && self.payload_sha256 == ack.payload_sha256)?;
+-        encoded(&json!({"protocol":PROTOCOL,"id":request.id,"ack":{"requestSha256":request.initial_digest,
++        encoded(&json!({"protocol":request.protocol(),"id":request.id,"ack":{"requestSha256":request.initial_digest,
+             "sequence":self.sequence,"revision":ack.revision.0,"payloadSha256":ack.payload_sha256,
+             "effect":"committed","durability":"durable","cleanup":"settled"}}), ACK_LIMIT)
+     }
+@@ -191,7 +220,7 @@
+         let usable = !self.poisoned && self.outstanding.is_none() && !self.finished && self.stage != Stage::Terminal;
+         self.poisoned = true; require(usable && self.request_digest == request.initial_digest)?;
+         let value = frame(raw, STATE_FRAME_LIMIT)?;
+-        require(closed(&value, &["protocol","id","state"]) && value["protocol"] == PROTOCOL && value["id"] == request.id)?;
++        require(closed(&value, &["protocol","id","state"]) && value["protocol"] == request.protocol() && value["id"] == request.id)?;
+         let state = &value["state"];
+         require(closed(state, &["requestSha256","sequence","expectedRevision","payloadSha256","transition"])
+             && state["requestSha256"] == request.initial_digest && self.sequence < MAX_TRANSITIONS
+@@ -249,9 +278,10 @@
+         self.poisoned = true; require(usable && self.request_digest == request.initial_digest)?;
+         require(request.matches_port(port))?;
+         let value = frame(raw, FIN_LIMIT)?;
+-        require(closed(&value,&["protocol","id","finished"]) && value["protocol"] == PROTOCOL && value["id"] == request.id)?;
++        require(closed(&value,&["protocol","id","finished"]) && value["protocol"] == request.protocol() && value["id"] == request.id)?;
+         let row = &value["finished"];
+-        require(closed(row,&["requestSha256","sequence","revision","payloadSha256","outcome"])
++        require(closed(row,if request.native { &["requestSha256","sequence","revision","payloadSha256","outcome","source","firstFailureNs","lifetime"] }
++            else { &["requestSha256","sequence","revision","payloadSha256","outcome"] })
+             && row["requestSha256"] == request.initial_digest && row["sequence"].as_u64() == Some(self.sequence as u64)
+             && row["revision"].as_u64() == Some(self.revision.0) && row["payloadSha256"] == self.state_sha256)?;
+         let snapshot = data(port.snapshot())?;
+@@ -282,15 +312,36 @@
+                 && checkpoint.as_ref() == Some(&local.checkpoint) && candidate.reservation.as_ref() == Some(&reservation)
+                 && self.stage == Stage::Terminal)?;
+         }
++        let (source,first_failure_ns) = if request.native {
++            let life=&row["lifetime"];
++            require(closed(life,&["originalsClosed","borrowEnded","handlersRestored","commands","profileCalls"])
++                && life["originalsClosed"]==true && life["borrowEnded"]==true && life["handlersRestored"]==true
++                && life["profileCalls"].as_u64()==Some(0))?;
++            let commands=life["commands"].as_u64().filter(|n|*n<=8).ok_or_else(BridgeError::protocol)?;
++            let source=if row["source"].is_null() {None} else {
++                require(row["source"]==request.selected.0["source"] && [7,8].contains(&commands))?;
++                Some(row["source"].clone())
++            };
++            let first=if row["firstFailureNs"].is_null() {None} else {
++                let text=row["firstFailureNs"].as_str().ok_or_else(BridgeError::protocol)?;
++                let n=text.parse::<u64>().map_err(|_|BridgeError::protocol())?;
++                require(n>0 && request.hard_ns.is_some_and(|hard|n<hard) && n.to_string()==text)?; Some(n)
++            };
++            require(if status=="reserved" { source.is_some() && first.is_none() && commands==(if claimed {8}else{7}) }
++                else { first.is_some() })?;
++            (source,first)
++        } else { (None,None) };
+         self.finished = true; self.poisoned = false;
+-        Ok(Finished { outcome:outcome.clone(), control })
++        Ok(Finished { outcome:outcome.clone(), control, source, first_failure_ns })
+     }
+ }
+
+ /// Private worker DATA only, before stdin shutdown/stdout EOF and actual joins.
+ /// Never serialize this as a public success or feed its reservation to an edit
+ /// without the current original RELEASE_VERSION checkout and explicit Apply.
+-pub(crate) struct Finished { pub(crate) outcome:Value, pub(crate) control:GitHubReadControl }
++#[derive(Clone)]
++pub(crate) struct Finished { pub(crate) outcome:Value, pub(crate) control:GitHubReadControl,
++    pub(crate) source:Option<Value>, pub(crate) first_failure_ns:Option<u64> }
+ fn reason(value: &str) -> bool {
+     matches!(value,"none"|"invalid-input"|"invalid-policy"|"manual-policy"|"ambiguous-rule"|"ref-not-allowed"
+         |"unsupported-version"|"build-exhausted"|"ios-integer-build-exhausted"|"store-observation-incomplete"
+--- a/desktop/src-tauri/src/version_allocation_state_jobs.rs
++++ b/desktop/src-tauri/src/version_allocation_state_jobs.rs
+@@ -37,13 +37,19 @@
+     slots: [Option<Job>; wire::MAX_TRANSITIONS as usize],
+     active: Option<usize>, registered: u8, failed: bool,
+     revoked: Arc<AtomicBool>,
++    reserve: Option<(Arc<crate::supervisor::VersionReserveControl>, Arc<super::reserve::StateHold>)>,
+ }
+ impl Jobs {
+     /// Pure metadata only: no port/Store/Host mutex, namespace read or worker.
+     pub(crate) fn new(request: Arc<wire::Request>, port: Arc<Mutex<VersionAllocationStatePort>>,
+         stop: watch::Receiver<bool>, end: Instant) -> Result<Self> {
+         if !current(&stop,end) { return Err(Failure::Stopped); }
+-        Ok(Self { request,port,stop,end,slots:std::array::from_fn(|_|None),active:None,registered:0,failed:false,revoked:Arc::new(AtomicBool::new(false)) })
++        Ok(Self { request,port,stop,end,slots:std::array::from_fn(|_|None),active:None,registered:0,failed:false,revoked:Arc::new(AtomicBool::new(false)),reserve:None })
++    }
++    pub(crate) fn new_reserve(request:Arc<wire::Request>,port:Arc<Mutex<VersionAllocationStatePort>>,
++        stop:watch::Receiver<bool>,end:Instant,control:Arc<crate::supervisor::VersionReserveControl>,state:Arc<super::reserve::StateHold>)->Result<Self> {
++        if !control.current() || end!=control.work_end() {return Err(Failure::Currentness);}
++        let mut jobs=Self::new(request,port,stop,end)?;jobs.reserve=Some((control,state));Ok(jobs)
+     }
+     fn fail(&mut self) { self.failed = true; self.revoked.store(true,Ordering::Release); }
+     /// The caller has already installed Jobs in the actual original Resources.
+@@ -59,16 +65,28 @@
+         self.slots[index] = Some(Job { step:step.clone(),release:Some(release),handle:None,returned:None,join_error:None,released:false });
+         self.active = Some(index); self.registered += 1;
+         let port = self.port.clone(); let request = self.request.clone(); let stop = self.stop.clone(); let end = self.end;
++        let reserve=self.reserve.clone();
+         let job = self.slots[index].as_mut().ok_or(Failure::Currentness)?;
+         job.handle = Some(tokio::task::spawn_blocking(move || {
+-            enter.blocking_recv().map_err(|_|Failure::NotReleased)?;
+-            if !current(&stop,end) { return Err(Failure::Stopped); }
+-            let mut port = port.lock().map_err(|_|Failure::PortUnknown)?;
+-            if !current(&stop,end) || !request.matches_port(&port) { return Err(Failure::Currentness); }
+-            // The one actual native CAS/close call. No Document/Edit lock is
+-            // held here. A STOP during fsync is not a pretend interruption;
+-            // retain/join this original and preserve its exact result instead.
+-            port.apply(step.expected_revision,request.selected(),step.transition()).map_err(Failure::Native)
++            let result=(||{
++                enter.blocking_recv().map_err(|_|Failure::NotReleased)?;
++                if !current(&stop,end) { return Err(Failure::Stopped); }
++                if let Some((control,state))=&reserve {
++                    if !control.current(){return Err(Failure::Stopped);}
++                    state.check_use().map_err(Failure::Native)?;
++                }
++                let mut port = port.lock().map_err(|_|Failure::PortUnknown)?;
++                if !current(&stop,end) || !request.matches_port(&port) { return Err(Failure::Currentness); }
++                // Original CAS result stays on the registered job. No Doc/Edit
++                // lock or fake interruption of the actual Store fsync.
++                port.apply(step.expected_revision,request.selected(),step.transition()).map_err(Failure::Native)
++            })();
++            let at=Instant::now();
++            if let (Some((control,_)),Err(error))=(&reserve,&result) {
++                match error {Failure::Native(e)=>control.state_failed(*e,at),
++                    Failure::JoinUnknown|Failure::PortUnknown=>control.unknown(),_=>control.stop_at(at)}
++            }
++            result
+         }));
+         self.failed = false; Ok(())
+     }
+--- a/desktop/src-tauri/src/version_allocation_state_native.rs
++++ b/desktop/src-tauri/src/version_allocation_state_native.rs
+@@ -31,6 +31,8 @@
+ pub(crate) mod enrollment;
+ #[path="version_allocation_ios_inventory.rs"]
+ pub(crate) mod ios_inventory;
++#[path="version_reserve_state_native.rs"]
++pub(crate) mod reserve;
+
+ const PROTOCOL: &str = "mrk-version-allocation-state/1";
+ const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
+@@ -323,7 +325,7 @@
+ pub(crate) struct VersionAllocationStatePort {
+     store: Arc<PrivateStateDirectory>, project: ProjectBinding, authority: Authority,
+     snapshot: Option<Snapshot>, state: Option<State>, bound: Option<Request>,
+-    attempted: Option<Attempt>, failure: Option<StateError>, poisoned: bool, remote_writes: u8,
++    attempted: Option<Attempt>, failure: Option<StateError>, poisoned: bool, remote_writes: u8, bounded: bool,
+ }
+ impl VersionAllocationStatePort {
+     /// Pure construction. The original caller retains this object BEFORE load.
+@@ -332,7 +334,7 @@
+         let authority: Authority = decode(authority)?;
+         need(authority.valid() && project.inode != 0 && Id::parse(project.project_id.as_str()).is_ok())?;
+         Ok(Self { store, project, authority, snapshot: None, state: None, bound: None,
+-            attempted: None, failure: None, poisoned: false, remote_writes: 0 })
++            attempted: None, failure: None, poisoned: false, remote_writes: 0, bounded: false })
+     }
+     /// Pure rematch only. Fresh native service/root/Document checks belong to
+     /// the original caller; this does NOT check the filesystem or claim a lease.
+@@ -352,6 +354,7 @@
+     // the exact 1MiB / 50k-node behavior. There is no caller-selected decoder.
+     fn load_bounded(&mut self, limit: usize) -> Result<()> {
+         self.usable()?; need(self.snapshot.is_none() && [256 * 1024, STATE_LIMIT].contains(&limit))?;
++        self.bounded = limit != STATE_LIMIT;
+         self.poisoned = true;
+         let loaded = self.store.read(Namespace::VersionAllocations);
+         match loaded {
+@@ -378,6 +381,10 @@
+         let expected = self.snapshot()?.revision;
+         let next_revision = Revision(expected.0.checked_add(1).ok_or_else(|| StateError::from(Error::RecoveryRequired))?);
+         let bytes = state.bytes()?;
++        if self.bounded {
++            strict_version_enrollment_state_json(&bytes).map_err(|error|
++                StateError::from(if error.code == "version_enrollment_state_limit" { Error::Unavailable } else { Error::RecoveryRequired }))?;
++        }
+         // Retain attempted input and latch BEFORE the sole native call. A panic
+         // or cancellation cannot expose a second usable writer. The original
+         // native Store retains its own intent fence and exact error facts too.
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -14,6 +14,7 @@
+ // observer executable. No library duplicate owner, helper/publisher/CLI entry.
+ #[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
+ #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
++#[path = "../src/version_reserve_protocol.rs"] mod version_reserve_protocol;
+ #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
+ #[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
+ #[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;
+--- a/desktop/tests/release-version-edit.test.mjs
++++ b/desktop/tests/release-version-edit.test.mjs
+@@ -68,7 +68,7 @@
+       journal: versionNoOp(preparedView) ? 'not_created' : 'clean', resources: 'settled', reason: 'none' } : null,
+     nativeReason: 'none', nativeFinality: phase === 'final' ? 'settled' : phase === 'unknown' ? 'unknown' : 'pending', lateSettled: false, ...options };
+ }
+-function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status(), onSaveBoundary = () => {} } = {}) {
++function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status(), onSaveBoundary = () => {}, reservedOperationReason } = {}) {
+   let workspace = addProject(initialWorkspace), registry = clone(nativeStatus), listener, clock = 100, other = null, operation = null;
+   let sessionId = ID.session; const calls = [], boundaries = [], reads = [];
+   const selected = () => workspace.projects[workspace.selectedId] ?? null;
+@@ -80,7 +80,7 @@
+     applyReleaseVersionEdit: (sessionId, planToken, intent) => request('apply', intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }), closeReleaseVersionEdit: (sessionId) => request('close', { sessionId }),
+   };
+   const controller = new ReleaseVersionEditController({ selectedProject: selected, project: (id) => workspace.projects[id] ?? null,
+-    otherEditReason: () => other, otherOperationReason: () => operation, now: () => clock,
++    otherEditReason: () => other, otherOperationReason: () => operation, reservedOperationReason, now: () => clock,
+     onSaveBoundary: (id) => { boundaries.push(id); onSaveBoundary(id); } });
+   controller.beginConnection(); controller.setHelp(guideResource); controller.syncProject();
+   const h = { controller, api, selected, calls, boundaries,
+@@ -704,3 +704,77 @@
+     h.controller.dispose();
+   }
+ });
++
++// Reserved DATA only selects the new fixed native Open. The SAME existing
++// controller still owns observed checkout, explicit review, Apply and receipt.
++const RESERVATION = { id: '9'.repeat(32), candidateId: '12345678-1234-4abc-8abc-123456789abc', name: VALUES.name, build: Number(VALUES.build) };
++test('reserved handoff waits for real Open then explicit review and Apply on same controller', async () => {
++  const h = await connected();
++  assert.equal(h.controller.openReserved(RESERVATION), true);
++  assert.deepEqual(h.last('open').args, { projectId: 'p', reservationId: RESERVATION.id });
++  assert.equal(h.controller.selectedEntry(), null); assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
++  const opening = h.publish(h.owner('opening')); h.last('open').resolve(opening); await flush();
++  h.publish(h.owner('editing'));
++  assert.deepEqual(h.controller.selectedEntry().values, VALUES); assert.equal(h.controller.editField('build', '99'), false);
++  assert.equal(h.count('prepare'), 0); assert.equal(h.controller.review(), true); assert.equal(h.count('prepare'), 1);
++  const reviewing = h.publish(h.owner('reviewing')); h.last('prepare').resolve(reviewing); await flush();
++  const binding = currentVersionApplyBinding(h.state); assert.ok(binding); assert.equal(h.controller.apply(binding), true);
++  const applying = h.publish(h.owner('applying')); h.last('apply').resolve(applying); await flush();
++  h.publish(h.owner('final')); assert.equal(h.count('apply'), 1);
++  assert.deepEqual(h.controller.selectedEntry().original.values, VALUES); assert.equal(h.state.edit.attempt.handled, true);
++});
++test('reserved handoff preserves dirty draft and refuses foreign checkout or missing native writer', async () => {
++  const h = await connected(); await openSaved(h); h.controller.editField('build', '91'); h.closeFinal();
++  const before = clone(h.controller.selectedEntry()); assert.equal(h.controller.openReserved(RESERVATION), false);
++  assert.deepEqual(h.controller.selectedEntry(), before); assert.equal(h.count('open'), 1);
++  const foreign = await connected({ opened: checkout(ORIGINAL, {name:'1.2.3',build:'7'}, {iosEnabled:false}) });
++  assert.equal(foreign.controller.openReserved(RESERVATION), true); foreign.publish(foreign.owner('editing'));
++  assert.equal(foreign.state.edit.attempt.invalidated, true); assert.equal(foreign.count('prepare'), 0);
++  const unavailable = harness(); assert.equal(unavailable.controller.openReserved(RESERVATION), false);
++});
++test('reserved handoff subscriber ABA peer and API invalidation prevent native Open', async () => {
++  for (const mutate of [h => h.controller.selectionIntent(), h => { h.controller.selectionIntent(); h.controller.syncProject(); },
++      h => h.operation('foreign operation'), h => h.controller.beginConnection()]) {
++    const h = await connected(); let once = false;
++    h.controller.subscribe(() => { if (!once && h.state.edit.attempt?.binding.reserved) { once = true; mutate(h); } });
++    assert.equal(h.controller.openReserved(RESERVATION), false); assert.equal(h.count('open'), 0); assert.equal(h.count('apply'), 0);
++  }
++});
++test('reserved handoff uses only fixed raw reservation command and existing status parser', async () => {
++  const calls = [];
++  const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return status(); });
++  await api.openReleaseVersionEdit({ projectId: 'p', reservationId: RESERVATION.id });
++  assert.equal(calls[0].command, 'version_reserve_edit'); assert.ok(calls[0].args instanceof Uint8Array);
++  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0].args)), { projectId: 'p', reservationId: RESERVATION.id });
++  assert.equal(versionEditRequestFits('version_reserve_edit', { projectId: 'p', reservationId: RESERVATION.id, values: VALUES }), false);
++  assert.equal(versionEditRequestFits('release_version_edit_open', { projectId: 'p', reservationId: RESERVATION.id }), false);
++});
++
++test('reserved handoff may retain only the idle connection; manual and foreign owners remain blocked', async () => {
++  let blocked = null;
++  const h = await connected({ reservedOperationReason: () => blocked });
++  h.operation('Disconnect the idle GitHub session before ordinary saved code.');
++  assert.match(h.controller.openReason(), /Disconnect/); assert.equal(h.controller.open(), false);
++  assert.equal(h.controller.reservedOpenReason(), null); assert.equal(h.controller.openReserved(RESERVATION), true);
++  h.publish(h.owner('editing')); assert.equal(h.controller.review(), true);
++  h.publish(h.owner('reviewing')); const binding = currentVersionApplyBinding(h.state); assert.ok(binding);
++  blocked = 'The exact connection is now unconfirmed'; assert.equal(h.controller.canApply(binding), false);
++  assert.equal(h.controller.apply(binding), false); assert.equal(h.count('apply'), 0);
++  blocked = null; h.other('A different original owner is active'); assert.equal(h.controller.canApply(binding), false);
++});
++test('reserved handoff notification cannot dispatch Prepare or Apply after peer or context retirement', async () => {
++  for (const phase of ['prepare', 'apply']) {
++    let blocked = null;
++    const h = await connected({ reservedOperationReason: () => blocked });
++    assert.equal(h.controller.openReserved(RESERVATION), true); h.publish(h.owner('editing'));
++    if (phase === 'apply') { h.controller.review(); h.publish(h.owner('reviewing')); }
++    let once = false;
++    h.controller.subscribe(() => { const a = h.state.edit.attempt;
++      if (!once && (phase === 'prepare' ? a.prepareClaimed : a.applyClaimed)) { once = true; blocked = 'Original peer changed'; }
++    });
++    if (phase === 'prepare') h.controller.review();
++    else h.controller.apply(currentVersionApplyBinding(h.state));
++    assert.equal(h.count(phase), 0); assert.ok(h.state.edit.attempt.binding.reserved);
++    assert.deepEqual(h.controller.selectedEntry().values, VALUES); // kept, not saved
++  }
++});

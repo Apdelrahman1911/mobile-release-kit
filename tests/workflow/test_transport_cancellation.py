@@ -92,8 +92,8 @@ class TransportModel:
     def install(self, stack):
         original_init = workflow._TransportProcess.__init__
 
-        def capture(owner, guard):
-            original_init(owner, guard)
+        def capture(owner, guard, *, history):
+            original_init(owner, guard, history=history)
             self.case.assertIs(guard, self.case.guard)
             self.owners.append(owner)
 

@@ -1,0 +1,87 @@
+Mobile Release Kit - CPython hosted source-build change summary
+
+Scope: the hosted verification archive, not a product runtime or installer.
+This describes the fixed recipe; it is not itself a build-success record.
+For an actual archive reconcile controls/source-lock.json, work/receipts/,
+configuration/ and the exact original/projected files. Do not infer native
+qualification or a successful modified build from this description.
+
+Upstream origin
+---------------
+CPython 3.14.7, source revision 823f0323ee6ec1402088b73bce1a38473cac36dc.
+Source: https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz
+Archive: inputs/archives/cpython.archive
+SHA256: 3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81
+Profile: cpython-3.14.7-linux-x86_64-source-v1
+
+The fixed lock's upstream patch lists are empty for all four native sources.
+The separately supplied recipe/cpython_source_setup.local is written to the
+out-of-tree build's Modules/Setup.local. That selection, configure choices,
+generated files and projection are not represented as unchanged upstream
+configuration. The original CPython LICENSE, whole third-party document,
+HACL/KaRaMeL supplements and bundled Expat COPYING are supplied verbatim.
+No PBS interpreter, patch set or compiler provenance is attributed here.
+
+Configuration specified by the retained recipe
+----------------------------------------------
+* Ordinary GIL-enabled CPython, static libpython in the interpreter, no shared
+  Python extension modules, pymalloc rather than mimalloc, no LTO/PGO, and no
+  test-extension or ensurepip build. The fixed configuration requires 60
+  builtin names and disables 55 optional names.
+* pyexpat and resource are builtin. _hashlib and _elementtree remain disabled;
+  this is not a general-purpose build supporting every Python/CLI API.
+* pyexpat uses CPython's bundled Expat 2.8.2, --without-system-expat and the
+  internal archive, not a system -lexpat or PBS Expat 2.8.4 provider. Native
+  XML-consumer behavior and security qualification remain separate.
+* Build six bundled HACL hash/HMAC archives and the internal Expat archive.
+  Build static-PIC zlib 1.3.2 and libffi 3.4.8 for zlib and _ctypes.
+* Build OpenSSL 3.5.8 private libcrypto.so.3 and libssl.so.3 with linux-x86_64,
+  shared, no-module, no-dso, no-engine, no-autoload-config, no-legacy and
+  no-tests. These choices do not remove all explicit configuration APIs or
+  establish actual provider/loader behavior.
+* Preserve the interpreter's $ORIGIN/../lib and OpenSSL libraries' $ORIGIN
+  RUNPATH intentions. The retained configure/make argv and generated files
+  are authoritative for a particular build; an intended RUNPATH is not a
+  successful relocation or suitable-library-replacement demonstration.
+* Strict module checking and the real sysconfig/build-details generator work
+  are mandatory. No ignored error or failed required generator is a pass.
+* controls/github-ca.pem is unchanged certifi 2026.7.22 public CA data. This
+  archive supplies it as a control/source input, not as an installed trust
+  store or a claim that the certifi Python package is a runtime dependency.
+
+Direct native/stdlib projection
+-------------------------------
+* Copy the original interpreter to work/stage/python/bin/python3 and the two
+  original OpenSSL libraries to work/stage/python/lib without strip or relink.
+* Project selected authenticated Lib/**/*.py files directly from CPython
+  source. Keep the actual generated _sysconfigdata, _sysconfig_vars and
+  build-details.json unchanged, including their build-path information.
+* Do not run upstream altinstall, libinstall or compileall. Fixed build
+  arguments suppress bytecode; the projection includes no .pyc/.pyo or
+  __pycache__ directories.
+* Omit test, ensurepip, idlelib, turtledemo, venv, site-packages, tkinter and
+  turtle.py; omit non-.py stdlib data under the fixed rule. Record omissions
+  in work/receipts/source-projection.json. Unexpected native output must not
+  be pruned into acceptance.
+* Keep python/LICENSE.txt, the empty python/lib/python314.zip landmark and
+  python/lib/python3.14/lib-dynload/README.mrk. Development headers, archives,
+  build configuration and tools are not in the projected runtime tree;
+  source/configuration/object reconstruction material is separately retained
+  elsewhere in the verification archive.
+* This projection does not add application bootstraps, a core ZIP or a product
+  manifest. inputs/core-source/ includes bootstrap and toolkit SOURCE only.
+  Product-specific preparation, installation and signing remain out of scope.
+
+Recipient reconstruction and result interpretation
+-------------------------------------------------
+REBUILD.md maps the source archives, ordinary configure/make commands,
+generated inputs and personal-use projection. SOURCE-AVAILABILITY.txt maps
+the complete selected glibc source set and the scoped notices. The retained
+source alternative supports the stated LGPL-2.1 section 6(a)/(d) route;
+unclassified loose objects alone are not represented as a usable relink kit.
+
+In a completed archive, original records establish what its build actually
+did. This text does not supply an independent modified-build/relink/use
+demonstration, final per-file license reconciliation or legal/product/native
+acceptance. Preserve actual failures and report missing or inconsistent
+reconstruction material instead of weakening admission or inventing a pass.

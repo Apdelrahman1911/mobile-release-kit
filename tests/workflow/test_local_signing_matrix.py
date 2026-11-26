@@ -27,7 +27,7 @@ from . import local_signing_persistent_fixture as fixture
 from . import local_signing_semantic_catalog as semantic_catalog
 from . import local_signing_semantic_fixture as semantic_fixture
 from . import run_local_signing_matrix as runner
-from .workflow_harness import load_workflow
+from .workflow_harness import evaluate_condition, load_workflow
 
 
 def event(number):
@@ -945,25 +945,43 @@ class MatrixContractTests(unittest.TestCase):
             return {"name": name, "original": original, "manual": manual, "expected": expected,
                     "observation": self.inert_recovery(token, expected, manual)}
 
+        native_rows = {}
         for prefix_name in ("database", "lock", "transaction-stage"):
             source = self.catalog.SEMANTIC
             declared = source.case("N/native-prefix/" + prefix_name)
             cut = self.inert_cut(declared.selector, token)
             payload = source.NATIVE_PREFIX_CONTENT[prefix_name]
             size = len(payload) // 2
-            facts = {"device": 1, "inode": 2, "mode": 0o600, "size": size,
+            creating = prefix_name == "lock"
+            facts = {"device": 1, "inode": 2, "mode": 0o400 if creating else 0o600, "size": size,
                      "sha256": hashlib.sha256(payload[:size]).hexdigest()}
-            filename = declared.selector.operation.removeprefix("native-effect/write/")
+            filename = declared.selector.operation.rsplit("/", 1)[1]
             names = ["default-keychain", "list-keychains", "create-keychain"]
             if prefix_name == "transaction-stage": names.append("set-keychain-settings")
             cut["context"]["recoveryAttempt"] = False
             cut["originalCommand"] = {"command": names[-1], "ordinal": len(names),
                                       "keychain": source.KEYCHAIN + "/" + source.DB_NAME, "revisionBefore": 0}
-            cut["physicalWrite"] = {"name": filename, "bytes": size, "intendedBytes": len(payload),
-                "sha256": facts["sha256"], "intendedSha256": hashlib.sha256(payload).hexdigest(),
-                "facts": facts, "properPrefix": True, "revisionAtCut": int(prefix_name == "transaction-stage")}
-            cut["snapshot"] = {"session": token, "native": {
-                source.KEYCHAIN.removeprefix("<ROOT>/").replace("<TOKEN>", token) + "/" + filename: copy.deepcopy(facts)},
+            if creating:
+                cut["event"]["succeeded"] = True
+                cut["physicalCreate"] = {"name": filename, "bytes": 0, "sha256": facts["sha256"],
+                    "facts": facts, "createdBeforeDatabase": True, "revisionAtCut": 0}
+            else:
+                cut["physicalWrite"] = {"name": filename, "bytes": size, "intendedBytes": len(payload),
+                    "sha256": facts["sha256"], "intendedSha256": hashlib.sha256(payload).hexdigest(),
+                    "facts": facts, "properPrefix": True, "revisionAtCut": int(prefix_name == "transaction-stage")}
+            directory = source.KEYCHAIN.removeprefix("<ROOT>/").replace("<TOKEN>", token)
+            native = {directory + "/" + filename: copy.deepcopy(facts)}
+            if not creating:
+                native[directory + "/" + source.LOCK_NAME] = {"device": 1, "inode": 3, "mode": 0o400,
+                    "size": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+                if prefix_name == "transaction-stage":
+                    native[directory + "/" + source.DB_NAME] = {"device": 1, "inode": 4, "mode": 0o600,
+                        "size": len(source.NATIVE_PREFIX_CONTENT["database"]),
+                        "sha256": hashlib.sha256(source.NATIVE_PREFIX_CONTENT["database"]).hexdigest()}
+            baseline = {"default": "/fictional/original-db", "search": ["/fictional/original-db"]}
+            cut["snapshot"] = {"session": token, "native": native, "ownedRemaining": copy.deepcopy(native),
+                "original": copy.deepcopy(baseline), "preferences": copy.deepcopy(baseline),
+                "controls": {"state.json": {"value": {"native": {}, "preferences": copy.deepcopy(baseline)}}},
                 "nativeCalls": [{"command": name, "mutation": number >= 2, "recovery": False}
                                 for number, name in enumerate(names)]}
             main = recovery_step("semantic-main", source.REFUSED)
@@ -971,7 +989,9 @@ class MatrixContractTests(unittest.TestCase):
                 {"name": "seed", "original": {**original, "exit": 73}, "observation": cut}, main,
                 recovery_step("semantic-resolution", declared.resolution, "resolve")], [("negative", main)])
             self.assertEqual(contract.validate_layered_record(native_row, operating_system), native_row["caseId"])
-        for variant in ("missing-prefix", "empty-prefix", "changed-prefix", "changed-inode", "wrong-command", "false-refusal-idle"):
+            native_rows[prefix_name] = native_row
+        for variant in ("missing-prefix", "empty-prefix", "changed-prefix", "changed-inode", "wrong-command",
+                        "false-refusal-idle", "extra-create", "write-as-create"):
             with self.subTest(native_variant=variant):
                 changed = copy.deepcopy(native_row)  # Last positive is the distinct transaction-stage case.
                 steps = changed["evidence"][changed["observation"]["evidence"]]["steps"]
@@ -982,6 +1002,34 @@ class MatrixContractTests(unittest.TestCase):
                 elif variant == "changed-inode": cut["physicalWrite"]["facts"]["inode"] += 1
                 elif variant == "wrong-command": cut["originalCommand"]["ordinal"] = 3
                 elif variant == "false-refusal-idle": steps[1]["observation"]["idleAndRenewedAdmission"] = True
+                elif variant == "extra-create": cut["physicalCreate"] = {}
+                elif variant == "write-as-create": cut["physicalCreate"] = cut.pop("physicalWrite")
+                self.refresh_inert_semantic_digests(changed)
+                with self.assertRaises(ValueError): contract.validate_layered_record(changed, operating_system)
+        for variant in ("missing-create", "cross-shaped", "wrong-mode", "nonempty", "changed-inode",
+                        "database-present", "missing-oracle", "wrong-edge", "failed-effect", "missing-command", "wrong-command"):
+            with self.subTest(lock_creation_variant=variant):
+                changed = copy.deepcopy(native_rows["lock"])
+                steps = changed["evidence"][changed["observation"]["evidence"]]["steps"]
+                cut = steps[0]["observation"]
+                proof, snapshot = cut["physicalCreate"], cut["snapshot"]
+                relative = directory + "/" + source.LOCK_NAME
+                if variant == "missing-create": cut.pop("physicalCreate")
+                elif variant == "cross-shaped": cut["physicalWrite"] = cut.pop("physicalCreate")
+                elif variant in {"wrong-mode", "nonempty"}:
+                    if variant == "wrong-mode": proof["facts"]["mode"] = 0o600
+                    else:
+                        proof["bytes"] = proof["facts"]["size"] = 1
+                        proof["sha256"] = proof["facts"]["sha256"] = hashlib.sha256(b"x").hexdigest()
+                    snapshot["native"][relative] = copy.deepcopy(proof["facts"])
+                    snapshot["ownedRemaining"][relative] = copy.deepcopy(proof["facts"])
+                elif variant == "changed-inode": proof["facts"]["inode"] += 1
+                elif variant == "database-present": snapshot["native"][directory + "/" + source.DB_NAME] = copy.deepcopy(proof["facts"])
+                elif variant == "missing-oracle": snapshot["ownedRemaining"].pop(relative)
+                elif variant == "wrong-edge": cut["edge"] = "partial"
+                elif variant == "failed-effect": cut["event"]["succeeded"] = False
+                elif variant == "missing-command": cut.pop("originalCommand")
+                elif variant == "wrong-command": cut["originalCommand"]["ordinal"] = 4
                 self.refresh_inert_semantic_digests(changed)
                 with self.assertRaises(ValueError): contract.validate_layered_record(changed, operating_system)
 
@@ -1147,7 +1195,14 @@ class MatrixContractTests(unittest.TestCase):
         self.assertNotIn("env", job)
         self.assertNotIn("environment", job)
         self.assertNotIn("outputs", job)
-        self.assertEqual(job["if"], "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}")
+        self.assertEqual(job["needs"], "changes")
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in ("full", "signing-matrix-canary", "linux", "signing-adapter", "unknown"):
+                for core in ("true", "false"):
+                    context = {"github": {"event_name": event}, "inputs": {"verification_target": target},
+                               "needs": {"changes": {"outputs": {"core": core}}}}
+                    self.assertEqual(evaluate_condition(job["if"], context, success=True, cancelled=False),
+                                     core == "true" and (event != "workflow_dispatch" or target in {"full", "signing-matrix-canary"}))
         self.assertNotIn("continue-on-error", job)
         commands = [step["run"] for step in job["steps"] if "run" in step]
         self.assertEqual(len(commands), 3)  # Hosted guard, Linux provider preparation, fixed controller.
@@ -1160,10 +1215,11 @@ class MatrixContractTests(unittest.TestCase):
             self.assertNotIn("run_local_signing_matrix.py", command)
             self.assertNotIn("pip wheel", command)
             self.assertNotIn("Popen", command)
-        self.assertEqual(aggregate["needs"], ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"])
-        self.assertIn('"$MATRIX_RESULT" == success', aggregate["steps"][0]["run"])
-        self.assertIn('"$NATIVE_RESULT" == success', aggregate["steps"][0]["run"])
-        self.assertIn('"$NATIVE_SUPPORT_RESULT" == success', aggregate["steps"][0]["run"])
+        self.assertEqual(set(aggregate["needs"]), {"changes", "test-linux", "test-native-profiles",
+            "test-native-support", "test-signing-matrix", "test-signing-adapter"})
+        # CIWorkflowIsolationTests executes the actual aggregate for each target
+        # and failed prerequisite; here protect the separate artifact handoff.
+        self.assertEqual(aggregate["steps"][0]["env"]["MATRIX_RESULT"], "${{ needs.test-signing-matrix.result }}")
         uploads = [step for step in job["steps"] if "local-signing-matrix-proof-" in step.get("with", {}).get("name", "")]
         self.assertEqual(len(uploads), 1)
         self.assertNotIn("if", uploads[0])
@@ -1177,9 +1233,18 @@ class MatrixContractTests(unittest.TestCase):
         reducers = [step for step in aggregate["steps"] if "--reduce" in step.get("run", "")]
         self.assertEqual(len(reducers), 1)
         self.assertNotIn("--local-reduction", reducers[0]["run"])
+        self.assertNotIn("if", aggregate["steps"][0])
         for step in aggregate["steps"]:
-            self.assertNotIn("if", step)
             self.assertNotIn("continue-on-error", step)
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in ("full", "signing-matrix-canary", "linux", "signing-adapter"):
+                for core in ("true", "false"):
+                    context = {"github": {"event_name": event}, "inputs": {"verification_target": target},
+                               "needs": {"changes": {"outputs": {"core": core}}}}
+                    full = core == "true" and (event != "workflow_dispatch" or target == "full")
+                    for step in (downloads[0], reducers[0]):
+                        self.assertEqual(evaluate_condition(step.get("if"), context, success=True, cancelled=False), full)
+                        self.assertFalse(evaluate_condition(step.get("if"), context, success=False, cancelled=False))
 
 
 class MatrixPhaseAdmissionTests(unittest.TestCase):

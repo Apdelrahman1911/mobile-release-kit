@@ -1,0 +1,66 @@
+name: Fixed read-only P0 enrollment (never executes installed payloads)
+on:
+  push:
+    branches: [verify/desktop-macos-p0-readonly-enrollment]
+    paths:
+      - .github/workflows/desktop-macos-p0-readonly-enrollment.yml
+      - desktop/tools/macos_p0_readonly_enrollment.py
+      - desktop/tools/macos_p0_readonly_native.py
+      - desktop/macos-installed-inputs/p0-readonly-enrollment.json
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: mrk-p0-readonly-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  readonly-enrollment:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-p0-readonly-enrollment'
+    runs-on: macos-26-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Inspect both independently qualified DMGs using only host read-only tools
+        id: enrollment
+        timeout-minutes: 10
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REF" == refs/heads/verify/desktop-macos-p0-readonly-enrollment ]] || exit 1
+          terminal="$RUNNER_TEMP/mrk-p0-readonly-terminal-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          # One exclusive finite terminal, no native captures or raw errors.
+          set +e
+          python3 -I -S -B desktop/tools/macos_p0_readonly_native.py > "$terminal"
+          status=$?
+          set -e
+          [[ -f "$terminal" && ! -L "$terminal" && $(wc -c < "$terminal") -le 65536 ]] || exit 1
+          exit "$status"
+      - name: Retain only finite enrollment and exact public inventories after known original success
+        if: steps.enrollment.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mrk-p0-readonly-enrollment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-p0-readonly-${{ github.run_id }}-${{ github.run_attempt }}/public/*.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Retain bounded finite terminal even on original failure (not qualification)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mrk-p0-readonly-terminal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-p0-readonly-terminal-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0

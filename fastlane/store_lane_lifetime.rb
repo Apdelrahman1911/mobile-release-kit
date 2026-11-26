@@ -129,6 +129,98 @@ module MobileReleaseKit
         @ios_dispatch_active, @ios_dispatch_state = false, :unreserved
       end
 
+      # Exact original Runtime handoff only; direct Invocation construction,
+      # another Runtime or an environment-shaped Hash cannot install this arm.
+      def bind_local_execution!(runtime,context)
+        origin!
+        raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
+          runtime.local_admission_context.equal?(context) && @resources && @mode == "execute" &&
+          MobileReleaseKit.local_stage_lane(context.fetch(:payload).fetch("platform"),context.fetch(:payload).fetch("stage"))==@lane && !@local_execution
+        @local_execution=context
+      end
+      def bind_local_stage!(runtime,context)
+        origin!
+        raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
+          runtime.local_stage_admission_context.equal?(context) && @resources && !@local_stage &&
+          %w[prepare execute].include?(@mode) && %w[external-testing production-submit].include?(context.fetch(:stage)) &&
+          MobileReleaseKit.local_stage_lane(context.fetch(:platform),context.fetch(:stage))==@lane &&
+          (@mode=="prepare" ? @local_execution.nil? : @local_execution.equal?(context))
+        @local_stage=context
+      end
+      def local_stage_context?(context)
+        origin!
+        @local_stage.equal?(context) && !@local_stage.nil? && @resources && %w[prepare execute].include?(@mode)
+      end
+
+      # One original local stage guard, not a caller Boolean or CI retry.
+      def claim_local_create_guard!(runtime, context, guard)
+        require_upload_continuation!
+        raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
+          runtime.local_stage_execution_context!(context.fetch(:payload).fetch("stage")).equal?(context) &&
+          @local_execution.equal?(context) && @mode == "execute" &&
+          %w[ios_testflight_external ios_app_store_submit].include?(@lane) &&
+          defined?(AppleCreateRetry) && guard.instance_of?(AppleCreateRetry) && !@local_create_guard
+        @local_create_guard = guard
+      end
+      def local_create_guard?(guard, context)
+        origin!
+        @local_execution.equal?(context) && @local_create_guard.equal?(guard) &&
+          @mode == "execute" && %w[ios_testflight_external ios_app_store_submit].include?(@lane)
+      end
+
+      def local_ios?
+        origin!
+        @local_execution && @local_execution.fetch(:payload).fetch("platform")=="ios"
+      end
+      def local_ios_context?(context)
+        origin!
+        local_ios? && @local_execution.equal?(context) && @resources && @mode=="execute" && @lane=="ios_testflight_internal"
+      end
+      def local_inflight_adapter?(adapter)
+        origin!
+        local_ios? && @ios_dispatch_active && @ios_dispatch_state==:ready && adapter.equal?(@ios_dispatch_adapter)
+      end
+      def local_altool_command!(runtime,api_key:,source:)
+        origin!;require_upload_continuation!
+        raise LifetimeError unless local_ios? && runtime.equal?(StoreLaneRuntime.current_runtime!) &&
+          runtime.invocation.equal?(self) && !@local_spawn && @ios_dispatch_command.nil?
+        tools=runtime.local_ios_transport!;runtime.local_ios_key!(api_key)
+        @resources.local_altool_source!(source,api_key.fetch(:key_dir))
+        # Invoke the documented Xcode tool name, not the physical shim as argv[0].
+        # Both xcrun and the resolved physical tool remain original inventory cells.
+        argv=['/usr/bin/xcrun','--no-cache','--run','altool','--upload-app','--apiKey',api_key.fetch(:key_id),'--apiIssuer',api_key.fetch(:issuer_id),
+          '-t','ios','-f',source,'-k','100000'].map { |part| part.dup.freeze }.freeze
+        env={'API_PRIVATE_KEYS_DIR'=>api_key.fetch(:key_dir).dup.freeze,
+          'DEVELOPER_DIR'=>tools.fetch('selection').fetch('developerDirectory'),
+          'PATH'=>'/usr/bin:/bin:/usr/sbin:/sbin','LANG'=>'C','LC_ALL'=>'C',
+          'SDKROOT'=>nil,'TOOLCHAINS'=>nil}.freeze
+        # The opaque string satisfies the pinned parser interface, but only
+        # this original adapter can consume the separately retained direct argv.
+        require 'shellwords'
+        @local_spawn=[env,argv].freeze
+        @local_command=Shellwords.join(argv).freeze
+      rescue Exception=>error
+        mark_unknown!(error);raise
+      end
+
+      def local_current_validation_request(adapter:)
+        require_upload_continuation!
+        raise LifetimeError unless @local_execution && @local_execution.fetch(:authority).fetch("purpose") == "execute" &&
+          StoreLaneRuntime.current_runtime!.local_execution_context.equal?(@local_execution) && @nested.nil? &&
+          @run_deadline_ns && NativeProcessSpawn.monotonic_ns < @run_deadline_ns-NESTED_CLEANUP_NS
+        key,tools = if @lane == "android_internal_upload" && defined?(AndroidUploadValidation) && adapter.equal?(AndroidUploadValidation)
+                      ["toolchain",@local_execution.fetch(:toolchain)]
+                    elsif @lane == "ios_testflight_internal" && defined?(IosUploadValidation) && adapter.equal?(IosUploadValidation)
+                      ["signingTools",@local_execution.fetch(:signing_tools)]
+                    else
+                      raise LifetimeError
+                    end
+        raw=MobileReleaseKit.canonical_json({"schemaVersion"=>1,key=>tools,
+          "runDeadlineNs"=>(@run_deadline_ns-NESTED_CLEANUP_NS).to_s,"hardDeadlineNs"=>@run_deadline_ns.to_s})
+        raise LifetimeError unless raw.bytesize <= 16*1024
+        raw.freeze
+      end
+
       def origin!
         # A forked/copied reference cannot operate on the parent's invocation.
         raise LifetimeError unless @pid == Process.pid && @thread.equal?(Thread.current)
@@ -189,10 +281,25 @@ module MobileReleaseKit
         origin!
         require_upload_continuation!
         expected = NESTED_ROLES[role]
-        unless expected && @lane == expected[0] && @mode == "execute" &&
+        unless expected && @lane == expected[0] && @mode == "execute" && argv.instance_of?(Array) &&
                MobileReleaseKit.const_defined?(expected[1], false) && adapter.equal?(MobileReleaseKit.const_get(expected[1], false)) &&
                !@nested_launches_closed && @nested.nil? && @run_deadline_ns &&
                monotonic_ns < @run_deadline_ns - NESTED_CLEANUP_NS
+          mark_unknown!(LifetimeError.new)
+          raise_unknown!
+        end
+        # A local registered-tools nomination comes only from this same admitted
+        # Invocation. Shape/argv DATA alone cannot grant a local upload.
+        if @local_execution
+          raw = local_current_validation_request(adapter: adapter)
+          unless intent_sha256 == @local_execution.fetch(:digest) &&
+                 argv.count("--intent-sha256") == 1 && argv[argv.index("--intent-sha256") + 1] == intent_sha256 &&
+                 argv.count("--local-operation-intent") == 1 && !argv.include?("--operation-intent") &&
+                 argv.count("--local-registered-tools-json") == 1 && argv[-2, 2] == ["--local-registered-tools-json", raw]
+            mark_unknown!(LifetimeError.new)
+            raise_unknown!
+          end
+        elsif argv.include?("--local-registered-tools-json") || argv.include?("--local-operation-intent")
           mark_unknown!(LifetimeError.new)
           raise_unknown!
         end
@@ -224,6 +331,9 @@ module MobileReleaseKit
                !command.empty? && !command.include?("\0") && artifact.instance_of?(String)
           mark_unknown!(LifetimeError.new)
           raise_unknown!
+        end
+        if local_ios? && (!@local_spawn || !command.equal?(@local_command))
+          mark_unknown!(LifetimeError.new);raise_unknown!
         end
         @ios_dispatch_command, @ios_dispatch_artifact = command.dup.freeze, artifact.dup.freeze
         @ios_dispatch_active, @ios_dispatch_state = true, :ready
@@ -373,8 +483,27 @@ module MobileReleaseKit
           raise_unknown!
         end
         check_ios_dispatch_current!
+        if local_ios?
+          raise LifetimeError unless @local_spawn && command==@local_command
+          runtime=StoreLaneRuntime.current_runtime!;runtime.send(:local_ios_inflight!,self,adapter)
+          @resources.local_altool_source!(@local_spawn[1][12],@local_spawn[0].fetch('API_PRIVATE_KEYS_DIR'))
+        end
         @ios_dispatch_state = :attempted
         true
+      end
+
+      def local_native_spawn_request(adapter,command)
+        origin!
+        return nil unless local_ios?
+        raise LifetimeError unless @ios_dispatch_active && @ios_dispatch_state==:attempted &&
+          adapter.equal?(@ios_dispatch_adapter) && command==@local_command && @local_spawn
+        @local_spawn
+      end
+      def post_local_native_dispatch(adapter)
+        origin!
+        return true unless local_ios?
+        raise LifetimeError unless adapter.equal?(@ios_dispatch_adapter) && @ios_dispatch_state==:attempted
+        @resources.check_local_transport!
       end
 
       def original_ios_dispatch_refusal?(adapter, error)
@@ -688,9 +817,14 @@ module MobileReleaseKit
               create_pair(0, @stdin_read, @stdin_write)
               create_pair(1, @stdout_read, @stdout_write)
               @invocation.send(:require_current_ios_native_dispatch!, self, command)
+              request=@invocation.send(:local_native_spawn_request,self,command)
               @creation = :attempted
-              @pid = Process.spawn(command, in: @stdin_read.io, out: @stdout_write.io,
-                                   err: @stdout_write.io, close_others: true)
+              @pid = if request
+                       Process.spawn(request[0],*request[1],in:@stdin_read.io,out:@stdout_write.io,err:@stdout_write.io,close_others:true)
+                     else
+                       Process.spawn(command, in: @stdin_read.io, out: @stdout_write.io,
+                                     err: @stdout_write.io, close_others: true)
+                     end
               raise LifetimeError unless @pid.instance_of?(Integer) && @pid.positive?
               @creation = :returned
               # No setsid/pgroup option: the command stays in the original
@@ -705,6 +839,7 @@ module MobileReleaseKit
               @stdout_read.close_once
               @invocation.raise_unknown! if @invocation.unknown?
               wait_once(nonblocking: false)
+              @invocation.send(:post_local_native_dispatch,self)
               @body_returned = true
             end
           rescue Exception => error # rubocop:disable Lint/RescueException

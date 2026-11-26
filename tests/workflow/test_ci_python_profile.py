@@ -146,7 +146,7 @@ class _Profile:
         self.work = self.path("/synthetic/session/work")
         self.checks, self.source = self.work / "checks", self.path("/synthetic/source")
         self.limits = {"FSIZE": ((1 << 32) + 1024**2,) * 2, "CORE": (0, 0),
-                       "NOFILE": (1024, 1024), "NPROC": (256, 256), "CPU": (300, 300),
+                       "NOFILE": (1024, 1024), "NPROC": (256, 256), "CPU": (450, 450),
                        "AS": (4 * 1024**3,) * 2}
         self.mounts = [{"path": "/", "device": "0:1", "root": "/", "options": "rw",
                         "filesystem": "tmpfs", "super": "rw"},
@@ -314,12 +314,15 @@ def _pure(module, fixture, **overrides):
         environ={"MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1"},
         umask=lambda value: fixture.event("umask", "fixed", value),
         chdir=lambda value: fixture.event("chdir", str(value), None))
-    limits = SimpleNamespace(**{"RLIMIT_" + name: name for name in fixture.limits}, getrlimit=fixture.getrlimit)
+    limits = SimpleNamespace(**{"RLIMIT_" + name: name for name in fixture.limits}, getrlimit=fixture.getrlimit,
+                             RUSAGE_SELF=0, getrusage=lambda _who: SimpleNamespace(ru_maxrss=4567))
     framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
         TextTestRunner=unittest.TextTestRunner, TestLoader=Mock(side_effect=AssertionError("unexpected discovery")))
     values = {"os": system, "resource": limits, "Path": fixture.path,
-        "time": SimpleNamespace(monotonic=lambda: fixture.now),
-        "sys": SimpleNamespace(platform=fixture.platform, stdout=fixture.stdout, stderr=fixture.stderr,
+        "time": SimpleNamespace(monotonic=lambda: fixture.now,
+                                monotonic_ns=lambda: round(fixture.now * 1_000_000_000),
+                                process_time_ns=lambda: 123_000_000),
+        "sys": SimpleNamespace(platform=fixture.platform, stdout=fixture.stdout, stderr=fixture.stderr, path=[],
             exc_info=sys.exc_info, flags=SimpleNamespace(isolated=1, dont_write_bytecode=1)),
         "subprocess": SimpleNamespace(), "selectors": SimpleNamespace(), "shutil": SimpleNamespace(),
         "importlib": SimpleNamespace(), "unittest": framework,
@@ -439,7 +442,7 @@ class CIPythonProfileTests(unittest.TestCase):
                 elif case == "work-alias": fixture.aliases[str(fixture.checks)] = "/synthetic/other/checks"
                 elif case == "old-fsize": fixture.limits["FSIZE"] = (512 * 1024**2,) * 2
                 elif case == "soft-fsize": fixture.limits["FSIZE"] = (512 * 1024**2, (1 << 32) + 1024**2)
-                elif case == "cpu": fixture.limits["CPU"] = (301, 301)
+                elif case == "cpu": fixture.limits["CPU"] = (300, 300)
                 elif case == "address-space": fixture.limits["AS"] = (5 * 1024**3,) * 2
                 elif case == "userns-enabled": fixture.userns = b"1\n"
                 elif case == "userns-malformed": fixture.userns = b"0\nprivate\n"
@@ -604,6 +607,8 @@ class CIPythonProfileTests(unittest.TestCase):
                 def discover(path, *, pattern):
                     self.assertEqual(path, str(fixture.source / "tests"))
                     self.assertEqual(discovered[:2], ["inventory", "delegation"])
+                    import_paths = [str(fixture.source / "tests" / name) for name in ("unit", "workflow", "desktop")]
+                    self.assertEqual(self.module.sys.path, import_paths if selection == "full" else [])
                     discovered.append(pattern)
                     # Each selected wheel pattern is still visited once, without
                     # loading any project module; the finite inert suite is supplied once.
@@ -616,6 +621,7 @@ class CIPythonProfileTests(unittest.TestCase):
                     framework.TestLoader = lambda: SimpleNamespace(errors=[], discover=discover)
                     details = self.module.run_python_tests(fixture.source, selection, 10.0, observations,
                                                           work_root=fixture.checks)
+                    self.assertEqual(self.module.sys.path, [])
                 self.assertEqual(events, ["first", "second", "third"])
                 self.assertEqual(observations, [{"id": identifier, "outcome": "ok"} for identifier in expected])
                 self.assertEqual(details["failure_callbacks"], [])
@@ -642,6 +648,7 @@ class CIPythonProfileTests(unittest.TestCase):
             framework.TestLoader = lambda: loader
             status = self.module.main(["--check", "python-full", "--source-root", str(fixture.source),
                                        "--work-root", str(fixture.checks), "--deadline", "10.0"])
+            self.assertEqual(self.module.sys.path, [])
         self.assertEqual(status, 1)
         self.assertEqual(events, ["first", "second"])
         stdout = fixture.stdout.getvalue()
@@ -654,6 +661,7 @@ class CIPythonProfileTests(unittest.TestCase):
         callback = {"id": expected[1], "outcome": "error", "category": "os-error", "errno": errno.EFBIG}
         self.assertEqual(report["details"]["failure_callbacks"], [callback])
         self.assertEqual(report["details"]["storage_profile"], _profile_details())
+        self.assertEqual(fixture.stderr.getvalue().count("MRK_PYTHON_ELAPSED_MS=0 CPU_MS=123 RSS_KIB=4567\n"), 2)
         self.assertIn("PRIVATE_SUBTEST_PARAMETER", fixture.stderr.getvalue())
         self.assertNotIn("PRIVATE_", stdout)
         self.assertEqual(fixture.fds, {})

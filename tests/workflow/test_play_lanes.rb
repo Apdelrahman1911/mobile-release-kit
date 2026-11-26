@@ -155,12 +155,17 @@ class PlayReleaseLanesTest < Minitest::Test
     ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"] = "mapping.txt" if mapping
     lane(@lane_name)
     precondition = JSON.parse(File.read(File.join(@root, "precondition.json")))
-    @payload = {
+    # Keep the complete CI envelope; the scenario overrides below remain
+    # inert lane DATA, not a Python/native artifact qualification.
+    fixture_stage = { "candidate" => "candidate", "external-testing" => "external", "production-submit" => "production" }.fetch(stage)
+    envelope = JSON.parse(File.read(File.expand_path("../fixtures/intent-#{fixture_stage}-valid.json", __dir__)))
+    envelope.delete("integrity")
+    @payload = envelope.merge({
       "schemaVersion" => 1, "documentType" => "store-operation-intent", "stage" => stage, "platform" => "android",
       "storePrecondition" => precondition, "authorizedBy" => @authority.dup,
       "artifacts" => [{ "logicalName" => "android-aab", "fileName" => "candidate.aab", "size" => @aab.bytesize,
                         "sha256" => Digest::SHA256.hexdigest(@aab) }],
-    }
+    })
     if mapping
       @payload["artifacts"] << { "logicalName" => "android-mapping", "fileName" => "mapping.txt",
                                  "size" => File.size(File.join(@root, "mapping.txt")), "sha256" => Digest::SHA256.file(File.join(@root, "mapping.txt")).hexdigest }
@@ -200,6 +205,240 @@ class PlayReleaseLanesTest < Minitest::Test
     destination = snapshot.fetch("destinationTrack")
     @service.state.fetch("tracks")[destination] = @service.clone(snapshot.fetch("destinationTargetState").reject { |key, _value| key == "canonicalization" })
     @service.add_bundle(@aab) unless @service.state.fetch("bundles").any? { |bundle| bundle["versionCode"] == 200 }
+  end
+
+  def local_execution_context
+    # Real existing lane/provider fixture. Only the admitted Runtime transport
+    # is supplied here; its exact same-Invocation gate has a separate test.
+    value=JSON.parse(File.binread(File.expand_path("../fixtures/local-intent-candidate-valid.json",__dir__)))
+    value.delete("integrity")
+    value["storePrecondition"]=@payload.fetch("storePrecondition")
+    value["application"]={"id"=>"test.example.release"}
+    value["version"]={"marketing"=>"2.0.0","build"=>200}
+    value["confirmation"]="candidate:android:2.0.0:200"
+    value["preparedBy"]["confirmationSha256"]=Digest::SHA256.hexdigest(value.fetch("confirmation"))
+    value["artifacts"][0].merge!("fileName"=>"candidate.aab","size"=>@aab.bytesize,"sha256"=>Digest::SHA256.hexdigest(@aab))
+    @payload=value;save_intent
+    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,"intent.json")),expected_sha256:@intent_digest)
+    authority=payload.fetch("preparedBy").merge("purpose"=>"execute","authorizationId"=>"55555555-5555-4555-8555-555555555555","intentSha256"=>digest)
+    {payload:payload,digest:digest,authority:authority}
+  end
+
+  def test_local_candidate_uses_same_supply_engine_and_distinct_receipt_without_ci_authority
+    prepare("candidate");context=local_execution_context
+    ENV.delete("MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON")
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) { execute }
+    assert_equal "local-store-execution-receipt",receipt.fetch("documentType")
+    assert_equal 1,receipt.fetch("schemaVersion");assert_equal "local-desktop",receipt.fetch("origin")
+    assert_equal context.fetch(:authority),receipt.fetch("executedBy")
+    assert_equal context.fetch(:payload).fetch("preparedBy"),receipt.fetch("preparedBy")
+    refute receipt.key?("authorizedBy");assert_equal "accepted",receipt.fetch("result")
+    assert_equal [File.join(@root,"candidate.aab")],@validation_calls
+    assert_equal 1,@service.commits.length
+    assert_equal 0,@service.commits.first.fetch(:retries)
+    assert_equal @unrelated,@service.state.fetch("tracks").fetch("internal").fetch("releases").reject { |r| r["versionCodes"]==["200"] }
+  end
+
+  def test_local_first_send_does_not_adopt_an_already_appeared_bundle_as_prior_execution
+    prepare("candidate");context=local_execution_context
+    @validation_hook=lambda do |_|
+      bundle=@service.add_bundle(@aab)
+      @service.edits.each_value { |state| state.fetch("bundles") << @service.clone(bundle) }
+    end
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+      assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+    end
+    assert_empty @service.mutations;assert_no_receipt
+  end
+
+  def commit_target_as(user, later_change: false)
+    original = @service.user
+    @service.user = user
+    api = @service.service
+    package = "test.example.release"
+    edit = api.insert_edit(package, Google::Apis::AndroidpublisherV3::AppEdit.new)
+    unless @service.state.fetch("bundles").any? { |b| b["versionCode"] == 200 }
+      api.upload_edit_bundle(package, edit.id, upload_source: File.join(@root, "candidate.aab"), content_type: "application/octet-stream")
+    end
+    target = @service.clone(snapshot.fetch("destinationTargetState").reject { |key, _| key == "canonicalization" })
+    target.fetch("releases").find { |r| r["versionCodes"] == ["90"] }["name"] = "Later independent actor" if later_change
+    api.update_edit_track(package, edit.id, "internal", Google::Apis::AndroidpublisherV3::Track.from_json(JSON.generate(target)))
+    options = Google::Apis::RequestOptions.new
+    options.retries = 0
+    api.commit_edit(package, edit.id, options: options)
+    @service.clone(@service.state)
+  ensure
+    @service.user = original
+  end
+
+  def test_local_delayed_initial_or_mutation_edit_rechecks_target_before_any_send
+    [1, 2].each do |delayed_insert|
+      reset_case
+      prepare("candidate")
+      context = local_execution_context
+      start = @service.requests.length
+      creates = 0
+      committed = nil
+      @service.before_request = lambda do |row|
+        next unless row[:user] == :original && row[:method] == :post && row[:path].end_with?("/edits")
+        creates += 1
+        next unless creates == delayed_insert
+        @service.before_request = nil
+        # The old process has not received this edit yet. A different principal
+        # commits target before its insert actually executes at the SDK boundary.
+        committed = commit_target_as(:other)
+      end
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context, context) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      end
+      assert_equal delayed_insert, creates
+      assert_equal delayed_insert, @service.requests.drop(start).count { |r| r[:user] == :original && r[:method] == :post && r[:path].end_with?("/edits") }
+      assert_equal committed, @service.state
+      assert_empty @service.mutations.select { |r| r[:user] == :original }
+      assert_empty @validation_calls
+      assert_no_receipt
+    end
+  end
+
+  def test_local_invalidated_old_commit_cannot_apply_after_cross_user_target_readback
+    prepare("candidate")
+    context = local_execution_context
+    start = @service.requests.length
+    committed = nil
+    @service.before_request = lambda do |row|
+      next unless row[:user] == :original && row[:path].end_with?(":commit")
+      @service.before_request = nil
+      old_id = row.fetch(:params).fetch("editId")
+      assert @service.edits.key?(old_id)
+      committed = commit_target_as(:other)
+      refute @service.edits.key?(old_id), "a different principal's commit invalidates old edits too"
+      begin
+        @service.user = :recovery
+        assert_equal :target, @fastfile.classify_play_intent_state("candidate", snapshot).fetch(:phase)
+      ensure
+        @service.user = :original
+      end
+    end
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context, context) do
+      assert_raises(Google::Apis::ClientError) { execute }
+    end
+    assert_equal committed, @service.state
+    old_commits = @service.commits.select { |r| r[:user] == :original }
+    assert_equal 1, old_commits.length
+    assert_equal 0, old_commits.first.fetch(:retries)
+    assert_equal 2, @service.requests.drop(start).count { |r| r[:user] == :original && r[:method] == :post && r[:path].end_with?("/edits") }
+    assert_equal 1, @validation_calls.length
+    assert_no_receipt
+  end
+
+  def test_local_lost_commit_reply_only_reads_and_never_overwrites_a_later_commit
+    [false, true].each do |later_change|
+      reset_case
+      prepare("candidate")
+      context = local_execution_context
+      start = @service.requests.length
+      committed = nil
+      @service.after_request = lambda do |row|
+        next unless row[:user] == :original && row[:path].end_with?(":commit")
+        @service.after_request = nil
+        begin
+          @service.user = :recovery
+          assert_equal :target, @fastfile.classify_play_intent_state("candidate", snapshot).fetch(:phase)
+        ensure
+          @service.user = :original
+        end
+        committed = later_change ? commit_target_as(:later, later_change: true) : @service.clone(@service.state)
+        raise Google::Apis::TransmissionError, "synthetic lost reply after actual commit"
+      end
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context, context) do
+        if later_change
+          assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+          assert_no_receipt
+        else
+          execute
+          assert_equal "reconciled", receipt.fetch("result")
+        end
+      end
+      assert_equal committed, @service.state
+      old_commits = @service.commits.select { |r| r[:user] == :original }
+      assert_equal 1, old_commits.length
+      assert_equal 0, old_commits.first.fetch(:retries)
+      assert_equal(later_change ? 3 : 4, @service.requests.drop(start).count { |r| r[:user] == :original && r[:method] == :post && r[:path].end_with?("/edits") })
+      assert_equal 1, @service.mutations.count { |r| r[:user] == :original && r[:path].end_with?("/bundles") }
+      assert_equal 1, @validation_calls.length
+    end
+  end
+
+  def local_reconcile_context
+    context=local_execution_context
+    context[:authority]=context.fetch(:authority).merge("purpose"=>"recover")
+    MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(context.fetch(:authority)),
+      intent_content:File.binread(File.join(@root,"intent.json")),expected_intent_sha256:context.fetch(:digest),purpose:"recover")
+    # These are dangerous ordinary recovery/mutation callsites, not provider
+    # fakes. Their invocation would fail this actual Fastfile route immediately.
+    %i[play_prior_execution? require_play_recovery_dispatch! replay_recovered_play_mapping!
+       guarded_play_upload validate_current_android_upload!].each do |name|
+      @fastfile.define_singleton_method(name) { |*_, **_| raise "Reconcile reached forbidden #{name}" }
+    end
+    ENV.delete("MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON")
+    context
+  end
+
+  def test_local_reconcile_observes_full_target_without_replaying_mapping_or_old_journal
+    prepare("candidate",mapping:true);context=local_reconcile_context;target_state!
+    before=@service.clone(@service.state);start=@service.requests.length
+    journal=File.join(@root,"journal.json");File.binwrite(journal,"old unknown attempt is not recovery authority")
+    old=[File.stat(journal).ino,File.binread(journal)]
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) { execute }
+    assert_equal before,@service.state
+    assert_empty @service.mutations;assert_empty @service.commits;assert_empty @validation_calls;assert_empty @service.edits
+    calls=@service.requests.drop(start)
+    assert_equal 1,calls.count { |r| r[:method]==:post && r[:path].end_with?("/edits") }
+    assert_equal 1,calls.count { |r| r[:method]==:delete }
+    assert_equal old,[File.stat(journal).ino,File.binread(journal)]
+    assert_equal "local-store-execution-receipt",receipt.fetch("documentType")
+    assert_equal context.fetch(:authority),receipt.fetch("executedBy")
+    assert_equal "recover",receipt.dig("executedBy","purpose")
+    assert_equal "reconciled",receipt.fetch("result")
+    assert_equal "recovery",receipt.dig("storeState","mode")
+    refute receipt.fetch("storeState").key?("mutationEditId")
+    refute receipt.key?("authorizedBy")
+  end
+
+  def test_local_reconcile_before_bundle_only_and_conflict_never_mutate_or_accept_receipt
+    %i[before bundle_only foreign_bundle unrelated_track].each do |state|
+      reset_case;prepare("candidate",mapping:true);context=local_reconcile_context
+      @service.add_bundle(@aab) if state==:bundle_only
+      if state==:foreign_bundle
+        target_state!;@service.state.fetch("bundles").find { |b| b["versionCode"]==200 }["sha256"]="e"*64
+      elsif state==:unrelated_track
+        target_state!;@service.state.fetch("tracks").fetch("internal").fetch("releases").first["name"]="another operator"
+      end
+      before=@service.clone(@service.state);start=@service.requests.length
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+        assert_raises(FastlaneCore::Interface::FastlaneError,state.to_s) { execute }
+      end
+      assert_equal before,@service.state
+      assert_empty @service.mutations;assert_empty @service.commits;assert_empty @validation_calls
+      assert_empty @service.edits;assert_no_receipt
+      assert_equal 1,@service.requests.drop(start).count { |r| r[:method]==:delete }
+    end
+  end
+
+  def test_local_reconcile_edit_delete_failure_or_lost_return_never_accepts_receipt
+    %i[before_request after_request].each do |hook|
+      reset_case;prepare("candidate");context=local_reconcile_context;target_state!
+      before=@service.clone(@service.state);start=@service.requests.length
+      @service.public_send("#{hook}=",lambda { |row| raise IOError,"synthetic uncertain delete" if row[:method]==:delete })
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+        assert_raises(IOError) { execute }
+      end
+      assert_equal before,@service.state
+      assert_empty @service.mutations;assert_empty @service.commits;assert_empty @validation_calls;assert_no_receipt
+      calls=@service.requests.drop(start)
+      assert_equal 1,calls.count { |r| r[:method]==:post && r[:path].end_with?("/edits") }
+      assert_equal 1,calls.count { |r| r[:method]==:delete }
+    end
   end
 
   def test_candidate_prepare_is_read_only_and_real_supply_preserves_all_track_records
@@ -304,7 +543,7 @@ class PlayReleaseLanesTest < Minitest::Test
           @service.before_request = ->(row) { raise Google::Apis::RequestTimeOutError, "final reread unavailable" if row[:method] == :get }
         end
       end
-      assert_raises(KeyError, Google::Apis::RequestTimeOutError) { execute }
+      assert_raises(Google::Apis::ClientError, Google::Apis::RequestTimeOutError) { execute }
       assert_empty @service.mutations
       assert_no_receipt
       # Preparation + execution classification + one mutation edit, never a
@@ -1100,6 +1339,74 @@ class PlayReleaseLanesTest < Minitest::Test
     assert_equal "Untouched French", @service.state.fetch("listings").fetch("fr-FR").fetch("title")
     refute @service.mutations.any? { |entry| entry.fetch(:path).include?("/listings/fr-FR") }
   end
+  def with_local_stage_lane(context,metadata_root,execute:)
+    # Native/Python tree creation is modeled here. Real original Runtime/tree
+    # admission/close gates run in test_local_store_execution_runtime; actual
+    # pinned Supply readers and guarded lane mutations run here.
+    runtime=Object.new;runtime.define_singleton_method(:local_metadata_root!) { metadata_root }
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_stage_context,context) do
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,execute ? context : nil) do
+        MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) { yield }
+      end
+    end
+  end
+  def local_stage_execution_context(stage)
+    value=JSON.parse(File.binread(File.expand_path("../fixtures/local-android-#{stage}-intent.json",__dir__)))
+    value.delete('integrity');value['storePrecondition']=@payload.fetch('storePrecondition')
+    value['application']={'id'=>'test.example.release'};value['version']={'marketing'=>'2.0.0','build'=>200}
+    value['confirmation']="#{stage}:android:2.0.0:200"
+    value['preparedBy']['confirmationSha256']=Digest::SHA256.hexdigest(value.fetch('confirmation'))
+    aabs=value.fetch('artifacts').select { |row| row['logicalName']=='android-aab' }
+    assert_equal 1,aabs.length
+    aabs.first.merge!('fileName'=>'candidate.aab','size'=>@aab.bytesize,'sha256'=>Digest::SHA256.hexdigest(@aab))
+    bundles=value.fetch('storePrecondition').fetch('snapshot').fetch('bundles').select { |row| row['versionCode']==200 }
+    assert_equal [aabs.first.fetch('sha256')],bundles.map { |row| row.fetch('sha256') }
+    @payload=value;save_intent
+    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,'intent.json')),
+      expected_sha256:@intent_digest,platform:'android',stage:stage)
+    authority=payload.fetch('preparedBy').merge('purpose'=>'execute','authorizationId'=>'55555555-5555-4555-8555-555555555555','intentSha256'=>digest)
+    {payload:payload,digest:digest,authority:authority,stage:stage,platform:'android'}
+  end
+  def test_local_later_lanes_use_snapshot_metadata_and_promote_original_without_upload
+    %w[external-testing production-submit].each do |stage|
+      reset_case
+      snapshot_root=File.join(@root,'metadata-tree');FileUtils.cp_r(File.join(@root,'release/store'),snapshot_root)
+      File.write(File.join(@root,'release/store/android/en-US/title.txt'),'ambient unselected bytes')
+      prepare_context={stage:stage,platform:'android'}
+      with_local_stage_lane(prepare_context,snapshot_root,execute:false) { prepare(stage) }
+      context=local_stage_execution_context(stage)
+      original_bundles=@service.clone(@service.state.fetch('bundles'))
+      ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+      with_local_stage_lane(context,snapshot_root,execute:true) { execute }
+      assert_equal 'accepted',receipt.fetch('result');assert_equal stage,receipt.fetch('stage')
+      assert_equal context.fetch(:payload).fetch('candidateOperationId'),receipt.fetch('candidateOperationId')
+      assert_equal context.fetch(:authority),receipt.fetch('executedBy')
+      assert_empty @validation_calls;assert_equal original_bundles,@service.state.fetch('bundles')
+      assert_equal 1,@service.commits.length;assert_equal 0,@service.commits.first.fetch(:retries)
+      if stage=='production-submit'
+        assert_equal 'Approved title',@service.state.fetch('listings').fetch('en-US').fetch('title')
+        assert_equal 'Untouched French',@service.state.fetch('listings').fetch('fr-FR').fetch('title')
+        assert_equal 'draft',receipt.fetch('releaseStatus')
+      end
+    end
+  end
+  def test_local_later_existing_target_refuses_without_recovery_or_second_commit
+    %w[external-testing production-submit].each do |stage|
+      reset_case;prepare(stage);context=local_stage_execution_context(stage);target_state!
+      before=@service.clone(@service.state);count=@service.commits.length
+      with_local_stage_lane(context,File.join(@root,'release/store'),execute:true) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      end
+      assert_no_receipt;assert_equal count,@service.commits.length;assert_equal before,@service.state
+      assert_empty @validation_calls
+      ENV['MOBILE_RELEASE_STORE_MODE']='prepare'
+      with_local_stage_lane({stage:stage,platform:'android'},File.join(@root,'release/store'),execute:false) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { lane(@lane_name) }
+      end
+      assert_equal count,@service.commits.length;assert_equal before,@service.state
+    end
+  end
+
 end
 
 class BoundedPlayImageTest < Minitest::Test
@@ -1167,4 +1474,5 @@ class BoundedPlayImageTest < Minitest::Test
     assert_raises(FastlaneCore::Interface::FastlaneError) { verify(redirects) }
     assert_equal 4, @connections.length
   end
+
 end

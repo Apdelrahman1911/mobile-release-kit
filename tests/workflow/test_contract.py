@@ -42,6 +42,14 @@ CALLERS = {
 
 MUTATING = ("candidate", "external-testing", "production-submit")
 PROMOTION_ONLY = ("external-testing", "production-submit")
+VERSION_ALLOCATION_SECRETS = {
+    "version_allocation_app_id": "${{ secrets.MOBILE_RELEASE_VERSION_APP_ID }}",
+    "version_allocation_app_private_key": "${{ secrets.MOBILE_RELEASE_VERSION_APP_PRIVATE_KEY }}",
+}
+PLAY_RECOVERY_SECRETS = {
+    "MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64",
+    "MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64",
+}
 ENVIRONMENT_SECRETS = {
     "candidate": {
         "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64",
@@ -54,6 +62,7 @@ ENVIRONMENT_SECRETS = {
         "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
         "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
         "MOBILE_RELEASE_PROJECT_READ_TOKEN",
+        *PLAY_RECOVERY_SECRETS,
     },
     "external-testing": {
         "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
@@ -161,7 +170,7 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertNotRegex(gate, r"(?m)^\s+if:")
                 self.assertIn("permissions: {}", gate)
                 self.assertIn(pattern, gate)
-                self.assertEqual(2, text.count("needs: validate-platform"))
+                self.assertEqual(3 if name == "candidate" else 2, text.count("needs: validate-platform"))
 
     def test_no_workflow_inherits_all_secrets(self) -> None:
         for path in REUSABLE.values():
@@ -259,6 +268,7 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(dict(python.env)["FASTLANE_SKIP_UPDATE_CHECK"], "true")
         ruby = {Path(step.argv[len(paths.bundle) + 2]).name for step in catalog if step.id.startswith("ruby-")}
         self.assertEqual(ruby, {
+            "test_metadata_image_catalog.rb", "test_local_store_intent.rb", "test_local_store_execution_runtime.rb",
             "test_fastlane_support.rb", "test_play_store.rb", "test_play_lanes.rb", "test_apple_store.rb",
             "test_apple_lanes.rb", "test_apple_production.rb", "test_apple_production_lane.rb",
             "test_apple_asset_upload.rb", "test_ios_upload_validation.rb", "test_android_upload_validation.rb",
@@ -274,9 +284,11 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(lock["actionlint"]["version"], "1.7.12")
         self.assertEqual(lock["actionlint"]["sha256"], "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8")
         lint = gates["actionlint"].argv
-        self.assertEqual(lint[:4], (str(paths.inputs / "actionlint/actionlint"), "-no-color", "-ignore",
-                                  'property "workflow_(repository|sha|ref)" is not defined in object type'))
-        self.assertEqual(lint[4:], tuple(map(str, sorted(WORKFLOWS.glob("*.yml")) + sorted(TEMPLATES.glob("*.yml")))))
+        self.assertEqual(lint[:6], (str(paths.inputs / "actionlint/actionlint"), "-no-color", "-ignore",
+                                  'property "workflow_(repository|sha|ref)" is not defined in object type',
+                                  "-config-file", str(ROOT / ".github/actionlint.yaml")))
+        self.assertEqual(gates["actionlint"].cwd, ROOT)
+        self.assertEqual(lint[6:], tuple(map(str, sorted(WORKFLOWS.glob("*.yml")) + sorted(TEMPLATES.glob("*.yml")))))
         build = gates["wheel-build"]
         self.assertEqual(build.argv, (str(paths.source_python), "-I", "-B", "-m", "pip", "wheel", "--no-index",
                                      "--find-links", str(paths.inputs / "python"), "--no-deps", "--wheel-dir",
@@ -296,6 +308,14 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(checks.TOOLING_SHA, "1" * 40)
         self.assertEqual(set(checks.TOOLING_FILES), {
             "Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/apple_store.rb",
+            "fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_registration.rb",
+            "fastlane/apple_provisioning_bundle_read.rb", "fastlane/apple_provisioning_profile_read.rb",
+            "fastlane/apple_provisioning_p12.rb", "fastlane/apple_provisioning_p12_assemble.rb",
+            "fastlane/apple_provisioning_signing.rb", "fastlane/apple_provisioning_certificate_issuance.rb",
+            "fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
+            "fastlane/apple_distribution_certificate_policy.rb", "fastlane/apple_distribution_certificate_prepare.rb",
+            "fastlane/apple_distribution_certificate_verify.rb", "fastlane/apple_store_versions.rb",
+            "fastlane/android_store_versions.rb", "fastlane/play_edit_recovery.rb",
             "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb",
             "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
             "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
@@ -452,8 +472,11 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             for key, job in document["jobs"].items():
                 if job["runs-on"] == "macos-26":
                     with self.subTest(workflow=name, job=key, tool="xcode"):
-                        self.assertEqual("/Applications/Xcode_26.3.app/Contents/Developer", job["env"]["DEVELOPER_DIR"])
                         scripts = "\n".join(step.get("run", "") for step in job["steps"])
+                        if (name, key) == ("candidate", "version_reserve"):
+                            self.assertNotIn("xcodebuild", scripts)
+                            continue
+                        self.assertEqual("/Applications/Xcode_26.3.app/Contents/Developer", job["env"]["DEVELOPER_DIR"])
                         self.assertIn('== "Xcode 26.3"', scripts)
                         self.assertIn('== "Build version 17C529"', scripts)
             if name in ("preflight", "candidate"):
@@ -619,8 +642,20 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertTrue(project_checks, "actual preflight project checks")
         project_gate = only([node for node in guards if any(call in ast.walk(statement)
                              for statement in node.orelse for call in project_checks)], "online project-check bypass")
-        self.assertEqual(set(project_checks), {call for statement in project_gate.orelse
-                                              for call in calls(statement, "run_project_checks")})
+        local_gate = only([node for node in implementation.body if isinstance(node, ast.If)
+                           and ast.unparse(node.test) == "scope == 'local-project'"], "offline local-project branch")
+        self.assertIsInstance(local_gate.body[-1], ast.Return)
+        scope_check = only(calls(implementation, "_preflight_scope"), "local-project admission")
+        self.assertIn(scope_check, [node.value for node in implementation.body[:implementation.body.index(local_gate)]
+                                    if isinstance(node, ast.Expr)])
+        self.assertEqual(set(project_checks), set(calls(local_gate, "run_project_checks")) |
+                         {call for statement in project_gate.orelse for call in calls(statement, "run_project_checks")})
+
+        from mobile_release.errors import ValidationError
+        from mobile_release.preflight import preflight
+
+        with self.assertRaisesRegex(ValidationError, "local project checks require offline Android"):
+            preflight(None, mode="online", platforms=("android",), run_builds=False, scope="local-project")
 
         # The prerequisite-only online branch has conditional returns too.
         # Only the actual query branch's direct tail return blocks all fallthrough.
@@ -794,6 +829,17 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             jobs = load_workflow(REUSABLE[workflow])["jobs"]
             app_jobs = {key for key, job in jobs.items()
                         if any(step.get("with", {}).get("path") == "app" for step in job["steps"])}
+            if workflow == "candidate":
+                # The version-only job reads the checkout and calls fixed
+                # tooling. It does not write the app's private workflow area.
+                app_jobs.remove("version_reserve")
+                version_steps = jobs["version_reserve"]["steps"]
+                self.assertIn('[[ "$MOBILE_RELEASE_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]', version_steps[0]["run"])
+                self.assertEqual([
+                    "python -P -m mobile_release.version_hosted reserve",
+                    "python -P -m mobile_release.version_hosted bind-version-tag",
+                    "python -P -m mobile_release.version_hosted_play_recovery cleanup",
+                ], [step["run"] for step in version_steps[1:] if "run" in step])
             self.assertEqual(names, app_jobs)
             for key in sorted(names):
                 with self.subTest(workflow=workflow, job=key):
@@ -902,22 +948,23 @@ class CallerTemplateContractTests(unittest.TestCase):
                 self.assertNotRegex(text, r"(?m)^\s*(push|pull_request|schedule)\s*:")
 
     def test_callers_do_not_inherit_secrets(self) -> None:
-        for path in CALLERS.values():
+        for name, path in CALLERS.items():
             with self.subTest(template=path.name):
                 text = read(path)
                 self.assertNotRegex(text, r"(?i)secrets\s*:\s*inherit")
-                self.assertNotRegex(
-                    text,
-                    r"(?m)^\s+secrets\s*:",
-                    "fixed-environment secrets must be resolved by the called jobs",
-                )
+                actual = {key: job["secrets"] for key, job in load_workflow(path)["jobs"].items() if "secrets" in job}
+                expected = {"reserve_version": VERSION_ALLOCATION_SECRETS} if name == "candidate" else {}
+                self.assertEqual(expected, actual)
 
     def test_environment_secrets_are_not_declared_as_caller_inputs(self) -> None:
         for name in MUTATING:
-            text = read(REUSABLE[name])
-            trigger = text.split("permissions:", 1)[0]
             with self.subTest(workflow=name):
-                self.assertNotRegex(trigger, r"(?m)^\s+secrets\s*:")
+                workflow = load_workflow(REUSABLE[name])
+                call = (workflow.get("on") or workflow["true"])["workflow_call"]
+                expected = set(VERSION_ALLOCATION_SECRETS) if name == "candidate" else set()
+                declarations = call.get("secrets", {})
+                self.assertEqual(expected, set(declarations))
+                self.assertTrue(all(secret["required"] is False for secret in declarations.values()))
 
     def test_fixed_environment_secret_matrices_are_exact_and_explicit(self) -> None:
         for name, expected in ENVIRONMENT_SECRETS.items():
@@ -927,6 +974,34 @@ class CallerTemplateContractTests(unittest.TestCase):
                 self.assertEqual(expected, actual)
                 for secret in expected:
                     self.assertIn(f"{secret}: ${{{{ secrets.{secret} }}}}", text)
+                if name == "candidate":
+                    steps = load_workflow(REUSABLE[name])["jobs"]["version_reserve"]["steps"]
+                    reserve = next(step for step in steps if step.get("run") == "python -P -m mobile_release.version_hosted reserve")
+                    cleanup = next(step for step in steps if step.get("run") == "python -P -m mobile_release.version_hosted_play_recovery cleanup")
+                    self.assertEqual("inputs.operation == 'recover-play-edit'", cleanup["if"])
+                    for secret in PLAY_RECOVERY_SECRETS:
+                        self.assertEqual(f"${{{{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.{secret} || '' }}}}",
+                                         reserve["env"][secret])
+                        self.assertEqual(f"${{{{ secrets.{secret} }}}}", cleanup["env"][secret])
+                        self.assertEqual(2, text.count(f"secrets.{secret}"))
+
+    def test_candidate_lint_exceptions_match_only_protected_environment_secrets(self) -> None:
+        config = load_workflow(ROOT / ".github/actionlint.yaml")
+        workflows = load_workflow(REUSABLE["candidate"])
+        expected = ENVIRONMENT_SECRETS["candidate"]
+        self.assertEqual(config["paths"], {
+            ".github/workflows/reusable-candidate.yml": {
+                "ignore": [
+                    f'^property "{secret}" is not defined in object type'
+                    for secret in sorted(name.lower() for name in expected)
+                ],
+            },
+        })
+        for name, job in workflows["jobs"].items():
+            references = set(re.findall(r"(?i)secrets\.([a-z0-9_]+)", json.dumps(job)))
+            if {reference.upper() for reference in references} & expected:
+                with self.subTest(job=name):
+                    self.assertEqual(job.get("environment"), "mobile-candidate")
 
     def test_templates_pin_uses_and_tooling_sha_to_same_placeholder(self) -> None:
         placeholder = "__MOBILE_RELEASE_KIT_SHA__"
@@ -943,10 +1018,15 @@ class CallerTemplateContractTests(unittest.TestCase):
 
     def test_callers_always_use_the_dispatched_commit_as_source(self) -> None:
         for name, path in CALLERS.items():
-            text = read(path)
             with self.subTest(template=name):
-                self.assertRegex(text, r"(?m)^\s*source_sha:\s*\$\{\{ github\.sha \}\}\s*$")
-                self.assertNotRegex(text, r"(?m)^\s+source_sha:\s*\n")
+                expected = "${{ inputs.desktop_source_sha || github.sha }}" if name == "preflight" else "${{ github.sha }}"
+                for job in load_workflow(path)["jobs"].values():
+                    self.assertEqual(expected, job["with"]["source_sha"])
+                if name == "preflight":
+                    gate = job_block(read(REUSABLE[name]), "validate-platform")
+                    self.assertIn('[[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_SOURCE_SHA" ]]', gate)
+                    self.assertIn('[[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]', gate)
+                    self.assertIn('[[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == "$MOBILE_RELEASE_CALLER_REF" ]]', gate)
 
 
 class DocumentationContractTests(unittest.TestCase):

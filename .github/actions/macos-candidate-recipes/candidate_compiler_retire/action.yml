@@ -1,0 +1,41 @@
+name: "Retire only the completed candidate's disposable compiler outputs"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Retire only the completed candidate's disposable compiler outputs"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B - <<'PY_CANDIDATE_CLEAN'
+        import json, os, re, shutil, stat
+        from pathlib import Path
+        root = Path(os.environ['MRK_MACOS_WORK'])
+        workspace = Path(os.environ['GITHUB_WORKSPACE'])
+        assert root.parent == Path('/Users/runner/work/_temp') and re.fullmatch(r'mrk-macos-installed\.[A-Za-z0-9]{8}', root.name)
+        assert workspace == Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+        info = root.lstat()
+        assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() != 0 and shutil.rmtree.avoids_symlink_attacks
+        fd = os.open(root / 'source-binding.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            bound = os.fstat(fd)
+            assert stat.S_ISREG(bound.st_mode) and bound.st_nlink == 1 and 0 < bound.st_size <= 65536
+            raw = os.read(fd, 65537)
+            assert len(raw) == bound.st_size
+            binding = json.loads(raw)
+        finally:
+            os.close(fd)
+        assert binding['workDirectory'] == [info.st_dev, info.st_ino, info.st_uid]
+        assert binding['source'] == os.environ['GITHUB_SHA'] and binding['scope'] == 'current-macos-candidate'
+        assert binding['frontendAbsentAtAdmission'] is True
+        # All producing commands and mandatory native owners returned before
+        # candidate staging; no UI app or test process was started. Keep the
+        # complete candidate and package evidence, including if upload failed.
+        for path in (root / 'cargo-target', root / 'vault-helper-target', root / 'remover-target', root / 'installed-cli-target', root / 'npm-cache',
+                     workspace / 'desktop/node_modules', workspace / 'desktop/dist'):
+            try: current = path.lstat()
+            except FileNotFoundError: continue
+            assert stat.S_ISDIR(current.st_mode) and current.st_uid == os.getuid() and current.st_dev == info.st_dev
+            shutil.rmtree(path)
+        PY_CANDIDATE_CLEAN

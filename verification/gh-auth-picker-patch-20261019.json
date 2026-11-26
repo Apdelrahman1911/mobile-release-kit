@@ -1,0 +1,48 @@
+{
+  "patch": "docs/github-auth-picker-integration-2026-10-19.patch",
+  "patchSha256": "34ff5211896419506b469821e85420f286bcfd3214dc96c8999a0871fa773b84",
+  "prerequisite": "github-auth-document-integration-current-2026-10-19.patch if gh parent not integrated",
+  "reviewAmendment": "Production RAW-only 1024-byte strict decoder; exact3 AppManifest commands + main-window permissions. Original six-file owner/GUI diff otherwise unchanged.",
+  "files": [
+    {
+      "path": "desktop/src-tauri/src/asset_session.rs",
+      "beforeSha256": "99fb0d87df7542dee4b042def1efe34ff5d512c29a6c75ea9a4bde58d9f64b0b",
+      "afterSha256": "735f5bd7c77ea29421cea1eb8814fac4e8d2ff31efe117476c5bacae09f25912"
+    },
+    {
+      "path": "desktop/src-tauri/src/shell.rs",
+      "beforeSha256": "c3fad4c2a51dea646c6b4ae7efdd43016e792beb57e2ba0bd293e1dc6b2d43d6",
+      "afterSha256": "e71a006c861850448ce6fe35b3f04b55a0640bb418945abef4a5bea896bb8520"
+    },
+    {
+      "path": "desktop/src-tauri/src/shell_macos_dialog.rs",
+      "beforeSha256": "136a27ce9f2222fba0b4ebe10212606500ecd47e1665a2ce7427c1a040b905b4",
+      "afterSha256": "65e6c12f1e75683c6cc4a896fce7cd5c5bc45b3ae28bbd265d360d3b1a91b9cf"
+    },
+    {
+      "path": "desktop/native/macos-installed-native/src/lib.rs",
+      "beforeSha256": "9a3598e9c19400bb0faee21d524196203f702d0790c6429bc1497a06c66965a1",
+      "afterSha256": "ece753f09e51e5e8c1509968d1261fe402c36b426fc6c18a869b29d3d42bfa17"
+    },
+    {
+      "path": "desktop/native/macos-installed-native/src/native.m",
+      "beforeSha256": "c929297573a15f3e8a875bcb68de2cf10115deeedefc0a08a3cebc4675884c3d",
+      "afterSha256": "21d4e0117704598e1724e7d033b4e161ec9c063744673db4ae9ac3304c12b496"
+    },
+    {
+      "path": "desktop/src-tauri/src/lib.rs",
+      "beforeSha256": "4e4b1bd5e30f47460f218e71f7c1be4ff107d6f1f8685a0736cd670f1c3d3060",
+      "afterSha256": "d688179a67deb46967af4e962be6ba4f66898cff1b803d214287d359a8e0fac0"
+    },
+    {
+      "path": "desktop/src-tauri/build.rs",
+      "beforeSha256": "3106b7a9ed0a4460072a7f48eb6428c97622f69b9b73ddba442a2e62c8107969",
+      "afterSha256": "3858e6910eef030192dec777437376927d8c405e430d426f81e5a2949368ac54"
+    },
+    {
+      "path": "desktop/src-tauri/capabilities/main.json",
+      "beforeSha256": "6b7396939ab4d6d9a5bf073712ebabf4273841e81f6d8ab7ae646d7a0d19784e",
+      "afterSha256": "52bbdb400359b18f625216c04e176934ff35dfd94167f15ec1c5e0589ab55714"
+    }
+  ]
+}
