@@ -2858,6 +2858,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
     extra = ADDITIONAL_FROZEN_UI.get(mode)
     if extra:
         method, bundle_stem, completion_marker = extra
+        env["TEST_RUNNER_MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] = "exact-0.2.13-frozen-ui"
     else:
         method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
                   "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]

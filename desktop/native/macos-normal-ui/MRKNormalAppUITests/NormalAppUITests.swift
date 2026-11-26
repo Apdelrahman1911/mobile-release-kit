@@ -5387,10 +5387,33 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func press(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
                                  failures: [String] = [], timeout: TimeInterval = 5, line: UInt = #line) throws {
-        let item = try waitElement(root.buttons.matching(identifier: label), in: root, enabled: true,
+        let guidedLabels = ["Open project folder": "Choose project folder", "Credentials": "Signing & accounts",
+                            "Environment": "Build tools", "Releases": "Build & release", "Artifacts": "Build files",
+                            "Recovery": "Recover work", "Metadata": "Store listing"]
+        let displayed = guidedProductSurface && root == renderer ? guidedLabels[label] ?? label : label
+        let item = try waitElement(root.buttons.matching(identifier: displayed), in: root, enabled: true,
                                    timeout: timeout, failures: failures, line: line)
         try reveal(item, in: renderer, line: line)
         item.click()
+    }
+    private var guidedProductSurface: Bool {
+        let context = ProcessInfo.processInfo.environment
+        return context["MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] == "exact-0.2.13-frozen-ui"
+            && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == "8dead1a987215fe7c5fe7bec4a08ec5e449b8aea"
+    }
+    @MainActor private func observeSelectedProject(_ renderer: XCUIElement, path: String) throws {
+        let failures = ["Static observation unavailable", "Only a partial static observation is available"]
+        if guidedProductSurface {
+            let title = URL(fileURLWithPath: path).lastPathComponent
+            let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", title))
+            _ = try waitElement(heading, in: renderer, failures: failures)
+            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: path), in: renderer,
+                                timeout: 24, failures: failures)
+        } else {
+            let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready."))
+            _ = try waitElement(heading, in: renderer, failures: failures)
+        }
     }
     @MainActor private func settingsTab(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
                                        line: UInt = #line) throws {
@@ -5798,6 +5821,12 @@ final class NormalAppUITests: XCTestCase {
                 }
                 throw error
             }
+        } else if guidedProductSurface {
+            try require(profile == .currentCandidateOrdinary || profile == .currentCandidateIOSTools,
+                        "guided product surface requires the scoped signed candidate")
+            let project = controls(renderer, [.button], label: "Choose project folder")
+            _ = try waitElement(project, in: renderer, enabled: true, timeout: 24,
+                                failures: Self.guidedWorkspaceFailures)
         } else {
             try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         }
@@ -6110,8 +6139,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Open project folder", renderer: renderer)
             let project = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected persistence project differs")
             try press(renderer, "Credentials", renderer: renderer)
             let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
@@ -6234,8 +6262,7 @@ final class NormalAppUITests: XCTestCase {
             try press(restartedRenderer, "Open project folder", renderer: restartedRenderer)
             let project = try nativeSheet(restartedWindow, title: "Choose a mobile project folder")
             try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
-            _ = try waitElement(restartedRenderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: restartedRenderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(restartedRenderer, path: fixture.projectPath)
             _ = try unique(restartedRenderer.staticTexts.matching(identifier: fixture.projectPath), "restarted persistence project differs")
             try press(restartedRenderer, "Credentials", renderer: restartedRenderer)
             let storage = try waitElement(named(restartedRenderer, "Private-input storage controls"), in: restartedRenderer)
@@ -6295,8 +6322,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -6746,8 +6772,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -6886,8 +6911,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             // Fixed public fixture expectations only. Snapshot before the original
             // wait; never inspect new AX values after its first failure.
@@ -7276,8 +7300,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Open project folder", renderer: renderer)
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "source project path differs")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -7380,8 +7403,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -7538,8 +7560,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "offline project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -8257,8 +8278,7 @@ final class NormalAppUITests: XCTestCase {
                 try press(renderer, "Open project folder", renderer: renderer)
                 let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
                 try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
-                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),
-                                    in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
+                try observeSelectedProject(renderer, path: fixture.projectPath)
                 _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "iOS selected fixture differs")
                 _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
                 try fixture.assertUnchanged()
