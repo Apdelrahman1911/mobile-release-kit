@@ -174,8 +174,10 @@ class UI:
         return found["snapshot_id"], nodes[0]
 
     def reveal(self, name, **selectors):
-        snapshot, node = self.node(name, **selectors)
+        # The action retains one snapshot. Read the window first so the
+        # subsequent element observation is the one eligible for a click.
         root = self.command("tree.snapshot", limit=1)["nodes"]
+        snapshot, node = self.node(name, **selectors)
         need(len(root) == 1 and root[0]["role"] == "window" and root[0]["bounds"] and
              node["id"].startswith(root[0]["id"] + "."), "original-focused-app-window")
         window = root[0]["bounds"]
@@ -379,12 +381,14 @@ def observe(work, action, media):
             save()
         return scenarios[name]["status"] == "Passed"
 
-    def startup():
+    def start_observation():
         results["commands"] = sorted(capabilities["commands"])
         if not {"element.wait", "element.click", "tree.snapshot"} <= set(capabilities["commands"]):
             raise Blocked("macOS Accessibility is unavailable to the action on this runner")
         ui.local_network_decision(capabilities)
         ui.snapshot("first-window")
+
+    def startup():
         ui.page("Build tools")
         ui.click("Advanced · app connection details", contains=True)
         ui.node("Bundled runtime", category="heading")
@@ -502,7 +506,8 @@ def observe(work, action, media):
             ui.image(f"settings-{width}x{height}")
 
     try:
-        if scenario("cold-runtime-and-cli-denial", lambda: ui.record_session("cold-runtime", startup)):
+        if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
+            scenario("cold-runtime-and-cli-denial", startup)
             scenario("cancel-native-project-picker", cancel_picker)
             selected = scenario("project-picker-and-saved-config", select_project)
             for page in PAGE_HEADINGS:
