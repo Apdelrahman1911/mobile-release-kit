@@ -6399,9 +6399,16 @@ final class NormalAppUITests: XCTestCase {
         @MainActor func androidBrowse(_ role: String, title: String, relative: String,
                                       cancel: Bool = false, refused: Bool = false) throws {
             try require(!(cancel && refused), "fixed Android source outcome is ambiguous")
+            var phase = "original-group"
+            defer {
+                if guidedProductSurface && phase != "settled" {
+                    print("MRK_GUIDED_ANDROID_SOURCE=v1;role=\(role);phase=\(phase)")
+                }
+            }
             let group = try androidGroup(role)
             try press(group, androidSelections[role] == nil ? "Browse for folder" : "Choose a different folder",
                       renderer: renderer, timeout: 48)
+            phase = "native-picker"
             let sheet = try nativeSheet(window, title: title)
             if cancel {
                 try click(sheet.buttons.matching(identifier: "Cancel"), "owned Android source Cancel unavailable")
@@ -6411,6 +6418,7 @@ final class NormalAppUITests: XCTestCase {
             } else {
                 try goToFolder(sheet, path: fixture.rootPath + "/" + relative)
                 try nativeOpen(sheet) // Genuine enabled Open, never file exclusion or Cancel.
+                phase = "returned-status"
                 if refused {
                     // Mac source parts rejects the 128th normal component
                     // before SourceBook.begin. Other outcomes must fail.
@@ -6427,8 +6435,10 @@ final class NormalAppUITests: XCTestCase {
             }
             // Cancel/refusal never replace the prior three role selections.
             // Enabled Browse also waits for the original Status gate to settle.
+            phase = "retained-selections"
             try androidRetained()
             try fixture.assertUnchanged()
+            phase = "settled"
         }
         try stage("android-source-jdk") {
             try press(renderer, guidedProductSurface ? "Build tools" : "Releases", renderer: renderer)
@@ -6441,15 +6451,25 @@ final class NormalAppUITests: XCTestCase {
         try stage("android-source-gradle") {
             try androidBrowse("gradle", title: "Choose an extracted Gradle distribution folder", relative: "sources/tool-gradle")
         }
+        @MainActor func verifyRefusedAndroidSource() throws {
+            try stage("android-source-refused") {
+                try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder",
+                                  relative: LocalFixture.androidRefusedDirectory, refused: true)
+            }
+        }
+        // Check refusal while all three original targets are already selected
+        // and before the independent Cancel and Replace gestures use the clock.
+        if guidedProductSurface {
+            try verifyRefusedAndroidSource()
+        }
         try stage("android-source-cancel") {
             try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk.jdk", cancel: true)
         }
         try stage("android-source-reselect") {
             try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk-replacement.jdk")
         }
-        try stage("android-source-refused") {
-            try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder",
-                              relative: LocalFixture.androidRefusedDirectory, refused: true)
+        if !guidedProductSurface {
+            try verifyRefusedAndroidSource()
         }
 
         try stage("quit") {
