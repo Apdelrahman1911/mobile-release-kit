@@ -943,10 +943,16 @@ def main():
     try:
         selection = load_selection(args.selection)
         if os.environ.get("MRK_FROZEN_RELEASE_MEDIA"):
-            need(os.environ.get("GITHUB_REF") == "refs/heads/main"
-                 and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             manifest_path = Path(os.environ["MRK_FROZEN_RELEASE_MEDIA"]) / "RELEASE-MANIFEST.json"
             frozen = json.loads(manifest_path.read_bytes())
+            ref = os.environ.get("GITHUB_REF")
+            diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project" and args.mode == "recovery-xctest"
+                          and frozen["sourceCommit"] == "8dead1a987215fe7c5fe7bec4a08ec5e449b8aea"
+                          and frozen["sourceTree"] == "e76ca3400eb87d42fcaab0b0a65e88bb419a6f8e"
+                          and (frozen["buildRun"], frozen["carrierRun"], frozen["carrierAttempt"])
+                          == ("45866692352", "45878823446", "1"))
+            need((ref == "refs/heads/main" or diagnostic)
+                 and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             result["frozenRelease"] = {key: frozen[key] for key in
                                        ("sourceCommit", "sourceTree", "buildRun", "carrierRun", "carrierAttempt")}
             result["frozenRelease"].update(manifestSha256=digest(manifest_path),
@@ -2899,6 +2905,9 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["recoveryControls"] = re.findall(
             r"(?m)^MRK_RELEASE_RECOVERY_CONTROL=(before|refused|review);inspect=(true|false);close=(true|false)$",
             transcript)
+        result["recoveryProjectObservations"] = re.findall(
+            r"(?m)^MRK_RECOVERY_PROJECT_OPEN=v1;(folder|unselected|choose-error|read-error|exact-path|tmp-alias|fixture-parent)=([0-5])$",
+            transcript)[-7:]
         result["recoveryTestRunnerEvents"] = [event for event, fragment in (
             ("objective-c-exception", "NSInvalidArgumentException"),
             ("unsupported-predicate", "Unsupported predicate"),

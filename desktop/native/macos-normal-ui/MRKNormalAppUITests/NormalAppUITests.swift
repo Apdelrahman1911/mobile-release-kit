@@ -5138,6 +5138,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func waitElement(_ query: XCUIElementQuery, in root: XCUIElement,
                                        enabled: Bool = false, timeout: TimeInterval = 5,
                                        failures: [String] = [], snapshotObservation: Bool = false,
+                                       selectedRecoveryProject: String? = nil,
                                        consentObservation: IOSRecoveryConsentPhase? = nil,
                                        projectFieldObservation: (String, XCUIElementQuery, String)? = nil, line: UInt = #line) throws -> XCUIElement {
         let first = query.element(boundBy: 0)
@@ -5157,7 +5158,7 @@ final class NormalAppUITests: XCTestCase {
         if snapshotObservation && (failureCount > 0 || result != .completed || matchCount != 1) {
             // Same original wait, before its existing refusal. Finite public
             // facts only; exhausted observation budget cannot replace its error.
-            observeSnapshotState(root, waiter: result)
+            observeSnapshotState(root, waiter: result, selectedRecoveryProject: selectedRecoveryProject)
         }
         if let phase = consentObservation, failureCount > 0 || result != .completed || matchCount != 1 {
             observeRecoveryConsent(root, phase: phase, waiter: result, matches: matchCount)
@@ -5219,7 +5220,8 @@ final class NormalAppUITests: XCTestCase {
             "Static observation unavailable", "Only a partial static observation is available",
         ], snapshotObservation: true, line: line)
     }
-    @MainActor private func observeSnapshotState(_ root: XCUIElement, waiter: XCTWaiter.Result) {
+    @MainActor private func observeSnapshotState(_ root: XCUIElement, waiter: XCTWaiter.Result,
+                                                 selectedRecoveryProject: String? = nil) {
         guard let clock = caseClock else { return }
         let end = min(clock.deadline, journeyDeadline ?? clock.deadline)
         let start = ProcessInfo.processInfo.systemUptime
@@ -5352,6 +5354,19 @@ final class NormalAppUITests: XCTestCase {
         guard finish >= last, clock.observationAllowed(finish, before: end) else { return }
         let state = waiter == .completed ? "completed" : waiter == .timedOut ? "timed-out" : "other"
         print("MRK_NORMAL_SNAPSHOT_STATE=v2;sample=post-wait;waiter=\(state);\(fields.joined(separator: ";"));firstKnownReason=\(firstKnownReason);nonAtomic=1")
+        if let project = selectedRecoveryProject, projectRequireDiagnosticMethod == .guidedRecovery {
+            let alias = "/tmp/" + String(project.dropFirst("/private/tmp/".count))
+            let parent = URL(fileURLWithPath: project).deletingLastPathComponent().path
+            let projectFacts = [
+                ("folder", "Selected project folder"), ("unselected", "No folder selected"),
+                ("choose-error", "The project could not be selected"), ("read-error", "Project read details"),
+                ("exact-path", project), ("tmp-alias", alias), ("fixture-parent", parent),
+            ]
+            for (key, value) in projectFacts {
+                let count = min(observed.filter { $0.contains(value) }.count, 5)
+                print("MRK_RECOVERY_PROJECT_OPEN=v1;\(key)=\(count)")
+            }
+        }
     }
     @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5, line: UInt = #line) throws {
         let wait = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
@@ -6620,7 +6635,9 @@ final class NormalAppUITests: XCTestCase {
             try nativeOpen(picker)
             try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
-                                timeout: 24, failures: Self.guidedWorkspaceFailures + ["Project read details"])
+                                timeout: 24,
+                                failures: Self.guidedWorkspaceFailures + ["The project could not be selected", "Project read details"],
+                                snapshotObservation: true, selectedRecoveryProject: project)
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)
