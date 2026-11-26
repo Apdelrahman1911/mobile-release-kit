@@ -146,7 +146,7 @@ class _Profile:
         self.work = self.path("/synthetic/session/work")
         self.checks, self.source = self.work / "checks", self.path("/synthetic/source")
         self.limits = {"FSIZE": ((1 << 32) + 1024**2,) * 2, "CORE": (0, 0),
-                       "NOFILE": (1024, 1024), "NPROC": (256, 256), "CPU": (300, 300),
+                       "NOFILE": (1024, 1024), "NPROC": (256, 256), "CPU": (450, 450),
                        "AS": (4 * 1024**3,) * 2}
         self.mounts = [{"path": "/", "device": "0:1", "root": "/", "options": "rw",
                         "filesystem": "tmpfs", "super": "rw"},
@@ -442,7 +442,7 @@ class CIPythonProfileTests(unittest.TestCase):
                 elif case == "work-alias": fixture.aliases[str(fixture.checks)] = "/synthetic/other/checks"
                 elif case == "old-fsize": fixture.limits["FSIZE"] = (512 * 1024**2,) * 2
                 elif case == "soft-fsize": fixture.limits["FSIZE"] = (512 * 1024**2, (1 << 32) + 1024**2)
-                elif case == "cpu": fixture.limits["CPU"] = (301, 301)
+                elif case == "cpu": fixture.limits["CPU"] = (300, 300)
                 elif case == "address-space": fixture.limits["AS"] = (5 * 1024**3,) * 2
                 elif case == "userns-enabled": fixture.userns = b"1\n"
                 elif case == "userns-malformed": fixture.userns = b"0\nprivate\n"

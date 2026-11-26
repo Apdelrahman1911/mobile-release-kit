@@ -33,6 +33,7 @@ from types import MappingProxyType
 
 AGGREGATE_SECONDS = 3300
 PYTHON_FULL_SECONDS = 2100
+PYTHON_FULL_CPU_SECONDS = 450
 DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
 # The integrated Desktop checkout is about 4,100 blobs and 149 MiB. Bound
 # the complete snapshot independently of per-file identity checks.
@@ -4578,7 +4579,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                       f"--{partition}-{phase}"))
             row["status"] = "RUNNING"
             value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=part.seconds,
-                output_limit=8 * 1024**2, cpu_seconds=300 if healthy and selection == "full" else 180,
+                output_limit=8 * 1024**2, cpu_seconds=PYTHON_FULL_CPU_SECONDS if healthy and selection == "full" else 180,
                 profile="python-full" if healthy and selection == "full" else "ordinary", absolute_deadline=cutoff,
                 dispose_retained_domain=partition in PYTHON_POISON_PARTITIONS)
             originals.append(value)
@@ -5844,8 +5845,8 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
     if step.kind == "command":
         value = session.run(list(step.argv), cwd=step.cwd, env=dict(step.env), seconds=step.seconds,
                             output_limit=(16 if "install" in step.id or step.id == "source-dependencies" else 8) * 1024**2,
-                            cpu_seconds=300 if step.id in {"bundle-install", "wheel-build", "python-full"} else 180,
-                            profile="python-full" if platform == "linux" and step.id == "python-full" else "ordinary")
+                            cpu_seconds=300 if step.id in {"bundle-install", "wheel-build"} else 180,
+                            profile="ordinary")
         if not value.ok:
             return CheckResult(False, failure_details(value, step, paths, checks=checks, deadline=deadline, platform=platform),
                                "COMMAND_EXIT_OR_FINALITY")

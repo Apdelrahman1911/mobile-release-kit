@@ -63,6 +63,7 @@ PACKAGE_RESOURCES = frozenset({
     "api/data/release-version-help-v1.json",
 })
 PYTHON_FULL_FSIZE = (1 << 32) + 1024 * 1024
+PYTHON_FULL_CPU_SECONDS = 450
 PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * 1024**2),) + tuple(
     (name, 16 * 1024**2) for name in
     ("home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")
@@ -839,7 +840,7 @@ def _python_full_profile(work_root: Path, *, deadline: float) -> dict:
     _profile_userns_zero(deadline)
     limits = ((resource.RLIMIT_FSIZE, PYTHON_FULL_FSIZE), (resource.RLIMIT_CORE, 0),
               (resource.RLIMIT_NOFILE, 1024), (resource.RLIMIT_NPROC, 256),
-              (resource.RLIMIT_CPU, 300), (resource.RLIMIT_AS, 4 * 1024**3))
+              (resource.RLIMIT_CPU, PYTHON_FULL_CPU_SECONDS), (resource.RLIMIT_AS, 4 * 1024**3))
     file_limit = None
     for which, wanted in limits:
         _remaining(deadline, 3300)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -46,10 +47,19 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 path = ROOT / "templates/workflows" / f"mobile-{stage}.yml"
                 self.assertEqual(path.read_text(), resource["workflows"][stage])
                 caller, reusable = load_workflow(path), workflow(stage)
-                self.assertEqual(1, len(caller["jobs"]))
-                call = next(iter(caller["jobs"].values()))
-                self.assertEqual("${{ github.sha }}", call["with"]["source_sha"])
-                self.assertEqual(f"__MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-{stage}.yml@__MOBILE_RELEASE_KIT_SHA__", call["uses"])
+                jobs = caller["jobs"]
+                self.assertEqual({stage, "reserve_version"} if stage == "candidate" else {stage}, set(jobs))
+                if stage == "candidate":
+                    for operation in ("candidate", "reserve-version", "reserve-future-tag", "bind-version-tag", "recover-play-edit"):
+                        active = {name for name, call in jobs.items()
+                                  if evaluate_condition(call["if"], {"inputs": {"operation": operation}},
+                                                        success=True, cancelled=False)}
+                        self.assertEqual({"candidate"} if operation == "candidate" else {"reserve_version"}, active)
+                for call in jobs.values():
+                    self.assertEqual("${{ github.sha }}", call["with"]["source_sha"])
+                    self.assertEqual(f"__MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-{stage}.yml@__MOBILE_RELEASE_KIT_SHA__", call["uses"])
+                    for name in trio:
+                        self.assertEqual("${{ inputs." + name + " }}", call["with"][name])
                 for name in trio:
                     for kind, value in (("workflow_dispatch", caller), ("workflow_call", reusable)):
                         # Psych's YAML1.1 loader turns unquoted `on` into the
@@ -57,7 +67,6 @@ class WorkflowLifecycleTests(unittest.TestCase):
                         event = value.get("on", value.get("true"))
                         spec = event[kind]["inputs"][name]
                         self.assertEqual((False, "", "string"), (spec["required"], spec["default"], spec["type"]))
-                    self.assertEqual("${{ inputs." + name + " }}", call["with"][name])
                 self.assertIn(f"format('MRK Desktop {stage} [{{0}}]', inputs.desktop_request)", caller["run-name"])
                 self.assertLessEqual(len(caller.get("on", caller.get("true"))["workflow_dispatch"]["inputs"]), 25)
                 self.assertEqual({}, caller["permissions"])
@@ -93,7 +102,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
             # Admit ONLY this inspected builtin-only program for this contract
             # test. A later script change cannot cause a general workflow step,
             # checkout, project hook, service or Store operation to run here.
-            self.assertEqual([
+            original_guard = [
                 "set -euo pipefail",
                 '[[ "$MOBILE_RELEASE_PLATFORM" =~ ^(' + platforms + ')$ ]]',
                 '[[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]',
@@ -105,12 +114,22 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 '  [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]',
                 '  [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == "$MOBILE_RELEASE_CALLER_REF" ]]',
                 "fi",
-            ], step["run"].splitlines())
+            ]
+            if stage == "candidate":
+                # Candidate also validates reservation, tag binding and Play recovery.
+                self.assertEqual("030e4e4038f6a82b5c1dbe5f95cd25a0e10a554d242e3718651c846a27db112e",
+                                 hashlib.sha256(step["run"].encode()).hexdigest())
+                self.assertEqual(original_guard[2:], step["run"].splitlines()[-len(original_guard[2:]):])
+            else:
+                self.assertEqual(original_guard, step["run"].splitlines())
             trio = {"MOBILE_RELEASE_DESKTOP_REQUEST": "d" * 32, "MOBILE_RELEASE_DESKTOP_SOURCE_SHA": SHA,
                     "MOBILE_RELEASE_DESKTOP_EXPECTED_REF": "refs/heads/main"}
             fixed = {"PATH": "/nonexistent", "LC_ALL": "C", "MOBILE_RELEASE_PLATFORM": "android",
                      "MOBILE_RELEASE_RUNNER_ENVIRONMENT": "github-hosted", "MOBILE_RELEASE_SOURCE_SHA": SHA,
                      "MOBILE_RELEASE_CALLER_SHA": SHA, "MOBILE_RELEASE_CALLER_REF": "refs/heads/main"}
+            if stage == "candidate":
+                fixed.update(MOBILE_RELEASE_OPERATION="candidate", MOBILE_RELEASE_RECOVERY_RUN_ID="",
+                             MOBILE_RELEASE_RECOVERY_CONFIRMATION="", MOBILE_RELEASE_CONFIRMATION="")
             cases = [(dict(zip(trio, values)), all(values) or not any(values))
                      for values in product(*[("", value) for value in trio.values()])]
             cases += [({**trio, name: bad}, False) for name, bad in (
@@ -119,6 +138,10 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 ("MOBILE_RELEASE_CALLER_SHA", "c" * 40), ("MOBILE_RELEASE_CALLER_REF", "refs/heads/other"),
                 ("MOBILE_RELEASE_RUNNER_ENVIRONMENT", "self-hosted"), ("MOBILE_RELEASE_PLATFORM", "invented"))]
             cases += [({**{key: "" for key in trio}, "MOBILE_RELEASE_PLATFORM": "both"}, stage != "production-submit")]
+            if stage == "candidate":
+                reservation = {"MOBILE_RELEASE_OPERATION": "reserve-version",
+                               "MOBILE_RELEASE_CONFIRMATION": "reserve-version:android:temporary-play-edit"}
+                cases += [({**dict.fromkeys(trio, ""), **reservation}, True), ({**trio, **reservation}, False)]
             for inputs, accepted in cases:
                 with self.subTest(stage=stage, inputs=inputs):
                     result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", step["run"]],

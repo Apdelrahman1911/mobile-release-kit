@@ -1515,7 +1515,7 @@ class CIControllerContractTests(unittest.TestCase):
                     profiles.append(options["profile"])
                     self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["profile"], "python-full" if parts[index] == "healthy" and phase == "source" else "ordinary")
-                    self.assertEqual(options["cpu_seconds"], 300 if parts[index] == "healthy" and phase == "source" else 180)
+                    self.assertEqual(options["cpu_seconds"], 450 if parts[index] == "healthy" and phase == "source" else 180)
                     self.assertEqual(options["seconds"], 2100 if index == healthy_index and phase == "source" else 900)
                     self.assertEqual(options["absolute_deadline"], cutoff)
                     self.assertEqual(options["output_limit"], 8 * 1024**2)

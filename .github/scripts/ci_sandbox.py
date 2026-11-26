@@ -52,8 +52,9 @@ _ANCESTOR_READ_BYTES = b"MRK_SYNTHETIC_ANCESTOR_READ\n"
 _HOME_SOCKET_BYTES = b"MRK_SYNTHETIC_HOME_SOCKET\n"
 _CENSUS_PASSES = 8
 _CENSUS_PAUSE = 0.01
-# Fixed wall budget for the full source suite in verify_ci.py.
+# Fixed budgets for the exact full source suite in verify_ci.py.
 _PYTHON_FULL_SECONDS = 2100
+_PYTHON_FULL_CPU_SECONDS = 450
 _PYTHON_FULL_FSIZE = (1 << 32) + MiB
 _PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * MiB), *((name, 16 * MiB) for name in (
     "home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")))
@@ -4437,7 +4438,7 @@ class Session:
     def _argv(self, argv: list[str], cpu: int, *, profile: str = "ordinary") -> tuple[list[str], dict]:
         if type(profile) is not str or profile not in {"ordinary", "python-full", "native-control", *_NATIVE_PROFILES}:
             raise SessionError("unknown fixed command profile")
-        if profile == "python-full" and (self.platform != "linux" or cpu != 300
+        if profile == "python-full" and (self.platform != "linux" or cpu != _PYTHON_FULL_CPU_SECONDS
                                           or argv != _python_full_command(self.root, self.deadline)):
             raise SessionError("fixed Python profile command/platform differs")
         role = ("--enter-python-full" if profile == "python-full" else
@@ -4663,13 +4664,14 @@ class Session:
         cwd = _canonical(cwd)
         if not (_under(cwd, self.work) or _under(cwd, self.source)):
             raise SessionError("command cwd outside source/private work")
-        if not 0 < seconds <= 3300 or not 0 < output_limit <= 16 * MiB or not 0 < cpu_seconds <= 300:
-            raise SessionError("unbounded command resource request")
         if type(profile) is not str or profile not in {"ordinary", "python-full", "native-control", *_NATIVE_PROFILES}:
             raise SessionError("unknown fixed command profile")
+        cpu_limit = _PYTHON_FULL_CPU_SECONDS if profile == "python-full" else 300
+        if not 0 < seconds <= 3300 or not 0 < output_limit <= 16 * MiB or not 0 < cpu_seconds <= cpu_limit:
+            raise SessionError("unbounded command resource request")
         if profile == "python-full" and (self.platform != "linux" or not self.admitted or self._admitting
                 or not latch or cancel_after is not None or cwd != self.work or seconds != _PYTHON_FULL_SECONDS
-                or cpu_seconds != 300 or output_limit != 8 * MiB
+                or cpu_seconds != _PYTHON_FULL_CPU_SECONDS or output_limit != 8 * MiB
                 or argv != _python_full_command(self.root, self.deadline)):
             raise SessionError("fixed Python profile invocation differs from its one admitted gate")
         native_state = None
@@ -6118,9 +6120,10 @@ class Session:
 
 
 def _limits(platform: str, cpu: int, *, profile: str = "ordinary") -> None:
-    if (platform not in {"linux", "darwin"} or type(cpu) is not int or not 0 < cpu <= 300
+    if (platform not in {"linux", "darwin"} or type(cpu) is not int
             or type(profile) is not str or profile not in {"ordinary", "python-full"}
-            or profile == "python-full" and (platform != "linux" or cpu != 300)):
+            or profile == "ordinary" and not 0 < cpu <= 300
+            or profile == "python-full" and (platform != "linux" or cpu != _PYTHON_FULL_CPU_SECONDS)):
         raise SessionError("unsupported fixed resource profile")
     fsize = _PYTHON_FULL_FSIZE if profile == "python-full" else 512 * MiB
     limits = [(resource.RLIMIT_CORE, 0), (resource.RLIMIT_NOFILE, 1024),
@@ -7261,7 +7264,7 @@ def _main(argv: list[str]) -> int:
         command = argv[6:]
         if argv[0] == "--enter-python-full":
             if (platform != "linux" or sys.platform != "linux" or not 60000 <= int(uid) < 65000
-                    or uid != str(int(uid)) or gid != uid or cpu != "300"):
+                    or uid != str(int(uid)) or gid != uid or cpu != str(_PYTHON_FULL_CPU_SECONDS)):
                 raise SessionError("fixed Python profile has incompatible native identity/platform/CPU")
             entry = Path(__file__).resolve(strict=True)
             root = entry.parent.parent

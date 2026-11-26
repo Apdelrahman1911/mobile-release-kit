@@ -486,8 +486,10 @@ profile makes the entire host-backed work tree read-only and overlays only
 namespace-private tmpfs leaves:640MiB work/tmp;16MiB each for work/home, config,
 cache, gem-cache, bundle-config, bundle-home and checks;128MiB /tmp;16MiB each
 for /run and /dev/shm. Their aggregate912MiB bounds **file data**, not total RAM
-or inode metadata. Dispatch also requires actual MemAvailable>=1536MiB; existing
-CPU/address-space/process/FD/deadline/output limits are unchanged.
+or inode metadata. Dispatch also requires actual MemAvailable>=1536MiB. Only
+this fixed full source capture has a 450-second CPU limit, with the same
+2100-second wall allocation. Address-space, process, descriptor and output
+limits remain in force.
 
 Before discovering tests, actual Linux controls verify limits, zero additional
 user namespaces, the read-only/capped mount topology and private writable roots.
