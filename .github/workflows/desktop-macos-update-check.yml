@@ -38,7 +38,7 @@ on:
         options: [none, update-credentials, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
                   android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
-                  release-asset, native-status-unit, recovery-contracts]
+                  release-asset, native-status-unit, recovery-contracts, xcode-path-control]
       protected_xcode_fixture:
         description: Prepare the Apple Xcode fixture for the supplemental unsigned archive only
         type: boolean
@@ -61,6 +61,68 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  xcode-path-control:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
+      inputs.additional_ui == 'xcode-path-control' && inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f'
+    name: Native Xcode SDK output comparison
+    runs-on: macos-26
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Compare the original argument with fixed Xcode SDK readbacks
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$(uname -m)" == arm64 && "$(id -u)" != 0 ]]
+          /usr/bin/python3 -I -B - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+
+          selected = Path("/Applications/Xcode.app").resolve(strict=True)
+          if selected.parent != Path("/Applications") or not re.fullmatch(r"Xcode[A-Za-z0-9._+\-]*\.app", selected.name):
+              raise SystemExit("unexpected hosted Xcode selection")
+          developer = selected / "Contents/Developer"
+          sdk_root = developer / "Platforms/iPhoneOS.platform/Developer/SDKs"
+          sdk = (sdk_root / "iPhoneOS.sdk").resolve(strict=True)
+          if sdk.parent != sdk_root:
+              raise SystemExit("unexpected hosted SDK selection")
+          anchor = str(developer / "usr/bin/xcodebuild")
+          roster = (
+              ("original", [anchor, "-version", "-sdk", "iphoneos", "Path"], True),
+              ("sdkroot-absent", [anchor, "-version", "-sdk", "iphoneos", "Path"], False),
+              ("sdk-info", [anchor, "-version", "-sdk", "iphoneos"], True),
+              ("xcrun", ["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-path"], True),
+          )
+          report = {"selectedSDK": sdk.name}
+          with tempfile.TemporaryDirectory(prefix="mrk-xcode-path-") as work:
+              root = Path(work)
+              home, tmp = root / "home", root / "tmp"
+              home.mkdir(mode=0o700)
+              tmp.mkdir(mode=0o700)
+              base_env = {"PATH": str(developer / "usr/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                          "DEVELOPER_DIR": str(developer), "HOME": str(home),
+                          "CFFIXED_USER_HOME": str(home), "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
+                          "LC_ALL": "en_US.UTF-8", "CI": "true", "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1"}
+              for label, argv, use_sdkroot in roster:
+                  env = dict(base_env, SDKROOT=str(sdk)) if use_sdkroot else base_env
+                  result = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                  lines = result.stdout.splitlines()
+                  paths = [match.group(1) for line in lines if (match := re.fullmatch(
+                      r"(?:Path: )?(/Applications/Xcode[A-Za-z0-9._+\-]*\.app/Contents/Developer/Platforms/iPhoneOS\.platform/Developer/SDKs/iPhoneOS[0-9.]*\.sdk)",
+                      line.strip()))]
+                  report[label] = dict(returnCode=result.returncode,
+                      stdoutLineCount=len(lines), recognizedSDKPaths=paths[:4],
+                      exactMatch=result.stdout.strip() == str(sdk), stderrNonempty=bool(result.stderr))
+          print(json.dumps(report, sort_keys=True))
+          PY
+
   recovery-contracts:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
@@ -140,7 +202,8 @@ jobs:
     name: Qualify frozen media (${{ matrix.mode }})
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' && inputs.additional_ui != 'recovery-contracts' &&
+      github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' &&
+      inputs.additional_ui != 'recovery-contracts' && inputs.additional_ui != 'xcode-path-control' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
         inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' &&
