@@ -814,14 +814,18 @@ def observe(work, action, media, suite):
         observe_pending_state("after-primary-selection")
         need(granted_project() == secondary_id, "reopen-expanded-cli-authority")
         require_denied(primary_id)
-        read_version("Values: 1.0.0 · Build 1.")
-        checks["primarySavedVersionAndDenialOnReturn"] = True
         observe_pending_state("before-revocation")
         access_panel()
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "switch-cli-grant-revocation")
         require_denied(secondary_id)
+        checks["secondaryGrantRevokedAfterReturn"] = True
+        save()
+        ui.page("Overview")
+        read_version("Values: 1.0.0 · Build 1.")
+        checks["primarySavedVersionAndDenialOnReturn"] = True
+        observe_pending_state("after-return-version-read")
         need(all(file_hash(path) == digest for path, digest in secondary_original.items())
              and all(file_hash(project / name) == digest for name, digest in primary_before.items()), "switch-changed-fixture")
         checks["bothFixturesPreservedAndGrantRevoked"] = True
