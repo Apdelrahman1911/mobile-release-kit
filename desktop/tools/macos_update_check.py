@@ -968,8 +968,11 @@ def main():
             candidate_replay = (identity == ("4feeced4ee513d824f8e44c50b3a340a7c39beed",
                                            "40c62080fe8a1ec90034508dbc2ce892f1083fb9", "45996045007")
                                and args.mode in ("unsigned-ios-xctest", "archived-upgrade"))
+            archive_candidate = (identity == ("7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc",
+                                              "fb712e594936256ff1d515cfaa1d269ae4e6d9a1", "46048925911")
+                                 and args.mode == "unsigned-ios-xctest")
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
-                          and (historical or candidate_replay)
+                          and (historical or candidate_replay or archive_candidate)
                           and (frozen["carrierRun"], frozen["carrierAttempt"])
                           == (os.environ.get("MRK_FROZEN_CARRIER_RUN"), "1"))
             need((ref == "refs/heads/main" or diagnostic)

@@ -544,6 +544,8 @@ jobs:
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
         inputs.carrier_attempt == '1' &&
         ((inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' && inputs.build_run == '45904194634') ||
+         (inputs.expected_sha == '7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc' && inputs.build_run == '46048925911' &&
+          inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
          (inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' && inputs.build_run == '45996045007' &&
           ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
            (inputs.additional_ui == 'archived-upgrade' && !inputs.protected_xcode_fixture))))))
@@ -577,6 +579,7 @@ jobs:
           case "$RELEASE_SOURCE" in
             4e821384cd912562dd5e30b195e87c113bd2d09f) release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14 ;;
             4feeced4ee513d824f8e44c50b3a340a7c39beed) release_tree=40c62080fe8a1ec90034508dbc2ce892f1083fb9 ;;
+            7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc) release_tree=fb712e594936256ff1d515cfaa1d269ae4e6d9a1 ;;
             *) exit 1 ;;
           esac
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CARRIER_RUN" |
@@ -615,6 +618,7 @@ jobs:
             case "$RELEASE_SOURCE" in
               4e821384cd912562dd5e30b195e87c113bd2d09f) release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14 ;;
               4feeced4ee513d824f8e44c50b3a340a7c39beed) release_tree=40c62080fe8a1ec90034508dbc2ce892f1083fb9 ;;
+            7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc) release_tree=fb712e594936256ff1d515cfaa1d269ae4e6d9a1 ;;
               *) exit 1 ;;
             esac
           fi
