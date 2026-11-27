@@ -5460,7 +5460,11 @@ final class NormalAppUITests: XCTestCase {
                 let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
                     label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
                 try reveal(details, in: renderer)
-                if caption.count == 0 { details.click() }
+                if caption.count == 0 {
+                    // Target the disclosure indicator within the verified
+                    // summary. Its native center can fall outside the control.
+                    details.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
+                }
             }
             do {
                 _ = try waitElement(renderer.staticTexts.matching(identifier: path), in: renderer,
@@ -8916,7 +8920,7 @@ final class NormalAppUITests: XCTestCase {
                     let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
                         label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
                     try reveal(details, in: renderer)
-                    details.click()
+                    details.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
                     try waitGone(label)
                     let collapsedCount = identity.count
                     try require(collapsedCount <= 1 && expandedCount == collapsedCount + 1,
