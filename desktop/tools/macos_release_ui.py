@@ -48,6 +48,7 @@ SUITE_SCENARIOS = {
     "cli-read": {"native-console-admission", "project-picker-and-saved-config", "installed-cli-read-data-and-refusals"},
     "git-index": {"native-console-admission", "project-picker-and-saved-config", "git-index-review-stage-unstage"},
     "vault-lifecycle": {"native-console-admission", "project-picker-and-saved-config", "vault-cancel-lock-reopen"},
+    "vault-profile": {"native-console-admission", "project-picker-and-saved-config", "vault-profile-save-bind-unlock"},
     "reopen-projects": {"native-console-admission", "project-picker-and-saved-config", "version-cancel-save-quit-reopen",
                         "project-switch-and-cli-isolation"},
 }
@@ -174,8 +175,16 @@ def install(media, work, suite):
     finally:
         detached = detach_install_media(mount, work / "evidence")
     need(detached == 0, "installer-mounted-media-still-busy")
-    shutil.copytree(FIXTURE, work / "MRK Verification Android")
-    project = work / "MRK Verification Android"
+    project = work / ("MRK Verification iOS" if suite == "vault-profile" else "MRK Verification Android")
+    if suite == "vault-profile":
+        fixture = json.loads(Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-persistence-v1.json").read_bytes())
+        for relative, encoded in fixture["files"].items():
+            if relative.startswith("project/") or relative == "sources/synthetic.mobileprovision":
+                target = (project / relative.removeprefix("project/") if relative.startswith("project/") else work / relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(base64.b64decode(encoded, validate=True))
+    else:
+        shutil.copytree(FIXTURE, project)
     if suite == "metadata":
         fixture = json.loads(Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json").read_bytes())
         (project / ".gitignore").write_bytes(base64.b64decode(fixture["stages"]["config"]["project/.gitignore"], validate=True))
@@ -365,6 +374,11 @@ class UI:
             self.click("Cancel", category="button")
             self.node(self.project_name or PAGE_HEADINGS["Overview"], category="heading")
             return
+        self.choose_path(project, "Choose a mobile project folder")
+        self.node(project.name, category="heading")
+        self.project_name = project.name
+
+    def choose_path(self, path, title):
         self.keys("command", "shift", "g")
         pid = self.payload_pid()
 
@@ -380,15 +394,15 @@ class UI:
 
         until(navigation_field, 10, "exact-go-to-folder-sheet")
         self.keys("command", "a")
-        self.command("text.insert", text=str(project))
+        self.command("text.insert", text=str(path))
 
         def completed_path():
             observation = navigation_field()
             if observation is None:
                 return None
             field, nodes = observation
-            return field["text"] == str(project) and any(
-                node["role"] == "statictext" and project.name in (node["name"], node["text"])
+            return field["text"] == str(path) and any(
+                node["role"] == "statictext" and path.name in (node["name"], node["text"])
                 for node in nodes)
 
         until(completed_path, 10, "native-folder-completion-did-not-match-fixture")
@@ -397,12 +411,10 @@ class UI:
         def original_picker():
             nodes = self.command("tree.snapshot", limit=1)["nodes"]
             return len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "sheet" and \
-                nodes[0]["name"].lower() == "choose a mobile project folder"
+                nodes[0]["name"].lower() == title.lower()
 
         until(original_picker, 5, "original-project-picker-did-not-resume")
         self.click("Open", category="button")
-        self.node(project.name, category="heading")
-        self.project_name = project.name
 
     def record_session(self, name, exercise):
         self.command("recording.start", duration_seconds=25)
@@ -496,7 +508,7 @@ def observe(work, action, media, suite):
     connection, client = open_session(work, action)
     capabilities = json.loads(client.fetch("/v2/capabilities"))
     ui = UI(client, evidence, capabilities["screen"])
-    project = work / "MRK Verification Android"
+    project = work / ("MRK Verification iOS" if suite == "vault-profile" else "MRK Verification Android")
     original = {path.relative_to(project): file_hash(path) for path in project.rglob("*")
                 if path.is_file() and ".git" not in path.relative_to(project).parts}
 
@@ -550,11 +562,13 @@ def observe(work, action, media, suite):
         ui.pick(project)
         ui.click("Project details & saved observations", contains=True)
         ui.node(str(project), category="statictext")
-        ui.node("org.mrk.fixture", contains=True)
+        identity = "org.example.mrk.observed" if suite == "vault-profile" else "org.mrk.fixture"
+        ui.node(identity, contains=True)
         if check_version:
             ui.click("Edit version & build number")
             ui.click("Open saved version editor", category="button")
-            ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
+            version = "Values: 1.2.3 · Build 7." if suite == "vault-profile" else "Values: 1.0.0 · Build 1."
+            ui.node(version, category="statictext", contains=True)
         need(all(file_hash(project / name) == digest for name, digest in original.items()), "project-originals")
 
     def metadata_journey():
@@ -599,23 +613,32 @@ def observe(work, action, media, suite):
     def vault_journey():
         vault = Path.home() / "Library/Application Support/dev.mobile-release-kit.desktop/credential-vault-v1"
         controls = {"vault-lock": 0, "initialization-reservation": 48, "vault-header": 104}
+        profile_file = work / "sources/synthetic.mobileprovision"
+        profile_canary = b"private-envelope-only-canary"
+        stored_profile = "Private input · Apple provisioning profile · item 1 · Synthetic profile input"
 
         def assert_no_header():
             need(not os.path.lexists(vault / "vault-header"), "vault-header-created-before-approval")
 
-        def read_vault_state():
+        def read_vault_state(*, with_profile=False):
             info = vault.lstat()
             need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
                  "new-vault-directory-custody")
-            need({path.name for path in vault.iterdir()} == controls.keys(), "unexpected-empty-vault-roster")
+            names = {path.name for path in vault.iterdir()}
+            records = names - controls.keys()
+            need(controls.keys() <= names and len(records) == int(with_profile) and
+                 all(re.fullmatch(r"record-[0-9a-f]{32}", name) for name in records), "unexpected-vault-roster")
             leaves = {}
-            for name, length in controls.items():
+            for name in sorted(names):
                 with os.fdopen(os.open(vault / name, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
                     item = os.fstat(stream.fileno())
                     need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and item.st_uid == os.getuid() and
-                         item.st_dev == info.st_dev and stat.S_IMODE(item.st_mode) == 0o600 and item.st_size == length,
+                         item.st_dev == info.st_dev and stat.S_IMODE(item.st_mode) == 0o600 and
+                         (item.st_size == controls[name] if name in controls else 248 <= item.st_size <= 65536),
                          "vault-control-custody-" + name)
-                    leaves[name] = (item.st_ino, hashlib.file_digest(stream, "sha256").hexdigest())
+                    payload = stream.read(65537)
+                    need(len(payload) == item.st_size and profile_canary not in payload, "vault-plaintext-or-size")
+                    leaves[name] = (item.st_ino, hashlib.sha256(payload).hexdigest())
             return info.st_ino, leaves
 
         def await_status(label):
@@ -623,6 +646,45 @@ def observe(work, action, media, suite):
                 rows = ui.command("tree.snapshot", limit=300)["nodes"]
                 return any(label in (row["name"], row["text"]) for row in rows if row["visible"])
             until(observed, 45, "vault-state-" + label)
+
+        def choose_option(control, value, moves):
+            node = ui.node(control, category="popupbutton")[1]
+            if node["text"] == value:
+                return
+            ui.click(control, category="popupbutton")
+            ui.keys("home")
+            for _ in range(moves):
+                ui.keys("down")
+            ui.keys("return")
+            need(ui.node(control, category="popupbutton")[1]["text"] == value, "wrong-vault-input-selection-" + control)
+
+        def save_profile():
+            ui.click("Submit current context", category="button")
+            await_status("Context submitted · not yet policy-validated")
+            choose_option("What would you like to provide?", "Apple provisioning profile", 4)
+            ui.click("Select file…", category="button")
+            ui.node("Choose a signing or iOS build-input file", contains=True)
+            ui.choose_path(profile_file, "Choose a signing or iOS build-input file")
+            ui.node("selected", category="statictext", region="Private-input operation phase")
+            ui.edit("Vault label (optional)", "Synthetic profile input")
+            ui.click("Prepare private review", category="button")
+            await_status("File check")
+            await_status("Configured only")
+            await_status("CMS envelope only: this does not establish an Apple issuer, profile validity, team, bundle ID or signing permission.")
+            await_status("Native validation: not run")
+            await_status("Service validation: not run")
+            await_status("Release readiness: unknown")
+            ui.node("Save this encrypted input?", category="heading", region="Explicit private-input review")
+            ui.click("Save encrypted copy", category="button", region="Explicit private-input review")
+            await_status("Not assigned to the current draft")
+            ui.node("1", category="statictext", region="Private-input record revision")
+            state = read_vault_state(with_profile=True)
+            ui.click("Assess and assign…", category="button", region=stored_profile)
+            ui.click("Assign to this context", category="button", region="Explicit private-input review")
+            await_status("Assigned to current submitted context")
+            need(read_vault_state(with_profile=True) == state, "profile-bind-changed-encrypted-bytes")
+            facts["envelopeSavedAndBound"] = True
+            return state
 
         need(not os.path.lexists(vault), "existing-vault-is-outside-test-scope")
         facts = results["vaultLifecycle"] = {}
@@ -645,21 +707,33 @@ def observe(work, action, media, suite):
         await_status("Encrypted vault · unlocked")
         initial = read_vault_state()
         facts["createdOwnedEmptyVault"] = True
+        with_profile = suite == "vault-profile"
+        if with_profile:
+            source_hash = file_hash(profile_file)
+            choose_option("Platform", "iOS", 1)
+            choose_option("Release stage", "Candidate / internal testing", 0)
+            choose_option("Input purpose", "Build / signing only", 1)
+            initial = save_profile()
         ui.click("Lock vault…", category="button")
         ui.click("Go back", category="button", region="Confirm private-input lock")
         await_status("Encrypted vault · unlocked")
-        need(read_vault_state() == initial, "cancelled-lock-changed-vault")
+        need(read_vault_state(with_profile=with_profile) == initial, "cancelled-lock-changed-vault")
         ui.click("Lock vault…", category="button")
         ui.click("Lock vault", category="button", region="Confirm private-input lock")
         await_status("Storage closed")
-        need(read_vault_state() == initial, "lock-changed-vault-identity")
+        need(read_vault_state(with_profile=with_profile) == initial, "lock-changed-vault-identity")
         facts["lockPreservedExactVault"] = True
         ui.click("Open encrypted vault", category="button")
         await_status("Encrypted vault · locked")
         ui.click("Unlock vault", category="button")
         await_status("Encrypted vault · unlocked")
-        need(read_vault_state() == initial and all(file_hash(project / path) == digest for path, digest in original.items()),
+        need(read_vault_state(with_profile=with_profile) == initial and
+             all(file_hash(project / path) == digest for path, digest in original.items()),
              "reopen-changed-synthetic-vault-or-project")
+        if with_profile:
+            await_status("Not assigned to the current draft")
+            ui.node("1", category="statictext", region="Private-input record revision")
+            need(file_hash(profile_file) == source_hash, "original-profile-source-changed")
         facts["sameVaultReopenedAndUnlocked"] = True
 
     def permission_lifecycle():
@@ -1084,6 +1158,7 @@ def observe(work, action, media, suite):
             "cli-read": ("installed-cli-read-data-and-refusals", cli_read_journey),
             "git-index": ("git-index-review-stage-unstage", git_observation),
             "vault-lifecycle": ("vault-cancel-lock-reopen", vault_journey),
+            "vault-profile": ("vault-profile-save-bind-unlock", vault_journey),
         }
         if suite in independent_journeys:
             name, journey = independent_journeys[suite]

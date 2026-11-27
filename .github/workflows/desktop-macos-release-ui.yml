@@ -27,7 +27,7 @@ on:
         description: Signed application journey suite
         type: choice
         default: workspace
-        options: [workspace, metadata, projects, cli-read, git-index, vault-lifecycle, reopen-projects]
+        options: [workspace, metadata, projects, cli-read, git-index, vault-lifecycle, reopen-projects, vault-profile]
 
 permissions:
   contents: read
