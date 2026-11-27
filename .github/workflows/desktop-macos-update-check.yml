@@ -201,7 +201,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.10'
-      - name: Run source cleanup on Xcode's exact outputs and refuse an escaping alias
+      - name: Test protected Xcode fixture input shapes
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: python -B -m unittest -v test_ci_xcode_preparation
+      - name: Inventory SwiftPM alias target families on the disposable host's exact outputs and refuse an escaping alias
         env:
           PYTHONPATH: src:tests:tests/desktop
         run: |
@@ -298,10 +302,10 @@ jobs:
                       target = path.readlink()
                       expected = Path(os.path.normpath(path.parent / target))
                       suffix = list(expected.parts[-5:])
-                  rows.append(dict(path=path.relative_to(work).as_posix(),
-                                   tail=suffix if all(part not in ("/",) for part in suffix) else suffix[-3:],
-                                   targetUsesFixturePath=expected.is_relative_to(root),
-                                   absolute=target.is_absolute()))
+                      rows.append(dict(path=path.relative_to(work).as_posix(),
+                                       tail=suffix if all(part not in ("/",) for part in suffix) else suffix[-3:],
+                                       targetUsesFixturePath=expected.is_relative_to(root),
+                                       absolute=target.is_absolute()))
               assert len(rows) <= 32
               print("MRK_XCODE_WORK_ALIASES=" + json.dumps(dict(xcode=developer.parents[1].name,
                     archivePresent=archive.is_dir(), returnCode=result.returncode, symlinks=sorted(rows, key=lambda row: row["path"]))))
