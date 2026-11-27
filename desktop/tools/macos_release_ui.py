@@ -244,6 +244,8 @@ class UI:
             nodes = found["nodes"]
         else:
             found = self.command("tree.snapshot", limit=300)
+            if region in {"Local Git action status", "Review local Git change"} and found["truncated"]:
+                found = self.command("tree.snapshot", limit=800)
             parents = [row for row in found["nodes"] if row["name"] == region and row["visible"]]
             need(len(parents) == 1, f"missing-or-ambiguous-region-{region}")
             prefix = parents[0]["id"] + "."
@@ -1024,13 +1026,15 @@ def observe(work, action, media, suite):
         def git_index_journey(head):
             review = "Review local Git change"
             reviewed = "I reviewed all listed files, including any contents not shown here."
+            fact = results["gitIndex"] = {"originalStatusReads": 0}
 
             def await_heading(name):
                 next_read = time.monotonic() + 2
 
                 def observe():
                     nonlocal next_read
-                    rows = ui.command("tree.snapshot", limit=300)["nodes"]
+                    tree = ui.command("tree.snapshot", limit=800)
+                    rows = tree["nodes"]
                     headings = {row["name"] for row in rows if row["role"] == "heading" and row["visible"]}
                     need(not headings.intersection({"Git action needs attention", "Git recovery is needed",
                                                    "Git action did not complete"}), "git-index-original-action-refused")
@@ -1041,6 +1045,7 @@ def observe(work, action, media, suite):
                     if time.monotonic() >= next_read and any(row["name"] == "Check action" and
                         row["role"] == "button" and row["enabled"] and row["visible"] for row in rows):
                         ui.click("Check action", category="button", region="Local Git action status")
+                        fact["originalStatusReads"] += 1
                         next_read = time.monotonic() + 5
                     return False
                 until(observe, 60, "git-index-" + name)
@@ -1061,6 +1066,7 @@ def observe(work, action, media, suite):
                  "git-index-apply-enabled-without-consent")
             ui.click("Close review, keep draft", category="button", region="Local Git action status")
             verify_change(False)
+            fact["cancelPreservedIndexAndHead"] = True
             ui.click("Review files to stage", category="button")
             await_heading("Review files to stage")
             ui.node("README.md", region=review)
@@ -1068,6 +1074,7 @@ def observe(work, action, media, suite):
             ui.click("Stage these files", category="button", region=review)
             await_heading("Selected files staged")
             verify_change(True)
+            fact["onlyReviewedBlobStaged"] = True
             ui.click("Refresh changes", category="button")
             wait_for_original_read(lambda rows: any(row["role"] == "heading" and row["name"] == "Local Git read finished"
                                                     for row in rows), "stage-readback")
@@ -1079,6 +1086,7 @@ def observe(work, action, media, suite):
             ui.click("Unstage these files", category="button", region=review)
             await_heading("Selected files unstaged")
             verify_change(False)
+            fact["unstagePreservedHeadAndWorktree"] = True
 
         before = git("status", "--porcelain=v1")
         head = git("rev-parse", "HEAD")
