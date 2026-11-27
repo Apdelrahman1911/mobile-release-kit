@@ -6057,9 +6057,15 @@ final class NormalAppUITests: XCTestCase {
             try replace(field(storage, "Vault label (optional)"), with: label, renderer: renderer)
         }
         try stage("vault-file-assessment") {
-            try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
-            try privateStatus(storage, action: "prepare", phase: "preview")
-            try privateAssessment(storage, input: input)
+            try stage("vault-prepare-request") {
+                try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
+            }
+            try stage("vault-prepare-receipt") {
+                try privateStatus(storage, action: "prepare", phase: "preview")
+            }
+            try stage("vault-assessment-readback") {
+                try privateAssessment(storage, input: input)
+            }
         }
         try stage("vault-file-commit") {
             let review = try privateReview(storage, title: "Save this encrypted input?", target: reviewTarget)
@@ -7180,13 +7186,10 @@ final class NormalAppUITests: XCTestCase {
                                         "optional comparison control is unavailable")
             try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
                         "passive supplied comparison unexpectedly enabled")
-            try press(renderer, "Preview GitHub setup", renderer: renderer)
             if guidedProductSurface {
-                let disclosure = try waitElement(controls(renderer, [.disclosureTriangle, .button],
-                    label: "Optional preview: proposed files and checklist · available", prefix: true),
-                    in: renderer, failures: Self.workflowFailures)
-                disclosure.click()
+                try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
             }
+            try press(renderer, "Preview GitHub setup", renderer: renderer)
             let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
                                           failures: Self.workflowFailures)
             _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
@@ -7653,16 +7656,12 @@ final class NormalAppUITests: XCTestCase {
                                         "optional comparison control is unavailable")
             try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
                         "passive supplied comparison unexpectedly enabled")
-            try press(renderer, "Preview GitHub setup", renderer: renderer)
             try stage("workflow-preview-disclosure") {
                 if guidedProductSurface {
-                    let disclosure = try waitElement(controls(renderer, [.disclosureTriangle, .button],
-                        label: "Optional preview: proposed files and checklist · available", prefix: true),
-                        in: renderer, failures: Self.workflowFailures)
-                    // The click must expose the matching read-only preview.
-                    disclosure.click()
+                    try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
                 }
             }
+            try press(renderer, "Preview GitHub setup", renderer: renderer)
             try stage("workflow-preview-readback") {
                 let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
                                               failures: Self.workflowFailures)
@@ -7918,17 +7917,21 @@ final class NormalAppUITests: XCTestCase {
                 let counts = try savedOfflineCounts(report)
                 missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
             }
-            let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
-            try require(panel.staticTexts.matching(identifier: unconfirmed).count == 0
-                        && panel.staticTexts.matching(identifier: historical).count == 0
-                        && report.staticTexts.matching(identifier: "Historical / stale context").count == 0
-                        && failedCount == 0
-                        && named(panel, "Confirm this saved offline-check intent").count == 0
-                        && panel.buttons.matching(identifier: runLabel).count == 0,
-                        "original offline report remains unconfirmed, stale, failed or rearmed")
-            try fixture.assertUnchanged()
-            try savedOperationComplete(panel)
-            _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report changed during readback")
+            try stage("offline-finality-audit") {
+                let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
+                try require(panel.staticTexts.matching(identifier: unconfirmed).count == 0
+                            && panel.staticTexts.matching(identifier: historical).count == 0
+                            && report.staticTexts.matching(identifier: "Historical / stale context").count == 0
+                            && failedCount == 0
+                            && named(panel, "Confirm this saved offline-check intent").count == 0
+                            && panel.buttons.matching(identifier: runLabel).count == 0,
+                            "original offline report remains unconfirmed, stale, failed or rearmed")
+            }
+            try stage("offline-originals-and-readback") {
+                try fixture.assertUnchanged()
+                try savedOperationComplete(panel)
+                _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report changed during readback")
+            }
         }
         try stage("offline-readback-and-quit") {
             try require(missing >= 2 && skipped >= 1, "no actual negative offline report was observed")

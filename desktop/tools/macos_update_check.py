@@ -2932,6 +2932,10 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("runner-exited", "Test runner exited"),
         ("runner-signal", "terminated with unexpected signal"),
         ("test-crashed", "TEST CRASHED"),
+        ("ui-testing-failure", "UI Testing Failure"),
+        ("ax-snapshot-failure", "Failed to get matching snapshot"),
+        ("ax-attribute-failure", "Failed to get attributes"),
+        ("test-interrupted", "Testing was interrupted"),
     ) if fragment.lower() in folded_transcript]
     for field, pattern in (
         ("xctestRequireLine", r"MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + r";line=([0-9]{1,5});check="),
