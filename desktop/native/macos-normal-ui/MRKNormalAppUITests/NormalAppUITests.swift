@@ -8687,7 +8687,9 @@ final class NormalAppUITests: XCTestCase {
         guard let wholeDeadline = journeyDeadline, let clock = caseClock else {
             throw Refusal.condition("iOS diagnostics requires the original archive clock")
         }
-        journeyDeadline = min(wholeDeadline, try clock.end(within: 15))
+        // Preserve the 15-second report-arrival gate. Allow separate bounded
+        // time for accessibility readback of the same report and its ledger.
+        journeyDeadline = min(wholeDeadline, try clock.end(within: 30))
         defer { journeyDeadline = wholeDeadline } // SAME absolute success cutoff, not renewed work.
         start.click() // Exactly one diagnostics Start; native work6/finality10 remain unchanged.
         diagnosticCut = "start-clicked"
