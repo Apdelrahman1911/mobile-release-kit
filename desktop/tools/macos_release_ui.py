@@ -1070,7 +1070,7 @@ def observe(work, action, media, suite):
         def git_index_journey(head):
             review = "Review local Git change"
             reviewed = "I reviewed all listed files, including any contents not shown here."
-            fact = results["gitIndex"] = {"originalStatusReads": 0, "visualStatusReads": 0}
+            fact = results["gitIndex"] = {"originalStatusReads": 0, "visualStatusReads": 0, "reviewViewportScrolls": 0}
 
             def read_visible_original_status(tree):
                 # The macOS driver caps its platform tree at 300 nodes.
@@ -1103,9 +1103,10 @@ def observe(work, action, media, suite):
 
             def await_heading(name):
                 next_read = time.monotonic() + 2
+                review_scrolls = 0
 
                 def observe():
-                    nonlocal next_read
+                    nonlocal next_read, review_scrolls
                     tree = ui.command("tree.snapshot", limit=300)
                     rows = tree["nodes"]
                     headings = {row["name"] for row in rows if row["role"] == "heading" and row["visible"]}
@@ -1113,6 +1114,26 @@ def observe(work, action, media, suite):
                                                    "Git action did not complete"}), "git-index-original-action-refused")
                     if name in headings:
                         return True
+                    if (name in {"Review files to stage", "Review files to unstage"} and
+                            "Review before changing Git" in headings and review_scrolls < 3):
+                        # The original review card follows the status region and
+                        # can be clipped below the hosted runner's viewport.
+                        # Use its visible status button only as a scroll anchor.
+                        root = rows[0]
+                        anchors = [row for row in rows if row["name"] == "Close review, keep draft" and
+                                   row["role"] == "button" and row["visible"] and row["bounds"]]
+                        if len(anchors) == 1 and root["id"] == f"mac:{ui.payload_pid()}:0" and root["bounds"]:
+                            anchor = anchors[0]
+                            bounds, box = root["bounds"], anchor["bounds"]
+                            x, y = box["x"] + box["width"] // 2, box["y"] + box["height"] // 2
+                            if (anchor["id"].startswith(root["id"] + ".") and
+                                    bounds["x"] + 200 < x < bounds["x"] + bounds["width"] - 8 and
+                                    bounds["y"] + 35 < y < min(bounds["y"] + bounds["height"] - 8,
+                                                               ui.screen["height"] - 65)):
+                                ui.command("pointer.scroll", x=x, y=y, dy=6)
+                                review_scrolls += 1
+                                fact["reviewViewportScrolls"] += 1
+                                return False
                     # The mutation controller's initial acknowledgement can
                     # be active. Check the original action as the UI directs.
                     if time.monotonic() >= next_read:
