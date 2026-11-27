@@ -7791,20 +7791,26 @@ final class NormalAppUITests: XCTestCase {
             }
             try require(headings.count == 1 && endings.count == 1 && headings[0] < endings[0],
                         "the original no-token conflict summary is missing or ambiguous")
+            try fixture.assertUnchanged()
+            try noApplyControls()
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_SAFETY=v1;originals=preserved;apply=absent")
             // WebKit can expose a list bullet as its own static text. The
-            // renderer formats the byte count using the current locale.
-            let conflict = labels[(headings[0] + 1)..<endings[0]].filter { $0 != "•" }
+            // list descendants need not appear between the heading and the
+            // trailing paragraph in a flattened staticText enumeration.
+            let candidates = review.descendants(matching: .any).matching(NSPredicate(
+                format: "elementType != %@ AND (label == %@ OR identifier == %@)",
+                NSNumber(value: XCUIElement.ElementType.staticText.rawValue), "candidate", "candidate"))
+            let digest = "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
             let suffix = " observed bytes"
-            let bytes = conflict.dropFirst().first.map { label -> String in
-                guard label.hasSuffix(suffix) else { return "" }
-                return String(label.dropLast(suffix.count)).replacingOccurrences(of: ",", with: "")
+            let sizeLabels = labels.filter { $0.hasSuffix(suffix) }
+            let sizes = sizeLabels.map { label in
+                String(label.dropLast(suffix.count)).replacingOccurrences(of: ",", with: "")
                     .replacingOccurrences(of: "\u{00a0}", with: "").replacingOccurrences(of: "\u{202f}", with: "")
             }
-            let idMatches = conflict.first == "candidate"
-            let hashMatches = conflict.last == "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
-            print("MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=\(conflict.count);id=\(idMatches);bytes=\(bytes == "2368");hash=\(hashMatches)")
-            try require(conflict.count == 3 && idMatches && bytes == "2368" && hashMatches,
-                        "the refused bundle did not report exactly the customized candidate")
+            let idMatches = labels.filter { $0 == "candidate" }.count == 1 || candidates.count == 1
+            let hashMatches = labels.filter { $0 == digest }.count == 1
+            let sizeMatches = sizes == ["2368"]
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=\(sizeLabels.count);id=\(idMatches);bytes=\(sizeMatches);hash=\(hashMatches)")
             try require(!labels.contains { $0.contains("# MRK synthetic user customization; preserve exactly.") },
                         "the refusal exposed customized original YAML")
             let facts = try waitElement(named(review, "Independent native workflow outcome facts"), in: review,
@@ -7815,6 +7821,9 @@ final class NormalAppUITests: XCTestCase {
             try require(pairs == ["Transaction effect", "not_started", "Journal", "not_created",
                                   "Core resources", "settled", "Native finality", "settled"],
                         "the named original effect/journal/resource/finality facts are not settled refusal")
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_SAFETY=v1;effect=not_started;journal=not_created;cleanup=settled")
+            try require(idMatches && sizeMatches && hashMatches,
+                        "the refused bundle did not report exactly the customized candidate")
             try noApplyControls()
         }
         try stage("workflow-refusal-native-review") {
