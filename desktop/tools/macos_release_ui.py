@@ -623,7 +623,28 @@ def observe(work, action, media):
             bounds = changes["bounds"]
             ui.command("pointer.scroll", x=bounds["x"] + bounds["width"] // 2,
                        y=bounds["y"] + bounds["height"] // 2, dy=6)
-            ui.click("Select README.md", category="checkbox", contains=True)
+            tree = ui.command("tree.snapshot", limit=300)
+            (evidence / "git-source-changes-tree.json").write_text(json.dumps(tree, indent=2) + "\n")
+            nodes = tree["nodes"]
+            pid = ui.payload_pid()
+            need(nodes and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "window",
+                 "exact-source-changes-window")
+            checks = [node for node in nodes if node["role"] == "checkbox" and node["visible"] and node["enabled"]]
+            select = [node for node in checks if "Select README.md" in (node["name"], node["text"])]
+            if not select:
+                # WebKit can present the cell control without its HTML label.
+                # Bind it to the accessibility row containing the one changed file.
+                matching_rows = [row["id"] + "." for row in nodes if row["role"] == "row" and any(
+                    item["id"].startswith(row["id"] + ".") and "README.md" in (item["name"], item["text"])
+                    for item in nodes)]
+                select = [node for node in checks if any(node["id"].startswith(row) for row in matching_rows)]
+            need(len(select) == 1 and select[0]["bounds"], "exact-readme-row-checkbox")
+            box, window = select[0]["bounds"], nodes[0]["bounds"]
+            x, y = box["x"] + box["width"] // 2, box["y"] + box["height"] // 2
+            need(window["x"] < x < window["x"] + window["width"] and
+                 window["y"] + 35 < y < min(window["y"] + window["height"] - 8, ui.screen["height"] - 65),
+                 "readme-checkbox-outside-app-viewport")
+            ui.command("element.click", snapshot_id=tree["snapshot_id"], id=select[0]["id"])
             ui.click("Working changes", category="button")
             ui.node(marker.strip().decode(), contains=True)
             need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
@@ -636,10 +657,11 @@ def observe(work, action, media):
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
         # Leave room for the title bar position and the Dock's reserved area.
         width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 120, 740)
-        if width < 980 or height < 640:
+        # The native payload enforces a minimum height of 640 points.
+        if width < 980 or height < 648:
             raise Blocked("The synthetic console is too small for two readable window sizes")
         results["windowBounds"] = []
-        for width, height in ((width - 40, height - 20), (width, height)):
+        for width, height in ((width - 40, max(640, height - 20)), (width, height)):
             results["windowBounds"].append(ui.resize(width, height))
             ui.page("Overview")
             ui.page("Project settings")
