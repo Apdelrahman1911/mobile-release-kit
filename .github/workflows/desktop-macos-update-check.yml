@@ -212,8 +212,10 @@ jobs:
       inputs.additional_ui != 'recovery-contracts' && inputs.additional_ui != 'xcode-path-control' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
-        inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' &&
-        inputs.build_run == '45904194634' && inputs.carrier_attempt == '1'))
+        inputs.carrier_attempt == '1' &&
+        ((inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' && inputs.build_run == '45904194634') ||
+         (inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' && inputs.build_run == '45996045007' &&
+          inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture))))
     runs-on: macos-26
     timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 55 }}
     strategy:
@@ -241,10 +243,15 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$CARRIER_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
+          case "$RELEASE_SOURCE" in
+            4e821384cd912562dd5e30b195e87c113bd2d09f) release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14 ;;
+            4feeced4ee513d824f8e44c50b3a340a7c39beed) release_tree=40c62080fe8a1ec90034508dbc2ce892f1083fb9 ;;
+            *) exit 1 ;;
+          esac
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CARRIER_RUN" |
-            jq -e --arg sha "$RELEASE_SOURCE" '
+            jq -e --arg sha "$RELEASE_SOURCE" --arg tree "$release_tree" '
               .head_sha == $sha and .head_branch == "main" and
-              .head_commit.tree_id == "50393070e54b402a5ac1bac63e411fa1fbd1ad14" and
+              .head_commit.tree_id == $tree and
               .display_title == "macOS / local-desktop-carrier / main" and
               .path == ".github/workflows/desktop-macos-installed.yml" and
               .event == "workflow_dispatch" and .run_attempt == 1 and .conclusion == "success"
@@ -274,7 +281,11 @@ jobs:
           printf 'MRK_FROZEN_RELEASE_MEDIA=%s\n' "$MRK_FROZEN_RELEASE_MEDIA" >> "$GITHUB_ENV"
           release_tree="$(git rev-parse 'HEAD^{tree}')"
           if [[ "$GITHUB_REF" == refs/heads/verify/macos-0213-recovery-project ]]; then
-            release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14
+            case "$RELEASE_SOURCE" in
+              4e821384cd912562dd5e30b195e87c113bd2d09f) release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14 ;;
+              4feeced4ee513d824f8e44c50b3a340a7c39beed) release_tree=40c62080fe8a1ec90034508dbc2ce892f1083fb9 ;;
+              *) exit 1 ;;
+            esac
           fi
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
             --source "$RELEASE_SOURCE" --tree "$release_tree" \
@@ -350,8 +361,15 @@ jobs:
                           report[label]["matchesArchivePredicate"] = bool(re.fullmatch(
                               r"Xcode [0-9]+(?:\.[0-9]+){0,2}\nBuild version [0-9A-Za-z]+\s*", result.stdout))
                       else:
-                          report[label].update(matchesArchivePredicate=output == str(sdk),
-                                               reportsUnversionedAlias=output == str(alias))
+                          reported = Path(output)
+                          versioned_alias = (reported.parent == sdk_parent and reported.is_symlink()
+                                             and reported.lstat().st_uid == 0
+                                             and re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+){0,2}\.sdk", reported.name)
+                                             and reported.readlink() == Path("iPhoneOS.sdk")
+                                             and reported.samefile(sdk))
+                          report[label].update(reportsCanonicalSDK=output == str(sdk),
+                                               reportsUnversionedAlias=output == str(alias),
+                                               reportsVersionedAliasToSameSDK=bool(versioned_alias))
                   except subprocess.TimeoutExpired:
                       report[label] = dict(timedOut=True, elapsedSeconds=round(time.monotonic() - start, 3))
           Path(sys.argv[1]).write_text(json.dumps(report, sort_keys=True) + "\n")

@@ -961,12 +961,17 @@ def main():
             manifest_path = Path(os.environ["MRK_FROZEN_RELEASE_MEDIA"]) / "RELEASE-MANIFEST.json"
             frozen = json.loads(manifest_path.read_bytes())
             ref = os.environ.get("GITHUB_REF")
+            identity = (frozen["sourceCommit"], frozen["sourceTree"], frozen["buildRun"])
+            historical = (identity == ("4e821384cd912562dd5e30b195e87c113bd2d09f",
+                                       "50393070e54b402a5ac1bac63e411fa1fbd1ad14", "45904194634")
+                          and args.mode in ("update-credentials", "recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI))
+            ios_regression = (identity == ("4feeced4ee513d824f8e44c50b3a340a7c39beed",
+                                           "40c62080fe8a1ec90034508dbc2ce892f1083fb9", "45996045007")
+                              and args.mode == "unsigned-ios-xctest")
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
-                          and args.mode in ("update-credentials", "recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI)
-                          and frozen["sourceCommit"] == "4e821384cd912562dd5e30b195e87c113bd2d09f"
-                          and frozen["sourceTree"] == "50393070e54b402a5ac1bac63e411fa1fbd1ad14"
-                          and (frozen["buildRun"], frozen["carrierRun"], frozen["carrierAttempt"])
-                          == ("45904194634", os.environ.get("MRK_FROZEN_CARRIER_RUN"), "1"))
+                          and (historical or ios_regression)
+                          and (frozen["carrierRun"], frozen["carrierAttempt"])
+                          == (os.environ.get("MRK_FROZEN_CARRIER_RUN"), "1"))
             need((ref == "refs/heads/main" or diagnostic)
                  and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             result["frozenRelease"] = {key: frozen[key] for key in
