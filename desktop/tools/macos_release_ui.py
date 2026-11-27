@@ -351,7 +351,7 @@ class UI:
         self.node("Choose a mobile project folder", contains=True)
         if cancel:
             self.click("Cancel", category="button")
-            self.node(PAGE_HEADINGS["Overview"], category="heading")
+            self.node(self.project_name or PAGE_HEADINGS["Overview"], category="heading")
             return
         self.keys("command", "shift", "g")
         pid = self.payload_pid()

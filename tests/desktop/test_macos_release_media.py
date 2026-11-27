@@ -112,6 +112,20 @@ class FrozenMediaTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "observation-scenario-failure"):
             verify(dict(result, scenarios=dict(result["scenarios"], **{row: {"status": "Failed"}})))
 
+    def test_ui_folder_picker_cancel_expects_the_current_project(self):
+        drive = ui.UI(None, self.root, {})
+        for project, button, heading in (
+            (None, "Choose project folder", ui.PAGE_HEADINGS["Overview"]),
+            ("Original project", "Open another project folder", "Original project"),
+        ):
+            with self.subTest(project=project), patch.object(drive, "click") as click, patch.object(drive, "node") as node:
+                drive.project_name = project
+                drive.pick(self.root / "Other project", cancel=True)
+                self.assertEqual(click.call_args_list[0].args, (button,))
+                click.assert_called_with("Cancel", category="button")
+                node.assert_called_with(heading, category="heading")
+                self.assertEqual(drive.project_name, project)
+
     def test_remove_producer_must_link_the_exact_install(self):
         source = "a" * 40
         version = self.manifest["version"]
