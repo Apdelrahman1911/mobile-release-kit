@@ -9004,11 +9004,12 @@ final class NormalAppUITests: XCTestCase {
                 let originalStatus = named(panel, statusLabel)
                 let terminalIssue = panel.staticTexts.matching(NSPredicate(
                     format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
-                let observed = NSPredicate(format: "result.exists == true OR failure.exists == true")
-                for interval: TimeInterval in [15, 60, 180] {
+                let readyOrFailed = NSPredicate(format: "result.exists == true OR failure.exists == true")
+                let statusReadIntervals: [TimeInterval] = [15, 60, 180]
+                for interval in statusReadIntervals {
                     let targets: NSDictionary = ["result": resultQuery.element(boundBy: 0),
                                                  "failure": terminalIssue.element(boundBy: 0)]
-                    let wait = XCTNSPredicateExpectation(predicate: observed, object: targets)
+                    let wait = XCTNSPredicateExpectation(predicate: readyOrFailed, object: targets)
                     if XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed { break }
                     let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
                     let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")
