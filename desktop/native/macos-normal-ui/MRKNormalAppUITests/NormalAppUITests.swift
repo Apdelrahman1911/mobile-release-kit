@@ -5492,7 +5492,7 @@ final class NormalAppUITests: XCTestCase {
             }
         }
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
-                                     in: root, enabled: true, line: line)
+                                     in: root, enabled: true, snapshotObservation: guidedProductSurface, line: line)
         let previous = control.value as? String
         if guidedProductSurface && previous == value {
             phase = "settled"
@@ -6237,15 +6237,23 @@ final class NormalAppUITests: XCTestCase {
             let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
             let storage = try waitElement(named(renderer, storageLabel), in: renderer)
             selectedStorage = storage
-            try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboardOptions: platforms)
-            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
-            try stage("persistence-open-vault") {
-                try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
-                try privateStatus(storage, action: "open-vault")
-                _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
-                                    failures: Self.privateInputFailures)
+            @MainActor func openVault() throws {
+                try stage("persistence-open-vault") {
+                    try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+                    try privateStatus(storage, action: "open-vault")
+                    _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
+                                        failures: Self.privateInputFailures)
+                }
             }
+            // The current Signing & accounts page starts by choosing storage.
+            // Check vault admission independently of release-context selection.
+            if guidedProductSurface { try openVault() }
+            try stage("persistence-scope") {
+                try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboardOptions: platforms)
+                try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+                try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
+            }
+            if !guidedProductSurface { try openVault() }
             try fixture.assertDefaultVaultAbsent()
             try privateRecordCount(storage, count: 0, assigned: 0)
             try press(storage, "Review vault initialization…", renderer: renderer, failures: Self.privateInputFailures)
@@ -8437,6 +8445,12 @@ final class NormalAppUITests: XCTestCase {
         let contextMatch = StaticTextMatch.edges("iOS / build · draft ", " · core host macos")
         let provenanceMatch = StaticTextMatch.suffix(
             " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe.")
+        if guidedProductSurface {
+            // The heading can be awaited without repeatedly reading every
+            // static text while the native operation has no result to show.
+            _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
+            diagnosticCut = "report-visible"
+        }
         let textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
         diagnosticCut = "settled-report"
