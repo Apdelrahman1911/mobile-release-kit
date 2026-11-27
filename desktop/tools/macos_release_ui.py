@@ -575,6 +575,16 @@ def observe(work, action, media):
             need(denied.returncode == 4 and error["ok"] is False and error["error"] == "access_denied",
                  "ungranted-project-observation-was-not-denied")
 
+        def read_version(expected):
+            tree = ui.command("tree.snapshot", limit=300)
+            buttons = [node for node in tree["nodes"] if node["role"] == "button" and
+                       node["name"] == "Open saved version editor" and node["visible"]]
+            if not buttons:
+                ui.click("Edit version & build number")
+            ui.click("Open saved version editor", category="button")
+            ui.node(expected, category="statictext", contains=True)
+
+        checks = results["projectSwitchIsolation"] = {}
         grant_selected()
         primary_id = granted_project()
         ui.page("Overview")
@@ -583,9 +593,9 @@ def observe(work, action, media):
         # Saved observation fields can change as selection settles. The grant
         # must retain the original project ID until another explicit Allow.
         need(granted_project() == primary_id, "switch-expanded-cli-authority")
-        ui.click("Edit version & build number")
-        ui.click("Open saved version editor", category="button")
-        ui.node("Values: 2.1.0 · Build 41.", category="statictext", contains=True)
+        checks["retainedPrimaryGrantOnSwitch"] = True
+        read_version("Values: 2.1.0 · Build 41.")
+        checks["secondarySavedVersion"] = True
         grant_selected()
 
         def replacement():
@@ -594,13 +604,13 @@ def observe(work, action, media):
 
         secondary_id = until(replacement, 10, "secondary-consent-did-not-replace-the-grant")
         require_denied(primary_id)
+        checks["secondaryGrantReplacedPrimary"] = True
         ui.page("Overview")
         ui.pick(project)
         need(granted_project() == secondary_id, "reopen-expanded-cli-authority")
         require_denied(primary_id)
-        ui.click("Edit version & build number")
-        ui.click("Open saved version editor", category="button")
-        ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
+        read_version("Values: 1.0.1 · Build 2.")
+        checks["primarySavedVersionAndDenialOnReturn"] = True
         access_panel()
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
@@ -608,6 +618,7 @@ def observe(work, action, media):
         require_denied(secondary_id)
         need(all(file_hash(path) == digest for path, digest in secondary_original.items())
              and all(file_hash(project / name) == digest for name, digest in primary_before.items()), "switch-changed-fixture")
+        checks["bothFixturesPreservedAndGrantRevoked"] = True
 
     def versions():
         nonlocal connection
