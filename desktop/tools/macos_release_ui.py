@@ -1251,31 +1251,30 @@ def observe(work, action, media, suite):
             fact["onlyReviewedBlobStaged"] = True
             # Apply invalidates the reader's captured project revision. The
             # ordinary UI requires a fresh read admission before Refresh.
-            press_after_settlement("Local Git read status", "Check local Git access")
+            read_status = "Local Git read status"
+            changes = "Local Git changes"
+            press_after_settlement(read_status, "Check local Git access")
             press_after_settlement("Local Git changes", "Refresh changes")
-            until(lambda: native_control("Local Git read status", "AXHeading", "Local Git read finished")["matches"] == 1,
-                  55, "git-index-original-stage-readback")
-            press_after_settlement(status_region, "Check local Git actions")
-            review_button = "Review files to unstage"
-            status_button = "Check local Git actions"
+            next_stage_read = time.monotonic() + 2
 
-            def unstage_ready():
-                if native_control("Local Git changes", "AXButton", review_button).get("enabled") is True:
+            def staged_observation():
+                nonlocal next_stage_read
+                # The earlier read's finished title can survive into Refresh.
+                # The changed and staged count requires the new file revision.
+                if native_control(changes, "AXStaticText", "1 changed · 1 staged")["matches"] == 1:
                     return True
-                if fact.get("unstageAvailabilityRechecked"):
-                    return False
-                retry = native_control(status_region, "AXButton", status_button)
-                status_missing = native_control(status_region, "AXStaticText",
-                    "Check local Git actions first. This checks native availability; it does not stage files or create a commit.")
-                if retry.get("enabled") is True and status_missing["matches"] == 1:
-                    # A settled availability read can be invalidated by the
-                    # refresh's new revision. No mutation has been submitted.
-                    native_control(status_region, "AXButton", status_button, press=True)
-                    fact["unstageAvailabilityRechecked"] = True
+                if time.monotonic() >= next_stage_read:
+                    check = native_control(read_status, "AXButton", "Check read")
+                    if check.get("enabled") is True:
+                        native_control(read_status, "AXButton", "Check read", press=True)
+                        fact["stageReadStatusChecks"] = fact.get("stageReadStatusChecks", 0) + 1
+                    next_stage_read = time.monotonic() + 5
                 return False
 
-            until(unstage_ready, 45, "git-unstage-missing-current-action-availability")
-            native_control("Local Git changes", "AXButton", review_button, press=True)
+            until(staged_observation, 60, "git-index-current-staged-observation")
+            fact["currentStagedObservation"] = True
+            press_after_settlement(status_region, "Check local Git actions")
+            press_after_settlement(changes, "Review files to unstage")
             await_heading("Review files to unstage")
             need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-unstage-review-path")
             need(native_control(review, "AXCheckBox", reviewed).get("checked") is False, "git-unstage-consent-starts-clear")
