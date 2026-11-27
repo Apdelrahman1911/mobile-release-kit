@@ -8659,7 +8659,20 @@ final class NormalAppUITests: XCTestCase {
         }
         return try LocalFixture.IOSArchiveIdentity(operationID: values[0], ownerGeneration: values[1])
     }
+    private func normalizedIOSFacts(_ text: String) -> String {
+        // WKWebView can expose punctuation and adjacent inline text in separate AX nodes.
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #" +([.,:])"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"(?<=\d)\. +(?=\d)"#, with: ".", options: .regularExpression)
+    }
+
     @MainActor private func iosPublicText(_ container: XCUIElement) throws -> String {
+        if guidedProductSurface {
+            let fields = try guidedDiagnosticsSnapshot(container).texts
+            let text = fields.joined(separator: "\n")
+            try require(text.utf8.count <= 32768, "iOS fixed panel text bound")
+            return normalizedIOSFacts(text)
+        }
         let query = container.staticTexts
         try require(query.count <= 256, "iOS fixed panel text count")
         var text = ""
@@ -9195,9 +9208,7 @@ final class NormalAppUITests: XCTestCase {
                     }
                     let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
                     try require(try iosCurrentArchiveIdentity(status) == pair, "iOS status original identity changed")
-                    let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")
-                        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                        .replacingOccurrences(of: #" +([.])"#, with: "$1", options: .regularExpression)
+                    let text = normalizedIOSFacts(try guidedDiagnosticsSnapshot(status).texts.joined(separator: " "))
                     let phases = ["Awaiting your approval", "Starting iOS operation", "iOS operation running",
                                   "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
                     let matches = phases.map { text.contains($0) ? "1" : "0" }.joined()
@@ -9215,19 +9226,30 @@ final class NormalAppUITests: XCTestCase {
                         try press(panel, "Check archive status", renderer: renderer, failures: failures, timeout: 12)
                     }
                 }
-                let result = try waitElement(resultQuery, in: panel, timeout: 750, failures: failures)
-                try reveal(result, in: renderer)
-                observed = try iosResult(result, identity: pair)
-                let status = try unique(named(panel, statusLabel), "iOS current terminal status absent")
-                try require(try iosCurrentArchiveIdentity(status) == pair, "iOS terminal status identity differs")
-                let text = try iosPublicText(status)
-                for required in ["iOS request finished", "Xcode version: known exit 0.", "iOS SDK selection: known exit 0.",
-                    "Saved preparation: not configured.", "Archive: known exit 0.",
-                    "Inspection snapshot: removed. Task work: removed. Archive output: retained-local-result."] {
-                    try require(text.contains(required), "iOS original command/finality fact missing")
+                var resultCard: XCUIElement?
+                try stage("ios-archive-terminal-result-card") {
+                    resultCard = try waitElement(resultQuery, in: panel, timeout: 750, failures: failures)
                 }
-                try require(!text.contains("This is retained original-operation data"), "iOS historical original status refused")
-                try fixture.finishIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                guard let result = resultCard else { throw Refusal.condition("iOS current terminal result absent") }
+                try stage("ios-archive-terminal-result-facts") {
+                    try reveal(result, in: renderer)
+                    observed = try iosResult(result, identity: pair)
+                }
+                try stage("ios-archive-terminal-command-facts") {
+                    let status = try unique(named(panel, statusLabel), "iOS current terminal status absent")
+                    try require(try iosCurrentArchiveIdentity(status) == pair, "iOS terminal status identity differs")
+                    let text = try iosPublicText(status)
+                    let required = ["iOS request finished", "Xcode version: known exit 0.", "iOS SDK selection: known exit 0.",
+                        "Saved preparation: not configured.", "Archive: known exit 0.",
+                        "Inspection snapshot: removed. Task work: removed. Archive output: retained-local-result."]
+                    let matched = required.map { text.contains($0) }
+                    print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(matched.map { $0 ? "1" : "0" }.joined())")
+                    try require(matched.allSatisfy { $0 }, "iOS original command/finality fact missing")
+                    try require(!text.contains("This is retained original-operation data"), "iOS historical original status refused")
+                }
+                try stage("ios-archive-terminal-original-files") {
+                    try fixture.finishIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                }
                 _ = try clock.remaining(1, before: successCutoff)
                 successBeforeCutoff = true // Only here; neither Quit nor cleanup can create success.
             }
