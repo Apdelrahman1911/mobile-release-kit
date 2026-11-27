@@ -650,9 +650,15 @@ def observe(work, action, media, suite):
                     leaves[name] = (item.st_ino, hashlib.sha256(payload).hexdigest())
             return info.st_ino, leaves
 
-        def await_status(label):
+        def await_status(label, *, region=None):
             def observed():
                 rows = ui.command("tree.snapshot", limit=300)["nodes"]
+                if region is not None:
+                    parents = [row for row in rows if row["role"] == "group" and row["name"] == region and row["visible"]]
+                    if len(parents) != 1:
+                        return False
+                    prefix = parents[0]["id"] + "."
+                    rows = [row for row in rows if row["id"].startswith(prefix) and row["role"] == "statictext"]
                 return any(label in (row["name"], row["text"]) for row in rows if row["visible"])
             until(observed, 45, "vault-state-" + label)
 
@@ -683,7 +689,8 @@ def observe(work, action, media, suite):
             ui.click("Select file…", category="button")
             ui.node("Choose a signing or iOS build-input file", contains=True)
             ui.choose_path(profile_file, "Choose a signing or iOS build-input file")
-            ui.node("selected", category="statictext", region="Private-input operation phase")
+            await_status("selected", region="Private-input operation phase")
+            await_status("choose-file", region="Private-input operation action")
             ui.edit("Vault label (optional)", "Synthetic profile input")
             ui.click("Prepare private review", category="button")
             await_status("File check")
