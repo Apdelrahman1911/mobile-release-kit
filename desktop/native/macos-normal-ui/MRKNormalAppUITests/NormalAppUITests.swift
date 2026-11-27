@@ -8929,8 +8929,13 @@ final class NormalAppUITests: XCTestCase {
                 }
                 let review = try waitElement(named(panel, "Confirm this saved unsigned iOS archive intent"), in: panel, failures: failures)
                 let text = try iosPublicText(review)
-                for expected in ["ios/MRKObserved.xcodeproj", "MRKObserved", "Release", "org.example.mrk.observed", "Saved preparation is not configured."] {
-                    try require(text.contains(expected), "iOS saved unsigned selection differs")
+                let expected = ["ios/MRKObserved.xcodeproj", "scheme MRKObserved", "configuration Release",
+                                "Bundle ID org.example.mrk.observed", "Saved preparation is not configured."]
+                let observed = expected.map { text.contains($0) }
+                let observedFields = observed.map { $0 ? "1" : "0" }.joined()
+                print("MRK_MACOS_GUIDED_IOS_REVIEW_FIELDS=v1;fields=\(observedFields)")
+                for (index, match) in observed.enumerated() {
+                    try require(match, "iOS saved unsigned selection differs at field \(index + 1)")
                 }
                 let pair = try iosCurrentArchiveIdentity(review)
                 identity = pair

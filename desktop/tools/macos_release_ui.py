@@ -665,7 +665,16 @@ def observe(work, action, media, suite):
             for _ in range(moves):
                 ui.keys("down")
             ui.keys("return")
-            need(ui.node(control, category="popupbutton")[1]["text"] == value, "wrong-vault-input-selection-" + control)
+
+            def selected():
+                tree = ui.command("tree.snapshot", limit=300)
+                matches = [row for row in tree["nodes"] if row["role"] == "popupbutton" and
+                           row["name"] == control and row["visible"]]
+                return len(matches) == 1 and matches[0]["text"] == value
+
+            # The native menu closes before WebKit publishes the new AX value.
+            # Read the original choice without sending another menu action.
+            until(selected, 5, "wrong-vault-input-selection-" + control)
 
         def save_profile():
             ui.click("Submit current context", category="button")
