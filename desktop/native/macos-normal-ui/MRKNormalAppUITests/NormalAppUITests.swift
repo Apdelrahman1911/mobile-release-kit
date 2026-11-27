@@ -8663,7 +8663,6 @@ final class NormalAppUITests: XCTestCase {
         // WKWebView can expose punctuation and adjacent inline text in separate AX nodes.
         text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #" +([.,:])"#, with: "$1", options: .regularExpression)
-            .replacingOccurrences(of: #"(?<=\d)\. +(?=\d)"#, with: ".", options: .regularExpression)
     }
 
     @MainActor private func iosPublicText(_ container: XCUIElement) throws -> String {
@@ -8697,7 +8696,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try require(!text.contains("Historical / retained context"), "iOS historical result refused")
         print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=result-facts")
-        let expression = try NSRegularExpression(pattern: #"Saved version 1\.2\.3 · build 7\. ([1-9][0-9]{0,5}) observed entries · ([1-9][0-9]{0,9}) observed bytes\."#)
+        let expression = try NSRegularExpression(pattern: #"Saved version 1\. *2\. *3 · build 7\. ([1-9][0-9]{0,5}) observed entries · ([1-9][0-9]{0,9}) observed bytes\."#)
         let rows = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
         guard rows.count == 1, let entryRange = Range(rows[0].range(at: 1), in: text),
               let byteRange = Range(rows[0].range(at: 2), in: text), let entries = Int(text[entryRange]),
