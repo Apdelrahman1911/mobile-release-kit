@@ -629,15 +629,15 @@ def observe(work, action, media):
             pid = ui.payload_pid()
             need(nodes and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "window",
                  "exact-source-changes-window")
-            checks = [node for node in nodes if node["role"] == "checkbox" and node["visible"] and node["enabled"]]
-            select = [node for node in checks if "Select README.md" in (node["name"], node["text"])]
-            if not select:
-                # WebKit can present the cell control without its HTML label.
-                # Bind it to the accessibility row containing the one changed file.
-                matching_rows = [row["id"] + "." for row in nodes if row["role"] == "row" and any(
-                    item["id"].startswith(row["id"] + ".") and "README.md" in (item["name"], item["text"])
-                    for item in nodes)]
-                select = [node for node in checks if any(node["id"].startswith(row) for row in matching_rows)]
+            table, = [node for node in nodes if node["role"] == "table" and
+                      node["name"].startswith("Choose files to inspect.")]
+            # WebKit exposes each cell under its row and again under its column.
+            # Select the checkbox in the actual row for the one changed file.
+            row, = [node for node in nodes if node["role"] == "row" and node["id"].startswith(table["id"] + ".") and
+                    any(item["id"].startswith(node["id"] + ".") and "README.md" in (item["name"], item["text"])
+                        for item in nodes)]
+            select = [node for node in nodes if node["role"] == "checkbox" and node["visible"] and node["enabled"] and
+                      node["id"].startswith(row["id"] + ".") and node["name"] == "Select README.md"]
             need(len(select) == 1 and select[0]["bounds"], "exact-readme-row-checkbox")
             box, window = select[0]["bounds"], nodes[0]["bounds"]
             x, y = box["x"] + box["width"] // 2, box["y"] + box["height"] // 2
@@ -646,7 +646,12 @@ def observe(work, action, media):
                  "readme-checkbox-outside-app-viewport")
             ui.command("element.click", snapshot_id=tree["snapshot_id"], id=select[0]["id"])
             ui.click("Working changes", category="button")
-            ui.node(marker.strip().decode(), contains=True)
+            ui.reveal("Working-file changes", category="heading")
+            added_line = "+" + marker.strip().decode()
+            diff = ui.command("element.wait", selector={"text_contains": added_line, "visible": True},
+                              state="present", timeout_ms=10000)
+            need(any(added_line in value.splitlines() for node in diff["nodes"]
+                     for value in (node["name"], node["text"])), "exact-added-line-in-working-diff")
             need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
                  and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
         finally:
