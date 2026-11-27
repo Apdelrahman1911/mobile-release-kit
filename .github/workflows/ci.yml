@@ -69,6 +69,23 @@ jobs:
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           umask 022
           mkdir "$root/home" "$root/bootstrap" "$root/gems"
+      - name: Install the distribution-signed Linux isolation tool if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x /usr/bin/bwrap ]]; then
+            # Bubblewrap comes from Ubuntu's signed archive.
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            [[ -s "$ubuntu_sources" ]]
+            sources=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=/dev/null)
+            sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" \
+              -o APT::Get::List-Cleanup=0 update
+            sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" install \
+              --yes --no-install-recommends bubblewrap
+          fi
+          [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
       - name: Install only the frozen test dependencies
         shell: bash
         timeout-minutes: 10
@@ -76,10 +93,6 @@ jobs:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: |
           set -euo pipefail
-          if [[ ! -x /usr/bin/bwrap ]]; then
-            sudo -n apt-get update
-            sudo -n apt-get install --yes --no-install-recommends bubblewrap
-          fi
           export HOME="$WORK_ROOT/home" GEM_HOME="$WORK_ROOT/bootstrap"
           export GEM_PATH="$GEM_HOME" PATH="$GEM_HOME/bin:$PATH"
           export BUNDLE_PATH="$WORK_ROOT/gems" BUNDLE_USER_HOME="$WORK_ROOT/home/bundle"
@@ -194,10 +207,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! -x /usr/bin/bwrap ]]; then
+            # Bubblewrap comes from Ubuntu's signed archive.
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            [[ -s "$ubuntu_sources" ]]
+            sources=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=/dev/null)
             sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get update
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" \
+              -o APT::Get::List-Cleanup=0 update
             sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" install \
               --yes --no-install-recommends bubblewrap
           fi
           [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
@@ -415,10 +433,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! -x /usr/bin/bwrap ]]; then
+            # Bubblewrap comes from Ubuntu's signed archive.
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            [[ -s "$ubuntu_sources" ]]
+            sources=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=/dev/null)
             sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get update
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" \
+              -o APT::Get::List-Cleanup=0 update
             sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" install \
               --yes --no-install-recommends bubblewrap
           fi
           [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
@@ -519,10 +542,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! -x /usr/bin/bwrap ]]; then
+            # Bubblewrap comes from Ubuntu's signed archive.
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            [[ -s "$ubuntu_sources" ]]
+            sources=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=/dev/null)
             sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get update
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" \
+              -o APT::Get::List-Cleanup=0 update
             sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" install \
               --yes --no-install-recommends bubblewrap
           fi
           [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
