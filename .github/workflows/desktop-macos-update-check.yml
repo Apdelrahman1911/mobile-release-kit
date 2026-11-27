@@ -299,7 +299,7 @@ jobs:
                       files.work = held
                       files.held.append(held)
                       files.live.add(held)
-                      files.namespace = SimpleNamespace(check=lambda: None)
+                      files.namespace = SimpleNamespace(check=lambda: None, cleanup=lambda: None, closed=lambda: True)
                       with patch.object(os, "open", native_open), patch.object(os, "close", native_close), \
                               patch.object(files, "point"), patch.object(files, "require_work_consumers"):
                           try:

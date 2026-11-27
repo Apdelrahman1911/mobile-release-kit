@@ -832,8 +832,6 @@ class IOSOwnershipDataTests(unittest.TestCase):
                 rmdir.assert_not_called()
 
     def test_work_links_allow_only_xcode_internal_targets_and_fixed_swiftpm_aliases(self):
-        import pwd
-
         base = ("DerivedData", "Build", "Products")
         swiftpm = ("home", ".swiftpm")
         cases = (
@@ -841,7 +839,7 @@ class IOSOwnershipDataTests(unittest.TestCase):
             (base, "App.app", "../../../home/App.app", False),
             (base, "App.app", "/outside/App.app", False),
             (base, "App.app", "../" * 400 + "Destination/App.app", False),
-            (("home", ".swiftpm"), "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", True),
+            (swiftpm, "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", True),
             (swiftpm, "configuration", "/Users/fixture/Library/org.swift.swiftpm/configuration", True),
             (swiftpm, "security", "/Users/not-fixture/Library/org.swift.swiftpm/security", False),
             (swiftpm, "security", "/Users/fixture/Library/org.swift.swiftpm/configuration", False),
@@ -849,8 +847,9 @@ class IOSOwnershipDataTests(unittest.TestCase):
             (("tmp", ".swiftpm"), "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", False),
             ((), "DerivedData", "anything", False),
         )
+        fixture_pwd = SimpleNamespace(getpwuid=lambda _: SimpleNamespace(pw_dir="/Users/fixture"))
         with patch.object(operation_module.sys, "platform", "darwin"), \
-                patch.object(pwd, "getpwuid", return_value=SimpleNamespace(pw_dir="/Users/fixture")):
+                patch.dict(operation_module.sys.modules, {"pwd": fixture_pwd}):
             for parent, name, target, expected in cases:
                 with self.subTest(parent=parent, name=name):
                     self.assertIs(operation_module._work_link_target(parent, name, target), expected)
