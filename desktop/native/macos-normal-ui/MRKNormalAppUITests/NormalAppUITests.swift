@@ -6419,7 +6419,10 @@ final class NormalAppUITests: XCTestCase {
             selectedStorage = storage
             @MainActor func openVault() throws {
                 try stage("persistence-open-vault") {
-                    try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+                    // Wait for the exact native-enabled control on the same
+                    // project. A disabled or refused control cannot pass.
+                    try press(storage, "Open encrypted vault", renderer: renderer,
+                              failures: Self.privateInputFailures, timeout: 36)
                     do {
                         try privateStatus(storage, action: "open-vault")
                     } catch {
@@ -7323,7 +7326,9 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Validate only", renderer: renderer)
             let validationAttribute = guidedProductSurface ? "title" : "value"
             let validated = renderer.staticTexts.matching(NSPredicate(format: "%K == %@", validationAttribute, "Format validation complete"))
-            _ = try waitElement(validated, in: renderer,
+            // The native gate can queue behind the original passive
+            // project read. Wait for this exact validation receipt only.
+            _ = try waitElement(validated, in: renderer, timeout: 36,
                                 failures: Self.configurationFailures)
             if guidedProductSurface {
                 try press(renderer, "Project settings", renderer: renderer)
