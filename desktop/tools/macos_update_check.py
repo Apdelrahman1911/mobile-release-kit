@@ -970,7 +970,8 @@ def main():
                                and args.mode in ("unsigned-ios-xctest", "archived-upgrade"))
             archive_candidate = (identity == ("7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc",
                                               "fb712e594936256ff1d515cfaa1d269ae4e6d9a1", "46048925911")
-                                 and args.mode == "unsigned-ios-xctest")
+                                 and frozen["carrierRun"] == "46067290901"
+                                 and args.mode in ADDITIONAL_FROZEN_UI)
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
                           and (historical or candidate_replay or archive_candidate)
                           and (frozen["carrierRun"], frozen["carrierAttempt"])
