@@ -6923,7 +6923,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(fields.matching(NSPredicate(format: "value == %@", relative)), in: renderer, timeout: 48,
                                 projectFieldObservation: field.map { ($0, fields, relative) })
             _ = try waitElement(renderer.buttons.matching(identifier: "Browse existing " + label),
-                                in: renderer, enabled: true, timeout: 48)
+                                in: renderer, enabled: true, timeout: 48, snapshotObservation: guidedProductSurface)
         }
         @MainActor func browse(_ label: String, title: String, relative: String, cancel: Bool = false) throws {
             try press(renderer, "Browse existing " + label, renderer: renderer)
@@ -6980,7 +6980,8 @@ final class NormalAppUITests: XCTestCase {
             try selected("Store metadata folder", relative: "metadata")
             try settings("General")
             try selected("Committed version file", relative: "inputs/VERSION")
-            try settings("iOS")
+            // The guided version and Xcode inputs share one group.
+            if !guidedProductSurface { try settings("iOS") }
             try selected("Xcode project", relative: "ios/Example.xcodeproj")
             try selected("Xcode workspace", relative: "ios/Example.xcworkspace")
             try press(renderer, guidedProductSurface ? "Check what’s needed" : "Review draft changes", renderer: renderer)
@@ -7607,10 +7608,12 @@ final class NormalAppUITests: XCTestCase {
                         "passive supplied comparison unexpectedly enabled")
             try press(renderer, "Preview GitHub setup", renderer: renderer)
             if guidedProductSurface {
-                _ = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                let disclosure = try waitElement(controls(renderer, [.disclosureTriangle, .button],
                     label: "Optional preview: proposed files and checklist · available", prefix: true),
                     in: renderer, failures: Self.workflowFailures)
-                try expand(renderer, prefix: "Optional preview: proposed files and checklist · available", renderer: renderer)
+                // The read-only disclosure has no disabled state in the app.
+                // Its actual click must expose the matching preview below.
+                disclosure.click()
             }
             let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
                                           failures: Self.workflowFailures)
@@ -7731,7 +7734,22 @@ final class NormalAppUITests: XCTestCase {
         try require((1...128).contains(total) && counts["MISSING", default: 0] >= 2 && counts["SKIP", default: 0] >= 1,
                     "the fixture's missing module/wrapper and early-exit findings were not retained")
         let summary = "\(total) total findings · \(total) included in the returned list · 0 omitted from that list. Counts below include every reported finding."
-        _ = try unique(report.staticTexts.matching(identifier: summary), "original offline count totals or omission state differ")
+        if guidedProductSurface {
+            // WebKit can expose one paragraph as adjacent static texts at the
+            // interpolation boundaries. Require the same complete summary.
+            let matches = labels.indices.filter { index in
+                var joined = labels[index]
+                for part in labels.dropFirst(index + 1).prefix(6) {
+                    if joined == summary || !summary.hasPrefix(joined) { break }
+                    joined += " " + part
+                }
+                return joined == summary
+            }
+            print("MRK_GUIDED_OFFLINE_COUNT=v1;total=\(total);missing=\(counts["MISSING", default: 0]);skipped=\(counts["SKIP", default: 0]);summary=\(min(matches.count, 5))")
+            try require(matches.count == 1, "original offline count totals or omission state differ", check: .singleton)
+        } else {
+            _ = try unique(report.staticTexts.matching(identifier: summary), "original offline count totals or omission state differ")
+        }
         for label in ["Android module configuration.", "Android Gradle wrapper policy.", "Core early-exit or remaining-check policy."] {
             _ = try unique(report.staticTexts.matching(identifier: label), "the expected negative-report finding is missing or repeated")
         }
