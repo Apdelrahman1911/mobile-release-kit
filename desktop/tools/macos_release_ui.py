@@ -10,6 +10,7 @@ import plistlib
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import time
 
@@ -43,6 +44,8 @@ EXPECTED_SCENARIOS = {
 
 SUITE_SCENARIOS = {
     "workspace": EXPECTED_SCENARIOS,
+    "cli-read": {"native-console-admission", "project-picker-and-saved-config", "installed-cli-read-data-and-refusals"},
+    "vault-lifecycle": {"native-console-admission", "project-picker-and-saved-config", "vault-cancel-lock-reopen"},
     "metadata": {"native-console-admission", "project-picker-and-saved-config", "metadata-negative-cancel-save-readback"},
     "projects": {"native-console-admission", "project-picker-and-saved-config", "project-switch-and-cli-isolation"},
 }
@@ -271,7 +274,7 @@ class UI:
         raise AssertionError(f"target-not-reachable-in-app-viewport-{name}")
 
     def click(self, name, *, category=None, contains=False, region=None):
-        for attempt in range(2):
+        for attempt in range(4):
             snapshot, node = self.reveal(name, category=category, contains=contains, region=region,
                                          enabled=True, actionable=True)
             try:
@@ -279,11 +282,13 @@ class UI:
                 return
             except Exception as error:
                 # The pinned action rejects a stale snapshot before sending
-                # any pointer event. Re-observe once, with the same checks.
+                # any pointer event. Let the AX tree settle and resolve the
+                # exact same target again. Never repeat an uncertain click.
                 payload = getattr(error, "payload", None)
-                if (attempt or getattr(error, "status", None) != 409 or not isinstance(payload, dict) or
+                if (attempt == 3 or getattr(error, "status", None) != 409 or not isinstance(payload, dict) or
                     (payload.get("error") or {}).get("code") != "stale_snapshot"):
                     raise
+                time.sleep(0.75)
 
     def edit(self, name, text):
         self.click(name, category="textfield", contains=True)
@@ -533,15 +538,16 @@ def observe(work, action, media, suite):
         need(all(file_hash(project / name) == digest for name, digest in original.items()),
              "cancelled-project-picker-changed-fixture")
 
-    def select_project():
+    def select_project(*, check_version=True):
         ui.page("Overview")
         ui.pick(project)
         ui.click("Project details & saved observations", contains=True)
         ui.node(str(project), category="statictext")
         ui.node("org.mrk.fixture", contains=True)
-        ui.click("Edit version & build number")
-        ui.click("Open saved version editor", category="button")
-        ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
+        if check_version:
+            ui.click("Edit version & build number")
+            ui.click("Open saved version editor", category="button")
+            ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
         need(all(file_hash(project / name) == digest for name, digest in original.items()), "project-originals")
 
     def metadata_journey():
@@ -597,6 +603,134 @@ def observe(work, action, media, suite):
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
+
+    def cli_read_journey():
+        receipts = results["installedCliReads"] = {}
+
+        def request(command, *args, kind):
+            process = call(str(CLI), command, *args, "--json", check=False)
+            reply = json.loads(process.stdout)
+            data = reply["response"]
+            receipts[command] = {"return": process.returncode, "kind": data["kind"]}
+            need(process.returncode == 0 and reply["version"] == 1 and data["kind"] == kind, f"cli-read-kind-{command}")
+            return data["value"]
+
+        def reject(command, *args, code, reason):
+            process = call(str(CLI), command, *args, "--json", check=False)
+            reply = json.loads(process.stdout)
+            local = reply.get("ok") is False and reply.get("error") == reason
+            remote = reply.get("response") == {"kind": "error", "value": reason}
+            need(process.returncode == code and reply["version"] == 1 and (local or remote),
+                 f"cli-refusal-{command}-{reason}")
+
+        ui.page("Project settings")
+        ui.click("Advanced · CLI / AI access", category="disclosuretriangle", contains=True)
+        ui.click("Check access", category="button")
+        ui.click("Allow selected project for 1 hour", category="button")
+        ui.node("1 project was allowed at last check", category="statictext", contains=True)
+        service = request("status", kind="info")
+        # readOnly identifies the separate foreground history host. The live
+        # Desktop host can service separately approved operations. This grant cannot.
+        need(service["readOnly"] is False and service["cachedObservationsAreAuthority"] is False and
+             service["readGrantAuthorizesExecution"] is False and service["localChecksRequireSeparateGrant"] is True and
+             service["requiresRunningDesktop"] is True and
+             0 < service["remainingAccessMs"] <= 3600000, "cli-session-read-only-contract")
+        rows = request("projects", kind="projects")
+        need(len(rows) == 1 and rows[0]["registeredInCurrentHost"] is True, "cli-only-current-project")
+        project_id = rows[0]["projectId"]
+        observation = request("observe", project_id, kind="observation")
+        receipt = observation["observation"]["configuration"]
+        need(observation["projectId"] == project_id and observation["registeredInCurrentHost"] is True and
+             receipt == {"state": "format-valid", "bytes": (project / CONFIG_FILE).stat().st_size,
+                         "sha256": original[CONFIG_FILE]}, "cli-saved-config-readback")
+        journal = request("requests", project_id, kind="requests")
+        need(journal["projectId"] == project_id and journal["doNotReplay"] is True and journal["requests"] == [],
+             "cli-empty-request-discovery")
+        tools = request("android-tools", project_id, kind="android-tools")
+        need(tools["projectId"] == project_id and tools["projectCompatibility"] == "not-checked" and
+             tools["freshness"] == "historical-not-revalidated", "cli-android-historical-labels")
+        repository = request("repository", project_id, kind="repository")
+        need(repository["projectId"] == project_id and repository["basis"] == "local-refs-no-fetch" and
+             repository["freshness"] == "historical-not-revalidated", "cli-git-historical-labels")
+        need(request("operations", project_id, kind="operations") == [], "cli-no-new-project-operations")
+        reject("operation", project_id, "f" * 32, code=5, reason="conflict")
+        reject("repository", project_id, "--fetch", code=2, reason="invalid_request")
+        reject("observe", "not-a-project", code=2, reason="invalid_request")
+        foreign = "f" * 32 if project_id != "f" * 32 else "e" * 32
+        reject("observe", foreign, code=4, reason="access_denied")
+        ui.click("Turn off access", category="button")
+        ui.node("Off at last check", category="statictext", contains=True)
+        for command in ("observe", "requests", "android-tools", "repository", "operations"):
+            reject(command, project_id, code=4, reason="access_denied")
+        need(all(file_hash(project / name) == digest for name, digest in original.items()), "cli-read-mutated-project")
+
+
+    def vault_journey():
+        vault = Path.home() / "Library/Application Support/dev.mobile-release-kit.desktop/credential-vault-v1"
+        controls = {"vault-lock": 0, "initialization-reservation": 48, "vault-header": 104}
+
+        def assert_no_header():
+            need(not os.path.lexists(vault / "vault-header"), "vault-header-created-before-approval")
+
+        def read_vault_state():
+            info = vault.lstat()
+            need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
+                 "new-vault-directory-custody")
+            need({path.name for path in vault.iterdir()} == controls.keys(), "unexpected-empty-vault-roster")
+            leaves = {}
+            for name, length in controls.items():
+                with os.fdopen(os.open(vault / name, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+                    item = os.fstat(stream.fileno())
+                    need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and item.st_uid == os.getuid() and
+                         item.st_dev == info.st_dev and stat.S_IMODE(item.st_mode) == 0o600 and item.st_size == length,
+                         "vault-control-custody-" + name)
+                    leaves[name] = (item.st_ino, hashlib.file_digest(stream, "sha256").hexdigest())
+            return info.st_ino, leaves
+
+        def await_status(label):
+            def observed():
+                rows = ui.command("tree.snapshot", limit=300)["nodes"]
+                return any(label in (row["name"], row["text"]) for row in rows if row["visible"])
+            until(observed, 45, "vault-state-" + label)
+
+        need(not os.path.lexists(vault), "existing-vault-is-outside-test-scope")
+        facts = results["vaultLifecycle"] = {}
+        ui.page("Signing & accounts")
+        ui.click("Open encrypted vault", category="button")
+        await_status("Encrypted vault · uninitialized")
+        ui.click("Review vault initialization…", category="button")
+        await_status("Create a new encrypted vault?")
+        assert_no_header()
+        ui.click("Discard review", category="button", region="Explicit private-input review")
+        await_status("Storage closed")
+        ui.node("discard", category="statictext", region="Private-input operation action")
+        ui.node("known", category="statictext", region="Private-input operation settlement")
+        assert_no_header()
+        facts["cancelDidNotInitialize"] = True
+        ui.click("Open encrypted vault", category="button")
+        await_status("Encrypted vault · uninitialized")
+        ui.click("Review vault initialization…", category="button")
+        ui.click("Create encrypted vault", category="button", region="Explicit private-input review")
+        await_status("Encrypted vault · unlocked")
+        initial = read_vault_state()
+        facts["createdOwnedEmptyVault"] = True
+        ui.click("Lock vault…", category="button")
+        ui.click("Go back", category="button", region="Confirm private-input lock")
+        await_status("Encrypted vault · unlocked")
+        need(read_vault_state() == initial, "cancelled-lock-changed-vault")
+        ui.click("Lock vault…", category="button")
+        ui.click("Lock vault", category="button", region="Confirm private-input lock")
+        await_status("Storage closed")
+        need(read_vault_state() == initial, "lock-changed-vault-identity")
+        facts["lockPreservedExactVault"] = True
+        ui.click("Open encrypted vault", category="button")
+        await_status("Encrypted vault · locked")
+        ui.click("Unlock vault", category="button")
+        await_status("Encrypted vault · unlocked")
+        need(read_vault_state() == initial and all(file_hash(project / path) == digest for path, digest in original.items()),
+             "reopen-changed-synthetic-vault-or-project")
+        facts["sameVaultReopenedAndUnlocked"] = True
+
 
     def project_switch_and_isolation():
         secondary = work / "MRK Verification Secondary"
@@ -871,11 +1005,16 @@ def observe(work, action, media, suite):
             ui.image(f"settings-{width}x{height}")
 
     try:
-        if suite in {"metadata", "projects"}:
-            name, journey = (("metadata-negative-cancel-save-readback", metadata_journey) if suite == "metadata"
-                             else ("project-switch-and-cli-isolation", project_switch_and_isolation))
+        independent_journeys = {
+            "metadata": ("metadata-negative-cancel-save-readback", metadata_journey),
+            "projects": ("project-switch-and-cli-isolation", project_switch_and_isolation),
+            "cli-read": ("installed-cli-read-data-and-refusals", cli_read_journey),
+            "vault-lifecycle": ("vault-cancel-lock-reopen", vault_journey),
+        }
+        if suite in independent_journeys:
+            name, journey = independent_journeys[suite]
             if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
-                if scenario("project-picker-and-saved-config", select_project):
+                if scenario("project-picker-and-saved-config", lambda: select_project(check_version=suite != "cli-read")):
                     scenario(name, journey)
                 else:
                     scenarios[name] = dict(status="Blocked", reason="Fixture project selection failed")

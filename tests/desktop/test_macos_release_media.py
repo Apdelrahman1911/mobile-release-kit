@@ -126,6 +126,25 @@ class FrozenMediaTests(unittest.TestCase):
                 node.assert_called_with(heading, category="heading")
                 self.assertEqual(drive.project_name, project)
 
+    def test_ui_click_reobserves_only_a_rejected_stale_snapshot(self):
+        class DriverError(Exception):
+            def __init__(self, status, code):
+                self.status = status
+                self.payload = {"error": {"code": code}}
+
+        drive = ui.UI(None, self.root, {})
+        stale = DriverError(409, "stale_snapshot")
+        with patch.object(drive, "reveal", return_value=("snapshot", {"id": "node"})) as reveal, \
+                patch.object(drive, "command", side_effect=[stale, None]) as command, patch.object(ui.time, "sleep"):
+            drive.click("Original target", category="button")
+            self.assertEqual(reveal.call_count, 2)
+            self.assertEqual(command.call_count, 2)
+        for failure in (DriverError(409, "replay_unavailable"), DriverError(504, "driver_timeout")):
+            with self.subTest(failure=failure.payload), patch.object(drive, "reveal", return_value=("snapshot", {"id": "node"})), \
+                    patch.object(drive, "command", side_effect=failure) as command, self.assertRaises(DriverError):
+                drive.click("Original target", category="button")
+            command.assert_called_once()
+
     def test_remove_producer_must_link_the_exact_install(self):
         source = "a" * 40
         version = self.manifest["version"]
