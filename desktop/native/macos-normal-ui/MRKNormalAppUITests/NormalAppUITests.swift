@@ -7791,12 +7791,20 @@ final class NormalAppUITests: XCTestCase {
             }
             try require(headings.count == 1 && endings.count == 1 && headings[0] < endings[0],
                         "the original no-token conflict summary is missing or ambiguous")
-            // The shipped number uses toLocaleString(): bind the hosted grouped
-            // presentation, not the unformatted integer or unrelated byte labels.
-            try require(Array(labels[(headings[0] + 1)..<endings[0]]) == [
-                "candidate", "2,368 observed bytes",
-                "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
-            ], "the refused bundle did not report exactly the customized candidate")
+            // WebKit can expose a list bullet as its own static text. The
+            // renderer formats the byte count using the current locale.
+            let conflict = labels[(headings[0] + 1)..<endings[0]].filter { $0 != "•" }
+            let suffix = " observed bytes"
+            let bytes = conflict.dropFirst().first.map { label -> String in
+                guard label.hasSuffix(suffix) else { return "" }
+                return String(label.dropLast(suffix.count)).replacingOccurrences(of: ",", with: "")
+                    .replacingOccurrences(of: "\u{00a0}", with: "").replacingOccurrences(of: "\u{202f}", with: "")
+            }
+            let idMatches = conflict.first == "candidate"
+            let hashMatches = conflict.last == "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=\(conflict.count);id=\(idMatches);bytes=\(bytes == "2368");hash=\(hashMatches)")
+            try require(conflict.count == 3 && idMatches && bytes == "2368" && hashMatches,
+                        "the refused bundle did not report exactly the customized candidate")
             try require(!labels.contains { $0.contains("# MRK synthetic user customization; preserve exactly.") },
                         "the refusal exposed customized original YAML")
             let facts = try waitElement(named(review, "Independent native workflow outcome facts"), in: review,

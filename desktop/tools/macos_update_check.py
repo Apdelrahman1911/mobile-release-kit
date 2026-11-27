@@ -2965,6 +2965,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestGuidedIOSReport", r"(?m)^MRK_GUIDED_IOS_REPORT=v1;context=([0-5]);receipt=([0-5])$"),
         ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
         ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),
+        ("xctestGuidedWorkflowConflictRow", r"(?m)^MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=([0-9]{1,3});id=(true|false);bytes=(true|false);hash=(true|false)$"),
         ("xctestGuidedPicker", r"(?m)^MRK_GUIDED_PICKER=v1;observed=(absent|expected|other|multiple)$"),
         ("xctestGuidedReadbackLoss", r"(?m)^MRK_GUIDED_READBACK_LOST=v1;line=([0-9]{1,5});present=([01])$"),
         ("xctestGuidedOfflineCounts", r"(?m)^MRK_GUIDED_OFFLINE_COUNT=v1;total=([0-9]{1,3});missing=([0-9]{1,3});skipped=([0-9]{1,3});summary=([0-5])$"),
