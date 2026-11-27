@@ -3069,6 +3069,7 @@ final class NormalAppUITests: XCTestCase {
                 && iosDirectories.isEmpty && acceptedStages.isEmpty, "iOS terminal original identity or state")
             guard var parent = directories["project"] else { throw Refusal.condition("fixture: iOS input project absent") }
             let device = parent.facts.device
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=input-state")
             for (index, name) in [".mobile-release", "desktop-ios-archive", identity.operationID, "archive.xcarchive"].enumerated() {
                 try check(); try checkDirectory(parent)
                 let original = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
@@ -3079,14 +3080,31 @@ final class NormalAppUITests: XCTestCase {
                     "iOS output original mode owner or filesystem")
                 // Xcode archive group/mode is not a toolkit-created 0700 root.
                 parent = original
+                print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=held-\(index)")
             }
             try checkIOSDirectories(identity, check: check)
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=output-roster")
             // Entered only after the caller's current typed complete result AND
             // all four originals/exact three immediate rosters above. No running
             // output or pathname alone can enable checkRoster's one exception.
             iosCompleted = true
-            try assertUnchanged()
+            do { try assertUnchanged() }
+            catch {
+                let cause: String
+                if case Refusal.condition(let reason) = error {
+                    if reason.contains("unexpected file change") { cause = "input-file-changed" }
+                    else if reason.contains("unexpected owned output") { cause = "input-roster-changed" }
+                    else if reason.contains("unexpected project control") { cause = "unexpected-control" }
+                    else if reason.contains("directory") { cause = "directory-identity" }
+                    else if reason.contains("close") { cause = "close" }
+                    else { cause = "other-check" }
+                } else { cause = "untyped" }
+                print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=\(cause)")
+                throw error
+            }
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=inputs-verified")
             try checkIOSDirectories(identity, check: check)
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=output-rechecked")
         }
         func assertIOSArchiveClosure(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
             try Self.need(iosCompleted && iosIdentity == identity && !iosClosing, "iOS output closure is not terminal")
@@ -4225,7 +4243,15 @@ final class NormalAppUITests: XCTestCase {
                 if path == "project" && iosUnsignedProfile && iosCompleted && iosIdentity != nil && iosDirectories.count == 4 {
                     expected.insert(".mobile-release") // Fixed completed iOS namespace; no other input-parent exception.
                 }
-                try Self.need(try children(directory) == expected, "unexpected owned output under " + path)
+                let actual = try children(directory)
+                if iosUnsignedProfile && iosCompleted && actual != expected {
+                    let extra = actual.subtracting(expected)
+                    let kinds = ["project.xcworkspace", "xcuserdata", ".DS_Store", ".swiftpm", "Package.resolved"]
+                    let matched = kinds.map { extra.contains($0) ? "1" : "0" }.joined()
+                    let scope = path == "project" ? "project" : path.isEmpty ? "root" : "nested"
+                    print("MRK_GUIDED_IOS_ARCHIVE_ROSTER=v1;scope=\(scope);extra=\(min(extra.count, 99));missing=\(min(expected.subtracting(actual).count, 99));known=\(matched)")
+                }
+                try Self.need(actual == expected, "unexpected owned output under " + path)
             }
             let project = directories["project"]!
             for name in Self.controls + (androidCandidateProfile ? [] : [".git"]) {
@@ -4777,6 +4803,11 @@ final class NormalAppUITests: XCTestCase {
             for path in current.keys.sorted() {
                 let old = current[path]!
                 let observed = try androidPositiveProfile && path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
+                if iosUnsignedProfile && iosCompleted && (old.bytes != observed.bytes || old.facts != observed.facts) {
+                    let originals = Self.iosUnsignedPaths.sorted()
+                    let index = originals.firstIndex(of: path) ?? 99
+                    print("MRK_GUIDED_IOS_ARCHIVE_INPUT=v1;index=\(index);bytes=\(old.bytes != observed.bytes ? 1 : 0);identity=\(old.facts != observed.facts ? 1 : 0)")
+                }
                 try Self.need(old.bytes == observed.bytes && old.facts == observed.facts, "unexpected file change: " + path)
             }
             try checkRoster()
