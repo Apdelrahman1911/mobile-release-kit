@@ -23,6 +23,11 @@ on:
         description: Successful main release qualification run
         required: true
         type: string
+      suite:
+        description: Signed application journey suite
+        type: choice
+        default: workspace
+        options: [workspace, metadata]
 
 permissions:
   contents: read
@@ -30,7 +35,7 @@ permissions:
   attestations: read
 
 concurrency:
-  group: macos-release-ui-${{ inputs.expected_sha }}
+  group: macos-release-ui-${{ inputs.expected_sha }}-${{ inputs.suite }}
   cancel-in-progress: false
 
 jobs:
@@ -45,6 +50,8 @@ jobs:
         inputs.carrier_attempt == '1' && inputs.qualification_run == '45915601788'))
     runs-on: macos-26
     timeout-minutes: 40
+    env:
+      MRK_UI_SUITE: ${{ inputs.suite }}
     steps:
       - name: Admit a fresh hosted Apple Silicon console and completed qualification
         id: admit
@@ -124,7 +131,7 @@ jobs:
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
           done
           unset GH_TOKEN
-          python -I -B desktop/tools/macos_release_ui.py install "$media" "$work"
+          python -I -B desktop/tools/macos_release_ui.py install "$media" "$work" --suite "$MRK_UI_SUITE"
       - name: Launch the signed app before connecting the UI driver
         run: |
           set -euo pipefail
@@ -152,7 +159,7 @@ jobs:
           (
             set +e
             python -I -B desktop/tools/macos_release_ui.py observe "$RUNNER_TEMP/signed-ui-media" "$MRK_UI_WORK" \
-              --action "$GITHUB_WORKSPACE/ui-action-source"
+              --action "$GITHUB_WORKSPACE/ui-action-source" --suite "$MRK_UI_SUITE"
             printf '%s\n' "$?" > "$MRK_UI_WORK/observer-status"
           ) > "$MRK_UI_WORK/evidence/observer.log" 2>&1 &
       - uses: ui-test-actions/ui-test-actions@0c818c5d72e8c30c59bd1287c330a40392bf8e89 # v3.0.1
@@ -189,7 +196,7 @@ jobs:
             [[ ! -f "$MRK_UI_WORK/observer-status" ]] || break
             sleep 1
           done
-          python -I -B desktop/tools/macos_release_ui.py require "$RUNNER_TEMP/signed-ui-media" "$MRK_UI_WORK"
+          python -I -B desktop/tools/macos_release_ui.py require "$RUNNER_TEMP/signed-ui-media" "$MRK_UI_WORK" --suite "$MRK_UI_SUITE"
       - name: Retain UI evidence from synthetic sessions only
         id: evidence
         if: ${{ !cancelled() && env.MRK_UI_WORK != '' }}

@@ -1,5 +1,6 @@
 """Exercise the installed release through a pinned ui-test-actions loopback session."""
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -39,6 +40,11 @@ EXPECTED_SCENARIOS = {
     "project-picker-and-saved-config", *NAVIGATION_SCENARIOS, "cli-grant-and-revoke",
     "project-switch-and-cli-isolation", "version-cancel-save-quit-reopen", "git-local-diff-and-no-side-effects", "window-layouts",
 }
+SUITE_SCENARIOS = {
+    "workspace": EXPECTED_SCENARIOS,
+    "metadata": {"native-console-admission", "project-picker-and-saved-config", "metadata-negative-cancel-save-readback"},
+}
+METADATA_TITLE = Path("public/store/android/en-US/title.txt")
 
 
 class Blocked(Exception):
@@ -69,19 +75,21 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_observation(work, media):
+def verify_observation(work, media, suite):
     evidence = work / "evidence"
     status_path = work / "observer-status"
     status = status_path.read_text().strip() if status_path.is_file() else "missing"
     result_path = evidence / "RESULT.json"
     result = json.loads(result_path.read_bytes()) if result_path.is_file() else {}
     scenarios = result.get("scenarios", {})
+    expected_scenarios = SUITE_SCENARIOS[suite]
     statuses = {}
-    for name in sorted(EXPECTED_SCENARIOS):
+    for name in sorted(expected_scenarios):
         state = scenarios.get(name, {}).get("status", "Not Tested")
         statuses[name] = state if state in {"Passed", "Failed", "Blocked", "Not Tested"} else "Invalid"
     summary = dict(observerExit=status if re.fullmatch(r"[0-9]{1,3}", status) else "unavailable",
-                   scenarios=statuses, extraScenarioCount=len(scenarios.keys() - EXPECTED_SCENARIOS),
+                   scenarios=statuses, extraScenarioCount=len(scenarios.keys() - expected_scenarios),
+                   suite=suite,
                    resultSha256=file_hash(result_path) if result_path.is_file() else None,
                    sourceCommit=result.get("sourceCommit"), harnessCommit=os.environ["GITHUB_SHA"])
     trace = evidence / "trace.jsonl"
@@ -96,8 +104,9 @@ def verify_observation(work, media):
                     packageSha256=manifest["packages"]["Install.pkg"]["sha256"],
                     removeSha256=manifest["packages"]["Remove.pkg"]["sha256"])
     need(all(result.get(key) == value for key, value in expected.items()), "observation-release-identity")
+    need(result.get("suite") == suite, "observation-suite-identity")
     need(status == "0", "observer-exit-status")
-    need(scenarios.keys() == EXPECTED_SCENARIOS, "observation-scenario-roster")
+    need(scenarios.keys() == expected_scenarios, "observation-scenario-roster")
     need(all(state == "Passed" for state in statuses.values()), "observation-scenario-failure")
     need(summary["traceSha256"] is not None, "observation-trace-absent")
 
@@ -120,7 +129,7 @@ def detach_install_media(mount, evidence):
         (evidence / "detach-install-media.json").write_text(json.dumps(attempts, indent=2) + "\n")
 
 
-def install(media, work):
+def install(media, work, suite):
     manifest = json.loads((media / "RELEASE-MANIFEST.json").read_bytes())
     name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-Install.dmg"
     image = media / name
@@ -160,13 +169,22 @@ def install(media, work):
     need(detached == 0, "installer-mounted-media-still-busy")
     shutil.copytree(FIXTURE, work / "MRK Verification Android")
     project = work / "MRK Verification Android"
+    if suite == "metadata":
+        fixture = json.loads(Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json").read_bytes())
+        (project / ".gitignore").write_bytes(base64.b64decode(fixture["stages"]["config"]["project/.gitignore"], validate=True))
+        metadata_folder = project / METADATA_TITLE.parent
+        metadata_folder.mkdir(parents=True)
+        for name in ("title.txt", "short_description.txt", "full_description.txt"):
+            encoded = fixture["files"]["project/release/store/android/en-US/" + name]
+            (metadata_folder / name).write_bytes(base64.b64decode(encoded, validate=True))
     call("/usr/bin/git", "-C", str(project), "init", "-b", "main")
     call("/usr/bin/git", "-C", str(project), "add", "--all")
     call("/usr/bin/git", "-C", str(project), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
          "commit", "-m", "Original synthetic project")
-    secondary = work / "MRK Verification Secondary"
-    shutil.copytree(FIXTURE, secondary)
-    (secondary / VERSION_FILE).write_bytes(b"VERSION_NAME=2.1.0\nBUILD_NUMBER=41\n")
+    if suite == "workspace":
+        secondary = work / "MRK Verification Secondary"
+        shutil.copytree(FIXTURE, secondary)
+        (secondary / VERSION_FILE).write_bytes(b"VERSION_NAME=2.1.0\nBUILD_NUMBER=41\n")
 
 
 class UI:
@@ -456,14 +474,14 @@ def open_session(work, action, *, previous=None, token_name="token"):
     return path, module.Client(connection, work / token_name)
 
 
-def observe(work, action, media):
+def observe(work, action, media, suite):
     evidence = work / "evidence"
     manifest = json.loads((media / "RELEASE-MANIFEST.json").read_bytes())
     results = dict(sourceCommit=manifest["sourceCommit"], sourceTree=manifest["sourceTree"],
                    buildRun=manifest["buildRun"], carrierRun=manifest["carrierRun"],
                    manifestSha256=file_hash(media / "RELEASE-MANIFEST.json"),
                    packageSha256=manifest["packages"]["Install.pkg"]["sha256"],
-                   removeSha256=manifest["packages"]["Remove.pkg"]["sha256"], scenarios={})
+                   removeSha256=manifest["packages"]["Remove.pkg"]["sha256"], suite=suite, scenarios={})
     scenarios = results["scenarios"]
     (evidence / "RESULT.json").write_text(json.dumps(results, indent=2) + "\n")
     connection, client = open_session(work, action)
@@ -528,6 +546,45 @@ def observe(work, action, media):
         ui.click("Open saved version editor", category="button")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
         need(all(file_hash(project / name) == digest for name, digest in original.items()), "project-originals")
+
+    def metadata_journey():
+        def title():
+            return ui.node("App title", category="textarea")[1]["text"]
+
+        def edit_title(text):
+            ui.click("App title", category="textarea")
+            ui.keys("command", "a")
+            ui.command("text.insert", text=text)
+            need(title() == text, "exact-metadata-title-draft")
+
+        initial = (project / METADATA_TITLE).read_text()
+        replacement = "Fixture public UI title"
+        ui.page("Store listing")
+        ui.click("Load text", category="button")
+        ui.snapshot("metadata-editor-loaded")
+        need(title() == initial, "original-public-text-readback")
+        edit_title("x" * 31)
+        ui.click("Check text", category="button")
+        ui.node("Needs changes", category="statictext")
+        need(not ui.node("Review changes", category="button")[1]["enabled"], "over-limit-title-can-be-reviewed")
+        need(file_hash(project / METADATA_TITLE) == original[METADATA_TITLE], "invalid-edit-changed-file")
+        edit_title(replacement)
+        ui.click("Check text", category="button")
+        ui.node("Text looks good", category="statictext")
+        ui.click("Review changes", category="button")
+        ui.click("Save text…", category="button")
+        ui.node("Save your Store text?", category="heading")
+        ui.click("Keep reviewing", category="button")
+        need(file_hash(project / METADATA_TITLE) == original[METADATA_TITLE], "cancelled-text-save-changed-file")
+        ui.click("Save text…", category="button")
+        ui.click("I reviewed the changes.", category="checkbox")
+        ui.click("Save text", category="button")
+        ui.node("Text saved", category="heading")
+        need((project / METADATA_TITLE).read_bytes() == replacement.encode()
+             and all(file_hash(project / name) == digest for name, digest in original.items() if name != METADATA_TITLE),
+             "metadata-save-edited-unrelated-bytes")
+        ui.click("Refresh text", category="button")
+        need(title() == replacement, "saved-public-text-readback")
 
     def permission_lifecycle():
         ui.page("Project settings")
@@ -779,6 +836,13 @@ def observe(work, action, media):
             ui.image(f"settings-{width}x{height}")
 
     try:
+        if suite == "metadata":
+            if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
+                if scenario("project-picker-and-saved-config", select_project):
+                    scenario("metadata-negative-cancel-save-readback", metadata_journey)
+                else:
+                    scenarios["metadata-negative-cancel-save-readback"] = dict(status="Blocked", reason="Fixture project selection failed")
+            return 0 if scenarios.keys() == SUITE_SCENARIOS[suite] and all(row["status"] == "Passed" for row in scenarios.values()) else 1
         if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
             scenario("cold-runtime-and-cli-denial", startup)
             scenario("cancel-native-project-picker", cancel_picker)
@@ -816,14 +880,15 @@ def main():
     parser.add_argument("media", type=Path)
     parser.add_argument("work", type=Path)
     parser.add_argument("--action", type=Path)
+    parser.add_argument("--suite", choices=SUITE_SCENARIOS, default="workspace")
     args = parser.parse_args()
     if args.mode == "install":
-        install(args.media, args.work)
+        install(args.media, args.work, args.suite)
         return 0
     if args.mode == "require":
-        verify_observation(args.work, args.media)
+        verify_observation(args.work, args.media, args.suite)
         return 0
-    return observe(args.work, args.action, args.media)
+    return observe(args.work, args.action, args.media, args.suite)
 
 
 if __name__ == "__main__":
