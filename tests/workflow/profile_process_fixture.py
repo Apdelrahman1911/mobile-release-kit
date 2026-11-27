@@ -1950,8 +1950,10 @@ if __name__ == "__main__":
     if role == "driver":
         status = driver(root, mode)
     elif role == "validator":
+        from mobile_release.ios_profiles import PROFILE_WORKER_MODES
+
         worker_mode, worker_directory, deadline = arguments
-        assert worker_mode == "--worker" and worker_directory == str(directory)
+        assert worker_mode in PROFILE_WORKER_MODES and worker_directory == str(directory)
         status = validator(root, directory, mode, int(deadline))
     elif role == "helper":
         status = helper(root, mode, arguments)
