@@ -8504,9 +8504,10 @@ final class NormalAppUITests: XCTestCase {
             item.click()
         }
         var cancelRequested = false, statusRequested = false
+        let statusLabel = guidedProductSurface ? "IOS archive status" : "Original iOS archive status"
         while true {
             try check()
-            let status = try only(panel.descendants(matching: .any).matching(identifier: "Original iOS archive status"))
+            let status = try only(named(panel, statusLabel))
             let details = try only(status.descendants(matching: .group).matching(identifier: "Archive details"))
             for (prefix, expected) in [("Archive operation ID: ", identity.operationID), ("Archive owner generation: ", identity.ownerGeneration)] {
                 let fields = try staticTextPrefix(details, prefix, check: check)
@@ -8766,14 +8767,16 @@ final class NormalAppUITests: XCTestCase {
                 try fixture.assertUnchanged()
             }
             let failures = ["No new iOS archive outcome was confirmed", "Cleanup needs attention"]
+            let panelLabel = guidedProductSurface ? "What will be built" : "Review the current saved inputs"
+            let statusLabel = guidedProductSurface ? "IOS archive status" : "Original iOS archive status"
             try stage("ios-unsigned-review") {
                 try press(renderer, "Releases", renderer: renderer)
                 try guidedTaskTab("iOS build", group: "Release tasks", renderer: renderer)
-                let panel = try waitElement(named(renderer, "Review the current saved inputs")
+                let panel = try waitElement(named(renderer, panelLabel)
                     .containing(.button, identifier: "Review saved iOS inputs"), in: renderer)
                 selected = panel
                 try require(named(panel, "Completed local unsigned iOS archive observation").count == 0
-                    && named(panel, "Original iOS archive status").count == 0, "iOS prior operation cannot supply this journey")
+                    && named(panel, statusLabel).count == 0, "iOS prior operation cannot supply this journey")
                 try press(panel, "Refresh saved configuration", renderer: renderer, failures: failures)
                 try press(panel, "Read saved version", renderer: renderer, failures: failures)
                 try press(panel, "Review saved iOS inputs", renderer: renderer, failures: failures)
@@ -8803,7 +8806,7 @@ final class NormalAppUITests: XCTestCase {
                     in: panel, timeout: 750, failures: failures)
                 try reveal(result, in: renderer)
                 observed = try iosResult(result, identity: pair)
-                let status = try unique(named(panel, "Original iOS archive status"), "iOS current terminal status absent")
+                let status = try unique(named(panel, statusLabel), "iOS current terminal status absent")
                 try require(try iosCurrentArchiveIdentity(status) == pair, "iOS terminal status identity differs")
                 let text = try iosPublicText(status)
                 for required in ["iOS request finished", "Xcode version: known exit 0.", "iOS SDK selection: known exit 0.",
