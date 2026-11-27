@@ -8629,6 +8629,29 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_IOS_ARCHIVE_TERMINAL=v1;outcome=\(outcome);reason=\(reason);xcode=\(command("Xcode version"));sdk=\(command("iOS SDK selection"));archive=\(command("Archive"));output=\(output)")
         return outcome
     }
+
+    @MainActor private func recordIOSArchiveNotice(_ panel: XCUIElement, original: XCUIElementQuery,
+                                                    result: XCUIElementQuery) throws {
+        let rows = try guidedDiagnosticsSnapshot(panel).texts
+        let codes = ["ios_archive_invalid", "ios_archive_unavailable", "ios_archive_busy",
+                     "ios_archive_owner", "ios_archive_protocol", "ios_archive_signing_inputs"]
+        let observed = codes.filter { code in rows.contains { $0.contains(code) } }
+        let code = observed.count == 1 ? observed[0] : "unobserved"
+        let originalCount = min(2, original.count)
+        let resultCount = min(2, result.count)
+        print("MRK_MACOS_IOS_ARCHIVE_NOTICE=v1;code=\(code);status=\(originalCount);result=\(resultCount)")
+        if originalCount == 1 {
+            let status = original.element(boundBy: 0)
+            let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            let phases = ["Awaiting your approval", "Starting iOS operation", "iOS operation running",
+                          "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
+            let phase = phases.map { text.contains($0) ? "1" : "0" }.joined()
+            print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(phase)")
+            // This panel may be stale after a protocol failure. Its state is
+            // diagnostic and cannot establish original completion.
+        }
+    }
     @MainActor private func settleFailedIOSArchive(_ app: XCUIApplication, window: XCUIElement,
                                                    panel: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws {
         guard let clock = caseClock, clock.firstFailure != nil, let owner = originalLaunch else {
@@ -9052,6 +9075,10 @@ final class NormalAppUITests: XCTestCase {
                                                  "failure": terminalIssue.element(boundBy: 0)]
                     let wait = XCTNSPredicateExpectation(predicate: readyOrFailed, object: targets)
                     let resultOrFailure = XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed
+                    if terminalIssue.count > 0 {
+                        try recordIOSArchiveNotice(panel, original: originalStatus, result: resultQuery)
+                        throw Refusal.condition("original iOS archive reported a terminal notice")
+                    }
                     let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
                     try require(try iosCurrentArchiveIdentity(status) == pair, "iOS status original identity changed")
                     let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")

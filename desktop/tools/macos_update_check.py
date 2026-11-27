@@ -3030,6 +3030,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
          r"(?m)^MRK_MACOS_IOS_ARCHIVE_TERMINAL=v1;outcome=([a-z-]{1,16});reason=([a-z-]{1,32});"
          r"xcode=(-?[0-9]{1,3}|[a-z-]{1,16});sdk=(-?[0-9]{1,3}|[a-z-]{1,16});"
          r"archive=(-?[0-9]{1,3}|[a-z-]{1,16});output=([a-z-]{1,24})$"),
+        ("xctestIOSArchiveNotice", r"(?m)^MRK_MACOS_IOS_ARCHIVE_NOTICE=v1;code=([a-z_]{1,40});status=([0-2]);result=([0-2])$"),
         ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
         ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),
         ("xctestGuidedWorkflowConflictRow", r"(?m)^MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=([0-9]{1,3});id=(true|false);bytes=(true|false);hash=(true|false)$"),
