@@ -2919,6 +2919,15 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
             )
             rows = json.loads(summary.stdout).get("testFailures", [])
             result["xctestSummaryFailureCount"] = len(rows)
+            locations = []
+            for row in rows[:12]:
+                location = row.get("sourceURL", "")
+                if isinstance(location, str) and "NormalAppUITests.swift" in location and len(location) <= 4096:
+                    match = re.search(r"(?:StartingLineNumber=|:)([1-9][0-9]{0,4})(?:\b|$)",
+                                      location.split("NormalAppUITests.swift", 1)[1], re.IGNORECASE)
+                    if match:
+                        locations.append(int(match[1]))
+            result["xctestSummaryFailureLines"] = locations
             folded_transcript += "\n" + "\n".join(
                 row["failureText"] for row in rows[:12] if isinstance(row.get("failureText"), str)
             ).lower()
@@ -2946,6 +2955,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestGuidedPicker", r"(?m)^MRK_GUIDED_PICKER=v1;observed=(absent|expected|other|multiple)$"),
         ("xctestGuidedReadbackLoss", r"(?m)^MRK_GUIDED_READBACK_LOST=v1;line=([0-9]{1,5});present=([01])$"),
         ("xctestGuidedOfflineCounts", r"(?m)^MRK_GUIDED_OFFLINE_COUNT=v1;total=([0-9]{1,3});missing=([0-9]{1,3});skipped=([0-9]{1,3});summary=([0-5])$"),
+        ("xctestGuidedOfflineAuthority", r"(?m)^MRK_GUIDED_OFFLINE_AUTHORITY=v1;consent=([0-5]);run=([0-5])$"),
         ("xctestSelectFailure", r"(?m)^MRK_GUIDED_SELECT=v1;phase=(control|reveal|item|written-value);line=([0-9]{1,5})$"),
         ("xctestAndroidSourceFailure", r"(?m)^MRK_GUIDED_ANDROID_SOURCE=v1;role=(jdk|sdk|gradle);phase=(original-group|native-picker|returned-status|retained-selections)$"),
         ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),

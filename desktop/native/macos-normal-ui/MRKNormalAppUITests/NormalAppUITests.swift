@@ -5455,7 +5455,13 @@ final class NormalAppUITests: XCTestCase {
             let title = URL(fileURLWithPath: path).lastPathComponent
             let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", title))
             _ = try waitElement(heading, in: renderer, failures: failures)
-            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            let caption = renderer.staticTexts.matching(identifier: "Selected project folder")
+            if caption.count == 0 {
+                let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                    label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
+                try reveal(details, in: renderer)
+                if caption.count == 0 { details.click() }
+            }
             do {
                 _ = try waitElement(renderer.staticTexts.matching(identifier: path), in: renderer,
                                     timeout: 24, failures: failures)
@@ -6029,7 +6035,10 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func choosePrivate(_ storage: XCUIElement, window: XCUIElement, renderer: XCUIElement,
                                          fixture: LocalFixture, input: PrivateInput, replacement: String? = nil,
                                          cancel: Bool = false) throws {
-        try select(storage, label: "What would you like to provide?", value: input.rawValue, renderer: renderer)
+        let fileKinds = ["Android upload keystore", "Android Firebase client document", "iOS Firebase client document",
+                         PrivateInput.p12.rawValue, PrivateInput.profile.rawValue, "App Store Connect API key"]
+        try select(storage, label: "What would you like to provide?", value: input.rawValue, renderer: renderer,
+                   keyboardOptions: guidedProductSurface ? fileKinds : [])
         try select(storage, label: "New or replacement copy?", value: replacement ?? "Save a new encrypted record", renderer: renderer)
         try press(storage, "Select file…", renderer: renderer, failures: Self.privateInputFailures)
         let sheet = try nativeSheet(window, title: "Choose a signing or iOS build-input file")
@@ -7140,7 +7149,7 @@ final class NormalAppUITests: XCTestCase {
                 try expand(renderer, prefix: "Check without saving", renderer: renderer)
             }
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "value == %@", "Format validation complete")), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,
                                 failures: Self.configurationFailures)
             if guidedProductSurface {
                 try press(renderer, "Project settings", renderer: renderer)
@@ -7918,14 +7927,17 @@ final class NormalAppUITests: XCTestCase {
                 missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
             }
             try stage("offline-finality-audit") {
-                let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
-                try require(panel.staticTexts.matching(identifier: unconfirmed).count == 0
-                            && panel.staticTexts.matching(identifier: historical).count == 0
-                            && report.staticTexts.matching(identifier: "Historical / stale context").count == 0
-                            && failedCount == 0
-                            && named(panel, "Confirm this saved offline-check intent").count == 0
-                            && panel.buttons.matching(identifier: runLabel).count == 0,
-                            "original offline report remains unconfirmed, stale, failed or rearmed")
+                try stage("offline-finality-status") {
+                    let terminal = failures + [unconfirmed, historical, "Historical / stale context"]
+                    let count = try staticTextFailureCount(panel, terminal) { _ = try remaining(1) }
+                    try require(count == 0, "the settled offline operation retained a stale or failed state")
+                }
+                try stage("offline-finality-authority") {
+                    let consentCount = named(panel, "Confirm this saved offline-check intent").count
+                    let runCount = panel.buttons.matching(identifier: runLabel).count
+                    print("MRK_GUIDED_OFFLINE_AUTHORITY=v1;consent=\(min(consentCount, 5));run=\(min(runCount, 5))")
+                    try require(consentCount == 0 && runCount == 0, "settled offline request retained original Start authority")
+                }
             }
             try stage("offline-originals-and-readback") {
                 try fixture.assertUnchanged()
