@@ -395,10 +395,14 @@ class UI:
 
         original = window()
         self.command("windows.move_resize", id=original["id"], width=width, height=height, x=20, y=55)
-        observed = window()["bounds"]
-        need(abs(observed["width"] - width) <= 1 and abs(observed["height"] - height) <= 1,
-             "observed-window-size")
-        return observed
+
+        def resized_bounds():
+            observed = window()["bounds"]
+            if abs(observed["width"] - width) <= 1 and abs(observed["height"] - height) <= 1:
+                return observed
+            return None
+
+        return until(resized_bounds, 3, "observed-window-size")
 
 
 def open_session(work, action, *, previous=None, token_name="token"):
@@ -596,7 +600,8 @@ def observe(work, action, media):
             bounds = changes["bounds"]
             ui.command("pointer.scroll", x=bounds["x"] + bounds["width"] // 2,
                        y=bounds["y"] + bounds["height"] // 2, dy=6)
-            ui.click("Select README.md", category="checkbox")
+            ui.node("README.md", category="statictext")
+            ui.click("Select README.md", category="checkbox", contains=True)
             ui.click("Working changes", category="button")
             ui.node(marker.strip().decode(), contains=True)
             need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
