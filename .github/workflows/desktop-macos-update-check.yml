@@ -39,6 +39,10 @@ on:
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
                   android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
                   release-asset, native-status-unit, recovery-contracts]
+      protected_xcode_fixture:
+        description: Prepare the Apple Xcode fixture for the supplemental unsigned archive only
+        type: boolean
+        default: false
   push:
     branches:
       - verify/desktop-macos-update-check
@@ -53,7 +57,7 @@ permissions:
   attestations: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}${{ github.ref == 'refs/heads/verify/macos-0213-recovery-project' && format('-{0}', inputs.additional_ui) || '' }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ github.ref == 'refs/heads/verify/macos-0213-recovery-project' && format('-{0}-{1}', inputs.additional_ui, inputs.protected_xcode_fixture) || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -214,6 +218,22 @@ jobs:
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
             --source "$RELEASE_SOURCE" --tree "$release_tree" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN" --selection "$work/selection.json"
+      - name: Prepare the existing protected Xcode fixture on this disposable host
+        if: github.ref == 'refs/heads/verify/macos-0213-recovery-project' && inputs.additional_ui == 'unsigned-ios-xctest' && matrix.mode == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture
+        timeout-minutes: 36
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(id -u)" != 0 && "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          script=desktop/tools/prepare_ci_xcode.py
+          printf '%s  %s\n' d13eadc42dfd7ff491116f49c1c5582998796a7375e87e724540117f4decce1e "$script" |
+            shasum -a 256 -c
+          mkdir -p "$MRK_UPDATE_WORK/evidence"
+          sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
+            /usr/bin/python3 -I -B "$script" | tee "$MRK_UPDATE_WORK/evidence/prepare-xcode.json"
       - name: Execute the production lifecycle or original installed XCTest
         env:
           GH_TOKEN: ${{ github.token }}
