@@ -66,7 +66,8 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
             finally:
                 os.close(held)
             self.assertEqual(actual, expected)
-            self.assertEqual(actual, {'directories': 2, 'files': 1, 'symlinks': 1, 'hardlinkedFiles': 0, 'cloneBytes': 0})
+            self.assertEqual(actual, {'directories': 2, 'files': 1, 'symlinks': 1, 'hardlinkedFiles': 0, 'cloneBytes': 0,
+                                      'reverseSdkAliases': 0, 'nonRootReverseSdkAliases': 0})
             self.assertEqual(executable.read_bytes(), b'unchanged')
             self.assertEqual(executable.stat().st_gid, before.st_gid)
             self.assertEqual(executable.stat().st_mtime_ns, before.st_mtime_ns)
@@ -74,6 +75,29 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
             self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o777)
             self.assertEqual(os.readlink(sub/'alias'), str(external))
+
+    def test_reverse_sdk_alias_binds_the_canonical_directory_without_following_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sdk = root / "iPhoneOS.sdk"
+            sdk.mkdir()
+            reverse = root / "iPhoneOS26.5.sdk"
+            reverse.symlink_to(sdk.name)
+            other = root / "iPhoneOS25.0.sdk"
+            other.symlink_to("../outside")
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                quote = ci.walk(fd, time.monotonic() + 10, mutate=False, path_bytes=0, relative=ci.SDK_ALIAS[:-1])
+                self.assertEqual(quote["reverseSdkAliases"], 1)
+                self.assertEqual(quote["nonRootReverseSdkAliases"], int(reverse.lstat().st_uid != 0))
+                self.assertEqual(ci.sdk_alias_target(fd, reverse.name), sdk.name)
+                self.assertIsNone(ci.sdk_alias_target(fd, other.name))
+                sdk.rmdir()
+                sdk.symlink_to(reverse.name)
+                with self.assertRaises(ci.Refused):
+                    ci.sdk_alias_target(fd, reverse.name)
+            finally:
+                os.close(fd)
 
     def test_hardlinks_are_quoted_and_bounds_refuse_before_permissions_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

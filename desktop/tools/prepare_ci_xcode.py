@@ -20,6 +20,7 @@ SIGNATURE_SECONDS = 900
 MAX_QUEUED_NAME_BYTES = 32 * 1024**2
 MAX_CLONE_BYTES = 64 * 1024**3
 SDK_ALIAS = ("Contents", "Developer", "Platforms", "iPhoneOS.platform", "Developer", "SDKs", "iPhoneOS.sdk")
+VERSIONED_SDK = re.compile(r"iPhoneOS[0-9]{1,3}(?:\.[0-9]{1,3}){1,2}\.sdk")
 REQUIREMENT = 'identifier "com.apple.dt.Xcode" and anchor apple'
 FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -165,10 +166,21 @@ def split_link(source, parent, name, end, clone):
                 raise Refused("clone-cleanup", cleanupFailures=cleanup_failures)
 
 
-def protect_sdk_alias(parent, name, row):
+def sdk_alias_target(parent, name):
+    if name == SDK_ALIAS[-1]:
+        target = os.readlink(name, dir_fd=parent)
+        need(re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+)*\.sdk", target) is not None, "sdk-alias-target")
+        return target
+    if VERSIONED_SDK.fullmatch(name) and os.readlink(name, dir_fd=parent) == SDK_ALIAS[-1]:
+        target = SDK_ALIAS[-1]
+        need(stat.S_ISDIR(os.stat(target, dir_fd=parent, follow_symlinks=False).st_mode), "reverse-sdk-target-kind")
+        return target
+    return None
+
+
+def protect_sdk_alias(parent, name, row, target):
     need(row.st_nlink == 1 and 1 <= row.st_size <= 1024, "sdk-alias-shape")
-    target = os.readlink(name, dir_fd=parent)
-    need(re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+)*\.sdk", target) is not None, "sdk-alias-target")
+    need(sdk_alias_target(parent, name) == target, "sdk-alias-target")
     need(stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) == stamp(row), "sdk-alias-before")
     os.chown(name, 0, -1, dir_fd=parent, follow_symlinks=False)
     post = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -182,7 +194,8 @@ def walk(fd, end, *, mutate, path_bytes, depth=0, counts=None, device=None, rela
     need(depth <= MAX_DEPTH and path_bytes <= MAX_PATH, "tree-depth-or-path",
          depth=depth, pathBytes=path_bytes)
     if counts is None:
-        counts = {"directories": 0, "files": 0, "symlinks": 0, "hardlinkedFiles": 0, "cloneBytes": 0}
+        counts = {"directories": 0, "files": 0, "symlinks": 0, "hardlinkedFiles": 0, "cloneBytes": 0,
+                  "reverseSdkAliases": 0, "nonRootReverseSdkAliases": 0}
     root = os.fstat(fd)
     if device is None:
         device = root.st_dev
@@ -216,12 +229,15 @@ def walk(fd, end, *, mutate, path_bytes, depth=0, counts=None, device=None, rela
             need(row.st_dev == device, "tree-entry-device", sameDevice=False)
             if stat.S_ISLNK(row.st_mode):
                 counts["symlinks"] += 1
-                if relative + (name,) == SDK_ALIAS:
-                    if mutate:
-                        protect_sdk_alias(fd, name, row)
-                    else:
-                        need(row.st_nlink == 1 and 1 <= row.st_size <= 1024
-                             and re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+)*\.sdk", os.readlink(name, dir_fd=fd)) is not None, "sdk-alias-preflight")
+                if relative == SDK_ALIAS[:-1]:
+                    target = sdk_alias_target(fd, name)
+                    if target is not None:
+                        need(row.st_nlink == 1 and 1 <= row.st_size <= 1024, "sdk-alias-preflight")
+                        if target == SDK_ALIAS[-1]:
+                            counts["reverseSdkAliases"] += 1
+                            counts["nonRootReverseSdkAliases"] += int(row.st_uid != 0)
+                        if mutate:
+                            protect_sdk_alias(fd, name, row, target)
                 continue  # Never follow or otherwise modify symlinks.
             directory = stat.S_ISDIR(row.st_mode)
             need(directory or stat.S_ISREG(row.st_mode) and row.st_nlink >= 1,
@@ -346,7 +362,7 @@ def main():
         protect(applications)  # Never walk unrelated Applications members.
         stage = "protect-selected-tree"
         counts = walk(app, end, mutate=True, path_bytes=len(os.fsencode(path)), clone=clone)
-        need(all(counts[key] == before[key] for key in ("directories", "files", "symlinks"))
+        need(all(counts[key] == before[key] for key in ("directories", "files", "symlinks", "reverseSdkAliases"))
              and counts["hardlinkedFiles"] <= before["hardlinkedFiles"] and counts["cloneBytes"] <= before["cloneBytes"], "tree-quote-post")
         joined()
         stage = "apple-signature-after"

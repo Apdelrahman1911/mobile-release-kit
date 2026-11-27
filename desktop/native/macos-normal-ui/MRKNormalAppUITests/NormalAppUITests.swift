@@ -6541,9 +6541,32 @@ final class NormalAppUITests: XCTestCase {
         guard let (app, window, renderer) = launched else { throw Refusal.condition("maintenance launch returned no original") }
         try stage("maintenance-ready") {
             try press(renderer, "Build tools", renderer: renderer)
-            try expand(renderer, prefix: "About this installation", renderer: renderer)
-            try press(renderer, "Refresh preparation status", renderer: renderer, timeout: 24)
             let consent = "I want to stop the installed Android helper and prepare this application to quit."
+            let checkbox = controls(renderer, [.checkBox], label: consent)
+            let refresh = renderer.buttons.matching(identifier: "Refresh preparation status")
+            let checking = renderer.buttons.matching(identifier: "Checking status…")
+            @MainActor func recordReadiness(_ phase: String) {
+                let enabled = refresh.allElementsBoundByIndex.prefix(5).filter(\.isEnabled).count
+                print("MRK_MAINTENANCE_READY=v1;phase=\(phase);consent=\(min(checkbox.count, 5));refresh=\(min(refresh.count, 5));enabled=\(min(enabled, 5));checking=\(min(checking.count, 5))")
+            }
+            recordReadiness("initial")
+            if checkbox.count == 0 {
+                let about = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                    label: "About this installation", prefix: true), in: renderer, enabled: true)
+                try reveal(about, in: renderer)
+                if checkbox.count == 0 {
+                    // Click the disclosure indicator in the intended summary.
+                    about.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
+                }
+            }
+            do {
+                _ = try waitElement(checkbox, in: renderer, timeout: 5)
+                recordReadiness("after-disclosure")
+                try press(renderer, "Refresh preparation status", renderer: renderer, timeout: 24)
+            } catch {
+                recordReadiness("failure")
+                throw error
+            }
             let check = try waitElement(controls(renderer, [.checkBox], label: consent), in: renderer,
                                         enabled: true, timeout: 24)
             try reveal(check, in: renderer)

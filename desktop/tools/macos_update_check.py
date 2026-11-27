@@ -2877,6 +2877,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestRequireLine", r"MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + r";line=([0-9]{1,5});check="),
         ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),
         ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
+        ("maintenanceReadiness", r"(?m)^MRK_MAINTENANCE_READY=v1;phase=(initial|after-disclosure|failure);consent=([0-5]);refresh=([0-5]);enabled=([0-5]);checking=([0-5])$"),
         ("xctestWait", r"MRK_NORMAL_WAIT=v1;line=([0-9]{1,5});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5])"),
         ("installedCLIStatuses", r"MRK_RELEASE_CLI_STATUS=expected=([034]);exit=(-?[0-9]{1,3})"),
         ("postRefusalCliStatus", r"MRK_RELEASE_CLI_POST_REFUSAL_STATUS=exit=(-?[0-9]{1,3});json=([01])"),
