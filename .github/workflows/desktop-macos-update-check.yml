@@ -263,6 +263,70 @@ jobs:
           print("MRK_IOS_APFS_SOURCE_CONTROL=exact-descriptor-removed;renamed-original-refused")
           PYTHON
 
+      - name: Inventory Xcode aliases in the exact disposable iOS fixture work directory
+        run: |
+          set -euo pipefail
+          umask 077
+          python -I -B - <<'PYTHON'
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          fixture = Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-ios-unsigned-v1.json")
+          raw = fixture.read_bytes()
+          assert hashlib.sha256(raw).hexdigest() == "999a48f946b2a26164d250086d5ece7588f3ff9b2b88824e596168b82faa8daf"
+          inputs = json.loads(raw)
+          assert inputs["schemaVersion"] == 1 and len(inputs["files"]) == 9 and not inputs["stages"]
+          with tempfile.TemporaryDirectory(prefix="mrk-xcode-alias-control-", dir="/private/tmp") as name:
+              root = Path(name)
+              for relative, encoded in inputs["files"].items():
+                  entry = Path(relative)
+                  assert entry.parts[0] == "project" and not {"..", "."} & set(entry.parts)
+                  dest = root / entry
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  raw = base64.b64decode(encoded, validate=True)
+                  assert 0 < len(raw) < 32 * 1024
+                  dest.write_bytes(raw)
+              work = root / "project/.mobile-release/desktop-ios-archive" / ("a" * 32) / "work"
+              for name in ("home", "tmp", "DerivedData"):
+                  (work / name).mkdir(mode=0o700, parents=True)
+              developer = Path("/Applications/Xcode.app").resolve(strict=True) / "Contents/Developer"
+              assert developer.parents[1].parent == Path("/Applications")
+              sdk = (developer / "Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk").resolve(strict=True)
+              xcode = developer / "usr/bin/xcodebuild"
+              environ = {"PATH": str(developer / "usr/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                         "DEVELOPER_DIR": str(developer), "SDKROOT": str(sdk),
+                         "HOME": str(work / "home"), "TMPDIR": str(work / "tmp"), "CFFIXED_USER_HOME": str(work / "home"),
+                         "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "CI": "true",
+                         "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+                         "MOBILE_RELEASE_VERSION_NAME": "1.2.3", "MOBILE_RELEASE_BUILD_NUMBER": "7"}
+              archive = work.parent / "archive.xcarchive"
+              result = subprocess.run([str(xcode), "-project", str(root / "project/ios/MRKObserved.xcodeproj"),
+                  "-scheme", "MRKObserved", "-configuration", "Release", "-destination", "generic/platform=iOS",
+                  "-archivePath", str(archive), "-derivedDataPath", str(work / "DerivedData"), "archive",
+                  "MARKETING_VERSION=1.2.3", "CURRENT_PROJECT_VERSION=7", "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"],
+                  cwd=root / "project", env=environ, capture_output=True, timeout=120)
+              rows = []
+              for parent, dirs, files in os.walk(work, followlinks=False):
+                  for leaf in dirs + files:
+                      path = Path(parent) / leaf
+                      if not path.is_symlink():
+                          continue
+                      target = path.readlink()
+                      expected = Path(os.path.normpath(path.parent / target))
+                      rows.append(dict(path=path.relative_to(work).as_posix(),
+                                       target=expected.relative_to(root).as_posix() if expected.is_relative_to(root) else "outside-fixture",
+                                       absolute=target.is_absolute()))
+              assert len(rows) <= 32
+              print("MRK_XCODE_WORK_ALIASES=" + json.dumps(dict(xcode=developer.parents[1].name,
+                    archivePresent=archive.is_dir(), returnCode=result.returncode, symlinks=sorted(rows, key=lambda row: row["path"]))))
+              assert result.returncode == 0 and archive.is_dir()
+          PYTHON
+
   xcode-path-control:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
