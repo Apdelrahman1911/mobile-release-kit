@@ -1221,6 +1221,11 @@ def observe(work, action, media, suite):
                 except (OSError, subprocess.SubprocessError):
                     return None
 
+            def press_after_settlement(region, name):
+                until(lambda: native_control(region, "AXButton", name).get("enabled") is True,
+                      15, "git-control-not-enabled-" + name)
+                native_control(region, "AXButton", name, press=True)
+
             ui.click("Check local Git actions", category="button", region="Local Git action status")
             ui.click("Review files to stage", category="button")
             await_heading("Review files to stage")
@@ -1245,11 +1250,11 @@ def observe(work, action, media, suite):
                 fact["stageIndexObserved"] = index_readback(b"README.md\n")
             verify_change(True)
             fact["onlyReviewedBlobStaged"] = True
-            ui.click("Refresh changes", category="button")
-            wait_for_original_read(lambda rows: any(row["role"] == "heading" and row["name"] == "Local Git read finished"
-                                                    for row in rows), "stage-readback")
-            ui.click("Check local Git actions", category="button", region="Local Git action status")
-            ui.click("Review files to unstage", category="button")
+            press_after_settlement("Local Git changes", "Refresh changes")
+            until(lambda: native_control("Local Git read status", "AXHeading", "Local Git read finished")["matches"] == 1,
+                  55, "git-index-original-stage-readback")
+            press_after_settlement(status_region, "Check local Git actions")
+            press_after_settlement("Local Git changes", "Review files to unstage")
             await_heading("Review files to unstage")
             need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-unstage-review-path")
             need(native_control(review, "AXCheckBox", reviewed).get("checked") is False, "git-unstage-consent-starts-clear")

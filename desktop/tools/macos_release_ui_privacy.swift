@@ -47,7 +47,7 @@ func matching(_ root: AXUIElement, limit: Int, predicate: (AXUIElement) -> Bool)
 func inspectGitReview(_ arguments: [String]) -> GitControl {
     guard arguments.count == 5, let pid = Int32(arguments[0]), pid > 0 else { return GitControl(error: "arguments") }
     let (region, role, name, action) = (arguments[1], arguments[2], arguments[3], arguments[4])
-    guard ["Review local Git change", "Local Git action status"].contains(region),
+    guard ["Review local Git change", "Local Git action status", "Local Git changes", "Local Git read status"].contains(region),
           ["AXHeading", "AXStaticText", "AXButton", "AXCheckBox"].contains(role),
           ["inspect", "press"].contains(action) else { return GitControl(error: "scope") }
     guard AXIsProcessTrusted() else { return GitControl(error: "ax-unavailable") }
