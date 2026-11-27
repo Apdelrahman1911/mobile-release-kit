@@ -610,10 +610,10 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
                 self.assertEqual(kwargs["output_limit"], 8 * 1024 * 1024)
         forms = {("openssl" if argv[0] == "openssl" else
                   "--extract-certificates" if codesign_certificate_prefix(argv) is not None else
-                  next(item for item in ("--deep", "--test-requirement",
+                  next(item for item in ("--deep", "--verify",
                                          "--verbose=4", "--entitlements") if item in argv))
                  for argv, _kwargs in self.native.calls}
-        self.assertEqual(forms, {"openssl", "--deep", "--extract-certificates", "--test-requirement",
+        self.assertEqual(forms, {"openssl", "--deep", "--extract-certificates", "--verify",
                                  "--verbose=4", "--entitlements"})
 
     def test_native_certificate_failure_stops_both_public_callers_without_losing_fatality(self):

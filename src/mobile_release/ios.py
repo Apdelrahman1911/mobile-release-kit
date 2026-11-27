@@ -941,6 +941,7 @@ def _nested_codesign_identities(
                              else _observation.executable(path)) for path in profiled_bundles}
     result: list[tuple[Path, str, str]] = []
     for index, code_path in enumerate(nested):
+        # Without an explicit requirement, codesign checks the code's own designated requirement.
         requirement = _run_native(
             [
                 "codesign",
@@ -948,8 +949,6 @@ def _nested_codesign_identities(
                 "--all-architectures",
                 "--strict",
                 "--verbose=2",
-                "--test-requirement",
-                "=designated",
                 str(code_path),
             ],
             deadline=deadline, cancellation=cancellation, timeout=30,

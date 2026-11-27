@@ -1055,7 +1055,8 @@ class ProfileBindings:
             assert (directory / "cms.der").read_bytes() == b"fictional-profile-canary"
             assert stat.S_IMODE((directory / "cms.der").stat().st_mode) == 0o600
             record(self.root / "scratch-path", str(directory))
-            return command("validator", self.root, directory, self.mode, deadline_ns)
+            # CONFIG must carry the same mode, directory, and deadline suffix as the real worker.
+            return command("validator", self.root, directory, self.mode, *original[-3:])
 
         def channel_init(channel, context, reader, writer, incoming, outgoing):
             original_channel_init(channel, context, reader, writer, incoming, outgoing)
@@ -1949,7 +1950,9 @@ if __name__ == "__main__":
     if role == "driver":
         status = driver(root, mode)
     elif role == "validator":
-        status = validator(root, directory, mode, int(arguments[0]))
+        worker_mode, worker_directory, deadline = arguments
+        assert worker_mode == "--worker" and worker_directory == str(directory)
+        status = validator(root, directory, mode, int(deadline))
     elif role == "helper":
         status = helper(root, mode, arguments)
     elif role == "bad-helper":

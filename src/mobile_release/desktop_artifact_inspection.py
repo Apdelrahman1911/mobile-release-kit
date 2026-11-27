@@ -793,7 +793,7 @@ class ArtifactInspectionOperation:
             options = argv[1:-1]
             if options and options[0] == "--verify":
                 require(options in (["--verify", "--all-architectures", "--deep", "--strict", "--verbose=2"],
-                    ["--verify", "--all-architectures", "--strict", "--verbose=2", "--test-requirement", "=designated"]))
+                    ["--verify", "--all-architectures", "--strict", "--verbose=2"]))
             else:
                 require(options and options[0] == "-d")
                 options = options[1:]

@@ -200,6 +200,8 @@ class IosArtifactTests(unittest.TestCase):
             (bundle / "_CodeSignature/CodeResources").write_bytes(b"signature")
 
             def fake_codesign(argv: list[str], **_kwargs: object) -> object:
+                if "--verify" in argv:
+                    self.assertEqual(argv[1:-1], ["--verify", "--all-architectures", "--strict", "--verbose=2"])
                 if "--verbose=4" in argv:
                     return type(
                         "Completed",
