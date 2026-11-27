@@ -5525,7 +5525,8 @@ final class NormalAppUITests: XCTestCase {
         let context = ProcessInfo.processInfo.environment
         return context["MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] == "exact-0.2.13-frozen-ui"
             && ["4e821384cd912562dd5e30b195e87c113bd2d09f",
-                "4feeced4ee513d824f8e44c50b3a340a7c39beed"].contains(context["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? "")
+                "4feeced4ee513d824f8e44c50b3a340a7c39beed",
+                "7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc"].contains(context["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? "")
     }
     @MainActor private func observeSelectedProject(_ renderer: XCUIElement, path: String) throws {
         let failures = ["Static observation unavailable", "Only a partial static observation is available"]
