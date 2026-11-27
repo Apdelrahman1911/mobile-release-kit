@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -358,7 +359,7 @@ class UI:
         need(len(active) == 1, "exact-original-payload")
         return int(active[0])
 
-    def reopened_payload(self, prior_pid):
+    def reopened_payload_pid(self, prior_pid):
         reply = call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False)
         need(reply.returncode in (0, 1), "reopened-payload-process-observation")
         if reply.returncode == 1:
@@ -366,9 +367,7 @@ class UI:
         pids = reply.stdout.splitlines()
         need(len(pids) == 1, "ambiguous-reopened-payload")
         pid = int(pids[0])
-        nodes = self.command("tree.snapshot", limit=1)["nodes"]
-        return pid if pid != prior_pid and len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and \
-            nodes[0]["role"] == "window" and nodes[0]["name"] == "Mobile Release Kit" else None
+        return pid if pid != prior_pid else None
 
     def resize(self, width, height):
         pid = self.payload_pid()
@@ -390,14 +389,15 @@ class UI:
         return observed
 
 
-def open_session(work, action):
+def open_session(work, action, *, previous=None, token_name="token"):
     def new_connection():
-        previous = set(json.loads((work / "previous-sessions.json").read_bytes()))
         found = [path for path in Path(os.environ["RUNNER_TEMP"]).glob("ui-session-*/connection.json")
                  if str(path) not in previous]
         need(len(found) <= 1, "unique-ui-session")
         return found[0] if found else None
 
+    if previous is None:
+        previous = set(json.loads((work / "previous-sessions.json").read_bytes()))
     path = until(new_connection, 260, "ui-action-never-ready")
     spec = importlib.util.spec_from_file_location("pinned_ui_client", action / "agent.py")
     module = importlib.util.module_from_spec(spec)
@@ -405,7 +405,7 @@ def open_session(work, action):
     connection = json.loads(path.read_bytes())
     need(connection["transport"] == "local" and connection["target"] == "macos", "loopback-only-session")
     need(re.fullmatch(r"http://127\.0\.0\.1:[0-9]+", connection["url"]), "loopback-only-origin")
-    return path, module.Client(connection, work / "token")
+    return path, module.Client(connection, work / token_name)
 
 
 def observe(work, action, media):
@@ -497,6 +497,7 @@ def observe(work, action, media):
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
 
     def versions():
+        nonlocal connection
         ui.page("Overview")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
         ui.edit("Build number", "x")
@@ -527,10 +528,24 @@ def observe(work, action, media):
         until(lambda: call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False).returncode == 1,
               18, "original-payload-did-not-quit")
         call("/usr/bin/open", "-a", str(APP))
-        end = time.monotonic() + 12
-        reopened_pid = until(lambda: ui.reopened_payload(prior_pid), end - time.monotonic(),
-                             "exact-reopened-payload-window")
+        reopened_pid = until(lambda: ui.reopened_payload_pid(prior_pid), 12, "exact-reopened-payload-process")
         results["reopenedPayload"] = {"original": prior_pid, "reopened": reopened_pid}
+        ui.image("before-reopened-driver")
+
+        # The original action reported its original PID without a window after
+        # Quit, even when the screen showed the newly opened app. Give the new
+        # payload its own pinned session and rotate the local-only bearer.
+        previous = {str(path) for path in Path(os.environ["RUNNER_TEMP"]).glob("ui-session-*/connection.json")}
+        token = secrets.token_hex(32)
+        (work / "reopen-token").write_text(token + "\n")
+        request = work / "reopen-request.next"
+        request.write_text(hashlib.sha256(token.encode("ascii")).hexdigest() + "\n")
+        request.replace(work / "reopen-token-digest")
+        (connection.parent / "stop").touch()
+        connection, ui.client = open_session(work, action, previous=previous, token_name="reopen-token")
+
+        end = time.monotonic() + 12
+        need(ui.payload_pid() == reopened_pid, "reopened-payload-identity-changed")
         ui.click("Overview", category="button")
         empty = PAGE_HEADINGS["Overview"]
         def reopened_overview():
@@ -550,23 +565,28 @@ def observe(work, action, media):
 
     def git_observation():
         readme = project / "README.md"
+        initial = readme.read_bytes()
         marker = b"\nSynthetic signed candidate UI verification.\n"
-        readme.write_bytes(readme.read_bytes() + marker)
+        readme.write_bytes(initial + marker)
         def git(*args):
             return call("/usr/bin/git", "-C", str(project), *args).stdout
         before = git("status", "--porcelain=v1")
         head = git("rev-parse", "HEAD")
         need(b" M README.md\n" in before, "synthetic-worktree-change")
-        ui.page("GitHub")
-        ui.click("Connect", category="radiobutton", region="GitHub tasks")
-        ui.click("Check local Git access", category="button")
-        ui.node("Local Git reader available", category="heading")
-        ui.click("Refresh changes", category="button")
-        ui.click("Select README.md", category="checkbox")
-        ui.click("Working changes", category="button")
-        ui.node(marker.strip().decode(), contains=True)
-        need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
-             and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
+        try:
+            ui.page("GitHub")
+            ui.click("Connect", category="radiobutton", region="GitHub tasks")
+            ui.click("Check local Git access", category="button")
+            ui.node("Local Git reader available", category="heading")
+            ui.click("Refresh changes", category="button")
+            ui.click("Select README.md", category="checkbox")
+            ui.click("Working changes", category="button")
+            ui.node(marker.strip().decode(), contains=True)
+            need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
+                 and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
+        finally:
+            need(readme.read_bytes() == initial + marker, "git-read-changed-the-synthetic-input")
+            readme.write_bytes(initial)
 
     def window_layouts():
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
@@ -589,13 +609,14 @@ def observe(work, action, media):
                 scenario(label, lambda page=page: ui.page(page))
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
-                scenario("version-cancel-save-quit-reopen", versions)
                 scenario("git-local-diff-and-no-side-effects", git_observation)
             else:
                 scenarios["cli-grant-and-revoke"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["git-local-diff-and-no-side-effects"] = dict(status="Blocked", reason="Fixture project selection failed")
             scenario("window-layouts", window_layouts)
+            if selected:
+                scenario("version-cancel-save-quit-reopen", versions)
         else:
             for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
                          "version-cancel-save-quit-reopen", "window-layouts", "git-local-diff-and-no-side-effects"):

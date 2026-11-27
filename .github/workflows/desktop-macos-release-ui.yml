@@ -162,6 +162,25 @@ jobs:
           token-sha256: ${{ steps.observer.outputs.token-digest }}
           duration-minutes: '15'
           startup-timeout-seconds: '180'
+      - name: Admit the single fresh driver for the reopened signed app
+        id: reopen
+        if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          request="$MRK_UI_WORK/reopen-token-digest"
+          if [[ -f "$request" ]]; then
+            IFS= read -r digest < "$request"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            printf 'token-digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: ui-test-actions/ui-test-actions@0c818c5d72e8c30c59bd1287c330a40392bf8e89 # v3.0.1
+        if: ${{ !cancelled() && steps.reopen.outputs.token-digest != '' }}
+        with:
+          target: macos
+          transport: local
+          token-sha256: ${{ steps.reopen.outputs.token-digest }}
+          duration-minutes: '5'
+          startup-timeout-seconds: '180'
       - name: Require the original UI observer result
         if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
         run: |
