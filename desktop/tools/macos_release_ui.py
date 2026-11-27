@@ -949,13 +949,24 @@ def observe(work, action, media, suite):
             reviewed = "I reviewed all listed files, including any contents not shown here."
 
             def await_heading(name):
+                next_read = time.monotonic() + 2
+
                 def observe():
+                    nonlocal next_read
                     rows = ui.command("tree.snapshot", limit=300)["nodes"]
                     headings = {row["name"] for row in rows if row["role"] == "heading" and row["visible"]}
                     need(not headings.intersection({"Git action needs attention", "Git recovery is needed",
                                                    "Git action did not complete"}), "git-index-original-action-refused")
-                    return name in headings
-                until(observe, 55, "git-index-" + name)
+                    if name in headings:
+                        return True
+                    # The mutation controller's initial acknowledgement can
+                    # be active. Check the original action as the UI directs.
+                    if time.monotonic() >= next_read and any(row["name"] == "Check action" and
+                        row["role"] == "button" and row["enabled"] and row["visible"] for row in rows):
+                        ui.click("Check action", category="button", region="Local Git action status")
+                        next_read = time.monotonic() + 5
+                    return False
+                until(observe, 60, "git-index-" + name)
 
             def verify_change(staged):
                 need(git("rev-parse", "HEAD") == head and readme.read_bytes() == initial + marker,
