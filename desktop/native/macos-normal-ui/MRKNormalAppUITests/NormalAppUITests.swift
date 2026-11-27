@@ -8489,8 +8489,12 @@ final class NormalAppUITests: XCTestCase {
             }
         }
         let action = guidedProductSurface ? "Check this computer" : "Check build tools"
-        let panel = try waitElement(named(renderer, "Observed build-tool checks")
-            .containing(.button, identifier: action), in: renderer)
+        var toolPanel: XCUIElement?
+        try stage("ios-tools-panel") {
+            toolPanel = try waitElement(named(renderer, "Observed build-tool checks")
+                .containing(.button, identifier: action), in: renderer)
+        }
+        guard let panel = toolPanel else { throw Refusal.condition("iOS tool panel unavailable") }
         diagnosticCut = "panel-ready"
         let integrityFailure = guidedProductSurface
             ? "Finality or status integrity is unknown" : "Original finality or status integrity is unknown"
@@ -8521,11 +8525,6 @@ final class NormalAppUITests: XCTestCase {
         let provenanceSuffix = " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe."
         let contextMatch = StaticTextMatch.edges(contextPrefix, contextSuffix)
         let provenanceMatch = StaticTextMatch.suffix(provenanceSuffix)
-        let contextQuery = panel.staticTexts.matching(NSPredicate(
-            format: "(value BEGINSWITH %@ AND value ENDSWITH %@) OR (label BEGINSWITH %@ AND label ENDSWITH %@)",
-            contextPrefix, contextSuffix, contextPrefix, contextSuffix))
-        let provenanceQuery = panel.staticTexts.matching(NSPredicate(
-            format: "value ENDSWITH %@ OR label ENDSWITH %@", provenanceSuffix, provenanceSuffix))
         @MainActor func guidedBadges() throws -> Bool {
             _ = try remaining(1)
             var pending: [any XCUIElementSnapshot] = [try panel.snapshot()]
@@ -8562,13 +8561,10 @@ final class NormalAppUITests: XCTestCase {
                 try clock.progress(until: journeyDeadline ?? wholeDeadline)
             }
             diagnosticCut = "settled-badges"
-            let context = try waitElement(contextQuery, in: panel, timeout: 15, failures: failures)
-            diagnosticCut = "report-context"
-            let provenance = try waitElement(provenanceQuery, in: panel, timeout: 15, failures: failures)
-            textRows = [context, provenance]
-            try require(contextMatch.accepts(try staticTextContent(context))
-                        && provenanceMatch.accepts(try staticTextContent(provenance)),
-                        "the current iOS report lost context or original Start acknowledgement")
+            // The established reader matches Swift strings first. AXValue can
+            // also be a number, so live queries use equality only.
+            textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
+                                            ready: [fresh], timeout: 15, failures: failures)
         } else {
             textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
@@ -8592,9 +8588,7 @@ final class NormalAppUITests: XCTestCase {
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
         diagnosticCut = "core-ledger"
         _ = try remaining(1)
-        let currentText = guidedProductSurface
-            ? [contextQuery.allElementsBoundByIndex, provenanceQuery.allElementsBoundByIndex]
-            : try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
+        let currentText = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
         let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
         try require(failedCount == 0 && currentText.allSatisfy { $0.count == 1 },
                     "original iOS diagnostics context changed during readback")
