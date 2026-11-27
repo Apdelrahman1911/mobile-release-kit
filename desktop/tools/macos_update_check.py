@@ -931,6 +931,7 @@ ADDITIONAL_FROZEN_UI = {
     "metadata-xctest": ("testSyntheticProjectLocalEditsAndImages", "project-test", "MRK_MACOS_NORMAL_METADATA_UI"),
     "persistence-xctest": ("testSyntheticPersistentCredentials", "persistence-test", "MRK_MACOS_NORMAL_PERSISTENCE_UI"),
     "offline-checks-xctest": ("testSyntheticProjectSavedOfflineChecks", "saved-checks-test", "MRK_MACOS_NORMAL_OFFLINE_UI"),
+    "empty-recovery-xctest": ("testSyntheticProjectEmptyBuildInputInspection", "saved-checks-test", "MRK_MACOS_NORMAL_RECOVERY_IDLE_UI"),
     "workflow-refusal-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI"),
     "workflow-conflict-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_CONFLICT_UI"),
     "release-evidence-xctest": ("testSyntheticProjectSavedReleaseEvidence", "release-evidence-test", "MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI"),

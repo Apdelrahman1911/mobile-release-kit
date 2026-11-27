@@ -7959,7 +7959,13 @@ final class NormalAppUITests: XCTestCase {
             }
             let idMatches = labels.filter { $0 == "candidate" }.count == 1 || candidates.count == 1
             let hashMatches = labels.filter { $0 == digest }.count == 1
-            let sizeMatches = sizes == ["2368"]
+            // A WebKit text node can divide the localized number and its
+            // unit. Match both adjacent parts in the same conflict summary.
+            let flattened = labels.map { $0.replacingOccurrences(of: "\u{00a0}", with: " ")
+                                           .replacingOccurrences(of: "\u{202f}", with: " ") }.joined(separator: " ")
+            let splitSize = flattened.range(of: #"(?:^|\s)2(?:[ ,])?368\s*observed bytes(?:\s|$)"#,
+                                            options: .regularExpression) != nil
+            let sizeMatches = sizes == ["2368"] || (sizes.isEmpty && splitSize)
             print("MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=\(sizeLabels.count);id=\(idMatches);bytes=\(sizeMatches);hash=\(hashMatches)")
             try require(!labels.contains { $0.contains("# MRK synthetic user customization; preserve exactly.") },
                         "the refusal exposed customized original YAML")

@@ -35,7 +35,7 @@ on:
         description: Run only the selected fixture check on the verification branch
         type: choice
         default: none
-        options: [none, update-credentials, all, exact-coverage, project-paths-xctest, project-edits-xctest, persistence-xctest,
+        options: [none, update-credentials, all, exact-coverage, exact-negative, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
                   android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
                   release-asset, native-status-unit, recovery-contracts, xcode-path-control, archived-upgrade, apfs-disposal-control]
@@ -546,7 +546,7 @@ jobs:
         ((inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' && inputs.build_run == '45904194634') ||
          (inputs.expected_sha == '7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc' && inputs.build_run == '46048925911' && inputs.carrier_run == '46067290901' &&
           ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
-           ((inputs.additional_ui == 'exact-coverage' || inputs.additional_ui == 'project-edits-xctest' ||
+           ((inputs.additional_ui == 'exact-coverage' || inputs.additional_ui == 'exact-negative' || inputs.additional_ui == 'project-edits-xctest' ||
              inputs.additional_ui == 'persistence-xctest') && !inputs.protected_xcode_fixture))) ||
          (inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' && inputs.build_run == '45996045007' &&
           ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
@@ -557,7 +557,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        mode: ${{ github.ref == 'refs/heads/main' && fromJSON('["fresh","update-credentials","archived-upgrade","post-reinstall-prepare","uninstaller","delete-data","workspace-xctest","recovery-xctest","core-recovery","performance-long"]') || (inputs.additional_ui == 'exact-coverage' && fromJSON('["project-paths-xctest","project-edits-xctest","persistence-xctest","offline-checks-xctest","workflow-refusal-xctest","workflow-conflict-xctest","release-evidence-xctest","android-inputs-xctest"]')) || (inputs.additional_ui == 'all' && fromJSON('["project-paths-xctest","project-edits-xctest","persistence-xctest","offline-checks-xctest","workflow-refusal-xctest","release-evidence-xctest","android-inputs-xctest","unsigned-ios-xctest"]')) || fromJSON(format('["{0}"]', inputs.additional_ui != 'none' && inputs.additional_ui || 'recovery-xctest')) }}
+        mode: ${{ github.ref == 'refs/heads/main' && fromJSON('["fresh","update-credentials","archived-upgrade","post-reinstall-prepare","uninstaller","delete-data","workspace-xctest","recovery-xctest","core-recovery","performance-long"]') || (inputs.additional_ui == 'exact-negative' && fromJSON('["empty-recovery-xctest","metadata-xctest","workflow-conflict-xctest"]')) || (inputs.additional_ui == 'exact-coverage' && fromJSON('["project-paths-xctest","project-edits-xctest","persistence-xctest","offline-checks-xctest","workflow-refusal-xctest","workflow-conflict-xctest","release-evidence-xctest","android-inputs-xctest"]')) || (inputs.additional_ui == 'all' && fromJSON('["project-paths-xctest","project-edits-xctest","persistence-xctest","offline-checks-xctest","workflow-refusal-xctest","release-evidence-xctest","android-inputs-xctest","unsigned-ios-xctest"]')) || fromJSON(format('["{0}"]', inputs.additional_ui != 'none' && inputs.additional_ui || 'recovery-xctest')) }}
     env:
       BASH_ENV: ''
       ENV: ''
