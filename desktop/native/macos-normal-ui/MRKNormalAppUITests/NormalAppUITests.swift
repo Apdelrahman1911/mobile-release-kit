@@ -9000,8 +9000,30 @@ final class NormalAppUITests: XCTestCase {
             }
             guard let panel = selected, let pair = identity else { throw Refusal.condition("iOS selected original absent") }
             try stage("ios-unsigned-original-result") {
-                let result = try waitElement(named(panel, "Completed local unsigned iOS archive observation"),
-                    in: panel, timeout: 750, failures: failures)
+                let resultQuery = named(panel, "Completed local unsigned iOS archive observation")
+                let originalStatus = named(panel, statusLabel)
+                let terminalIssue = panel.staticTexts.matching(NSPredicate(
+                    format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
+                let observed = NSPredicate(format: "result.exists == true OR failure.exists == true")
+                for interval: TimeInterval in [15, 60, 180] {
+                    let targets: NSDictionary = ["result": resultQuery.element(boundBy: 0),
+                                                 "failure": terminalIssue.element(boundBy: 0)]
+                    let wait = XCTNSPredicateExpectation(predicate: observed, object: targets)
+                    if XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed { break }
+                    let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
+                    let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")
+                    let phases = ["Awaiting your approval", "Starting iOS operation", "iOS operation running",
+                                  "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
+                    let matches = phases.map { text.contains($0) ? "1" : "0" }.joined()
+                    print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(matches)")
+                    // Lost UI events do not authorize another Start. Use only
+                    // the visible status read for this same submitted identity.
+                    try stage("ios-archive-read-original-status") {
+                        try require(try iosCurrentArchiveIdentity(status) == pair, "iOS status original identity changed")
+                        try press(panel, "Check archive status", renderer: renderer, failures: failures, timeout: 12)
+                    }
+                }
+                let result = try waitElement(resultQuery, in: panel, timeout: 750, failures: failures)
                 try reveal(result, in: renderer)
                 observed = try iosResult(result, identity: pair)
                 let status = try unique(named(panel, statusLabel), "iOS current terminal status absent")

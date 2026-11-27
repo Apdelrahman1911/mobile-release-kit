@@ -2966,6 +2966,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestGuidedIOSReview", r"(?m)^MRK_MACOS_GUIDED_IOS_REVIEW_FIELDS=v1;fields=([01]{5})$"),
         ("xctestGuidedIOSReviewTokens", r"(?m)^MRK_MACOS_GUIDED_IOS_REVIEW_TOKENS=v1;fields=([01]{5})$"),
         ("xctestGuidedIOSAckReadback", r"(?m)^MRK_MACOS_GUIDED_IOS_ACK_READBACK=v1;fields=([01]{3})$"),
+        ("xctestGuidedIOSOriginalPhase", r"(?m)^MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=([01]{6})$"),
         ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
         ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),
         ("xctestGuidedWorkflowConflictRow", r"(?m)^MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=([0-9]{1,3});id=(true|false);bytes=(true|false);hash=(true|false)$"),
