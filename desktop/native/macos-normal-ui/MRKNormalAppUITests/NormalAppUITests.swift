@@ -8588,6 +8588,47 @@ final class NormalAppUITests: XCTestCase {
         }
         return (entries, bytes) // Displayed original result, NOT a new archive census.
     }
+
+    private func recordIOSArchiveTerminal(_ text: String) -> String {
+        let outcomes = ["complete", "refused", "failed", "cancelled", "timed-out", "unknown"]
+        let outcome = outcomes.first { text.contains("Outcome: " + $0 + " ") } ?? "unobserved"
+        let reasons = [
+            ("none", "The operation completed within its stated local scope."),
+            ("command-failed", "A known Xcode or preparation command returned a nonzero code."),
+            ("command-incomplete", "No usable original command outcome was obtained."),
+            ("artifact-missing", "The expected task-owned archive was not created."),
+            ("artifact-unsafe", "The archive layout could not be safely inspected."),
+            ("artifact-changed", "Original captured inputs or output changed during inspection."),
+            ("archive-validation-failed", "The archive did not pass the required identity/version or symbols checks."),
+            ("project-admission-refused", "Resolve pending toolkit work or unsafe private-directory state"),
+            ("toolchain-unavailable", "Install full Xcode in Applications"),
+            ("toolchain-mismatch", "The protected Xcode/SDK layout does not match the supported profile."),
+            ("runtime-unavailable", "The required installed Desktop runtime is unavailable."),
+            ("protocol-error", "Original archive communication did not match its fixed contract."),
+            ("timed-out", "The original deadline was reached."),
+            ("work-retained", "Original task work is known to remain."),
+            ("cleanup-unknown", "Original cleanup is unconfirmed and ownership is retained."),
+            ("input-limit", "A bounded saved input or archive-processing limit was reached."),
+            ("result-limit", "The bounded result could not be represented safely.")
+        ]
+        let reason = reasons.first { text.contains($0.1) }?.0 ?? "unobserved"
+        func command(_ name: String) -> String {
+            let prefix = name + ": known exit "
+            if let start = text.range(of: prefix),
+               let end = text[start.upperBound...].firstIndex(of: "."),
+               let value = Int(text[start.upperBound..<end]), (-255...255).contains(value) {
+                return String(value)
+            }
+            if text.contains(name + ": not dispatched.") { return "not-dispatched" }
+            if text.contains(name + ": no usable original outcome.") { return "unknown" }
+            return "unobserved"
+        }
+        let outputs = ["not-created", "retained-incomplete", "retained-local-result", "unknown"]
+        let output = outputs.first { text.contains("Archive output: " + $0 + ".") } ?? "unobserved"
+        // Publish only fixed categories and bounded numeric exit codes.
+        print("MRK_MACOS_IOS_ARCHIVE_TERMINAL=v1;outcome=\(outcome);reason=\(reason);xcode=\(command("Xcode version"));sdk=\(command("iOS SDK selection"));archive=\(command("Archive"));output=\(output)")
+        return outcome
+    }
     @MainActor private func settleFailedIOSArchive(_ app: XCUIApplication, window: XCUIElement,
                                                    panel: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws {
         guard let clock = caseClock, clock.firstFailure != nil, let owner = originalLaunch else {
@@ -9010,17 +9051,26 @@ final class NormalAppUITests: XCTestCase {
                     let targets: NSDictionary = ["result": resultQuery.element(boundBy: 0),
                                                  "failure": terminalIssue.element(boundBy: 0)]
                     let wait = XCTNSPredicateExpectation(predicate: readyOrFailed, object: targets)
-                    if XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed { break }
+                    let resultOrFailure = XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed
                     let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
+                    try require(try iosCurrentArchiveIdentity(status) == pair, "iOS status original identity changed")
                     let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")
+                        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                        .replacingOccurrences(of: #" +([.])"#, with: "$1", options: .regularExpression)
                     let phases = ["Awaiting your approval", "Starting iOS operation", "iOS operation running",
                                   "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
                     let matches = phases.map { text.contains($0) ? "1" : "0" }.joined()
                     print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(matches)")
+                    if text.contains("iOS request finished") {
+                        let outcome = recordIOSArchiveTerminal(text)
+                        try require(outcome == "complete" || outcome == "unobserved",
+                                    "original unsigned iOS archive reached a non-successful terminal outcome")
+                        break // The same operation is settled. Wait for its result card below.
+                    }
+                    if resultOrFailure { break }
                     // Lost UI events do not authorize another Start. Use only
                     // the visible status read for this same submitted identity.
                     try stage("ios-archive-read-original-status") {
-                        try require(try iosCurrentArchiveIdentity(status) == pair, "iOS status original identity changed")
                         try press(panel, "Check archive status", renderer: renderer, failures: failures, timeout: 12)
                     }
                 }
