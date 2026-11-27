@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -31,6 +32,12 @@ PAGE_HEADINGS = {
     "Build files": "Inspect a build",
     "Recover work": "Check interrupted work safely",
     "Automation": "Let a command-line tool help",
+}
+NAVIGATION_SCENARIOS = {"nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-"): page for page in PAGE_HEADINGS}
+EXPECTED_SCENARIOS = {
+    "native-console-admission", "cold-runtime-and-cli-denial", "cancel-native-project-picker",
+    "project-picker-and-saved-config", *NAVIGATION_SCENARIOS, "cli-grant-and-revoke",
+    "version-cancel-save-quit-reopen", "git-local-diff-and-no-side-effects", "window-layouts",
 }
 
 
@@ -60,6 +67,39 @@ def until(operation, timeout, reason):
 def file_hash(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_observation(work, media):
+    evidence = work / "evidence"
+    status_path = work / "observer-status"
+    status = status_path.read_text().strip() if status_path.is_file() else "missing"
+    result_path = evidence / "RESULT.json"
+    result = json.loads(result_path.read_bytes()) if result_path.is_file() else {}
+    scenarios = result.get("scenarios", {})
+    statuses = {}
+    for name in sorted(EXPECTED_SCENARIOS):
+        state = scenarios.get(name, {}).get("status", "Not Tested")
+        statuses[name] = state if state in {"Passed", "Failed", "Blocked", "Not Tested"} else "Invalid"
+    summary = dict(observerExit=status if re.fullmatch(r"[0-9]{1,3}", status) else "unavailable",
+                   scenarios=statuses, extraScenarioCount=len(scenarios.keys() - EXPECTED_SCENARIOS),
+                   resultSha256=file_hash(result_path) if result_path.is_file() else None,
+                   sourceCommit=result.get("sourceCommit"), harnessCommit=os.environ["GITHUB_SHA"])
+    trace = evidence / "trace.jsonl"
+    summary["traceSha256"] = file_hash(trace) if trace.is_file() else None
+    payload = json.dumps(summary, sort_keys=True)
+    (evidence / "SCENARIO-SUMMARY.json").write_text(payload + "\n")
+    print(payload, flush=True)
+    manifest_file = media / "RELEASE-MANIFEST.json"
+    manifest = json.loads(manifest_file.read_bytes())
+    expected = {key: manifest[key] for key in ("sourceCommit", "sourceTree", "buildRun", "carrierRun")}
+    expected.update(manifestSha256=file_hash(manifest_file),
+                    packageSha256=manifest["packages"]["Install.pkg"]["sha256"],
+                    removeSha256=manifest["packages"]["Remove.pkg"]["sha256"])
+    need(all(result.get(key) == value for key, value in expected.items()), "observation-release-identity")
+    need(status == "0", "observer-exit-status")
+    need(scenarios.keys() == EXPECTED_SCENARIOS, "observation-scenario-roster")
+    need(all(state == "Passed" for state in statuses.values()), "observation-scenario-failure")
+    need(summary["traceSha256"] is not None, "observation-trace-absent")
 
 
 def detach_install_media(mount, evidence):
@@ -177,13 +217,18 @@ class UI:
         # The action retains one snapshot. Read the window first so the
         # subsequent element observation is the one eligible for a click.
         pid = self.payload_pid()
-        root = self.command("tree.snapshot", limit=1)["nodes"]
+
+        def focused_root():
+            nodes = self.command("tree.snapshot", limit=1)["nodes"]
+            if len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] in ("window", "sheet"):
+                return nodes[0] if nodes[0]["bounds"] else None
+            return None
+
+        root = until(focused_root, 4, "original-focused-app-window-or-sheet")
         snapshot, node = self.node(name, **selectors)
-        need(len(root) == 1 and root[0]["role"] in ("window", "sheet") and root[0]["bounds"] and
-             root[0]["id"] == f"mac:{pid}:0" and node["id"].startswith(root[0]["id"] + "."),
-             "original-focused-app-window-or-sheet")
-        window = root[0]["bounds"]
-        top = max(0, window["y"] + (35 if root[0]["role"] == "window" else 3))
+        need(node["id"].startswith(root["id"] + "."), "original-focused-app-window-or-sheet")
+        window = root["bounds"]
+        top = max(0, window["y"] + (35 if root["role"] == "window" else 3))
         bottom = min(self.screen["height"] - 65, window["y"] + window["height"] - 8)
         left = max(0, window["x"] + 3)
         right = min(self.screen["width"], window["x"] + window["width"]) - 3
@@ -285,10 +330,40 @@ class UI:
             self.node(PAGE_HEADINGS["Overview"], category="heading")
             return
         self.keys("command", "shift", "g")
-        self.node("Go to Folder", contains=True)
+        pid = self.payload_pid()
+
+        def navigation_field():
+            nodes = self.command("tree.snapshot", limit=40)["nodes"]
+            if not nodes or nodes[0]["id"] != f"mac:{pid}:0" or nodes[0]["role"] != "sheet":
+                return None
+            matching_caption = any(node["visible"] and ("Go to Folder" in node["name"] or
+                                   "Go to Folder" in node["text"] or node["text"] == "Go to:") for node in nodes)
+            edits = [node for node in nodes if node["role"] == "textfield" and node["enabled"] and node["visible"]]
+            need(len(edits) <= 1, "ambiguous-goto-input")
+            return (edits[0], nodes) if matching_caption and edits else None
+
+        until(navigation_field, 10, "exact-go-to-folder-sheet")
         self.keys("command", "a")
         self.command("text.insert", text=str(project))
+
+        def completed_path():
+            observation = navigation_field()
+            if observation is None:
+                return None
+            field, nodes = observation
+            return field["text"] == str(project) and any(
+                node["role"] == "statictext" and project.name in (node["name"], node["text"])
+                for node in nodes)
+
+        until(completed_path, 10, "native-folder-completion-did-not-match-fixture")
         self.keys("return")
+
+        def original_picker():
+            nodes = self.command("tree.snapshot", limit=1)["nodes"]
+            return len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "sheet" and \
+                nodes[0]["name"].lower() == "choose a mobile project folder"
+
+        until(original_picker, 5, "original-project-picker-did-not-resume")
         self.click("Open", category="button")
         self.node(project.name, category="heading")
         self.project_name = project.name
@@ -319,6 +394,16 @@ class UI:
         need(len(active) == 1, "exact-original-payload")
         return int(active[0])
 
+    def reopened_payload_pid(self, prior_pid):
+        reply = call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False)
+        need(reply.returncode in (0, 1), "reopened-payload-process-observation")
+        if reply.returncode == 1:
+            return None
+        pids = reply.stdout.splitlines()
+        need(len(pids) == 1, "ambiguous-reopened-payload")
+        pid = int(pids[0])
+        return pid if pid != prior_pid else None
+
     def resize(self, width, height):
         pid = self.payload_pid()
 
@@ -333,20 +418,25 @@ class UI:
 
         original = window()
         self.command("windows.move_resize", id=original["id"], width=width, height=height, x=20, y=55)
-        observed = window()["bounds"]
-        need(abs(observed["width"] - width) <= 1 and abs(observed["height"] - height) <= 1,
-             "observed-window-size")
-        return observed
+
+        def resized_bounds():
+            observed = window()["bounds"]
+            if abs(observed["width"] - width) <= 1 and abs(observed["height"] - height) <= 1:
+                return observed
+            return None
+
+        return until(resized_bounds, 3, "observed-window-size")
 
 
-def open_session(work, action):
+def open_session(work, action, *, previous=None, token_name="token"):
     def new_connection():
-        previous = set(json.loads((work / "previous-sessions.json").read_bytes()))
         found = [path for path in Path(os.environ["RUNNER_TEMP"]).glob("ui-session-*/connection.json")
                  if str(path) not in previous]
         need(len(found) <= 1, "unique-ui-session")
         return found[0] if found else None
 
+    if previous is None:
+        previous = set(json.loads((work / "previous-sessions.json").read_bytes()))
     path = until(new_connection, 260, "ui-action-never-ready")
     spec = importlib.util.spec_from_file_location("pinned_ui_client", action / "agent.py")
     module = importlib.util.module_from_spec(spec)
@@ -354,7 +444,7 @@ def open_session(work, action):
     connection = json.loads(path.read_bytes())
     need(connection["transport"] == "local" and connection["target"] == "macos", "loopback-only-session")
     need(re.fullmatch(r"http://127\.0\.0\.1:[0-9]+", connection["url"]), "loopback-only-origin")
-    return path, module.Client(connection, work / "token")
+    return path, module.Client(connection, work / token_name)
 
 
 def observe(work, action, media):
@@ -446,6 +536,7 @@ def observe(work, action, media):
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
 
     def versions():
+        nonlocal connection
         ui.page("Overview")
         ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
         ui.edit("Build number", "x")
@@ -469,12 +560,31 @@ def observe(work, action, media):
         need((project / VERSION_FILE).read_bytes() == expected, "exact-saved-version")
         need(all(file_hash(project / name) == digest for name, digest in original.items() if name != VERSION_FILE),
              "save-touched-another-input")
+        prior_pid = ui.payload_pid()
         ui.keys("command", "q")
         ui.node("Quit and discard unsaved drafts?", category="statictext", contains=True)
         ui.click("Quit", category="button")
         until(lambda: call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False).returncode == 1,
               18, "original-payload-did-not-quit")
         call("/usr/bin/open", "-a", str(APP))
+        reopened_pid = until(lambda: ui.reopened_payload_pid(prior_pid), 12, "exact-reopened-payload-process")
+        results["reopenedPayload"] = {"original": prior_pid, "reopened": reopened_pid}
+        ui.image("before-reopened-driver")
+
+        # The original action reported its original PID without a window after
+        # Quit, even when the screen showed the newly opened app. Give the new
+        # payload its own pinned session and rotate the local-only bearer.
+        previous = {str(path) for path in Path(os.environ["RUNNER_TEMP"]).glob("ui-session-*/connection.json")}
+        token = secrets.token_hex(32)
+        (work / "reopen-token").write_text(token + "\n")
+        request = work / "reopen-request.next"
+        request.write_text(hashlib.sha256(token.encode("ascii")).hexdigest() + "\n")
+        request.replace(work / "reopen-token-digest")
+        (connection.parent / "stop").touch()
+        connection, ui.client = open_session(work, action, previous=previous, token_name="reopen-token")
+
+        end = time.monotonic() + 12
+        need(ui.payload_pid() == reopened_pid, "reopened-payload-identity-changed")
         ui.click("Overview", category="button")
         empty = PAGE_HEADINGS["Overview"]
         def reopened_overview():
@@ -483,7 +593,7 @@ def observe(work, action, media):
                        for value in (node.get("name"), node.get("text")) if value in (empty, project.name)}
             need(len(matches) <= 1, "ambiguous-reopened-overview")
             return matches.pop() if matches else None
-        if until(reopened_overview, 12, "reopened-overview-not-rendered") == empty:
+        if until(reopened_overview, end - time.monotonic(), "reopened-overview-not-rendered") == empty:
             ui.project_name = None
             ui.pick(project)
         ui.click("Edit version & build number")
@@ -494,31 +604,87 @@ def observe(work, action, media):
 
     def git_observation():
         readme = project / "README.md"
+        initial = readme.read_bytes()
         marker = b"\nSynthetic signed candidate UI verification.\n"
-        readme.write_bytes(readme.read_bytes() + marker)
+        readme.write_bytes(initial + marker)
         def git(*args):
             return call("/usr/bin/git", "-C", str(project), *args).stdout
+
+        def wait_for_original_read(matches, stage):
+            started = time.monotonic()
+
+            def observe():
+                tree = ui.command("tree.snapshot", limit=300)
+                nodes = tree["nodes"]
+                need(not any(node["role"] == "heading" and node["name"] in (
+                    "Local Git read needs attention", "Local Git read did not complete") for node in nodes),
+                    "original-local-git-read-refused")
+                return tree if matches(nodes) else None
+
+            # The Git reader owns a 45-second work and a 55-second hard
+            # deadline. Observe the original operation without sending Start again.
+            tree = until(observe, 55, "original-local-git-" + stage)
+            results.setdefault("gitLocalReadSeconds", {})[stage] = round(time.monotonic() - started, 2)
+            return tree
+
         before = git("status", "--porcelain=v1")
         head = git("rev-parse", "HEAD")
-        need(b" M README.md\n" in before, "synthetic-worktree-change")
-        ui.page("GitHub")
-        ui.click("Connect", category="radiobutton", region="GitHub tasks")
-        ui.click("Check local Git access", category="button")
-        ui.node("Local Git reader available", category="heading")
-        ui.click("Refresh changes", category="button")
-        ui.click("Select README.md", category="checkbox")
-        ui.click("Working changes", category="button")
-        ui.node(marker.strip().decode(), contains=True)
-        need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
-             and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
+        need(before == b" M README.md\n", "exact-synthetic-worktree-change")
+        try:
+            ui.page("GitHub")
+            ui.click("Connect", category="radiobutton", region="GitHub tasks")
+            ui.click("Check local Git access", category="button")
+            ui.node("Local Git reader available", category="heading")
+            ui.click("Refresh changes", category="button")
+            wait_for_original_read(lambda nodes: any(node["role"] == "heading" and
+                node["name"] == "Local Git read finished" for node in nodes), "observation")
+            _, changes = ui.reveal("Source changes", category="heading")
+            bounds = changes["bounds"]
+            ui.command("pointer.scroll", x=bounds["x"] + bounds["width"] // 2,
+                       y=bounds["y"] + bounds["height"] // 2, dy=6)
+            tree = ui.command("tree.snapshot", limit=300)
+            (evidence / "git-source-changes-tree.json").write_text(json.dumps(tree, indent=2) + "\n")
+            nodes = tree["nodes"]
+            pid = ui.payload_pid()
+            need(nodes and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "window",
+                 "exact-source-changes-window")
+            table, = [node for node in nodes if node["role"] == "table" and
+                      node["name"].startswith("Choose files to inspect.")]
+            # WebKit exposes each cell under its row and again under its column.
+            # Select the checkbox in the actual row for the one changed file.
+            row, = [node for node in nodes if node["role"] == "row" and node["id"].startswith(table["id"] + ".") and
+                    any(item["id"].startswith(node["id"] + ".") and "README.md" in (item["name"], item["text"])
+                        for item in nodes)]
+            select = [node for node in nodes if node["role"] == "checkbox" and node["visible"] and node["enabled"] and
+                      node["id"].startswith(row["id"] + ".") and node["name"] == "Select README.md"]
+            need(len(select) == 1 and select[0]["bounds"], "exact-readme-row-checkbox")
+            box, window = select[0]["bounds"], nodes[0]["bounds"]
+            x, y = box["x"] + box["width"] // 2, box["y"] + box["height"] // 2
+            need(window["x"] < x < window["x"] + window["width"] and
+                 window["y"] + 35 < y < min(window["y"] + window["height"] - 8, ui.screen["height"] - 65),
+                 "readme-checkbox-outside-app-viewport")
+            ui.command("element.click", snapshot_id=tree["snapshot_id"], id=select[0]["id"])
+            ui.click("Working changes", category="button")
+            added_line = "+" + marker.strip().decode()
+            diff = wait_for_original_read(lambda nodes: any(added_line in node["text"].splitlines()
+                or added_line in node["name"].splitlines() for node in nodes), "working-diff")
+            (evidence / "git-working-diff-tree.json").write_text(json.dumps(diff, indent=2) + "\n")
+            ui.reveal("Working-file changes", category="heading")
+            need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
+                 and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
+        finally:
+            need(readme.read_bytes() == initial + marker, "git-read-changed-the-synthetic-input")
+            readme.write_bytes(initial)
 
     def window_layouts():
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
-        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 75, 740)
-        if width < 980 or height < 690:
+        # Leave room for the title bar position and the Dock's reserved area.
+        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 120, 740)
+        # The native payload enforces a minimum height of 640 points.
+        if width < 980 or height < 648:
             raise Blocked("The synthetic console is too small for two readable window sizes")
         results["windowBounds"] = []
-        for width, height in ((width - 40, height - 20), (width, height)):
+        for width, height in ((width - 40, max(640, height - 20)), (width, height)):
             results["windowBounds"].append(ui.resize(width, height))
             ui.page("Overview")
             ui.page("Project settings")
@@ -529,18 +695,18 @@ def observe(work, action, media):
             scenario("cold-runtime-and-cli-denial", startup)
             scenario("cancel-native-project-picker", cancel_picker)
             selected = scenario("project-picker-and-saved-config", select_project)
-            for page in PAGE_HEADINGS:
-                label = "nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-")
+            for label, page in NAVIGATION_SCENARIOS.items():
                 scenario(label, lambda page=page: ui.page(page))
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
-                scenario("version-cancel-save-quit-reopen", versions)
                 scenario("git-local-diff-and-no-side-effects", git_observation)
             else:
                 scenarios["cli-grant-and-revoke"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["git-local-diff-and-no-side-effects"] = dict(status="Blocked", reason="Fixture project selection failed")
             scenario("window-layouts", window_layouts)
+            if selected:
+                scenario("version-cancel-save-quit-reopen", versions)
         else:
             for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
                          "version-cancel-save-quit-reopen", "window-layouts", "git-local-diff-and-no-side-effects"):
@@ -553,13 +719,16 @@ def observe(work, action, media):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("install", "observe"))
+    parser.add_argument("mode", choices=("install", "observe", "require"))
     parser.add_argument("media", type=Path)
     parser.add_argument("work", type=Path)
     parser.add_argument("--action", type=Path)
     args = parser.parse_args()
     if args.mode == "install":
         install(args.media, args.work)
+        return 0
+    if args.mode == "require":
+        verify_observation(args.work, args.media)
         return 0
     return observe(args.work, args.action, args.media)
 

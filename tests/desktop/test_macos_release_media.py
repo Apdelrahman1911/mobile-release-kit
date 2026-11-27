@@ -56,6 +56,33 @@ class FrozenMediaTests(unittest.TestCase):
         with self.assertRaises(OSError):
             media.record(image)
 
+    def test_ui_qualification_binds_the_complete_proof_and_modes(self):
+        manifest = self.verify()
+        frozen = {key: manifest[key] for key in ("sourceCommit", "sourceTree", "buildRun", "carrierRun", "carrierAttempt")}
+        frozen.update(manifestSha256=media.record(self.root / media.MANIFEST)["sha256"],
+                      installSha256=self.package["sha256"], removeSha256=self.package["sha256"])
+        modes = ["fresh", "update-credentials", "archived-upgrade", "uninstaller", "delete-data", "performance-long",
+                 "workspace-xctest", "recovery-xctest", "core-recovery", "post-reinstall-prepare"]
+        proof = dict(qualificationRun="102", qualificationAttempt="1", frozenRelease=frozen, modes=modes)
+        path = self.root / "QUALIFIED.json"
+
+        def verify(value, carrier_attempt="1"):
+            path.write_bytes(media.dump(value))
+            media.verify_qualification(self.root, manifest, path, "102", "1", carrier_attempt)
+
+        verify(proof)
+        for key, value in frozen.items():
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "release-qualification-identity"):
+                verify(dict(proof, frozenRelease=dict(frozen, **{key: "0" * len(value)})))
+        for changed in ({"qualificationRun": "103"}, {"qualificationAttempt": "2"}, {"unexpected": True}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "release-qualification-identity"):
+                verify(dict(proof, **changed))
+        with self.assertRaisesRegex(ValueError, "release-qualification-identity"):
+            verify(proof, carrier_attempt="2")
+        for invalid in (modes[:-1], modes[:-1] + modes[:1], modes[:-1] + ["unknown"], modes[:-1] + [{}]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "release-qualification-modes"):
+                verify(dict(proof, modes=invalid))
+
     def test_remove_producer_must_link_the_exact_install(self):
         source = "a" * 40
         version = self.manifest["version"]
