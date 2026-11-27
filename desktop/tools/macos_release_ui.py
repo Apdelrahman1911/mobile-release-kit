@@ -571,8 +571,11 @@ def observe(work, action, media):
 
         def require_denied(identity):
             denied = call(str(CLI), "observe", identity, "--json", check=False)
-            error = json.loads(denied.stdout)
-            need(denied.returncode == 4 and error["ok"] is False and error["error"] == "access_denied",
+            reply = json.loads(denied.stdout)
+            remote_error = reply.get("response") == {"kind": "error", "value": "access_denied"}
+            local_error = (set(reply) == {"version", "ok", "error", "message"} and
+                           reply["ok"] is False and reply["error"] == "access_denied")
+            need(denied.returncode == 4 and reply["version"] == 1 and (remote_error or local_error),
                  "ungranted-project-observation-was-not-denied")
 
         def read_version(expected):
