@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import stat
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -57,6 +58,14 @@ def _tool_data(value: os.stat_result) -> dict:
             "mtimeNs": str(value.st_mtime_ns), "ctimeNs": str(value.st_ctime_ns)}
 
 
+def _darwin_descriptor_path(fd: int) -> bytes:
+    import fcntl
+
+    path, terminator, _ = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).partition(b"\0")
+    require(terminator == b"\0" and path.startswith(b"/"))
+    return path
+
+
 @dataclass(eq=False)
 class _Held:
     parent: int
@@ -90,6 +99,14 @@ class _IOSRemoval:
         files.require_work_consumers()
         require(self.state == "NEW")
         files.check_held(original)
+        number = original.slot.number
+        require(number is not None)
+        directory_path = None
+        if original.directory and sys.platform == "darwin":
+            parent = _darwin_descriptor_path(original.parent)
+            directory_path = parent.rstrip(b"/") + b"/" + os.fsencode(original.name)
+            require(_darwin_descriptor_path(number) == directory_path)
+            files.check_held(original)
         operation = os.rmdir if original.directory else os.unlink
         builtin = _OS_RMDIR if original.directory else _OS_UNLINK
         with files.guard.deferred(check_on_exit=False):
@@ -102,12 +119,16 @@ class _IOSRemoval:
                 files.operation.remember(error, fatal=self.state == "UNKNOWN")
                 raise
             try:
-                require(result is None and original.slot.number is not None)
-                after = os.fstat(original.slot.number)
+                require(result is None and original.slot.number == number)
+                after = os.fstat(number)
                 identity = _directory(after) if original.directory else _file(after)
                 ignored = set() if original.directory else {"ctime", "links"}
-                require(after.st_nlink == 0 and all(identity[key] == original.identity[key]
-                        for key in identity if key not in ignored))
+                require(all(identity[key] == original.identity[key] for key in identity if key not in ignored))
+                # On APFS, an open empty directory can retain two links after
+                # rmdir. Anchor that case to the original descriptor path so
+                # removing a substitute after moving the original still fails.
+                require(after.st_nlink == 0 or (after.st_nlink == 2 and directory_path is not None
+                                              and _darwin_descriptor_path(number) == directory_path))
                 try:
                     os.stat(original.name, dir_fd=original.parent, follow_symlinks=False)
                 except FileNotFoundError:

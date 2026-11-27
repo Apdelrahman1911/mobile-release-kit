@@ -780,6 +780,56 @@ class IOSOwnershipDataTests(unittest.TestCase):
             self.assertTrue(operation.resources_closed)
             self.assertFalse(operation.guard.lifetime_ledger.fatal)
 
+    def test_darwin_directory_removal_with_links_requires_the_original_detached_path(self):
+        details = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o700,
+                                  st_uid=501, st_gid=20, st_nlink=2)
+        for case, post_path, post_inode, name_absent in (
+                ("detached", b"/owned/work", 2, True),
+                ("moved-original", b"/owned/elsewhere", 2, True),
+                ("changed-descriptor", b"/owned/work", 3, True),
+                ("recreated-name", b"/owned/work", 2, False)):
+            with self.subTest(case=case), original() as operation:
+                files = operation.files
+                held = operation_module._Held(71, "work", build_inputs._FD(operation.guard), True,
+                                              identity=build_inputs._directory(details))
+                held.slot.number, held.slot.open_state = 72, "OPEN"
+                removal = operation_module._IOSRemoval(files, held)
+                post = SimpleNamespace(**{**vars(details), "st_ino": post_inode})
+                observed_name = FileNotFoundError() if name_absent else details
+                with patch.object(operation_module.sys, "platform", "darwin"), \
+                        patch.object(operation_module, "_darwin_descriptor_path",
+                                     side_effect=[b"/owned", b"/owned/work", post_path]), \
+                        patch.object(files, "require_work_consumers"), patch.object(files, "check_held") as check, \
+                        patch.object(os, "rmdir", return_value=None) as rmdir, \
+                        patch.object(os, "fstat", return_value=post), patch.object(os, "stat", side_effect=[observed_name]):
+                    if case == "detached":
+                        removal.remove()
+                        self.assertTrue(held.deleted)
+                        self.assertEqual(removal.state, "DELETED")
+                    else:
+                        with self.assertRaises((wire.ProtocolError, operation_module.IOSArchiveError)):
+                            removal.remove()
+                        self.assertFalse(held.deleted)
+                        self.assertEqual(removal.state, "UNKNOWN")
+                        self.assertTrue(operation.guard.lifetime_ledger.fatal)
+                    self.assertEqual(check.call_count, 2)
+                    rmdir.assert_called_once_with("work", dir_fd=71)
+
+    def test_darwin_directory_changed_before_remove_is_never_consumed(self):
+        with original() as operation:
+            files = operation.files
+            held = operation_module._Held(71, "work", build_inputs._FD(operation.guard), True)
+            held.slot.number, held.slot.open_state = 72, "OPEN"
+            removal = operation_module._IOSRemoval(files, held)
+            with patch.object(operation_module.sys, "platform", "darwin"), \
+                    patch.object(operation_module, "_darwin_descriptor_path", side_effect=[b"/owned", b"/outside/work"]), \
+                    patch.object(files, "require_work_consumers"), patch.object(files, "check_held"), \
+                    patch.object(os, "rmdir", side_effect=AssertionError("unexpected disposal")) as rmdir:
+                with self.assertRaises(wire.ProtocolError):
+                    removal.remove()
+                self.assertEqual(removal.state, "NEW")
+                rmdir.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
