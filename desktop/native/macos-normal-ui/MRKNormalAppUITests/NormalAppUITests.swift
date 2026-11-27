@@ -8241,10 +8241,11 @@ final class NormalAppUITests: XCTestCase {
 
     // One ordinary current diagnostics run, not full doctor or project-code execution.
     // No new observer, IPC, app hook or fixture bytes; queries use shipped AX content.
-    @MainActor private func guidedDiagnosticsTexts(_ panel: XCUIElement) throws -> [String] {
+    @MainActor private func guidedDiagnosticsSnapshot(_ panel: XCUIElement) throws -> (texts: [String], titles: [String]) {
         _ = try remaining(1)
         var pending = Array(try panel.snapshot().children.reversed())
         var labels: [String] = []
+        var titles: [String] = []
         var visited = 0
         while let item = pending.popLast() {
             visited += 1
@@ -8257,11 +8258,12 @@ final class NormalAppUITests: XCTestCase {
                 let value = item.value
                 labels.append(try Self.staticTextContent(value: value, label: value is String ? "" : item.label)
                     .trimmingCharacters(in: .whitespacesAndNewlines))
+                titles.append(item.title)
             }
             pending.append(contentsOf: children.reversed())
         }
         _ = try remaining(1)
-        return labels
+        return (labels, titles)
     }
 
     @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement, guidedTexts: [String]? = nil) throws -> Int {
@@ -8618,7 +8620,7 @@ final class NormalAppUITests: XCTestCase {
         let contextMatch = StaticTextMatch.edges(contextPrefix, contextSuffix)
         let provenanceMatch = StaticTextMatch.suffix(provenanceSuffix)
         @MainActor func guidedReport() throws -> (context: String, provenance: String)? {
-            let labels = try guidedDiagnosticsTexts(panel)
+            let (labels, titles) = try guidedDiagnosticsSnapshot(panel)
             try require(!labels.contains(where: failures.contains), "terminal iOS diagnostics refusal")
             let adjacent = zip(labels, labels.dropFirst()).map { pair in pair.0 + " " + pair.1 }
             let matches = ["Phase: settled", "Outcome: complete", "Native finality: settled"].map { caption in
@@ -8627,13 +8629,13 @@ final class NormalAppUITests: XCTestCase {
             try require(matches.allSatisfy { $0 <= 1 }, "current iOS diagnostics badges are ambiguous", check: .singleton)
             guard matches.allSatisfy({ $0 == 1 }) else { return nil }
             diagnosticCut = "settled-badges"
-            try require(labels.filter { $0 == "Tool observations from this run" }.count == 1,
+            try require(titles.filter { $0 == "Tool observations from this run" }.count == 1,
                         "current acknowledged iOS diagnostics report is missing or ambiguous")
             for title in ["macOS developer selection", "Git version", "Xcode version and build"] {
-                try require(labels.filter { $0 == title }.count == 1, "fixed iOS diagnostics card is missing or repeated")
+                try require(titles.filter { $0 == title }.count == 1, "fixed iOS diagnostics card is missing or repeated")
             }
             for title in ["Java runtime version", "Java compiler version"] {
-                try require(!labels.contains(title), "Android diagnostics cannot supply the iOS observation")
+                try require(!titles.contains(title), "Android diagnostics cannot supply the iOS observation")
             }
             let contexts = labels.filter(contextMatch.accepts)
             // Read the fixed receipt paragraph even when WebKit splits its
@@ -8697,11 +8699,11 @@ final class NormalAppUITests: XCTestCase {
             // summary may report a different native center than its control.
             summary.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
             diagnosticCut = "core-disclosure-clicked"
-            var ledger = try guidedDiagnosticsTexts(panel)
+            var ledger = try guidedDiagnosticsSnapshot(panel).texts
             while !ledger.contains("Core outcome") {
                 try require(!ledger.contains(where: failures.contains), "terminal iOS diagnostics refusal")
                 try clock.progress(until: journeyDeadline ?? wholeDeadline)
-                ledger = try guidedDiagnosticsTexts(panel)
+                ledger = try guidedDiagnosticsSnapshot(panel).texts
             }
             diagnosticCut = "core-ledger-visible"
             try require(!ledger.contains(where: failures.contains), "terminal iOS diagnostics refusal")
