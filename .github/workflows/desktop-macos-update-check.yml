@@ -38,7 +38,7 @@ on:
         options: [none, update-credentials, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
                   android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
-                  release-asset, native-status-unit, recovery-contracts, xcode-path-control, archived-upgrade]
+                  release-asset, native-status-unit, recovery-contracts, xcode-path-control, archived-upgrade, apfs-disposal-control]
       protected_xcode_fixture:
         description: Prepare the Apple Xcode fixture for the supplemental unsigned archive only
         type: boolean
@@ -61,6 +61,97 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  apfs-disposal-control:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
+      inputs.additional_ui == 'apfs-disposal-control' && inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' &&
+      inputs.build_run == '45996045007' && inputs.carrier_run == '46015331710' && inputs.carrier_attempt == '1'
+    name: Compare held directory and regular-file disposal on macOS
+    runs-on: macos-26
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Compare descriptor and name identity across native disposal
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
+          [[ "$(id -u)" != 0 && "$(sw_vers -productVersion)" == 26.* ]]
+          /usr/bin/python3 -I -B - <<'PYTHON'
+          import json
+          import os
+          import stat
+          import subprocess
+          import tempfile
+
+          def identity(row):
+              return (row.st_dev, row.st_ino, row.st_uid, row.st_gid, row.st_mode,
+                      getattr(row, "st_flags", 0))
+
+          def remove(parent, name, directory):
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+              fd = os.open(name, flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+              try:
+                  before = os.fstat(fd)
+                  assert identity(before) == identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                  assert before.st_uid == os.geteuid() and before.st_dev == os.fstat(parent).st_dev
+                  if directory:
+                      assert stat.S_ISDIR(before.st_mode) and not os.listdir(fd)
+                  else:
+                      assert stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                  call = os.rmdir if directory else os.unlink
+                  assert call(name, dir_fd=parent) is None
+                  after = os.fstat(fd)
+                  try:
+                      os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  except FileNotFoundError:
+                      missing = True
+                  else:
+                      missing = False
+                  same = identity(before) == identity(after)
+                  assert missing and same
+                  return dict(beforeLinks=before.st_nlink, afterLinks=after.st_nlink,
+                              nameAbsent=missing, descriptorIdentityPreserved=same,
+                              candidateLinkPostcondition=after.st_nlink == 0)
+              finally:
+                  os.close(fd)
+
+          with tempfile.TemporaryDirectory(prefix="mrk-disposal-control-", dir="/private/tmp") as root:
+              parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  os.mkdir("work", mode=0o700, dir_fd=parent)
+                  os.mkdir("archive.xcarchive", mode=0o700, dir_fd=parent)
+                  archive = os.stat("archive.xcarchive", dir_fd=parent, follow_symlinks=False)
+                  task = os.open("work", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                  try:
+                      os.mkdir("home", mode=0o700, dir_fd=task)
+                      os.mkdir("DerivedData", mode=0o700, dir_fd=task)
+                      fd = os.open("owned-output", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=task)
+                      os.close(fd)
+                      with os.scandir(task) as entries:
+                          first = sorted(row.name for row in entries)
+                      with os.scandir(task) as entries:
+                          second = sorted(row.name for row in entries)
+                      assert first == ["DerivedData", "home", "owned-output"]
+                      control = dict(independentEnumerationStable=first == second,
+                                     file=remove(task, "owned-output", False),
+                                     emptyDirectory=remove(task, "home", True),
+                                     secondDirectory=remove(task, "DerivedData", True))
+                  finally:
+                      os.close(task)
+                  control["workDirectory"] = remove(parent, "work", True)
+                  after = os.stat("archive.xcarchive", dir_fd=parent, follow_symlinks=False)
+                  control["archiveUntouched"] = identity(after) == identity(archive)
+                  assert control["archiveUntouched"]
+                  control["hostOS"] = subprocess.check_output(["/usr/bin/sw_vers", "-productVersion"], text=True).strip()
+                  print("MRK_APFS_DISPOSAL_CONTROL=" + json.dumps(control, sort_keys=True))
+              finally:
+                  os.close(parent)
+          PYTHON
+
   xcode-path-control:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
@@ -210,6 +301,7 @@ jobs:
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
       github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' &&
       inputs.additional_ui != 'recovery-contracts' && inputs.additional_ui != 'xcode-path-control' &&
+      inputs.additional_ui != 'apfs-disposal-control' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
         inputs.carrier_attempt == '1' &&
