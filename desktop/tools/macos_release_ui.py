@@ -217,13 +217,18 @@ class UI:
         # The action retains one snapshot. Read the window first so the
         # subsequent element observation is the one eligible for a click.
         pid = self.payload_pid()
-        root = self.command("tree.snapshot", limit=1)["nodes"]
+
+        def focused_root():
+            nodes = self.command("tree.snapshot", limit=1)["nodes"]
+            if len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] in ("window", "sheet"):
+                return nodes[0] if nodes[0]["bounds"] else None
+            return None
+
+        root = until(focused_root, 4, "original-focused-app-window-or-sheet")
         snapshot, node = self.node(name, **selectors)
-        need(len(root) == 1 and root[0]["role"] in ("window", "sheet") and root[0]["bounds"] and
-             root[0]["id"] == f"mac:{pid}:0" and node["id"].startswith(root[0]["id"] + "."),
-             "original-focused-app-window-or-sheet")
-        window = root[0]["bounds"]
-        top = max(0, window["y"] + (35 if root[0]["role"] == "window" else 3))
+        need(node["id"].startswith(root["id"] + "."), "original-focused-app-window-or-sheet")
+        window = root["bounds"]
+        top = max(0, window["y"] + (35 if root["role"] == "window" else 3))
         bottom = min(self.screen["height"] - 65, window["y"] + window["height"] - 8)
         left = max(0, window["x"] + 3)
         right = min(self.screen["width"], window["x"] + window["width"]) - 3
@@ -335,12 +340,30 @@ class UI:
                                    "Go to Folder" in node["text"] or node["text"] == "Go to:") for node in nodes)
             edits = [node for node in nodes if node["role"] == "textfield" and node["enabled"] and node["visible"]]
             need(len(edits) <= 1, "ambiguous-goto-input")
-            return edits[0] if matching_caption and edits else None
+            return (edits[0], nodes) if matching_caption and edits else None
 
         until(navigation_field, 10, "exact-go-to-folder-sheet")
         self.keys("command", "a")
         self.command("text.insert", text=str(project))
+
+        def completed_path():
+            observation = navigation_field()
+            if observation is None:
+                return None
+            field, nodes = observation
+            return field["text"] == str(project) and any(
+                node["role"] == "statictext" and project.name in (node["name"], node["text"])
+                for node in nodes)
+
+        until(completed_path, 10, "native-folder-completion-did-not-match-fixture")
         self.keys("return")
+
+        def original_picker():
+            nodes = self.command("tree.snapshot", limit=1)["nodes"]
+            return len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "sheet" and \
+                nodes[0]["name"].lower() == "choose a mobile project folder"
+
+        until(original_picker, 5, "original-project-picker-did-not-resume")
         self.click("Open", category="button")
         self.node(project.name, category="heading")
         self.project_name = project.name
