@@ -8643,7 +8643,16 @@ final class NormalAppUITests: XCTestCase {
             try require(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)).count == 0,
                         "Android diagnostics cannot supply the iOS observation")
         }
-        try expand(panel, prefix: "Core resource observations — provisional, not native finality", renderer: renderer)
+        let resources = "Core resource observations — provisional, not native finality"
+        if guidedProductSurface {
+            let summary = try waitElement(controls(panel, [.disclosureTriangle, .button], label: resources, prefix: true),
+                                          in: panel, enabled: true, failures: failures)
+            try reveal(summary, in: renderer)
+            summary.click()
+            diagnosticCut = "core-disclosure-clicked"
+        } else {
+            try expand(panel, prefix: resources, renderer: renderer)
+        }
         _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
         let commandsAttempted = try diagnosticsCoreReport(panel)
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
