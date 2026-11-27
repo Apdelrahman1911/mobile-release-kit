@@ -2973,6 +2973,83 @@ final class NormalAppUITests: XCTestCase {
             try check()
             iosStarted = true
         }
+        // Diagnostic only after the original reports a terminal issue. Never read
+        // contents or follow aliases, and never let this prove archive success.
+        func recordIOSArchiveFailureOutput(_ identity: IOSArchiveIdentity, check: () throws -> Void) {
+            guard iosIdentity == identity, iosStarted, !iosCompleted, let project = directories["project"] else { return }
+            var archive = 0, work = 0, entries = 0, symlinks = 0, hardlinks = 0, foreign = 0, unsafeMode = 0, other = 0
+            var complete = false, closeFailed = false
+            func statEntry(_ fd: Int32, _ name: String) throws -> StatFacts? {
+                var value = stat()
+                if fstatat(fd, name, &value, AT_SYMLINK_NOFOLLOW) == 0 { return StatFacts(value) }
+                try Self.need(errno == ENOENT, "iOS diagnostic entry stat")
+                return nil
+            }
+            func withDirectory(_ fd: Int32, _ name: String, _ value: StatFacts,
+                               _ body: (Directory) throws -> Void) throws {
+                try check()
+                try Self.need(value.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                    && value.device == project.facts.device && value.uid == getuid()
+                    && value.mode & 0o7022 == 0, "iOS diagnostic directory scope")
+                let opened = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                try Self.need(opened >= 0, "iOS diagnostic directory open")
+                defer { if Darwin.close(opened) != 0 { closeFailed = true } }
+                try Self.need(value == Self.facts(opened), "iOS diagnostic directory replaced")
+                try body(Directory(fd: opened, parent: fd, name: name, facts: value))
+                try Self.need(value == Self.facts(opened) && value == statEntry(fd, name),
+                              "iOS diagnostic directory changed")
+            }
+            func scan(_ directory: Directory, depth: Int) throws {
+                try check()
+                try Self.need(depth <= 32, "iOS diagnostic depth limit")
+                for name in try children(directory).sorted() {
+                    try check()
+                    try Self.need(entries < 8192, "iOS diagnostic entry limit")
+                    entries += 1
+                    guard let value = try statEntry(directory.fd, name) else {
+                        throw Refusal.condition("iOS diagnostic entry disappeared")
+                    }
+                    let kind = value.mode & mode_t(S_IFMT)
+                    let foreignEntry = value.device != project.facts.device || value.uid != getuid()
+                    let writable = value.mode & 0o7022 != 0
+                    if foreignEntry { foreign += 1 }
+                    if writable { unsafeMode += 1 }
+                    switch kind {
+                    case mode_t(S_IFLNK): symlinks += 1
+                    case mode_t(S_IFREG): if value.links != 1 { hardlinks += 1 }
+                    case mode_t(S_IFDIR):
+                        if !foreignEntry && !writable {
+                            try withDirectory(directory.fd, name, value) { try scan($0, depth: depth + 1) }
+                        }
+                    default: other += 1
+                    }
+                }
+            }
+            func inspect() throws {
+                try checkDirectory(project)
+                guard let meta = try statEntry(project.fd, ".mobile-release") else { return }
+                try withDirectory(project.fd, ".mobile-release", meta) { meta in
+                    guard let namespace = try statEntry(meta.fd, "desktop-ios-archive") else { return }
+                    try withDirectory(meta.fd, "desktop-ios-archive", namespace) { namespace in
+                        guard let original = try statEntry(namespace.fd, identity.operationID) else { return }
+                        try withDirectory(namespace.fd, identity.operationID, original) { original in
+                            if let output = try statEntry(original.fd, "archive.xcarchive") {
+                                archive = output.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) ? 1 : 2
+                            }
+                            if let output = try statEntry(original.fd, "work") {
+                                work = output.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) ? 1 : 2
+                                try withDirectory(original.fd, "work", output) { try scan($0, depth: 0) }
+                            }
+                        }
+                    }
+                }
+                try checkDirectory(project)
+            }
+            do { try inspect(); complete = !closeFailed } catch { /* Keep bounded partial counts. */ }
+            print("MRK_MACOS_IOS_ARCHIVE_DISPOSAL=v1;archive=\(archive);work=\(work);entries=\(entries)"
+                + ";symlinks=\(symlinks);hardlinks=\(hardlinks);foreign=\(foreign);unsafe=\(unsafeMode);other=\(other)"
+                + ";complete=\(complete ? 1 : 0)")
+        }
         private func checkIOSDirectories(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
             try check()
             try Self.need(iosIdentity == identity && iosStarted && iosDirectories.count == 4,
@@ -9109,6 +9186,10 @@ final class NormalAppUITests: XCTestCase {
                     let resultOrFailure = XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed
                     if terminalIssue.count > 0 {
                         try recordIOSArchiveNotice(panel, original: originalStatus, result: resultQuery)
+                        let diagnosticEnd = try clock.end(within: 5)
+                        fixture.recordIOSArchiveFailureOutput(pair) {
+                            _ = try clock.remaining(1, before: diagnosticEnd)
+                        }
                         throw Refusal.condition("original iOS archive reported a terminal notice")
                     }
                     let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
