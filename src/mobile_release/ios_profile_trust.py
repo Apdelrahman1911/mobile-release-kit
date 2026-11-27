@@ -24,10 +24,11 @@ from .errors import ValidationError
 
 MAX_CERTIFICATE_BYTES = 64 * 1024
 MAX_CERTIFICATES = 16
+APPLE_G3_SHA256 = "63343abfb89a6a03ebb57e9b3f5fa7be7c4f5c756f3017b3a8c488c3653e9179"
 APPLE_ROOT_SHA256 = frozenset({
     "b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024",
     "c2b9b042dd57830e7d117dac55ac8ae19407d38e41d88f3215bc3a890444a050",
-    "63343abfb89a6a03ebb57e9b3f5fa7be7c4f5c756f3017b3a8c488c3653e9179",
+    APPLE_G3_SHA256,
 })
 
 
@@ -145,7 +146,7 @@ def apple_roots() -> tuple[bytes, ...]:
     return roots
 
 
-def verify_profile_signer(signer: bytes, certificates: tuple[bytes, ...]) -> None:
+def verify_profile_signer(signer: bytes, certificates: tuple[bytes, ...], *, inner_profile: bool = False) -> None:
     """Authenticate the exact CMS signer, not any convenient presented certificate."""
     import ctypes as C
 
@@ -226,10 +227,21 @@ def verify_profile_signer(signer: bytes, certificates: tuple[bytes, ...]) -> Non
             require(string_length(name) == len(buffer.value))  # Exact ASCII names; no embedded NUL suffix.
             return buffer.value
 
-        identifier = pointer.in_dll(security, "kSecPolicyAppleiPhoneProvisioningProfileSigning")
-        require(bool(identifier.value))
-        policy = own(policy_create(identifier, None))
-        presented = array([certificate(signer), *(certificate(item) for item in certificates if item != signer)])
+        signer_certificate = certificate(signer)
+        modern_signer = b"WWDR Provisioning Profile Signing"
+        modern = inner_profile and common_name(signer_certificate) == modern_signer
+        if modern:
+            # Match both Apple purpose extensions, not just the display names.
+            apple_pinned = bind(security, "SecPolicyCreateApplePinned", pointer, [pointer, pointer, pointer])
+            create_string = bind(foundation, "CFStringCreateWithCString", pointer, [pointer, C.c_char_p, C.c_uint32])
+            policy = own(apple_pinned(*(own(create_string(None, value, 0x08000100)) for value in (
+                b"MRKWWDRProvisioningProfile", b"1.2.840.113635.100.6.2.17", b"1.2.840.113635.100.12.19",
+            ))))
+        else:
+            identifier = pointer.in_dll(security, "kSecPolicyAppleiPhoneProvisioningProfileSigning")
+            require(bool(identifier.value))
+            policy = own(policy_create(identifier, None))
+        presented = array([signer_certificate, *(certificate(item) for item in certificates if item != signer)])
         trust = out_call(trust_create, presented, policy)
         require(set_anchors(trust, array([certificate(item) for item in roots])) == 0)
         require(anchors_only(trust, 1) == 0 and network(trust, 0) == 0 and keychains(trust, 0) == 0)
@@ -248,9 +260,15 @@ def verify_profile_signer(signer: bytes, certificates: tuple[bytes, ...]) -> Non
         leaf, intermediate, anchor = (array_item(chain, index) for index in range(3))
         require(bool(leaf) and bool(intermediate) and bool(anchor))
         require(encoded(leaf) == signer)
-        require(common_name(leaf) == b"Apple iPhone OS Provisioning Profile Signing")
-        require(common_name(intermediate) == b"Apple iPhone Certification Authority")
-        require(hashlib.sha256(encoded(anchor)).hexdigest() in APPLE_ROOT_SHA256)
+        anchor_digest = hashlib.sha256(encoded(anchor)).hexdigest()
+        if modern:
+            require(common_name(leaf) == modern_signer)
+            require(common_name(intermediate) == b"Apple System Integration CA 4")
+            require(anchor_digest == APPLE_G3_SHA256)
+        else:
+            require(common_name(leaf) == b"Apple iPhone OS Provisioning Profile Signing")
+            require(common_name(intermediate) == b"Apple iPhone Certification Authority")
+            require(anchor_digest in APPLE_ROOT_SHA256)
     except (AttributeError, OSError, ValueError):
         raise ValidationError("supported macOS Apple provisioning-profile trust APIs are unavailable") from None
     finally:

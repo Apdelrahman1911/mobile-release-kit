@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ._desktop_ios_archive_control import IOSArchiveInput
-from ._desktop_ios_archive_protocol import IOSArchiveRequest, REASONS, ROLES, SIGNED_ROLES, stages, require
+from ._desktop_ios_archive_protocol import IOSArchiveRequest, ProtocolError, REASONS, ROLES, SIGNED_ROLES, stages, require
 from ._desktop_ios_archive_selection import (
     SavedIOSSelection, bind_saved_ios_version, select_saved_ios_configuration,
 )
@@ -184,6 +184,7 @@ class _OriginalIOSFiles:
         self.namespace: _StoreNamespace | None = None
         self.developer: _Directory | None = None
         self.sdk: _Directory | None = None
+        self.reported_sdk_alias: tuple[str, dict] | None = None
         self.xcodebuild: _Held | None = None
         self.system_tools: dict[str, _Held] = {}
         self.system_directory: _Directory | None = None
@@ -539,6 +540,9 @@ class _OriginalIOSFiles:
                 and _directory_data(values[1]) == expected["sdkIdentity"]
                 and _tool_data(values[2]) == expected["xcodebuildIdentity"])
         require(all(value.st_uid in {0, os.geteuid()} and value.st_mode & 0o022 == 0 for value in values))
+        if self.reported_sdk_alias is not None:
+            name, identity = self.reported_sdk_alias
+            require(self._sdk_alias_identity(name) == identity)
         if self.operation.signing is not None:
             require(self.system_directory is not None and set(self.system_tools) == {"security", "codesign", "openssl"})
             self.system_directory.check()
@@ -547,6 +551,39 @@ class _OriginalIOSFiles:
                 value = os.fstat(original.slot.number)
                 require(_tool_data(value) == self.operation.request.native["signingTools"][name]
                         and value.st_uid == 0 and value.st_mode & 0o022 == 0)
+
+    def _sdk_alias_identity(self, name: str) -> dict:
+        require(self.sdk is not None and self.sdk.path.name == "iPhoneOS.sdk")
+        require(re.fullmatch(r"iPhoneOS[0-9]{1,3}(?:\.[0-9]{1,3}){1,2}\.sdk", name) is not None)
+        parent = self.sdk.slots[-2].number
+        require(parent is not None)
+        directory = os.fstat(parent)
+        require(stat.S_ISDIR(directory.st_mode) and directory.st_uid == 0 and directory.st_mode & 0o022 == 0)
+        metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISLNK(metadata.st_mode) and metadata.st_uid == 0 and metadata.st_nlink == 1
+                and metadata.st_size == len("iPhoneOS.sdk"))
+        identity = _tool_data(metadata)
+        require(os.readlink(name, dir_fd=parent) == "iPhoneOS.sdk")
+        # Resolve the literal target through the same held parent without
+        # following the reported alias or admitting a new SDK directory.
+        target = os.stat("iPhoneOS.sdk", dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISDIR(target.st_mode) and _directory_data(target) == _directory_data(os.fstat(self.sdk.fd)))
+        require(_tool_data(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity)
+        return identity
+
+    def accept_sdk_readback(self, output: str) -> None:
+        require(self.sdk is not None and self.reported_sdk_alias is None)
+        if output == str(self.sdk.path):
+            return
+        prefix = str(self.sdk.path.parent) + "/"
+        if not output.startswith(prefix):
+            self.operation.fail("toolchain-mismatch")
+        name = output[len(prefix):]
+        try:
+            self.reported_sdk_alias = name, self._sdk_alias_identity(name)
+        except (OSError, ProtocolError):
+            self.operation.fail("toolchain-mismatch")
+        self.check_tools()
 
     def require_work_consumers(self) -> None:
         operation = self.operation
@@ -1227,8 +1264,9 @@ class IOSArchiveOperation:
         if type(version) is not str or re.fullmatch(r"Xcode [0-9]+(?:\.[0-9]+){0,2}\nBuild version [0-9A-Za-z]+\s*", version) is None:
             self.fail("toolchain-mismatch")
         sdk = self._run("ios-sdk", (program, "-version", "-sdk", "iphoneos", "Path")).stdout
-        if type(sdk) is not str or sdk.strip() != self.request.native["toolchain"]["sdk"]:
+        if type(sdk) is not str:
             self.fail("toolchain-mismatch")
+        self.files.accept_sdk_readback(sdk.strip())
         self.tool_version = version.strip()
 
     def run_preparation(self) -> None:

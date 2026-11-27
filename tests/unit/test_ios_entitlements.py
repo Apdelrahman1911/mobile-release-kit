@@ -26,7 +26,7 @@ from mobile_release.reporting import FAILING_STATUSES
 
 from .ios_artifact_helpers import artifact_set, fat_image, native_image, zip_tree
 from .ios_entitlement_helpers import (
-    BUNDLE, CERTIFICATE, TEAM, NativeProfileSeam, add_discardable_root_dictionary,
+    BUNDLE, CERTIFICATE, TEAM, NativeProfileSeam, add_discardable_root_dictionary, codesign_certificate_prefix,
     der_entitlements, der_value, malformed_xml_cases, modern_profile_bytes, profile,
     signed_entitlements, supported_xml_lexical_cases, tlv,
 )
@@ -609,10 +609,11 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
                 self.assertEqual(kwargs["timeout"], 60 if "--deep" in argv else 30)
                 self.assertEqual(kwargs["output_limit"], 8 * 1024 * 1024)
         forms = {("openssl" if argv[0] == "openssl" else
-                  next(item for item in ("--deep", "--extract-certificates", "--test-requirement",
+                  "--extract-certificates" if codesign_certificate_prefix(argv) is not None else
+                  next(item for item in ("--deep", "--verify",
                                          "--verbose=4", "--entitlements") if item in argv))
                  for argv, _kwargs in self.native.calls}
-        self.assertEqual(forms, {"openssl", "--deep", "--extract-certificates", "--test-requirement",
+        self.assertEqual(forms, {"openssl", "--deep", "--extract-certificates", "--verify",
                                  "--verbose=4", "--entitlements"})
 
     def test_native_certificate_failure_stops_both_public_callers_without_losing_fatality(self):
@@ -638,7 +639,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
                     def native(argv, **kwargs):
                         calls.append(argv)
                         self.assertIs(kwargs["cancellation"], owner)
-                        if "--extract-certificates" not in argv:
+                        if codesign_certificate_prefix(argv) is None:
                             return self.native(argv, **kwargs)
                         if mode == "ordinary":
                             return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"synthetic invalid signature")
@@ -672,8 +673,8 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
                                 elif mode == "fatal":
                                     self.assertTrue(caught.exception.fatal and caught.exception.dispatched)
                                     self.assertFalse(caught.exception.contained)
-                        self.assertIn("--extract-certificates", calls[-1])
-                        self.assertEqual(sum("--extract-certificates" in argv for argv in calls), 1)
+                        self.assertIsNotNone(codesign_certificate_prefix(calls[-1]))
+                        self.assertEqual(sum(codesign_certificate_prefix(argv) is not None for argv in calls), 1)
                         self.assertFalse(any(argv[0] == "openssl" or "--verbose=4" in argv for argv in calls))
                         self.assertEqual(len(self.native.cms_calls) - first_profile, 2,
                                          "later nested profiles were inspected after the first failure")

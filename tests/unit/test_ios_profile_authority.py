@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from mobile_release.errors import ValidationError
 from mobile_release.inspection import InspectionDeadline
-from mobile_release.ios_profile_auth import cms_payload_and_certificates, verify_cms
+from mobile_release.ios_profile_auth import SHA1, cms_payload_and_certificates, verify_cms
 from mobile_release.ios_profile_trust import APPLE_ROOT_SHA256, apple_roots, pem_certificates, verify_profile_signer
 from mobile_release.ios_profiles import decode_authenticated_profile, read_profile_bytes
 from mobile_release._lifetime_evidence import ProfileCallEvidence
@@ -39,6 +39,16 @@ def parser_only_evidence(test):
 
 
 class CMSFramingTests(unittest.TestCase):
+    def test_sha1_is_confined_to_the_outer_role_with_matching_signer_digest(self):
+        raw = framed_cms(digest_oid=SHA1)
+        self.assertEqual(cms_payload_and_certificates(raw, mode="--outer-profile")[0], b"fictional payload")
+        for mode in ("--worker", "--inner-profile", "--foreign"):
+            with self.subTest(mode=mode), self.assertRaises(ValidationError):
+                cms_payload_and_certificates(raw, mode=mode)
+        for bad in (framed_cms(signer_digest=SHA1), raw + b"\0"):
+            with self.assertRaises(ValidationError):
+                cms_payload_and_certificates(bad, mode="--outer-profile")
+
     def test_parser_extracts_only_the_attached_payload_and_original_certificates(self):
         certificate = b"\x30\x01\x00"
         for version in (b"\x01", b"\x03"):
@@ -320,6 +330,24 @@ class NativeProfileAuthorityTests(unittest.TestCase):
         signer = pem_certificates((self.root / "fictional.pem").read_bytes())[0]
         with self.assertRaises(ValidationError):
             verify_profile_signer(signer, (signer, *public_certificates().values(), *apple_roots()))
+        self.check_legacy_envelope()
+
+    def check_legacy_envelope(self):
+        raw = signed_cms(self.root, self.outer_payload, "legacy", digest="sha1")
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValidationError):
+            verify_cms(raw, Path(directory), mode="--outer-profile")
+        tampered = raw.replace(b"com.example.reader", b"com.example.forged", 1)
+        self.assertNotEqual(raw, tampered)
+        for content in (raw, tampered):
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch("mobile_release.ios_profile_auth.verify_profile_signer") as trust:
+                if content == raw:
+                    self.assertEqual(verify_cms(content, Path(directory), mode="--outer-profile"), self.outer_payload)
+                    trust.assert_called_once()
+                else:
+                    with self.assertRaises(ValidationError):
+                        verify_cms(content, Path(directory), mode="--outer-profile")
+                    trust.assert_not_called()
 
     def test_complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam(self):
         # Keep REAL native crypto for both layers, then use their exact verified

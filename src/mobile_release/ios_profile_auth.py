@@ -13,9 +13,7 @@ import time
 from pathlib import Path
 
 from .errors import ValidationError
-from .ios_profiles import (
-    MAX_PROFILE_BYTES, profile_environment, read_profile_bytes,
-)
+from .ios_profiles import MAX_PROFILE_BYTES, PROFILE_WORKER_MODES, profile_environment, read_profile_bytes
 from .ios_profile_trust import MAX_CERTIFICATE_BYTES, MAX_CERTIFICATES, pem_certificates, require, verify_profile_signer
 
 OPENSSL_SECONDS = 20
@@ -25,11 +23,16 @@ TIMEOUT = "Apple profile authentication timed out; no decode-only fallback is pe
 OID_DATA = b"\x2a\x86\x48\x86\xf7\x0d\x01\x07\x01"
 OID_SIGNED_DATA = OID_DATA[:-1] + b"\x02"
 STRONG_DIGESTS = frozenset(b"\x60\x86\x48\x01\x65\x03\x04\x02" + bytes([index]) for index in (1, 2, 3))
+SHA1 = b"\x2b\x0e\x03\x02\x1a"
 
 
-def cms_payload_and_certificates(raw: bytes) -> tuple[bytes, tuple[bytes, ...]]:
+def cms_payload_and_certificates(raw: bytes, *, mode: str = "--worker") -> tuple[bytes, tuple[bytes, ...]]:
     """Frame supported attached DER SignedData, without claiming crypto validity."""
-    require(type(raw) is bytes and 0 < len(raw) <= MAX_PROFILE_BYTES)
+    require(type(raw) is bytes and 0 < len(raw) <= MAX_PROFILE_BYTES and mode in PROFILE_WORKER_MODES)
+    # Only the two-envelope decoder may request this mode. The outer Apple
+    # signature is still verified. Authority comes from the SHA-2 inner
+    # signature and the subsequent correlation of all used outer fields.
+    digests = STRONG_DIGESTS | {SHA1} if mode == "--outer-profile" else STRONG_DIGESTS
 
     def item(offset, end):
         require(offset + 2 <= end)
@@ -62,7 +65,7 @@ def cms_payload_and_certificates(raw: bytes) -> tuple[bytes, tuple[bytes, ...]]:
     def digest(node):
         require(node[0] == 0x30)
         algorithm = children(node, 2)
-        require(1 <= len(algorithm) <= 2 and algorithm[0][0] == 6 and content(algorithm[0]) in STRONG_DIGESTS)
+        require(1 <= len(algorithm) <= 2 and algorithm[0][0] == 6 and content(algorithm[0]) in digests)
         require(len(algorithm) == 1 or (algorithm[1][0] == 5 and content(algorithm[1]) == b""))
         return content(algorithm[0])
 
@@ -110,13 +113,13 @@ def _remaining(deadline_ns: int) -> float:
     return remaining / NANOSECOND
 
 
-def verify_cms(raw: bytes, directory: Path, *, deadline_ns: int | None = None) -> bytes:
+def verify_cms(raw: bytes, directory: Path, *, deadline_ns: int | None = None, mode: str = "--worker") -> bytes:
     now = time.monotonic_ns()
     require(deadline_ns is None or type(deadline_ns) is int and 0 < deadline_ns <= TIME_LIMIT)
     cutoff = min(now + OPENSSL_SECONDS * NANOSECOND,
                  deadline_ns if deadline_ns is not None else TIME_LIMIT)
     _remaining(cutoff)
-    payload, certificates = cms_payload_and_certificates(raw)
+    payload, certificates = cms_payload_and_certificates(raw, mode=mode)
     source, output, signer_file = (directory / name for name in ("verify-input.der", "native-content.bin", "native-signer.pem"))
     require(not any(path.exists() or path.is_symlink() for path in (source, output, signer_file)))
     with source.open("xb") as handle:
@@ -139,7 +142,10 @@ def verify_cms(raw: bytes, directory: Path, *, deadline_ns: int | None = None) -
     signers = pem_certificates(read_profile_bytes(signer_file, maximum=MAX_CERTIFICATE_BYTES * 2))
     require(len(signers) == 1 and signers[0] in certificates)
     _remaining(cutoff)
-    verify_profile_signer(signers[0], certificates)
+    if mode == "--inner-profile":
+        verify_profile_signer(signers[0], certificates, inner_profile=True)
+    else:
+        verify_profile_signer(signers[0], certificates)
     _remaining(cutoff)
     return payload
 
@@ -149,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         require(len(arguments) == 3)
         mode, name, deadline_text = arguments
-        require(mode == "--worker" and sys.platform == "darwin")
+        require(mode in PROFILE_WORKER_MODES and sys.platform == "darwin")
         require(type(deadline_text) is str and deadline_text.isascii()
                 and deadline_text.isdecimal() and len(deadline_text) <= 19)
         deadline_ns = int(deadline_text)
@@ -159,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         require(directory.is_absolute() and not directory.is_symlink() and directory.is_dir())
         require(stat.S_IMODE(directory.stat().st_mode) == 0o700)
         os.umask(0o077)
-        payload = verify_cms(read_profile_bytes(directory / "cms.der"), directory, deadline_ns=deadline_ns)
+        payload = verify_cms(read_profile_bytes(directory / "cms.der"), directory, deadline_ns=deadline_ns, mode=mode)
         _remaining(deadline_ns)
         with (directory / "verified-content.bin").open("xb") as handle:
             handle.write(payload)

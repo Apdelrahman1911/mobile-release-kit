@@ -353,13 +353,13 @@ class CurrentIPATools:
             options=argv[1:-1]
             if options and options[0]=='--verify':
                 need(options in (['--verify','--all-architectures','--deep','--strict','--verbose=2'],
-                    ['--verify','--all-architectures','--strict','--verbose=2','--test-requirement','=designated']))
+                    ['--verify','--all-architectures','--strict','--verbose=2']))
             else:
                 need(options and options[0]=='-d');options=options[1:]
                 if options and options[0]=='--architecture':
                     need(len(options)>=3 and re.fullmatch(r'[0-9]{1,10},[0-9]{1,10}',options[1]));options=options[2:]
-                if options and options[0]=='--extract-certificates':
-                    need(len(options)==2);prefix=Path(options[1])
+                if options and options[0].startswith('--extract-certificates='):
+                    need(len(options)==1);prefix=Path(options[0].removeprefix('--extract-certificates='))
                     need(any(record[2]['acquired'] and prefix.parent==Path(record[0].name) for record in self.scratches)
                         and re.fullmatch(r'slice-(?:[0-9]|[12][0-9]|3[01])-',prefix.name) and prefix not in self.prefixes and len(self.prefixes)<MAX_CALLS)
                     self.prefixes.add(prefix)

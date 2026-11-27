@@ -1046,16 +1046,17 @@ class ProfileBindings:
             peer = "bad-helper" if role == "custodian" and self.mode in BAD_FRAME_MODES else "helper"
             return command(peer, self.root, self.root, self.mode, *original[-5:])
 
-        def worker_argv(directory, deadline_ns):
-            original = original_worker(directory, deadline_ns)
+        def worker_argv(directory, deadline_ns, mode="--worker"):
+            original = original_worker(directory, deadline_ns, mode)
             assert original[:5] == (sys.executable, "-I", "-S", "-B", "-c")
-            assert original[-3:] == ("--worker", str(directory), str(deadline_ns))
+            assert original[-3:] == (mode, str(directory), str(deadline_ns))
             assert directory.parent == self.root and directory.is_dir()
             assert stat.S_IMODE(directory.stat().st_mode) == 0o700
             assert (directory / "cms.der").read_bytes() == b"fictional-profile-canary"
             assert stat.S_IMODE((directory / "cms.der").stat().st_mode) == 0o600
             record(self.root / "scratch-path", str(directory))
-            return command("validator", self.root, directory, self.mode, deadline_ns)
+            # CONFIG must carry the same mode, directory, and deadline suffix as the real worker.
+            return command("validator", self.root, directory, self.mode, *original[-3:])
 
         def channel_init(channel, context, reader, writer, incoming, outgoing):
             original_channel_init(channel, context, reader, writer, incoming, outgoing)
@@ -1949,7 +1950,11 @@ if __name__ == "__main__":
     if role == "driver":
         status = driver(root, mode)
     elif role == "validator":
-        status = validator(root, directory, mode, int(arguments[0]))
+        from mobile_release.ios_profiles import PROFILE_WORKER_MODES
+
+        worker_mode, worker_directory, deadline = arguments
+        assert worker_mode in PROFILE_WORKER_MODES and worker_directory == str(directory)
+        status = validator(root, directory, mode, int(deadline))
     elif role == "helper":
         status = helper(root, mode, arguments)
     elif role == "bad-helper":

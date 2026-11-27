@@ -160,10 +160,15 @@ ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' &&
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
+  # Bubblewrap comes from Ubuntu's signed archive.
+  ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+  [[ -s "$ubuntu_sources" ]]
+  sources=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=/dev/null)
   sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
-    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get update
+    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" \\
+    -o APT::Get::List-Cleanup=0 update
   sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
-    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install \\
+    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" install \\
     --yes --no-install-recommends bubblewrap
 fi
 [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
@@ -259,6 +264,11 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                         self.assertRegex(step["uses"], r"^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+@[0-9a-f]{40}$")
                     if step.get("uses", "").startswith("actions/checkout@"):
                         self.assertIs(step["with"]["persist-credentials"], False)
+        for name in ("test-play-lanes", "test-linux", "test-signing-matrix", "test-signing-adapter"):
+            with self.subTest(package_setup=name):
+                apt_steps = [step["run"] for step in workflow["jobs"][name]["steps"]
+                             if "apt-get" in step.get("run", "")]
+                self.assertEqual(apt_steps, [LINUX_TOOL_SETUP])
         for platform, name, image in (("linux", "test-linux", "ubuntu-24.04"),
                                       ("macos", "test-native-profiles", "macos-26"),
                                       ("macos", "test-native-support", "macos-26")):

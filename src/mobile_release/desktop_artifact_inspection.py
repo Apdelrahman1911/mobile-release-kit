@@ -793,16 +793,16 @@ class ArtifactInspectionOperation:
             options = argv[1:-1]
             if options and options[0] == "--verify":
                 require(options in (["--verify", "--all-architectures", "--deep", "--strict", "--verbose=2"],
-                    ["--verify", "--all-architectures", "--strict", "--verbose=2", "--test-requirement", "=designated"]))
+                    ["--verify", "--all-architectures", "--strict", "--verbose=2"]))
             else:
                 require(options and options[0] == "-d")
                 options = options[1:]
                 if options and options[0] == "--architecture":
                     require(len(options) >= 3 and re.fullmatch(r"[0-9]{1,10},[0-9]{1,10}", options[1]) is not None)
                     options = options[2:]
-                if options and options[0] == "--extract-certificates":
-                    require(len(options) == 2)
-                    prefix = Path(options[1])
+                if options and options[0].startswith("--extract-certificates="):
+                    require(len(options) == 1)
+                    prefix = Path(options[0].removeprefix("--extract-certificates="))
                     record = next((record for record in self._scratch if record[2]["acquired"]
                                    and prefix.parent == Path(record[0].name)), None)
                     require(record is not None and id(record) in self._scratch_directories

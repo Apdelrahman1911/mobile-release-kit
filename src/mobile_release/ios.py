@@ -832,7 +832,7 @@ def _codesign_slice_fingerprint(
     _observation: _ArtifactIPASigning | None = None,
 ) -> str:
     extract = _run_native(
-        ["codesign", "-d", *_architecture_options(architecture), "--extract-certificates", str(prefix), str(code_path)],
+        ["codesign", "-d", *_architecture_options(architecture), f"--extract-certificates={prefix}", str(code_path)],
         deadline=deadline, cancellation=cancellation, timeout=30,
     )
     certificate = prefix.parent / f"{prefix.name}0"
@@ -941,6 +941,7 @@ def _nested_codesign_identities(
                              else _observation.executable(path)) for path in profiled_bundles}
     result: list[tuple[Path, str, str]] = []
     for index, code_path in enumerate(nested):
+        # Without an explicit requirement, codesign checks the code's own designated requirement.
         requirement = _run_native(
             [
                 "codesign",
@@ -948,8 +949,6 @@ def _nested_codesign_identities(
                 "--all-architectures",
                 "--strict",
                 "--verbose=2",
-                "--test-requirement",
-                "=designated",
                 str(code_path),
             ],
             deadline=deadline, cancellation=cancellation, timeout=30,

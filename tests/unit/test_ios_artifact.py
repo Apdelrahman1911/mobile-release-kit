@@ -30,7 +30,7 @@ from mobile_release.ios import (
 from mobile_release.reporting import FAILING_STATUSES
 
 from .ios_artifact_helpers import native_image
-from .ios_entitlement_helpers import NativeProfileSeam, der_entitlements, modern_profile_bytes
+from .ios_entitlement_helpers import NativeProfileSeam, codesign_certificate_prefix, der_entitlements, modern_profile_bytes
 
 
 class IosArtifactTests(unittest.TestCase):
@@ -200,6 +200,8 @@ class IosArtifactTests(unittest.TestCase):
             (bundle / "_CodeSignature/CodeResources").write_bytes(b"signature")
 
             def fake_codesign(argv: list[str], **_kwargs: object) -> object:
+                if "--verify" in argv:
+                    self.assertEqual(argv[1:-1], ["--verify", "--all-architectures", "--strict", "--verbose=2"])
                 if "--verbose=4" in argv:
                     return type(
                         "Completed",
@@ -273,8 +275,7 @@ class IosArtifactTests(unittest.TestCase):
     def _fake_native_certificate(self, *, before: str, after: str, calls: list) -> object:
         def run(argv, **kwargs):
             calls.append((argv, kwargs))
-            if "--extract-certificates" in argv:
-                prefix = Path(argv[argv.index("--extract-certificates") + 1])
+            if (prefix := codesign_certificate_prefix(argv)) is not None:
                 Path(str(prefix) + "0").write_bytes(b"synthetic certificate, never a real signature")
                 return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
             if "x509" in argv:
@@ -299,7 +300,7 @@ class IosArtifactTests(unittest.TestCase):
                     _codesign_fingerprint(code, Path(temporary))
             self.assertEqual(len(calls), 3)
             self.assertIn("--verify", calls[0][0])
-            self.assertIn("--extract-certificates", calls[1][0])
+            self.assertIsNotNone(codesign_certificate_prefix(calls[1][0]))
             self.assertIn("-dates", calls[2][0])
 
     def test_extracted_leaf_interval_is_returned_with_current_lower_boundary_inclusive(self) -> None:
@@ -324,8 +325,7 @@ class IosArtifactTests(unittest.TestCase):
                 calls = []
                 def native(argv, **kwargs):
                     calls.append(argv)
-                    if "--extract-certificates" in argv:
-                        prefix = argv[argv.index("--extract-certificates") + 1]
+                    if (prefix := codesign_certificate_prefix(argv)) is not None:
                         Path(prefix + "0").write_bytes(b"fake leaf")
                         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
                     return completed
@@ -464,8 +464,7 @@ class IosArtifactTests(unittest.TestCase):
                         if ".framework" in argv[-1]:
                             value = {}
                         return types.SimpleNamespace(returncode=0, stdout=der_entitlements(value) if "--der" in argv else plistlib.dumps(value), stderr=b"")
-                    if "--extract-certificates" in argv:
-                        prefix = Path(argv[argv.index("--extract-certificates") + 1])
+                    if (prefix := codesign_certificate_prefix(argv)) is not None:
                         leaf = Path(str(prefix) + "0")
                         leaf.write_bytes(certificate)
                         extracted_leaf_paths[str(leaf)] = argv[-1]

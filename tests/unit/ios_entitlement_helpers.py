@@ -299,6 +299,13 @@ def modernize_ipa_fixture(path: Path) -> None:
             archive.writestr(name, data)
 
 
+def codesign_certificate_prefix(argv):
+    if "--extract-certificates" in argv:
+        raise AssertionError("codesign requires its optional output prefix in the attached argument")
+    return next((item.removeprefix("--extract-certificates=") for item in argv
+                 if item.startswith("--extract-certificates=")), None)
+
+
 class NativeProfileSeam:
     """Fake native app signing, preserving actual bytes, parsers and inventory.
 
@@ -394,7 +401,9 @@ class NativeProfileSeam:
         path = Path(argv[-1])
         arch = argv[argv.index("--architecture") + 1] if "--architecture" in argv else None
         key = (path.name, arch)
-        operation = next((item for item in ("--entitlements", "--extract-certificates", "--verbose=4") if item in argv), argv[0])
+        prefix = codesign_certificate_prefix(argv)
+        operation = ("--extract-certificates" if prefix is not None else
+                     next((item for item in ("--entitlements", "--verbose=4") if item in argv), argv[0]))
         if (operation, *key) in self.failures:
             output = "private-native-canary" if kwargs.get("text", False) else b"private-native-canary"
             return types.SimpleNamespace(returncode=1, stdout=output, stderr=output)
@@ -411,9 +420,8 @@ class NativeProfileSeam:
                 value = None
             data = b"" if value is None else (der_entitlements(value) if "--der" in argv else plistlib.dumps(value))
             return types.SimpleNamespace(returncode=0, stdout=data, stderr=b"")
-        if "--extract-certificates" in argv:
-            prefix = Path(argv[argv.index("--extract-certificates") + 1])
-            leaf = Path(str(prefix) + "0")
+        if prefix is not None:
+            leaf = Path(prefix + "0")
             self.extracted.append(leaf)
             if key not in self.missing_certificates:
                 leaf.write_bytes(self.certificates.get(key, CERTIFICATE))
