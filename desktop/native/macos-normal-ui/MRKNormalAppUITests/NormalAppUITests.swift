@@ -8650,8 +8650,14 @@ final class NormalAppUITests: XCTestCase {
             let summary = try waitElement(controls(panel, [.disclosureTriangle, .button], label: resources, prefix: true),
                                           in: panel, enabled: true, failures: failures)
             try reveal(summary, in: renderer)
-            summary.click()
+            // Target the disclosure's own indicator. A full-width WebKit
+            // summary may report a different native center than its control.
+            summary.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
             diagnosticCut = "core-disclosure-clicked"
+            let expanded = summary.value as? NSNumber
+            let staticCount = panel.staticTexts.matching(identifier: "Core outcome").count
+            let namedCount = named(panel, "Core outcome").count
+            print("MRK_GUIDED_IOS_LEDGER=v1;expanded=\(expanded?.boolValue == true ? 1 : 0);static=\(min(staticCount, 5));named=\(min(namedCount, 5))")
         } else {
             try expand(panel, prefix: resources, renderer: renderer)
         }
