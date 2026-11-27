@@ -1042,14 +1042,43 @@ def observe(work, action, media, suite):
         def git_index_journey(head):
             review = "Review local Git change"
             reviewed = "I reviewed all listed files, including any contents not shown here."
-            fact = results["gitIndex"] = {"originalStatusReads": 0}
+            fact = results["gitIndex"] = {"originalStatusReads": 0, "visualStatusReads": 0}
+
+            def read_visible_original_status(tree):
+                # The macOS driver caps its platform tree at 300 nodes.
+                # An omitted Check action is still usable when the original
+                # panel is visible. Only target its read-only button.
+                root = tree["nodes"][0]
+                need(root["id"] == f"mac:{ui.payload_pid()}:0" and root["role"] == "window" and root["bounds"],
+                     "git-status-not-original-window")
+                bounds = root["bounds"]
+                frame = ui.image(f"git-original-status-{fact['visualStatusReads']}")
+                rows = json.loads(call("/usr/bin/swift", str(CONSOLE_OCR), str(frame), timeout=20).stdout)
+                matches = [[row for row in rows if row["text"] == label] for label in
+                           ("Git action is still running", "Check action", "Stop original action")]
+                if any(len(match) != 1 for match in matches):
+                    return False
+                title, check, stop = [match[0] for match in matches]
+                x = round(check["x"] * ui.screen["width"])
+                y = round(check["y"] * ui.screen["height"])
+                need(bounds["x"] + 200 < x < bounds["x"] + bounds["width"] - 8 and
+                     bounds["y"] + 35 < y < min(bounds["y"] + bounds["height"] - 8, ui.screen["height"] - 65)
+                     and 0 < check["y"] - title["y"] < 0.2
+                     and abs(check["y"] - stop["y"]) < 0.02 and 0 < stop["x"] - check["x"] < 0.25,
+                     "git-original-status-button-geometry")
+                focused = ui.command("tree.snapshot", limit=1)["nodes"]
+                need(len(focused) == 1 and focused[0]["id"] == root["id"] and focused[0]["bounds"] == bounds,
+                     "git-status-window-changed")
+                ui.command("pointer.click", x=x, y=y)
+                fact["visualStatusReads"] += 1
+                return True
 
             def await_heading(name):
                 next_read = time.monotonic() + 2
 
                 def observe():
                     nonlocal next_read
-                    tree = ui.command("tree.snapshot", limit=800)
+                    tree = ui.command("tree.snapshot", limit=300)
                     rows = tree["nodes"]
                     headings = {row["name"] for row in rows if row["role"] == "heading" and row["visible"]}
                     need(not headings.intersection({"Git action needs attention", "Git recovery is needed",
@@ -1058,10 +1087,14 @@ def observe(work, action, media, suite):
                         return True
                     # The mutation controller's initial acknowledgement can
                     # be active. Check the original action as the UI directs.
-                    if time.monotonic() >= next_read and any(row["name"] == "Check action" and
-                        row["role"] == "button" and row["enabled"] and row["visible"] for row in rows):
-                        ui.click("Check action", category="button", region="Local Git action status")
-                        fact["originalStatusReads"] += 1
+                    if time.monotonic() >= next_read:
+                        if any(row["name"] == "Check action" and row["role"] == "button" and
+                               row["enabled"] and row["visible"] for row in rows):
+                            ui.click("Check action", category="button", region="Local Git action status")
+                            fact["originalStatusReads"] += 1
+                        elif tree["truncated"]:
+                            if fact["visualStatusReads"] < 3 and read_visible_original_status(tree):
+                                fact["originalStatusReads"] += 1
                         next_read = time.monotonic() + 5
                     return False
                 until(observe, 60, "git-index-" + name)
