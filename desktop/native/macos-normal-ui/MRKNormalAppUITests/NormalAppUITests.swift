@@ -7668,6 +7668,11 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {
+        let scope = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_WORKFLOW_CONFLICT_ONLY"]
+        let conflictOnly = scope == "fixed-workflow-conflict-v1"
+        guard scope == nil || (conflictOnly && guidedProductSurface) else {
+            throw Refusal.condition("the standalone conflict journey requires the exact guided candidate")
+        }
         projectRequireDiagnosticMethod = .managedWorkflowRefusal
         projectRequireDiagnosticEmitted = false
         defer { projectRequireDiagnosticMethod = nil }
@@ -7705,61 +7710,66 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
-        try stage("workflow-refusal-preview") {
+        try stage("workflow-refusal-coordinates") {
             try press(renderer, "GitHub", renderer: renderer)
             try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
             try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
             try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
-            if guidedProductSurface {
-                try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
-            }
-            let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
-                                        "optional comparison control is unavailable")
-            try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
-                        "passive supplied comparison unexpectedly enabled")
-            try stage("workflow-preview-disclosure") {
-                if guidedProductSurface {
-                    try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
-                }
-            }
-            do {
-                try press(renderer, "Preview GitHub setup", renderer: renderer)
-            } catch {
-                if guidedProductSurface {
-                    let reasons = [
-                        ("checking-capabilities", "Desktop capabilities and core setup guidance are loading."),
-                        ("guidance-unavailable", "Core setup guidance is unavailable. Restore the packaged service and reload guidance before requesting a preview."),
-                        ("draft-unavailable", "Choose a project and prepare an in-memory configuration draft in Project settings. Nothing will be saved by this preview."),
-                        ("coordinates-incomplete", "Enter the toolkit repository and full toolkit commit. There is no account or commit default."),
-                        ("preview-in-progress", "The core is preparing a read-only proposal for these inputs."),
-                        ("proposal-unavailable", "The packaged proposal service is unavailable. Restore it and reload capabilities and core guidance."),
-                    ]
-                    for (code, message) in reasons where renderer.staticTexts.matching(identifier: message).count == 1 {
-                        print("MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=\(code)")
-                    }
-                }
-                throw error
-            }
-            try stage("workflow-preview-readback") {
-                var current: XCUIElement?
-                try stage("workflow-preview-heading") {
-                    let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
-                                                  failures: Self.workflowFailures)
-                    _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
-                    current = proposal
-                }
-                guard let proposal = current else { throw Refusal.condition("original preview is absent") }
-                for (index, path) in LocalFixture.callers.enumerated() {
-                    let shownPath = String(path.dropFirst("project/".count))
-                    try stage("workflow-preview-caller-\(index + 1)") {
-                        try expand(proposal, prefix: shownPath, renderer: renderer)
-                        try displayed(proposal, label: "Read-only proposed content for " + shownPath,
-                                      equals: fixture.text(path, stage: "workflows"))
-                    }
-                }
-            }
-            try noApplyControls()
             try fixture.assertUnchanged()
+        }
+        if !conflictOnly {
+            try stage("workflow-refusal-preview") {
+                if guidedProductSurface {
+                    try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+                }
+                let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
+                                            "optional comparison control is unavailable")
+                try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
+                            "passive supplied comparison unexpectedly enabled")
+                try stage("workflow-preview-disclosure") {
+                    if guidedProductSurface {
+                        try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
+                    }
+                }
+                do {
+                    try press(renderer, "Preview GitHub setup", renderer: renderer)
+                } catch {
+                    if guidedProductSurface {
+                        let reasons = [
+                            ("checking-capabilities", "Desktop capabilities and core setup guidance are loading."),
+                            ("guidance-unavailable", "Core setup guidance is unavailable. Restore the packaged service and reload guidance before requesting a preview."),
+                            ("draft-unavailable", "Choose a project and prepare an in-memory configuration draft in Project settings. Nothing will be saved by this preview."),
+                            ("coordinates-incomplete", "Enter the toolkit repository and full toolkit commit. There is no account or commit default."),
+                            ("preview-in-progress", "The core is preparing a read-only proposal for these inputs."),
+                            ("proposal-unavailable", "The packaged proposal service is unavailable. Restore it and reload capabilities and core guidance."),
+                        ]
+                        for (code, message) in reasons where renderer.staticTexts.matching(identifier: message).count == 1 {
+                            print("MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=\(code)")
+                        }
+                    }
+                    throw error
+                }
+                try stage("workflow-preview-readback") {
+                    var current: XCUIElement?
+                    try stage("workflow-preview-heading") {
+                        let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                                      failures: Self.workflowFailures)
+                        _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+                        current = proposal
+                    }
+                    guard let proposal = current else { throw Refusal.condition("original preview is absent") }
+                    for (index, path) in LocalFixture.callers.enumerated() {
+                        let shownPath = String(path.dropFirst("project/".count))
+                        try stage("workflow-preview-caller-\(index + 1)") {
+                            try expand(proposal, prefix: shownPath, renderer: renderer)
+                            try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                                          equals: fixture.text(path, stage: "workflows"))
+                        }
+                    }
+                }
+                try noApplyControls()
+                try fixture.assertUnchanged()
+            }
         }
         let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
         // Only this exact final conflict is expected here. The shared failure
@@ -7819,7 +7829,11 @@ final class NormalAppUITests: XCTestCase {
             ownedFixture = nil
         }
         try acceptFinalScenario()
-        print("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        if conflictOnly {
+            print("MRK_MACOS_NORMAL_WORKFLOW_CONFLICT_UI=customized-candidate-whole-bundle-refused-no-apply-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        } else {
+            print("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        }
     }
 
     // Ordinary saved offline checks and empty project-recovery inspection only.

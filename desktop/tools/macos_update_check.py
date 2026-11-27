@@ -932,6 +932,7 @@ ADDITIONAL_FROZEN_UI = {
     "persistence-xctest": ("testSyntheticPersistentCredentials", "persistence-test", "MRK_MACOS_NORMAL_PERSISTENCE_UI"),
     "offline-checks-xctest": ("testSyntheticProjectSavedOfflineChecks", "saved-checks-test", "MRK_MACOS_NORMAL_OFFLINE_UI"),
     "workflow-refusal-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI"),
+    "workflow-conflict-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_CONFLICT_UI"),
     "release-evidence-xctest": ("testSyntheticProjectSavedReleaseEvidence", "release-evidence-test", "MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI"),
     "android-inputs-xctest": ("testSyntheticProjectAndroidSourceSelection", "project-test", "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI"),
     "unsigned-ios-xctest": ("testSyntheticProjectUnsignedIOSArchive", "ios-unsigned-archive-test", "MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI"),
@@ -2862,6 +2863,8 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         env["TEST_RUNNER_MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] = "exact-0.2.13-frozen-ui"
         if mode == "metadata-xctest":
             env["TEST_RUNNER_MRK_NORMAL_UI_METADATA_ONLY"] = "fixed-metadata-journey-v1"
+        if mode == "workflow-conflict-xctest":
+            env["TEST_RUNNER_MRK_NORMAL_UI_WORKFLOW_CONFLICT_ONLY"] = "fixed-workflow-conflict-v1"
     else:
         method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
                   "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]
