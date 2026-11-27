@@ -1182,6 +1182,15 @@ def observe(work, action, media, suite):
                             region = review if name in {"Review files to stage", "Review files to unstage"} else status_region
                             if native_control(region, "AXHeading", name)["matches"] == 1:
                                 return True
+                            if region == status_region:
+                                check = native_control(status_region, "AXButton", "Check action")
+                                if check["matches"] == 1 and check.get("enabled") is True:
+                                    # Apply can scroll the original status out of
+                                    # view. This requests only the original read.
+                                    native_control(status_region, "AXButton", "Check action", press=True)
+                                    fact["originalStatusReads"] += 1
+                                    next_read = time.monotonic() + 5
+                                    return False
                         if (tree["truncated"] and name in {"Review files to stage", "Review files to unstage"}
                                 and review_scrolls < 3 and scroll_visible_review(tree)):
                             fact["reviewViewportScrolls"] += 1
@@ -1206,6 +1215,12 @@ def observe(work, action, media, suite):
                 if staged:
                     need(git("show", ":README.md") == initial + marker, "git-index-wrong-staged-bytes")
 
+            def index_readback(expected):
+                try:
+                    return git("diff", "--cached", "--name-only") == expected
+                except (OSError, subprocess.SubprocessError):
+                    return None
+
             ui.click("Check local Git actions", category="button", region="Local Git action status")
             ui.click("Review files to stage", category="button")
             await_heading("Review files to stage")
@@ -1223,7 +1238,11 @@ def observe(work, action, media, suite):
             native_control(review, "AXCheckBox", reviewed, press=True)
             need(native_control(review, "AXCheckBox", reviewed).get("checked") is True, "git-stage-consent-readback")
             native_control(review, "AXButton", "Stage these files", press=True)
-            await_heading("Selected files staged")
+            fact["stagePressConfirmed"] = True
+            try:
+                await_heading("Selected files staged")
+            finally:
+                fact["stageIndexObserved"] = index_readback(b"README.md\n")
             verify_change(True)
             fact["onlyReviewedBlobStaged"] = True
             ui.click("Refresh changes", category="button")
@@ -1237,7 +1256,11 @@ def observe(work, action, media, suite):
             native_control(review, "AXCheckBox", reviewed, press=True)
             need(native_control(review, "AXCheckBox", reviewed).get("checked") is True, "git-unstage-consent-readback")
             native_control(review, "AXButton", "Unstage these files", press=True)
-            await_heading("Selected files unstaged")
+            fact["unstagePressConfirmed"] = True
+            try:
+                await_heading("Selected files unstaged")
+            finally:
+                fact["unstageIndexObserved"] = index_readback(b"")
             verify_change(False)
             fact["unstagePreservedHeadAndWorktree"] = True
 
