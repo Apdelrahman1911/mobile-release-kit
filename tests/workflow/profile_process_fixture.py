@@ -1046,10 +1046,10 @@ class ProfileBindings:
             peer = "bad-helper" if role == "custodian" and self.mode in BAD_FRAME_MODES else "helper"
             return command(peer, self.root, self.root, self.mode, *original[-5:])
 
-        def worker_argv(directory, deadline_ns):
-            original = original_worker(directory, deadline_ns)
+        def worker_argv(directory, deadline_ns, mode="--worker"):
+            original = original_worker(directory, deadline_ns, mode)
             assert original[:5] == (sys.executable, "-I", "-S", "-B", "-c")
-            assert original[-3:] == ("--worker", str(directory), str(deadline_ns))
+            assert original[-3:] == (mode, str(directory), str(deadline_ns))
             assert directory.parent == self.root and directory.is_dir()
             assert stat.S_IMODE(directory.stat().st_mode) == 0o700
             assert (directory / "cms.der").read_bytes() == b"fictional-profile-canary"

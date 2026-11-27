@@ -340,7 +340,11 @@ class CaptureFinality:
     bind_scratch binds custody, not an assertion about acquisition or cleanup.
     Only the real capture owner calls the private state transitions below.
     """
-    def __init__(self) -> None:
+    def __init__(self, *, worker_mode: str = "--worker") -> None:
+        from .ios_profiles import PROFILE_WORKER_MODES
+
+        _require(type(worker_mode) is str and worker_mode in PROFILE_WORKER_MODES)
+        self.worker_mode = worker_mode
         self._pid = os.getpid()
         self._state = "NO_PRODUCERS"
         self._scratch: object | None = None
@@ -520,16 +524,18 @@ def helper_argv(role: str, *, parent_context: dict[str, int], deadlines: dict[st
             str(deadlines["run_deadline_ns"]), str(deadlines["hard_cleanup_deadline_ns"]))
 
 
-def _worker_argv(directory: Path, deadline_ns: int) -> tuple[str, ...]:
-    _require(_integer(deadline_ns, TIME_LIMIT) and directory.is_absolute())
+def _worker_argv(directory: Path, deadline_ns: int, mode: str = "--worker") -> tuple[str, ...]:
+    from .ios_profiles import PROFILE_WORKER_MODES
+
+    _require(_integer(deadline_ns, TIME_LIMIT) and directory.is_absolute() and mode in PROFILE_WORKER_MODES)
     return (_interpreter(), "-I", "-S", "-B", "-c", WORKER_BOOTSTRAP, _module_root(),
-            "--worker", str(directory), str(deadline_ns))
+            mode, str(directory), str(deadline_ns))
 
 
-def _configuration(directory: Path, deadlines: _Deadlines, role: str) -> dict[str, Any]:
+def _configuration(directory: Path, deadlines: _Deadlines, role: str, mode: str = "--worker") -> dict[str, Any]:
     from .ios_profiles import MAX_COMPLETION_BYTES, profile_environment
     frame = {"v": 1, "type": "CONFIG", "role": role, "cwd": str(directory),
-             "validator_argv": list(_worker_argv(directory, deadlines.native)),
+             "validator_argv": list(_worker_argv(directory, deadlines.native, mode)),
              "validator_env": profile_environment(directory), "run_deadline_ns": deadlines.run,
              "hard_cleanup_deadline_ns": deadlines.hard, "max_output_bytes": MAX_COMPLETION_BYTES,
              "capture_kind": "profile"}
@@ -1393,11 +1399,11 @@ def _validate_configuration(frame: dict[str, Any], context: _Context) -> Path:
     _require(stat.S_ISDIR(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o700)
     arguments = frame["validator_argv"]
     try:
-        cutoff = int(arguments[-1])
-    except (ValueError, TypeError):
+        cutoff, mode = int(arguments[-1]), arguments[-3]
+    except (ValueError, TypeError, IndexError):
         raise ValidationError(PROTOCOL_ERROR) from None
     _require(str(cutoff) == arguments[-1] and _integer(cutoff, context.run)
-             and tuple(arguments) == _worker_argv(directory, cutoff)
+             and tuple(arguments) == _worker_argv(directory, cutoff, mode)
              and frame["validator_env"] == profile_environment(directory))
     # Child-local only; no caller/global cwd mutation and no shell command.
     os.chdir(directory)
@@ -2224,6 +2230,7 @@ class _Outer:
     def __init__(self, context: _Context, directory: Path, deadlines: _Deadlines) -> None:
         context._check_origin()
         self.context, self.directory, self.deadlines = context, directory, deadlines
+        self.worker_mode = "--worker"
         self.channel: _Channel | None = None
         self.payload: Any = None
         self.child: Any = None
@@ -2396,7 +2403,7 @@ class _Outer:
         self.child = _spawn(ctx, command, profile_environment(self.directory), sources, "custodian", self.pump)
         for lease in (control_read, status_write, payload_write, null_read, null_write):
             ctx.close(lease)
-        self.channel.send_frame(_configuration(self.directory, self.deadlines, "custodian"))
+        self.channel.send_frame(_configuration(self.directory, self.deadlines, "custodian", self.worker_mode))
         while (self.hello is None or self.control_retiring) and self.final is None:
             self.pump(); ctx.check(); _pause(ctx.run, (self.channel,), (self.payload,))
         if self.final is not None:
@@ -2541,6 +2548,7 @@ def capture_profile(directory: Path, deadline: InspectionDeadline, *, cancellati
             finality._begin(context)
             context.start_io()
             owner = _Outer(context, directory, deadlines)
+            owner.worker_mode = finality.worker_mode
             result = owner.run()
         except BaseException as error:
             if origin_pid != os.getpid():

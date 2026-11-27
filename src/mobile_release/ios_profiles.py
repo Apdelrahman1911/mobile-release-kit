@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from ._profile_process import CaptureFinality
 
 MAX_PROFILE_BYTES = 4 * 1024 * 1024
+PROFILE_WORKER_MODES = frozenset(("--worker", "--outer-profile", "--inner-profile"))
 COMPLETION_MAGIC = b"MRK-PROFILE-CMS\x01\n"
 COMPLETION_MARKER = b"\x00MRK-CMS-COMPLETE\x01\n"
 MAX_COMPLETION_BYTES = len(COMPLETION_MAGIC) + 4 + MAX_PROFILE_BYTES + len(COMPLETION_MARKER)
@@ -684,7 +685,10 @@ def authenticate_cms(
     from ._profile_process import CaptureFinality
 
     evidence, owns_evidence, guard, owns_guard = _profile_entry(_evidence, "authenticate", cancellation)
-    finality = CaptureFinality()
+    mode = "--worker"
+    if evidence.operation in {"decode", "load"}:
+        mode = {"OUTER_CMS": "--outer-profile", "INNER_CMS": "--inner-profile"}[_evidence_role]
+    finality = CaptureFinality(worker_mode=mode)
     scratch = ScratchLease(finality)
     descriptor = scratch._source
 

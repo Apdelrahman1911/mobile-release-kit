@@ -55,10 +55,10 @@ def synthetic_identity(directory: Path) -> None:
                    "-keyout", str(directory / "fictional.key"), "-out", str(directory / "fictional.pem"))
 
 
-def signed_cms(directory: Path, content: bytes, name: str) -> bytes:
+def signed_cms(directory: Path, content: bytes, name: str, *, digest: str = "sha256") -> bytes:
     source, output = directory / (name + ".input"), directory / (name + ".cms")
     source.write_bytes(content)
-    native_command(directory, "cms", "-sign", "-binary", "-nodetach", "-md", "sha256",
+    native_command(directory, "cms", "-sign", "-binary", "-nodetach", "-md", digest,
                    "-in", str(source), "-signer", str(directory / "fictional.pem"),
                    "-inkey", str(directory / "fictional.key"), "-outform", "DER", "-out", str(output))
     return output.read_bytes()
