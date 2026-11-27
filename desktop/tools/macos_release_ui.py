@@ -704,7 +704,24 @@ def observe(work, action, media, suite):
             await_status("Not assigned to the current draft")
             ui.node("1", category="statictext", region="Private-input record revision")
             state = read_vault_state(with_profile=True)
+            facts["encryptedRevisionSavedAndUnauthorised"] = True
+            save()
+
+            def assignment_ready():
+                tree = ui.command("tree.snapshot", limit=300)
+                records = [row for row in tree["nodes"] if row["name"] == stored_profile and row["visible"]]
+                if len(records) != 1:
+                    return False
+                prefix = records[0]["id"] + "."
+                controls = [row for row in tree["nodes"] if row["id"].startswith(prefix)
+                            and row["role"] == "button" and row["name"] == "Assess and assign…" and row["visible"]]
+                return len(controls) == 1 and controls[0]["enabled"]
+
+            # Saving the revision and clearing the original passive
+            # saved-file check are separate. Do not re-submit either one.
+            until(assignment_ready, 45, "original-saved-file-check-prevented-profile-assignment")
             ui.click("Assess and assign…", category="button", region=stored_profile)
+            ui.node("Assign to this context", category="button")
             ui.click("Assign to this context", category="button", region="Explicit private-input review")
             await_status("Assigned to current submitted context")
             need(read_vault_state(with_profile=True) == state, "profile-bind-changed-encrypted-bytes")
