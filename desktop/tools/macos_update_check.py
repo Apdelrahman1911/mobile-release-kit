@@ -960,7 +960,7 @@ def main():
             frozen = json.loads(manifest_path.read_bytes())
             ref = os.environ.get("GITHUB_REF")
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
-                          and args.mode in ("recovery-xctest", *ADDITIONAL_FROZEN_UI)
+                          and args.mode in ("recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI)
                           and frozen["sourceCommit"] == "4e821384cd912562dd5e30b195e87c113bd2d09f"
                           and frozen["sourceTree"] == "50393070e54b402a5ac1bac63e411fa1fbd1ad14"
                           and (frozen["buildRun"], frozen["carrierRun"], frozen["carrierAttempt"])
@@ -3081,6 +3081,26 @@ def release_asset_check(selection, work, evidence, steps, result):
         shutil.copyfile(work / "removal/MobileReleaseKit-Remove.dmg", image)
         need(digest(image) == selection["removal"]["imageSha256"], "asset-removal-image-digest")
         shutil.copyfile(folder / "carrier-release-asset.dmg", output / "MobileReleaseKit-Install.dmg")
+        frozen_media = os.environ.get("MRK_FROZEN_RELEASE_MEDIA")
+        if frozen_media:
+            manifest = json.loads((Path(frozen_media) / "RELEASE-MANIFEST.json").read_bytes())
+            image_evidence = {}
+            for role in ("Install", "Remove"):
+                name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-{role}.dmg"
+                copied = work / name
+                expected = manifest["images"][name]["sha256"]
+                shutil.copyfile(Path(frozen_media) / name, copied)
+                need(digest(copied) == expected, "frozen-quarantine-image-identity")
+                require_quarantine(copied)
+                gate, _ = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "open", "--context", "context:primary-signature",
+                               str(copied)], 120)
+                need(gate.returncode == 0 and "Notarized Developer ID" in gate.stdout + gate.stderr,
+                     "frozen-quarantine-image-gatekeeper")
+                staple, _ = run(["/usr/bin/xcrun", "stapler", "validate", str(copied)], 120)
+                need(staple.returncode == 0 and digest(copied) == expected, "frozen-quarantine-image-staple")
+                image_evidence[name] = {"sha256": expected, "quarantineVerified": True,
+                                        "stapleVerified": True, "gatekeeper": "Notarized Developer ID"}
+            result["frozenQuarantinedImages"] = image_evidence
         result["asset"] = {"schemaVersion": 1, "version": row["packageVersion"], "release": row["release"],
                            "sourceCommit": origin["source"], "sourceTree": origin["tree"], "target": origin["target"],
                            "buildRun": row["runId"], "removalRun": selection["removal"]["runId"],
