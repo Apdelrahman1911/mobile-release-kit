@@ -40,9 +40,9 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha) ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
-        inputs.expected_sha == '8dead1a987215fe7c5fe7bec4a08ec5e449b8aea' &&
-        inputs.build_run == '45866692352' && inputs.carrier_run == '45878823446' &&
-        inputs.carrier_attempt == '1' && inputs.qualification_run == '45882652228'))
+        inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' &&
+        inputs.build_run == '45904194634' && inputs.carrier_run == '45913358576' &&
+        inputs.carrier_attempt == '1' && inputs.qualification_run == '45915601788'))
     runs-on: macos-26
     timeout-minutes: 40
     steps:
@@ -58,33 +58,12 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
           [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 && "$QUALIFICATION_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
-          expected_conclusion=success
-          if [[ "$GITHUB_REF" == refs/heads/verify/macos-0213-recovery-project ]]; then
-            expected_conclusion=failure
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/45884436881" |
-              jq -e '
-                .head_sha == "20be92e8f414b0b88142cbd132dd8bb5d5e3171f" and
-                .head_branch == "verify/macos-0213-recovery-project" and
-                .path == ".github/workflows/desktop-macos-update-check.yml" and
-                .event == "workflow_dispatch" and .run_attempt == 1 and
-                .status == "completed" and .conclusion == "success"
-              ' >/dev/null
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN/jobs?per_page=100" |
-              jq -e '
-                [.jobs[] | select(.name | startswith("Qualify frozen media ("))] |
-                length == 10 and
-                all(.[]; if .name == "Qualify frozen media (recovery-xctest)"
-                         then .conclusion == "failure" else .conclusion == "success" end)
-              ' >/dev/null
-          fi
           attempt="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN" |
-            jq -e -r --arg source "$RELEASE_SOURCE" --arg conclusion "$expected_conclusion" '
+            jq -e -r --arg source "$RELEASE_SOURCE" '
               select(.head_sha == $source and .event == "workflow_dispatch" and .head_branch == "main" and
-                .path == ".github/workflows/desktop-macos-update-check.yml" and .status == "completed" and
-                .conclusion == $conclusion) | .run_attempt
+                .path == ".github/workflows/desktop-macos-update-check.yml" and .conclusion == "success") | .run_attempt
             ')"
           [[ "$attempt" =~ ^[1-9][0-9]{0,5}$ ]]
-          [[ "$expected_conclusion" == success || "$attempt" == 1 ]]
           printf 'qualification-attempt=%s\n' "$attempt" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,28 +85,11 @@ jobs:
           name: macos-release-frozen-${{ inputs.expected_sha }}-${{ inputs.carrier_run }}-${{ inputs.carrier_attempt }}
           path: ${{ runner.temp }}/signed-ui-media
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        if: github.ref == 'refs/heads/main'
         with:
           run-id: ${{ inputs.qualification_run }}
           github-token: ${{ github.token }}
-          name: macos-release-qualified-${{ github.sha }}-${{ inputs.qualification_run }}-${{ steps.admit.outputs.qualification-attempt }}
+          name: macos-release-qualified-${{ inputs.expected_sha }}-${{ inputs.qualification_run }}-${{ steps.admit.outputs.qualification-attempt }}
           path: ${{ runner.temp }}/signed-ui-qualification
-      - name: Download the original main qualification results
-        if: github.ref == 'refs/heads/verify/macos-0213-recovery-project'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          run-id: ${{ inputs.qualification_run }}
-          github-token: ${{ github.token }}
-          pattern: macos-release-qualification-*-${{ inputs.expected_sha }}-${{ inputs.qualification_run }}-1
-          path: ${{ runner.temp }}/signed-ui-original-results
-      - name: Download the exact signed recovery replay result
-        if: github.ref == 'refs/heads/verify/macos-0213-recovery-project'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          run-id: '45884436881'
-          github-token: ${{ github.token }}
-          name: macos-release-qualification-recovery-xctest-20be92e8f414b0b88142cbd132dd8bb5d5e3171f-45884436881-1
-          path: ${{ runner.temp }}/signed-ui-replayed-recovery
       - name: Bind assets and attestations and install the exact signed DMG
         env:
           BUILD_RUN: ${{ inputs.build_run }}
@@ -146,81 +108,22 @@ jobs:
           mkdir "$work/evidence"
           release_tree="$(git rev-parse 'HEAD^{tree}')"
           if [[ "$GITHUB_REF" == refs/heads/verify/macos-0213-recovery-project ]]; then
-            release_tree=e76ca3400eb87d42fcaab0b0a65e88bb419a6f8e
+            release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14
           fi
           python -I -B desktop/tools/macos_release_media.py verify "$media" \
             --source "$RELEASE_SOURCE" --tree "$release_tree" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN"
-          manifest_hash="$(shasum -a 256 "$media/RELEASE-MANIFEST.json" | cut -d ' ' -f 1)"
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            jq -e --arg qualification "$QUALIFICATION_RUN" --arg qualificationAttempt "$QUALIFICATION_ATTEMPT" \
-              --arg attempt "$CARRIER_ATTEMPT" --arg hash "$manifest_hash" '
-              .qualificationRun == $qualification and .qualificationAttempt == $qualificationAttempt and
-              .frozenRelease.carrierAttempt == $attempt and .frozenRelease.manifestSha256 == $hash
-              ' "$RUNNER_TEMP/signed-ui-qualification/QUALIFIED.json" > /dev/null
-          else
-            original=("$RUNNER_TEMP/signed-ui-original-results"/*/RESULT.json)
-            [[ "${#original[@]}" == 10 ]]
-            jq -e -s --slurpfile manifest "$media/RELEASE-MANIFEST.json" --arg hash "$manifest_hash" \
-              --arg qualification "$QUALIFICATION_RUN" '
-              ($manifest[0] | {sourceCommit, sourceTree, buildRun, carrierRun, carrierAttempt,
-                 manifestSha256: $hash, installSha256: .packages["Install.pkg"].sha256,
-                 removeSha256: .packages["Remove.pkg"].sha256}) as $frozen |
-              .[:10] as $original | .[10] as $replay |
-              select(($original | map(.mode) | sort) == ["archived-upgrade", "core-recovery", "delete-data",
-                "fresh", "performance-long", "post-reinstall-prepare", "recovery-xctest", "uninstaller",
-                "update-credentials", "workspace-xctest"] and all(.[]; .frozenRelease == $frozen) and
-                all($original[]; if .mode == "recovery-xctest" then
-                   .passed == false and .failure == "xctest-original-result" and
-                   .xctestStages[-1] == ["project-open","failed"]
-                 else .passed == true end) and
-                ($replay | .mode == "recovery-xctest" and .passed == true and .xctestReturn == 0 and
-                 .xctestCasePassed == true and .guiRecoveryObserved == true and
-                 .recoveryProjectMatchesOriginals == true and .newCrashReports == [])) |
-              {frozenRelease: $frozen, qualificationRun: $qualification, original: ($original |
-                map({mode, passed, failure})), recoveryReplayRun: "45884436881", recoveryReplayPassed: true}
-              ' "${original[@]}" "$RUNNER_TEMP/signed-ui-replayed-recovery/RESULT.json" \
-              > "$work/evidence/QUALIFICATION-REPLAY.json"
-          fi
+          jq -e --arg qualification "$QUALIFICATION_RUN" --arg qualificationAttempt "$QUALIFICATION_ATTEMPT" \
+            --arg attempt "$CARRIER_ATTEMPT" --arg hash "$(shasum -a 256 "$media/RELEASE-MANIFEST.json" | cut -d ' ' -f 1)" '
+            .qualificationRun == $qualification and .qualificationAttempt == $qualificationAttempt and
+            .frozenRelease.carrierAttempt == $attempt and .frozenRelease.manifestSha256 == $hash
+            ' "$RUNNER_TEMP/signed-ui-qualification/QUALIFIED.json" > /dev/null
           for asset in "$media"/*; do
             gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
               --source-digest "$RELEASE_SOURCE" --deny-self-hosted-runners \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
           done
           unset GH_TOKEN
-          if [[ "$GITHUB_REF" == refs/heads/verify/macos-0213-recovery-project ]]; then
-            python -I -B - "$media" "$work" <<'PY'
-          import json
-          from pathlib import Path
-          import runpy
-          import shutil
-          import sys
-
-          media, work = map(Path, sys.argv[1:])
-          release_media = runpy.run_path('desktop/tools/macos_release_media.py')
-          require_quarantine = runpy.run_path('desktop/tools/macos_update_check.py')['require_quarantine']
-          manifest = json.loads((media / 'RELEASE-MANIFEST.json').read_bytes())
-          report = {}
-          inspected = []
-          copies = work / 'quarantine'
-          copies.mkdir()
-          for role, name in zip(('Install', 'Remove'), release_media['image_names'](manifest['version']), strict=True):
-              image = copies / name
-              shutil.copyfile(media / name, image)
-              require_quarantine(image)
-              observation = release_media['inspect_image'](image, role)
-              outer, package, _ = observation
-              if outer != manifest['images'][name] or package != manifest['packages'][role + '.pkg']:
-                  raise RuntimeError('quarantined-media-identity-' + role)
-              inspected.append(observation)
-              report[role] = dict(quarantineVerified=True, strictSignature=True, stapleValidated=True,
-                                  gatekeeperAccepted=True, readonlyPackageVerified=True,
-                                  imageSha256=outer['sha256'], packageSha256=package['sha256'])
-          release_media['package_identities'](*inspected, source=manifest['sourceCommit'],
-                                              release=manifest['release'], version=manifest['version'])
-          (work / 'evidence' / 'QUARANTINE.json').write_text(json.dumps(report, indent=2) + '\n')
-          PY
-          fi
           python -I -B desktop/tools/macos_release_ui.py install "$media" "$work"
       - name: Launch the signed app before connecting the UI driver
         run: |
@@ -267,14 +170,22 @@ jobs:
             [[ ! -f "$MRK_UI_WORK/observer-status" ]] || break
             sleep 1
           done
-          [[ -f "$MRK_UI_WORK/observer-status" ]]
-          [[ "$(cat "$MRK_UI_WORK/observer-status")" == 0 ]]
-          jq -e '.scenarios | length > 0 and all(.[]; .status == "Passed")' "$MRK_UI_WORK/evidence/RESULT.json"
+          python -I -B desktop/tools/macos_release_ui.py require "$RUNNER_TEMP/signed-ui-media" "$MRK_UI_WORK"
       - name: Retain UI evidence from synthetic sessions only
+        id: evidence
         if: ${{ !cancelled() && env.MRK_UI_WORK != '' }}
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-release-ui-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: macos-release-ui-${{ inputs.expected_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MRK_UI_WORK }}/evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retry UI evidence transfer on an upload failure
+        if: ${{ !cancelled() && steps.evidence.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-release-ui-recovered-${{ inputs.expected_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MRK_UI_WORK }}/evidence
           if-no-files-found: error
           retention-days: 30

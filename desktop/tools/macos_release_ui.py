@@ -32,6 +32,12 @@ PAGE_HEADINGS = {
     "Recover work": "Check interrupted work safely",
     "Automation": "Let a command-line tool help",
 }
+NAVIGATION_SCENARIOS = {"nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-"): page for page in PAGE_HEADINGS}
+EXPECTED_SCENARIOS = {
+    "native-console-admission", "cold-runtime-and-cli-denial", "cancel-native-project-picker",
+    "project-picker-and-saved-config", *NAVIGATION_SCENARIOS, "cli-grant-and-revoke",
+    "version-cancel-save-quit-reopen", "git-local-diff-and-no-side-effects", "window-layouts",
+}
 
 
 class Blocked(Exception):
@@ -60,6 +66,39 @@ def until(operation, timeout, reason):
 def file_hash(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_observation(work, media):
+    evidence = work / "evidence"
+    status_path = work / "observer-status"
+    status = status_path.read_text().strip() if status_path.is_file() else "missing"
+    result_path = evidence / "RESULT.json"
+    result = json.loads(result_path.read_bytes()) if result_path.is_file() else {}
+    scenarios = result.get("scenarios", {})
+    statuses = {}
+    for name in sorted(EXPECTED_SCENARIOS):
+        state = scenarios.get(name, {}).get("status", "Not Tested")
+        statuses[name] = state if state in {"Passed", "Failed", "Blocked", "Not Tested"} else "Invalid"
+    summary = dict(observerExit=status if re.fullmatch(r"[0-9]{1,3}", status) else "unavailable",
+                   scenarios=statuses, extraScenarioCount=len(scenarios.keys() - EXPECTED_SCENARIOS),
+                   resultSha256=file_hash(result_path) if result_path.is_file() else None,
+                   sourceCommit=result.get("sourceCommit"), harnessCommit=os.environ["GITHUB_SHA"])
+    trace = evidence / "trace.jsonl"
+    summary["traceSha256"] = file_hash(trace) if trace.is_file() else None
+    payload = json.dumps(summary, sort_keys=True)
+    (evidence / "SCENARIO-SUMMARY.json").write_text(payload + "\n")
+    print(payload, flush=True)
+    manifest_file = media / "RELEASE-MANIFEST.json"
+    manifest = json.loads(manifest_file.read_bytes())
+    expected = {key: manifest[key] for key in ("sourceCommit", "sourceTree", "buildRun", "carrierRun")}
+    expected.update(manifestSha256=file_hash(manifest_file),
+                    packageSha256=manifest["packages"]["Install.pkg"]["sha256"],
+                    removeSha256=manifest["packages"]["Remove.pkg"]["sha256"])
+    need(all(result.get(key) == value for key, value in expected.items()), "observation-release-identity")
+    need(status == "0", "observer-exit-status")
+    need(scenarios.keys() == EXPECTED_SCENARIOS, "observation-scenario-roster")
+    need(all(state == "Passed" for state in statuses.values()), "observation-scenario-failure")
+    need(summary["traceSha256"] is not None, "observation-trace-absent")
 
 
 def detach_install_media(mount, evidence):
@@ -202,9 +241,19 @@ class UI:
         raise AssertionError(f"target-not-reachable-in-app-viewport-{name}")
 
     def click(self, name, *, category=None, contains=False, region=None):
-        snapshot, node = self.reveal(name, category=category, contains=contains, region=region,
-                                     enabled=True, actionable=True)
-        self.command("element.click", snapshot_id=snapshot, id=node["id"])
+        for attempt in range(2):
+            snapshot, node = self.reveal(name, category=category, contains=contains, region=region,
+                                         enabled=True, actionable=True)
+            try:
+                self.command("element.click", snapshot_id=snapshot, id=node["id"])
+                return
+            except Exception as error:
+                # The pinned action rejects a stale snapshot before sending
+                # any pointer event. Re-observe once, with the same checks.
+                payload = getattr(error, "payload", None)
+                if (attempt or getattr(error, "status", None) != 409 or not isinstance(payload, dict) or
+                    (payload.get("error") or {}).get("code") != "stale_snapshot"):
+                    raise
 
     def edit(self, name, text):
         self.click(name, category="textfield", contains=True)
@@ -313,7 +362,11 @@ class UI:
         pid = self.payload_pid()
 
         def window():
-            rows = [row for row in self.command("windows.list")["windows"] if row["process_id"] == pid]
+            nodes = self.command("tree.snapshot", limit=1)["nodes"]
+            need(len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "window" and
+                 nodes[0]["name"] == "Mobile Release Kit", "exact-focused-payload-window")
+            rows = [row for row in self.command("windows.list")["windows"]
+                    if row["process_id"] == pid and row["title"] == nodes[0]["name"] and row["bounds"] == nodes[0]["bounds"]]
             need(len(rows) == 1 and rows[0]["bounds"] is not None, "exact-original-window")
             return rows[0]
 
@@ -515,8 +568,7 @@ def observe(work, action, media):
             scenario("cold-runtime-and-cli-denial", startup)
             scenario("cancel-native-project-picker", cancel_picker)
             selected = scenario("project-picker-and-saved-config", select_project)
-            for page in PAGE_HEADINGS:
-                label = "nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-")
+            for label, page in NAVIGATION_SCENARIOS.items():
                 scenario(label, lambda page=page: ui.page(page))
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
@@ -539,13 +591,16 @@ def observe(work, action, media):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("install", "observe"))
+    parser.add_argument("mode", choices=("install", "observe", "require"))
     parser.add_argument("media", type=Path)
     parser.add_argument("work", type=Path)
     parser.add_argument("--action", type=Path)
     args = parser.parse_args()
     if args.mode == "install":
         install(args.media, args.work)
+        return 0
+    if args.mode == "require":
+        verify_observation(args.work, args.media)
         return 0
     return observe(args.work, args.action, args.media)
 
