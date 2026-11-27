@@ -188,6 +188,23 @@ def verify_frozen(media, source, tree, build_run, carrier_run):
     return value
 
 
+def verify_qualification(media, manifest, proof_path, run_id, attempt, carrier_attempt):
+    proof = json_data(proof_path)
+    frozen = {key: manifest[key] for key in ("sourceCommit", "sourceTree", "buildRun", "carrierRun", "carrierAttempt")}
+    frozen.update(manifestSha256=record(media / MANIFEST, DESCRIPTOR_LIMIT)["sha256"],
+                  installSha256=manifest["packages"]["Install.pkg"]["sha256"],
+                  removeSha256=manifest["packages"]["Remove.pkg"]["sha256"])
+    modes = {"archived-upgrade", "core-recovery", "delete-data", "fresh", "performance-long",
+             "post-reinstall-prepare", "recovery-xctest", "uninstaller", "update-credentials", "workspace-xctest"}
+    need(set(proof) == {"qualificationRun", "qualificationAttempt", "frozenRelease", "modes"}
+         and proof["qualificationRun"] == run_id and proof["qualificationAttempt"] == attempt
+         and proof["frozenRelease"] == frozen and frozen["carrierAttempt"] == carrier_attempt,
+         "release-qualification-identity")
+    observed = proof["modes"]
+    need(isinstance(observed, list) and all(isinstance(mode, str) for mode in observed)
+         and len(observed) == len(modes) and set(observed) == modes, "release-qualification-modes")
+
+
 def release_selection(value):
     """Select the qualified predecessor and actual same-source Actions outputs."""
     repository = REPOSITORY
@@ -393,6 +410,7 @@ def main():
     verify.add_argument("--carrier-run", required=True)
     verify.add_argument("--selection", type=Path)
     verify.add_argument("--draft-id")
+    verify.add_argument("--qualification", nargs=4, metavar=("PROOF", "RUN", "ATTEMPT", "CARRIER_ATTEMPT"))
     args = parser.parse_args()
     if args.command == "preflight":
         preflight()
@@ -400,6 +418,9 @@ def main():
         freeze(args.work, args.media)
     else:
         value = verify_frozen(args.media, args.source, args.tree, args.build_run, args.carrier_run)
+        if args.qualification is not None:
+            proof, run_id, attempt, carrier_attempt = args.qualification
+            verify_qualification(args.media, value, Path(proof), run_id, attempt, carrier_attempt)
         if args.selection is not None:
             with args.selection.open("xb") as stream:
                 stream.write(dump(release_selection(value)))
