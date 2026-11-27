@@ -5993,7 +5993,8 @@ final class NormalAppUITests: XCTestCase {
         return review
     }
     @MainActor private func privateAssessment(_ storage: XCUIElement, input: PrivateInput) throws {
-        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", "Supplied-input assessment")), in: storage,
+        let title = guidedProductSurface ? "File check" : "Supplied-input assessment"
+        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", title)), in: storage,
                             failures: Self.privateInputFailures)
         try require(storage.staticTexts.matching(identifier: "Configured only").count >= 1,
                     "mechanical supplied-input assessment did not configure this input")
@@ -8463,17 +8464,38 @@ final class NormalAppUITests: XCTestCase {
         let phase = panel.staticTexts.matching(identifier: "Phase: settled")
         let outcome = panel.staticTexts.matching(identifier: "Outcome: complete")
         let finality = panel.staticTexts.matching(identifier: "Native finality: settled")
-        let contextMatch = StaticTextMatch.edges("iOS / build · draft ", " · core host macos")
-        let provenanceMatch = StaticTextMatch.suffix(
-            " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe.")
+        let contextPrefix = "iOS / build · draft "
+        let contextSuffix = " · core host macos"
+        let provenanceSuffix = " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe."
+        let contextMatch = StaticTextMatch.edges(contextPrefix, contextSuffix)
+        let provenanceMatch = StaticTextMatch.suffix(provenanceSuffix)
+        let contextQuery = panel.staticTexts.matching(NSPredicate(
+            format: "(value BEGINSWITH %@ AND value ENDSWITH %@) OR (label BEGINSWITH %@ AND label ENDSWITH %@)",
+            contextPrefix, contextSuffix, contextPrefix, contextSuffix))
+        let provenanceQuery = panel.staticTexts.matching(NSPredicate(
+            format: "value ENDSWITH %@ OR label ENDSWITH %@", provenanceSuffix, provenanceSuffix))
+        let textRows: [XCUIElement]
         if guidedProductSurface {
             // The heading can be awaited without repeatedly reading every
             // static text while the native operation has no result to show.
             _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
             diagnosticCut = "report-visible"
-        }
-        let textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
+            for (query, cut) in [(phase, "settled-phase"), (outcome, "complete-outcome"),
+                                 (finality, "settled-finality")] {
+                _ = try waitElement(query, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
+                diagnosticCut = cut
+            }
+            let context = try waitElement(contextQuery, in: panel, timeout: 15, failures: failures)
+            diagnosticCut = "report-context"
+            let provenance = try waitElement(provenanceQuery, in: panel, timeout: 15, failures: failures)
+            textRows = [context, provenance]
+            try require(contextMatch.accepts(try staticTextContent(context))
+                        && provenanceMatch.accepts(try staticTextContent(provenance)),
+                        "the current iOS report lost context or original Start acknowledgement")
+        } else {
+            textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
+        }
         diagnosticCut = "settled-report"
         for query in [fresh, phase, outcome, finality] {
             _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
@@ -8493,12 +8515,16 @@ final class NormalAppUITests: XCTestCase {
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
         diagnosticCut = "core-ledger"
         _ = try remaining(1)
-        let currentText = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
+        let currentText = guidedProductSurface
+            ? [contextQuery.allElementsBoundByIndex, provenanceQuery.allElementsBoundByIndex]
+            : try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
         let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
         try require(failedCount == 0 && currentText.allSatisfy { $0.count == 1 },
                     "original iOS diagnostics context changed during readback")
         try require(try staticTextContent(currentText[0][0]) == originalContext,
                     "original iOS diagnostics context changed during readback")
+        try require(provenanceMatch.accepts(try staticTextContent(currentText[1][0])),
+                    "original iOS diagnostics acknowledgement changed during readback")
         for query in [fresh, phase, outcome, finality] {
             _ = try unique(query, "same original iOS report did not remain current and settled")
         }
