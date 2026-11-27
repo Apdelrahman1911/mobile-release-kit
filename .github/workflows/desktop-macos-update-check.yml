@@ -32,10 +32,10 @@ on:
         type: string
         required: true
       additional_ui:
-        description: Run only the selected credential-free check on the verification branch
+        description: Run only the selected fixture check on the verification branch
         type: choice
         default: none
-        options: [none, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
+        options: [none, update-credentials, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
                   android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
                   release-asset, native-status-unit, recovery-contracts]
