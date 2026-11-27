@@ -2952,6 +2952,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestProjectSelection", r"(?m)^MRK_GUIDED_PROJECT_SELECTION=v1;([a-z-]{1,30})=([0-5])$"),
         ("xctestSidebarNavigation", r"(?m)^MRK_GUIDED_NAV=v1;line=([0-9]{1,5});phase=(sidebar-scroll|hittable)$"),
         ("xctestIOSToolDiagnosticCut", r"(?m)^MRK_GUIDED_IOS_TOOLS=v1;cut=([a-z-]{1,24});expired=([01])$"),
+        ("xctestGuidedIOSReport", r"(?m)^MRK_GUIDED_IOS_REPORT=v1;context=([0-5]);receipt=([0-5])$"),
         ("xctestGuidedPicker", r"(?m)^MRK_GUIDED_PICKER=v1;observed=(absent|expected|other|multiple)$"),
         ("xctestGuidedReadbackLoss", r"(?m)^MRK_GUIDED_READBACK_LOST=v1;line=([0-9]{1,5});present=([01])$"),
         ("xctestGuidedOfflineCounts", r"(?m)^MRK_GUIDED_OFFLINE_COUNT=v1;total=([0-9]{1,3});missing=([0-9]{1,3});skipped=([0-9]{1,3});summary=([0-5])$"),

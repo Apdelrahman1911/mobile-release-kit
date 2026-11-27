@@ -8537,7 +8537,7 @@ final class NormalAppUITests: XCTestCase {
         let provenanceSuffix = " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe."
         let contextMatch = StaticTextMatch.edges(contextPrefix, contextSuffix)
         let provenanceMatch = StaticTextMatch.suffix(provenanceSuffix)
-        @MainActor func guidedBadges() throws -> Bool {
+        @MainActor func guidedReport() throws -> (context: String, provenance: String)? {
             _ = try remaining(1)
             var pending: [any XCUIElementSnapshot] = [try panel.snapshot()]
             var labels: [String] = []
@@ -8561,31 +8561,50 @@ final class NormalAppUITests: XCTestCase {
                 labels.filter { $0 == caption }.count + adjacent.filter { $0 == caption }.count
             }
             try require(matches.allSatisfy { $0 <= 1 }, "current iOS diagnostics badges are ambiguous", check: .singleton)
-            return matches.allSatisfy { $0 == 1 }
+            guard matches.allSatisfy({ $0 == 1 }) else { return nil }
+            diagnosticCut = "settled-badges"
+            let contexts = labels.filter(contextMatch.accepts)
+            // Read the fixed receipt paragraph even when WebKit splits its
+            // timestamp, revision and acknowledgement into adjacent texts.
+            let receipts = labels.indices.compactMap { index -> String? in
+                guard labels[index].hasPrefix("Received by this view:") else { return nil }
+                var joined = labels[index]
+                for part in labels.dropFirst(index + 1).prefix(8) {
+                    if provenanceMatch.accepts(joined) { break }
+                    joined += part.hasPrefix(".") ? part : " " + part
+                }
+                return provenanceMatch.accepts(joined) ? joined : nil
+            }
+            print("MRK_GUIDED_IOS_REPORT=v1;context=\(min(contexts.count, 5));receipt=\(min(receipts.count, 5))")
+            try require(contexts.count <= 1 && receipts.count <= 1, "iOS diagnostics context or receipt is ambiguous")
+            guard let context = contexts.first, let provenance = receipts.first else { return nil }
+            return (context, provenance)
         }
-        let textRows: [XCUIElement]
+        let originalContext: String
+        let originalProvenance: String?
         if guidedProductSurface {
             // The heading can be awaited without repeatedly reading every
             // static text while the native operation has no result to show.
             _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
             diagnosticCut = "report-visible"
-            while !(try guidedBadges()) {
+            var observed = try guidedReport()
+            while observed == nil {
                 try clock.progress(until: journeyDeadline ?? wholeDeadline)
+                observed = try guidedReport()
             }
-            diagnosticCut = "settled-badges"
-            // The established reader matches Swift strings first. AXValue can
-            // also be a number, so live queries use equality only.
-            textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
-                                            ready: [fresh], timeout: 15, failures: failures)
+            guard let observed else { throw Refusal.condition("iOS diagnostics observation missing") }
+            originalContext = observed.context
+            originalProvenance = observed.provenance
         } else {
-            textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
-                                          ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
+            let rows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
+                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
+            originalContext = try staticTextContent(rows[0])
+            originalProvenance = nil
         }
         diagnosticCut = "settled-report"
         for query in guidedProductSurface ? [fresh] : [fresh, phase, outcome, finality] {
             _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
         }
-        let originalContext = try staticTextContent(textRows[0])
         for label in ["macOS developer selection", "Git version", "Xcode version and build"] {
             _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)),
                            "fixed iOS diagnostics card is missing or repeated")
@@ -8600,16 +8619,19 @@ final class NormalAppUITests: XCTestCase {
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
         diagnosticCut = "core-ledger"
         _ = try remaining(1)
-        let currentText = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
-        let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
-        try require(failedCount == 0 && currentText.allSatisfy { $0.count == 1 },
-                    "original iOS diagnostics context changed during readback")
-        try require(try staticTextContent(currentText[0][0]) == originalContext,
-                    "original iOS diagnostics context changed during readback")
-        try require(provenanceMatch.accepts(try staticTextContent(currentText[1][0])),
-                    "original iOS diagnostics acknowledgement changed during readback")
         if guidedProductSurface {
-            try require(try guidedBadges(), "same original iOS report did not remain settled")
+            let current = try guidedReport()
+            try require(current?.context == originalContext && current?.provenance == originalProvenance,
+                        "same original iOS report did not remain settled and acknowledged")
+        } else {
+            let rows = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
+            let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
+            try require(failedCount == 0 && rows.allSatisfy { $0.count == 1 },
+                        "original iOS diagnostics context changed during readback")
+            try require(try staticTextContent(rows[0][0]) == originalContext,
+                        "original iOS diagnostics context changed during readback")
+            try require(provenanceMatch.accepts(try staticTextContent(rows[1][0])),
+                        "original iOS diagnostics acknowledgement changed during readback")
         }
         for query in guidedProductSurface ? [fresh] : [fresh, phase, outcome, finality] {
             _ = try unique(query, "same original iOS report did not remain current and settled")
