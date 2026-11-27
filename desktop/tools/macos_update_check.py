@@ -962,7 +962,7 @@ def main():
             frozen = json.loads(manifest_path.read_bytes())
             ref = os.environ.get("GITHUB_REF")
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
-                          and args.mode in ("recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI)
+                          and args.mode in ("update-credentials", "recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI)
                           and frozen["sourceCommit"] == "4e821384cd912562dd5e30b195e87c113bd2d09f"
                           and frozen["sourceTree"] == "50393070e54b402a5ac1bac63e411fa1fbd1ad14"
                           and (frozen["buildRun"], frozen["carrierRun"], frozen["carrierAttempt"])
