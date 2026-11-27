@@ -81,6 +81,7 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
           [[ "$(id -u)" != 0 && "$(sw_vers -productVersion)" == 26.* ]]
           /usr/bin/python3 -I -B - <<'PYTHON'
+          import fcntl
           import json
           import os
           import stat
@@ -90,6 +91,33 @@ jobs:
           def identity(row):
               return (row.st_dev, row.st_ino, row.st_uid, row.st_gid, row.st_mode,
                       getattr(row, "st_flags", 0))
+
+          def held_path_facts(fd, parent):
+              def check_path():
+                  raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+                  path = os.fsdecode(raw.split(b"\x00", 1)[0])
+                  try:
+                      resolved = os.stat(path, follow_symlinks=False)
+                  except FileNotFoundError:
+                      return "unbound-path"
+                  return "original-live" if os.path.samestat(resolved, os.fstat(fd)) else "path-substituted"
+
+              def check_parent():
+                  found = os.stat("..", dir_fd=fd, follow_symlinks=False)
+                  return "same-parent" if os.path.samestat(found, os.fstat(parent)) else "different-parent"
+
+              def check_current():
+                  found = os.stat(".", dir_fd=fd, follow_symlinks=False)
+                  return "same-directory" if os.path.samestat(found, os.fstat(fd)) else "different-directory"
+
+              result = {}
+              for key, query in (("descriptorPath", check_path), ("relativeParent", check_parent),
+                                 ("relativeDot", check_current)):
+                  try:
+                      result[key] = query()
+                  except OSError as error:
+                      result[key] = error.errno
+              return result
 
           def remove(parent, name, directory):
               flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -115,7 +143,8 @@ jobs:
                   assert missing and same
                   return dict(beforeLinks=before.st_nlink, afterLinks=after.st_nlink,
                               nameAbsent=missing, descriptorIdentityPreserved=same,
-                              candidateLinkPostcondition=after.st_nlink == 0)
+                              candidateLinkPostcondition=after.st_nlink == 0,
+                              heldPath=held_path_facts(fd, parent) if directory else None)
               finally:
                   os.close(fd)
 
@@ -143,6 +172,18 @@ jobs:
                   finally:
                       os.close(task)
                   control["workDirectory"] = remove(parent, "work", True)
+                  os.mkdir("original", mode=0o700, dir_fd=parent)
+                  original = os.open("original", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     dir_fd=parent)
+                  try:
+                      control["live"] = held_path_facts(original, parent)
+                      os.rename("original", "moved", src_dir_fd=parent, dst_dir_fd=parent)
+                      os.mkdir("original", mode=0o700, dir_fd=parent)
+                      os.rmdir("original", dir_fd=parent)
+                      control["movedOriginalRemovedSubstitute"] = held_path_facts(original, parent)
+                      assert os.path.samestat(os.fstat(original), os.stat("moved", dir_fd=parent, follow_symlinks=False))
+                  finally:
+                      os.close(original)
                   after = os.stat("archive.xcarchive", dir_fd=parent, follow_symlinks=False)
                   control["archiveUntouched"] = identity(after) == identity(archive)
                   assert control["archiveUntouched"]
