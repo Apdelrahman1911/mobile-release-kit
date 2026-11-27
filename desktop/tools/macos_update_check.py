@@ -3080,16 +3080,16 @@ def release_asset_check(selection, work, evidence, steps, result):
         image = output / "MobileReleaseKit-Remove.dmg"
         shutil.copyfile(work / "removal/MobileReleaseKit-Remove.dmg", image)
         need(digest(image) == selection["removal"]["imageSha256"], "asset-removal-image-digest")
-        shutil.copyfile(folder / "carrier-release-asset.dmg", output / "MobileReleaseKit-Install.dmg")
         frozen_media = os.environ.get("MRK_FROZEN_RELEASE_MEDIA")
         if frozen_media:
             manifest = json.loads((Path(frozen_media) / "RELEASE-MANIFEST.json").read_bytes())
+            install_name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-Install.dmg"
+            shutil.copyfile(Path(frozen_media) / install_name, output / "MobileReleaseKit-Install.dmg")
             image_evidence = {}
             for role in ("Install", "Remove"):
                 name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-{role}.dmg"
-                copied = work / name
+                copied = output / f"MobileReleaseKit-{role}.dmg"
                 expected = manifest["images"][name]["sha256"]
-                shutil.copyfile(Path(frozen_media) / name, copied)
                 need(digest(copied) == expected, "frozen-quarantine-image-identity")
                 require_quarantine(copied)
                 gate, _ = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "open", "--context", "context:primary-signature",
@@ -3101,6 +3101,8 @@ def release_asset_check(selection, work, evidence, steps, result):
                 image_evidence[name] = {"sha256": expected, "quarantineVerified": True,
                                         "stapleVerified": True, "gatekeeper": "Notarized Developer ID"}
             result["frozenQuarantinedImages"] = image_evidence
+        else:
+            shutil.copyfile(folder / "carrier-release-asset.dmg", output / "MobileReleaseKit-Install.dmg")
         result["asset"] = {"schemaVersion": 1, "version": row["packageVersion"], "release": row["release"],
                            "sourceCommit": origin["source"], "sourceTree": origin["tree"], "target": origin["target"],
                            "buildRun": row["runId"], "removalRun": selection["removal"]["runId"],
