@@ -739,7 +739,7 @@ class IOSOwnershipDataTests(unittest.TestCase):
                 files.work = operation_module._Held(71, "work", build_inputs._FD(operation.guard), True,
                     identity=build_inputs._directory(details), creation={"state": "CREATED"})
                 files.work.slot.number, files.work.slot.open_state = 72, "OPEN"  # No actual descriptor acquired.
-                files.namespace = SimpleNamespace(check=lambda: None)
+                files.namespace = SimpleNamespace(check=lambda: None, path=Path("/owned"))
                 with patch.object(files, "require_work_consumers"), patch.object(files, "check_held"), \
                         patch.object(files, "entries", side_effect=lambda _: entries(values)), \
                         patch.object(os, "readlink", return_value="unrecognized"), \
@@ -834,25 +834,26 @@ class IOSOwnershipDataTests(unittest.TestCase):
     def test_work_links_allow_only_xcode_internal_targets_and_fixed_swiftpm_aliases(self):
         base = ("DerivedData", "Build", "Products")
         swiftpm = ("home", ".swiftpm")
+        home = Path("/private/tmp/fixture/work/home")
+        swiftpm_library = str(home / "Library")
         cases = (
             (base, "App.app", "../Destination/App.app", True),
             (base, "App.app", "../../../home/App.app", False),
             (base, "App.app", "/outside/App.app", False),
             (base, "App.app", "../" * 400 + "Destination/App.app", False),
-            (swiftpm, "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", True),
-            (swiftpm, "configuration", "/Users/fixture/Library/org.swift.swiftpm/configuration", True),
-            (swiftpm, "security", "/Users/not-fixture/Library/org.swift.swiftpm/security", False),
-            (swiftpm, "security", "/Users/fixture/Library/org.swift.swiftpm/configuration", False),
-            (swiftpm, "other", "/Users/fixture/Library/org.swift.swiftpm/security", False),
-            (("tmp", ".swiftpm"), "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", False),
+            (swiftpm, "cache", swiftpm_library + "/Caches/org.swift.swiftpm", True),
+            (swiftpm, "configuration", "/System/Volumes/Data" + swiftpm_library + "/org.swift.swiftpm/configuration", True),
+            (swiftpm, "security", swiftpm_library.removeprefix("/private") + "/org.swift.swiftpm/security", True),
+            (swiftpm, "security", "/Users/fixture/Library/org.swift.swiftpm/security", False),
+            (swiftpm, "security", swiftpm_library + "/org.swift.swiftpm/configuration", False),
+            (swiftpm, "other", swiftpm_library + "/org.swift.swiftpm/security", False),
+            (("tmp", ".swiftpm"), "cache", swiftpm_library + "/Caches/org.swift.swiftpm", False),
             ((), "DerivedData", "anything", False),
         )
-        fixture_pwd = SimpleNamespace(getpwuid=lambda _: SimpleNamespace(pw_dir="/Users/fixture"))
-        with patch.object(operation_module.sys, "platform", "darwin"), \
-                patch.dict(operation_module.sys.modules, {"pwd": fixture_pwd}):
+        with patch.object(operation_module.sys, "platform", "darwin"):
             for parent, name, target, expected in cases:
                 with self.subTest(parent=parent, name=name):
-                    self.assertIs(operation_module._work_link_target(parent, name, target), expected)
+                    self.assertIs(operation_module._work_link_target(parent, name, target, home), expected)
 
 
 if __name__ == "__main__":

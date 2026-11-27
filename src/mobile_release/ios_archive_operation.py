@@ -72,16 +72,24 @@ def _darwin_descriptor_path(fd: int) -> bytes:
     return path
 
 
-def _work_link_target(relative: tuple[str, ...], name: str, target: str) -> bool:
+def _work_link_target(relative: tuple[str, ...], name: str, target: str, home: Path) -> bool:
     if sys.platform != "darwin" or not target or len(os.fsencode(target)) >= 1024:
         return False
     if relative and relative[0] == "DerivedData" and not posixpath.isabs(target):
         return posixpath.normpath(posixpath.join(*relative, target)).startswith("DerivedData/")
     if relative == ("home", ".swiftpm") and name in _SWIFTPM_WORK_LINKS:
-        import pwd
-
-        home = pwd.getpwuid(os.geteuid()).pw_dir
-        return posixpath.isabs(home) and target == posixpath.join(home, *_SWIFTPM_WORK_LINKS[name])
+        # Foundation may spell the same Data volume path through a firmlink
+        # or through /tmp and /var. Match only this operation's home spelling.
+        data_prefix = "/System/Volumes/Data"
+        home_path = str(home)
+        if home_path.startswith(data_prefix + "/"):
+            home_path = home_path.removeprefix(data_prefix)
+        if home_path.startswith(("/tmp/", "/var/")):
+            home_path = "/private" + home_path
+        spellings = {home_path, data_prefix + home_path}
+        if home_path.startswith(("/private/tmp/", "/private/var/")):
+            spellings.add(home_path.removeprefix("/private"))
+        return any(target == posixpath.join(spelling, *_SWIFTPM_WORK_LINKS[name]) for spelling in spellings)
     return False
 
 
@@ -693,7 +701,7 @@ class _OriginalIOSFiles:
                             and (directory or ((stat.S_ISREG(observed.st_mode) or work_link) and observed.st_nlink == 1)))
                     if work_link:
                         target = os.readlink(name, dir_fd=original.slot.number)
-                        require(_work_link_target(relative, name, target)
+                        require(_work_link_target(relative, name, target, self.namespace.path / "work" / "home")
                                 and _tool_data(observed) == _tool_data(
                                     os.stat(name, dir_fd=original.slot.number, follow_symlinks=False)))
                     self.operation.charge("work-bytes", observed.st_size if stat.S_ISREG(observed.st_mode) else 0, 8 * 1024**3)
