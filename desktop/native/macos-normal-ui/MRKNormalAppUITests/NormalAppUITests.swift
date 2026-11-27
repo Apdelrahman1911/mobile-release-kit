@@ -8884,7 +8884,8 @@ final class NormalAppUITests: XCTestCase {
                     // or replace that snapshot to make the test pass.
                     let label = try waitElement(configured, in: renderer, timeout: 24,
                         failures: ["Static observation unavailable", "Only a partial static observation is available"])
-                    _ = try waitElement(identity, in: renderer, timeout: 12)
+                    // The same value may also appear in the Overview summary.
+                    // The disclosure delta below binds the one additional row.
                     let expandedCount = identity.count
                     let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
                         label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
