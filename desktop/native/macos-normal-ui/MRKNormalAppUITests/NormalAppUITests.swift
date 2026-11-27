@@ -5380,6 +5380,32 @@ final class NormalAppUITests: XCTestCase {
         try require(XCTWaiter.wait(for: [wait], timeout: try remaining(timeout)) == .completed,
                     "owned UI did not dismiss in " + journeyStage, line: line)
     }
+    @MainActor private func waitForGuidedStartupProject(_ renderer: XCUIElement) throws {
+        guard let clock = caseClock, let journeyDeadline else {
+            throw Refusal.condition("original guided startup deadline missing")
+        }
+        let end = min(journeyDeadline, try clock.end(within: 24))
+        let query = controls(renderer, [.button], label: "Choose project folder")
+        let failures = Self.guidedWorkspaceFailures
+        let terminal = renderer.staticTexts.matching(NSPredicate(
+            format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
+        var ready = false
+        while true {
+            try checkOriginalOwners()
+            _ = try clock.remaining(1, before: end)
+            try require(terminal.count == 0, "terminal UI refusal during guided startup")
+            let count = query.count
+            try require(count <= 1, "guided startup project control is ambiguous", check: .singleton)
+            let item = query.element(boundBy: 0)
+            let observed = count == 1 && item.exists && item.isEnabled
+            _ = try clock.remaining(1, before: end)
+            // Bootstrap may briefly change the enabled state after the window
+            // appears. Require two affirmative observations within one cutoff.
+            if observed && ready { return }
+            ready = observed
+            try clock.progress(until: end)
+        }
+    }
     @MainActor private func reveal(_ element: XCUIElement, in surface: XCUIElement, line: UInt = #line) throws {
         // Scroll only the identified surface inside the original renderer.
         for direction in [-1.0, 1.0] {
@@ -5912,9 +5938,7 @@ final class NormalAppUITests: XCTestCase {
         } else if guidedProductSurface {
             try require(profile == .currentCandidateOrdinary || profile == .currentCandidateIOSTools,
                         "guided product surface requires the scoped signed candidate")
-            let project = controls(renderer, [.button], label: "Choose project folder")
-            _ = try waitElement(project, in: renderer, enabled: true, timeout: 24,
-                                failures: Self.guidedWorkspaceFailures, snapshotObservation: true)
+            try waitForGuidedStartupProject(renderer)
         } else {
             try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         }
@@ -6022,23 +6046,28 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func savePrivate(_ storage: XCUIElement, renderer: XCUIElement, fixture: LocalFixture,
                                        input: PrivateInput, label: String, reviewTarget: String,
                                        replacement: Bool = false) throws {
-        if input == .p12 {
-            let password = try waitElement(controls(storage, [.secureTextField], label: "P12 export password", prefix: true),
-                                           in: storage, enabled: true, failures: Self.privateInputFailures)
-            try reveal(password, in: renderer); password.click()
-            // Fictional DATA typed into the ordinary write-only field. Do not
-            // inspect its masked value, use the clipboard or change app state.
-            password.typeText(replacement ? "MRK-inert-password-v2" : "MRK-inert-password-v1")
+        try stage("vault-write-only-fields") {
+            if input == .p12 {
+                let password = try waitElement(controls(storage, [.secureTextField], label: "P12 export password", prefix: true),
+                                               in: storage, enabled: true, failures: Self.privateInputFailures)
+                try reveal(password, in: renderer); password.click()
+                // Never inspect the masked field or use the clipboard.
+                password.typeText(replacement ? "MRK-inert-password-v2" : "MRK-inert-password-v1")
+            }
+            try replace(field(storage, "Vault label (optional)"), with: label, renderer: renderer)
         }
-        try replace(field(storage, "Vault label (optional)"), with: label, renderer: renderer)
-        try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
-        try privateStatus(storage, action: "prepare", phase: "preview")
-        try privateAssessment(storage, input: input)
-        let review = try privateReview(storage, title: "Save this encrypted input?", target: reviewTarget)
-        try fixture.assertUnchanged()
-        try press(review, "Save encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
-        try privateStatus(storage, action: "commit", mutation: true)
-        try require(named(storage, "Explicit private-input review").count == 0, "saving retained an assignment review")
+        try stage("vault-file-assessment") {
+            try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare", phase: "preview")
+            try privateAssessment(storage, input: input)
+        }
+        try stage("vault-file-commit") {
+            let review = try privateReview(storage, title: "Save this encrypted input?", target: reviewTarget)
+            try fixture.assertUnchanged()
+            try press(review, "Save encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "commit", mutation: true)
+            try require(named(storage, "Explicit private-input review").count == 0, "saving retained an assignment review")
+        }
     }
     @MainActor private func assignPrivate(_ storage: XCUIElement, renderer: XCUIElement, fixture: LocalFixture,
                                          input: PrivateInput, label: String, revision: Int) throws {

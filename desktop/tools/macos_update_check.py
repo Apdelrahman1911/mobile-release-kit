@@ -2873,6 +2873,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         sampler = threading.Thread(target=workspace_resource_observations, args=(stop_sampling, resource_samples),
                                    daemon=True)
         sampler.start()
+    xctest_started_at = time.monotonic()
     try:
         tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
                                  "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
@@ -2883,6 +2884,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
                                  "-maximum-test-execution-time-allowance", "900" if ios else "300"],
                                 env=env, capture_output=True, text=True, timeout=1200 if ios else 600)
     finally:
+        result["xctestSeconds"] = round(time.monotonic() - xctest_started_at, 2)
         stop_sampling.set()
         if sampler is not None:
             sampler.join(timeout=65)
@@ -2907,11 +2909,28 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
     folded_transcript = transcript.lower()
+    if extra and tested.returncode != 0 and bundle.is_dir():
+        # Retain only known failure categories. The raw result may include
+        # screenshot attachments, UI values or synthetic credential input.
+        try:
+            summary = subprocess.run(
+                ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(bundle), "--compact"],
+                env=env, capture_output=True, timeout=20, check=True,
+            )
+            rows = json.loads(summary.stdout).get("testFailures", [])
+            result["xctestSummaryFailureCount"] = len(rows)
+            folded_transcript += "\n" + "\n".join(
+                row["failureText"] for row in rows[:12] if isinstance(row.get("failureText"), str)
+            ).lower()
+        except (subprocess.SubprocessError, OSError, ValueError, AttributeError, TypeError):
+            result["xctestSummaryUnavailable"] = True
     runner_events = [event for event, fragment in (
         ("objective-c-exception", "NSInvalidArgumentException"),
         ("unsupported-predicate", "Unsupported predicate"),
         ("execution-timeout", "exceeded execution time allowance"),
+        ("execution-timeout", "exceeded the maximum allowed execution time"),
         ("runner-exited", "Test runner exited"),
+        ("runner-signal", "terminated with unexpected signal"),
         ("test-crashed", "TEST CRASHED"),
     ) if fragment.lower() in folded_transcript]
     for field, pattern in (
