@@ -44,6 +44,7 @@ SUITE_SCENARIOS = {
     "workspace": EXPECTED_SCENARIOS,
     "metadata": {"native-console-admission", "project-picker-and-saved-config", "metadata-negative-cancel-save-readback"},
     "projects": {"native-console-admission", "project-picker-and-saved-config", "project-switch-and-cli-isolation"},
+    "cli-read": {"native-console-admission", "project-picker-and-saved-config", "installed-cli-read-data-and-refusals"},
 }
 METADATA_TITLE = Path("public/store/android/en-US/title.txt")
 
@@ -602,6 +603,59 @@ def observe(work, action, media, suite):
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
 
+    def cli_read_journey():
+        def request(command, *args, kind):
+            reply = json.loads(call(str(CLI), command, *args, "--json").stdout)
+            data = reply["response"]
+            need(reply["version"] == 1 and data["kind"] == kind, f"cli-read-kind-{command}")
+            return data["value"]
+
+        def reject(command, *args, code, reason):
+            process = call(str(CLI), command, *args, "--json", check=False)
+            reply = json.loads(process.stdout)
+            local = reply.get("ok") is False and reply.get("error") == reason
+            remote = reply.get("response") == {"kind": "error", "value": reason}
+            need(process.returncode == code and reply["version"] == 1 and (local or remote),
+                 f"cli-refusal-{command}-{reason}")
+
+        ui.page("Project settings")
+        ui.click("Advanced · CLI / AI access", category="disclosuretriangle", contains=True)
+        ui.click("Check access", category="button")
+        ui.click("Allow selected project for 1 hour", category="button")
+        ui.node("1 project was allowed at last check", category="statictext", contains=True)
+        service = request("status", kind="info")
+        need(service["readOnly"] is True and service["cachedObservationsAreAuthority"] is False and
+             service["readGrantAuthorizesExecution"] is False and service["requiresRunningDesktop"] is True and
+             0 < service["remainingAccessMs"] <= 3600000, "cli-session-read-only-contract")
+        rows = request("projects", kind="projects")
+        need(len(rows) == 1 and rows[0]["registeredInCurrentHost"] is True, "cli-only-current-project")
+        project_id = rows[0]["projectId"]
+        observation = request("observe", project_id, kind="observation")
+        receipt = observation["observation"]["configuration"]
+        need(observation["projectId"] == project_id and observation["registeredInCurrentHost"] is True and
+             receipt == {"state": "format-valid", "bytes": (project / CONFIG_FILE).stat().st_size,
+                         "sha256": original[CONFIG_FILE]}, "cli-saved-config-readback")
+        journal = request("requests", project_id, kind="requests")
+        need(journal["projectId"] == project_id and journal["doNotReplay"] is True and journal["requests"] == [],
+             "cli-empty-request-discovery")
+        tools = request("android-tools", project_id, kind="android-tools")
+        need(tools["projectId"] == project_id and tools["projectCompatibility"] == "not-checked" and
+             tools["freshness"] == "historical-not-revalidated", "cli-android-historical-labels")
+        repository = request("repository", project_id, kind="repository")
+        need(repository["projectId"] == project_id and repository["basis"] == "local-refs-no-fetch" and
+             repository["freshness"] == "historical-not-revalidated", "cli-git-historical-labels")
+        need(request("operations", project_id, kind="operations") == [], "cli-no-new-project-operations")
+        reject("operation", project_id, "f" * 32, code=5, reason="conflict")
+        reject("repository", project_id, "--fetch", code=2, reason="invalid_request")
+        reject("observe", "not-a-project", code=2, reason="invalid_request")
+        foreign = "f" * 32 if project_id != "f" * 32 else "e" * 32
+        reject("observe", foreign, code=4, reason="access_denied")
+        ui.click("Turn off access", category="button")
+        ui.node("Off at last check", category="statictext", contains=True)
+        for command in ("observe", "requests", "android-tools", "repository", "operations"):
+            reject(command, project_id, code=4, reason="access_denied")
+        need(all(file_hash(project / name) == digest for name, digest in original.items()), "cli-read-mutated-project")
+
     def project_switch_and_isolation():
         secondary = work / "MRK Verification Secondary"
         primary_before = {name: file_hash(project / name) for name in original}
@@ -854,9 +908,13 @@ def observe(work, action, media, suite):
             ui.image(f"settings-{width}x{height}")
 
     try:
-        if suite in {"metadata", "projects"}:
-            name, journey = (("metadata-negative-cancel-save-readback", metadata_journey) if suite == "metadata"
-                             else ("project-switch-and-cli-isolation", project_switch_and_isolation))
+        independent_journeys = {
+            "metadata": ("metadata-negative-cancel-save-readback", metadata_journey),
+            "projects": ("project-switch-and-cli-isolation", project_switch_and_isolation),
+            "cli-read": ("installed-cli-read-data-and-refusals", cli_read_journey),
+        }
+        if suite in independent_journeys:
+            name, journey = independent_journeys[suite]
             if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
                 if scenario("project-picker-and-saved-config", select_project):
                     scenario(name, journey)
