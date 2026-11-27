@@ -8264,10 +8264,9 @@ final class NormalAppUITests: XCTestCase {
         return labels
     }
 
-    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement) throws -> Int {
+    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement, guidedTexts: [String]? = nil) throws -> Int {
         let rows: [String]
-        if guidedProductSurface {
-            let texts = try guidedDiagnosticsTexts(panel)
+        if let texts = guidedTexts {
             let starts = texts.indices.filter { texts[$0] == "Core outcome" }
             try require(starts.count == 1 && starts[0] + 22 <= texts.count, "original core report rows do not match")
             rows = Array(texts[starts[0]..<(starts[0] + 22)])
@@ -8628,6 +8627,14 @@ final class NormalAppUITests: XCTestCase {
             try require(matches.allSatisfy { $0 <= 1 }, "current iOS diagnostics badges are ambiguous", check: .singleton)
             guard matches.allSatisfy({ $0 == 1 }) else { return nil }
             diagnosticCut = "settled-badges"
+            try require(labels.filter { $0 == "Tool observations from this run" }.count == 1,
+                        "current acknowledged iOS diagnostics report is missing or ambiguous")
+            for title in ["macOS developer selection", "Git version", "Xcode version and build"] {
+                try require(labels.filter { $0 == title }.count == 1, "fixed iOS diagnostics card is missing or repeated")
+            }
+            for title in ["Java runtime version", "Java compiler version"] {
+                try require(!labels.contains(title), "Android diagnostics cannot supply the iOS observation")
+            }
             let contexts = labels.filter(contextMatch.accepts)
             // Read the fixed receipt paragraph even when WebKit splits its
             // timestamp, revision and acknowledgement into adjacent texts.
@@ -8667,18 +8674,21 @@ final class NormalAppUITests: XCTestCase {
             originalProvenance = nil
         }
         diagnosticCut = "settled-report"
-        for query in guidedProductSurface ? [fresh] : [fresh, phase, outcome, finality] {
-            _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
-        }
-        for label in ["macOS developer selection", "Git version", "Xcode version and build"] {
-            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)),
-                           "fixed iOS diagnostics card is missing or repeated")
-        }
-        for label in ["Java runtime version", "Java compiler version"] {
-            try require(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)).count == 0,
-                        "Android diagnostics cannot supply the iOS observation")
+        if !guidedProductSurface {
+            for query in [fresh, phase, outcome, finality] {
+                _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
+            }
+            for label in ["macOS developer selection", "Git version", "Xcode version and build"] {
+                _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)),
+                               "fixed iOS diagnostics card is missing or repeated")
+            }
+            for label in ["Java runtime version", "Java compiler version"] {
+                try require(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)).count == 0,
+                            "Android diagnostics cannot supply the iOS observation")
+            }
         }
         let resources = "Core resource observations — provisional, not native finality"
+        let commandsAttempted: Int
         if guidedProductSurface {
             let summary = try waitElement(controls(panel, [.disclosureTriangle, .button], label: resources, prefix: true),
                                           in: panel, enabled: true, failures: failures)
@@ -8687,16 +8697,21 @@ final class NormalAppUITests: XCTestCase {
             // summary may report a different native center than its control.
             summary.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
             diagnosticCut = "core-disclosure-clicked"
-            let expanded = summary.value as? NSNumber
-            let staticCount = panel.staticTexts.matching(identifier: "Core outcome").count
-            let namedCount = named(panel, "Core outcome").count
-            print("MRK_GUIDED_IOS_LEDGER=v1;expanded=\(expanded?.boolValue == true ? 1 : 0);static=\(min(staticCount, 5));named=\(min(namedCount, 5))")
+            var ledger = try guidedDiagnosticsTexts(panel)
+            while !ledger.contains("Core outcome") {
+                try require(!ledger.contains(where: failures.contains), "terminal iOS diagnostics refusal")
+                try clock.progress(until: journeyDeadline ?? wholeDeadline)
+                ledger = try guidedDiagnosticsTexts(panel)
+            }
+            diagnosticCut = "core-ledger-visible"
+            try require(!ledger.contains(where: failures.contains), "terminal iOS diagnostics refusal")
+            commandsAttempted = try diagnosticsCoreReport(panel, guidedTexts: ledger)
         } else {
             try expand(panel, prefix: resources, renderer: renderer)
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
+            diagnosticCut = "core-ledger-visible"
+            commandsAttempted = try diagnosticsCoreReport(panel)
         }
-        _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
-        diagnosticCut = "core-ledger-visible"
-        let commandsAttempted = try diagnosticsCoreReport(panel)
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
         diagnosticCut = "core-ledger"
         _ = try remaining(1)
