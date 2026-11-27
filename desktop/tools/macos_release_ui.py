@@ -1250,6 +1250,9 @@ def observe(work, action, media, suite):
                 fact["stageIndexObserved"] = index_readback(b"README.md\n")
             verify_change(True)
             fact["onlyReviewedBlobStaged"] = True
+            # Apply invalidates the reader's captured project revision. The
+            # ordinary UI requires a fresh read admission before Refresh.
+            press_after_settlement("Local Git read status", "Check local Git access")
             press_after_settlement("Local Git changes", "Refresh changes")
             until(lambda: native_control("Local Git read status", "AXHeading", "Local Git read finished")["matches"] == 1,
                   55, "git-index-original-stage-readback")
