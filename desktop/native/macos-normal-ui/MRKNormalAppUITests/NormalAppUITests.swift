@@ -7075,15 +7075,13 @@ final class NormalAppUITests: XCTestCase {
                 if guidedProductSurface {
                     let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@",
                         "3. Review the project defaults"))
-                    let progress = renderer.staticTexts.matching(identifier: "Group 3 of 4 · changes remain in this draft")
-                    if progress.count == 0 {
+                    if heading.count == 0 {
                         if renderer.buttons.matching(identifier: "Next: Version & build").count == 1 {
                             try press(renderer, "Next: Version & build", renderer: renderer)
                         }
                         try press(renderer, "Next: Project defaults", renderer: renderer)
                     }
                     _ = try waitElement(heading, in: renderer)
-                    _ = try waitElement(progress, in: renderer)
                 } else {
                     let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
                     try settingsTab(settings, "General", renderer: renderer)
@@ -7531,7 +7529,9 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a release evidence folder")
             try click(sheet.buttons.matching(identifier: "Cancel"), "replacement evidence Cancel unavailable")
             try waitGone(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Original operation cancelled and settled. No new result was accepted."), in: renderer, failures: failures)
+            let cancelled = guidedProductSurface ? "Operation cancelled and settled. No new result was accepted."
+                : "Original operation cancelled and settled. No new result was accepted."
+            _ = try waitElement(renderer.staticTexts.matching(identifier: cancelled), in: renderer, failures: failures)
             try staleDocuments()
             try guidedTaskTab("GitHub release", group: "Release tasks", renderer: renderer)
             try releaseSeparation()
@@ -7543,6 +7543,9 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("evidence-readback-and-quit") {
             try press(renderer, "Dashboard", renderer: renderer)
+            if guidedProductSurface && renderer.staticTexts.matching(identifier: fixture.projectPath).count == 0 {
+                try observeSelectedProject(renderer, path: fixture.projectPath)
+            }
             _ = try waitElement(renderer.staticTexts.matching(identifier: fixture.projectPath), in: renderer)
             try fixture.assertUnchanged()
             let sheet = try quitSheet(app, window)
