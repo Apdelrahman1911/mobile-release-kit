@@ -1225,8 +1225,8 @@ def observe(work, action, media, suite):
                       15, "git-control-not-enabled-" + name)
                 native_control(region, "AXButton", name, press=True)
 
-            ui.click("Check local Git actions", category="button", region="Local Git action status")
-            ui.click("Review files to stage", category="button")
+            press_after_settlement(status_region, "Check local Git actions")
+            press_after_settlement("Local Git changes", "Review files to stage")
             await_heading("Review files to stage")
             need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-stage-review-path")
             apply = native_control(review, "AXButton", "Stage these files")
@@ -1235,7 +1235,7 @@ def observe(work, action, media, suite):
             native_control(status_region, "AXButton", "Close review, keep draft", press=True)
             verify_change(False)
             fact["cancelPreservedIndexAndHead"] = True
-            ui.click("Review files to stage", category="button")
+            press_after_settlement("Local Git changes", "Review files to stage")
             await_heading("Review files to stage")
             need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-stage-review-path")
             need(native_control(review, "AXCheckBox", reviewed).get("checked") is False, "git-stage-consent-starts-clear")
