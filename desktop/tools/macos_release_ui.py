@@ -1182,15 +1182,14 @@ def observe(work, action, media, suite):
                             region = review if name in {"Review files to stage", "Review files to unstage"} else status_region
                             if native_control(region, "AXHeading", name)["matches"] == 1:
                                 return True
-                            if region == status_region:
-                                check = native_control(status_region, "AXButton", "Check action")
-                                if check["matches"] == 1 and check.get("enabled") is True:
-                                    # Apply can scroll the original status out of
-                                    # view. This requests only the original read.
-                                    native_control(status_region, "AXButton", "Check action", press=True)
-                                    fact["originalStatusReads"] += 1
-                                    next_read = time.monotonic() + 5
-                                    return False
+                            # Preparing and applying both own native requests.
+                            # Their original status can lie outside the capped tree.
+                            check = native_control(status_region, "AXButton", "Check action")
+                            if check["matches"] == 1 and check.get("enabled") is True:
+                                native_control(status_region, "AXButton", "Check action", press=True)
+                                fact["originalStatusReads"] += 1
+                                next_read = time.monotonic() + 5
+                                return False
                         if (tree["truncated"] and name in {"Review files to stage", "Review files to unstage"}
                                 and review_scrolls < 3 and scroll_visible_review(tree)):
                             fact["reviewViewportScrolls"] += 1
