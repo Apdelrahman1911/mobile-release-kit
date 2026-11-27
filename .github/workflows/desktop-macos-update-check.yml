@@ -219,6 +219,7 @@ jobs:
             --source "$RELEASE_SOURCE" --tree "$release_tree" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN" --selection "$work/selection.json"
       - name: Prepare the existing protected Xcode fixture on this disposable host
+        id: protected_xcode
         if: github.ref == 'refs/heads/verify/macos-0213-recovery-project' && inputs.additional_ui == 'unsigned-ios-xctest' && matrix.mode == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture
         timeout-minutes: 36
         env:
@@ -231,9 +232,8 @@ jobs:
           script=desktop/tools/prepare_ci_xcode.py
           printf '%s  %s\n' d13eadc42dfd7ff491116f49c1c5582998796a7375e87e724540117f4decce1e "$script" |
             shasum -a 256 -c
-          mkdir -p "$MRK_UPDATE_WORK/evidence"
           sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
-            /usr/bin/python3 -I -B "$script" | tee "$MRK_UPDATE_WORK/evidence/prepare-xcode.json"
+            /usr/bin/python3 -I -B "$script" | tee "$MRK_UPDATE_WORK/prepare-xcode.json"
       - name: Execute the production lifecycle or original installed XCTest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -244,6 +244,15 @@ jobs:
           set -euo pipefail
           python3 -I -B desktop/tools/macos_update_check.py --selection "$MRK_UPDATE_WORK/selection.json" \
             --work "$MRK_UPDATE_WORK" --mode '${{ matrix.mode }}'
+      - name: Retain the bounded protected Xcode fixture status
+        if: ${{ !cancelled() && (steps.protected_xcode.outcome == 'success' || steps.protected_xcode.outcome == 'failure') }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -f "$MRK_UPDATE_WORK/prepare-xcode.json" ]]; then
+            mkdir -p "$MRK_UPDATE_WORK/evidence"
+            cp "$MRK_UPDATE_WORK/prepare-xcode.json" "$MRK_UPDATE_WORK/evidence/"
+          fi
       - name: Retain scenario result and bounded evidence
         if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
