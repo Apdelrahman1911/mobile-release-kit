@@ -2111,7 +2111,7 @@ final class NormalAppUITests: XCTestCase {
         // Outer Phase owns preparation; XCTest borrows only comparison originals.
         // Real project registration/consent/Keychain remain ordinary app actions.
         private var androidCandidateProfile = false
-        private var candidateEmptyDirectories: Set<String> = []
+        private var fixtureEmptyDirectories: Set<String> = []
         private(set) var candidateCommit = "", candidateTree = "", candidateSHA256 = ""
         private var candidateHandoff: (Directory, File)?
         // Python encoded() wire form for these closed ASCII-key fixture schemas.
@@ -2283,8 +2283,8 @@ final class NormalAppUITests: XCTestCase {
                 name.hasPrefix("project/.git/") && (gitControls.contains(String(name.dropFirst(13))) ||
                     name.range(of:#"^project/\.git/objects/[0-9a-f]{2}/[0-9a-f]{38}$"#,options:.regularExpression) != nil)
             } && Set(files.keys).isSuperset(of:originals.keys),"candidate Git closed leaf roles")
-            candidateEmptyDirectories = ["project/.git/objects/info","project/.git/objects/pack","project/.git/refs/tags"]
-            let expectedDirs = Set(Self.ancestors(Set(files.keys))).union(candidateEmptyDirectories)
+            fixtureEmptyDirectories = ["project/.git/objects/info","project/.git/objects/pack","project/.git/refs/tags"]
+            let expectedDirs = Set(Self.ancestors(Set(files.keys))).union(fixtureEmptyDirectories)
             try Self.need(Set(dirs.keys) == expectedDirs && expectedDirs.count + anchors.count + 18 + 34 <= 256,
                           "candidate original directory census")
             rootPath = root
@@ -3310,7 +3310,7 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(closeErrors.isEmpty, "Android input consuming close failed")
         }
         private func androidInputRoster(outputsMayExist: Bool) throws {
-            let leaves = Set(current.keys), expectedDirectories = Set(Self.ancestors(leaves)).union(candidateEmptyDirectories)
+            let leaves = Set(current.keys), expectedDirectories = Set(Self.ancestors(leaves)).union(fixtureEmptyDirectories)
             try Self.need(Set(directories.keys) == expectedDirectories, "Android input directory roster")
             for path in expectedDirectories.sorted() {
                 guard let original = directories[path] else { throw Refusal.condition("fixture: Android input parent absent") }
@@ -4230,7 +4230,7 @@ final class NormalAppUITests: XCTestCase {
         private func checkRoster() throws {
             for value in anchors { try checkDirectory(value) }
             let leafPaths = Set(current.keys)
-            let expectedDirectories = Set(Self.ancestors(leafPaths)).union(candidateEmptyDirectories)
+            let expectedDirectories = Set(Self.ancestors(leafPaths)).union(fixtureEmptyDirectories)
             try Self.need(Set(directories.keys) == expectedDirectories, "unexpected registered directory")
             for path in expectedDirectories.sorted() {
                 guard let directory = directories[path] else { throw Refusal.condition("fixture: directory absent") }
@@ -4332,6 +4332,13 @@ final class NormalAppUITests: XCTestCase {
                 try Self.need(originals.count == 9 && Self.ancestors(Set(originals.keys)).count == 9
                     && originals.values.reduce(0, { $0 + $1.count }) == 7264,
                     "iOS fixed public input census")
+                // Xcode 26.6 creates this empty SwiftPM scaffolding on its first archive.
+                // Admit it at fixture creation and retain its descriptors, so later roster
+                // checks still reject every new, missing or substituted project entry.
+                let workspace = "project/ios/MRKObserved.xcodeproj/project.xcworkspace/xcshareddata"
+                fixtureEmptyDirectories = [workspace, workspace + "/swiftpm", workspace + "/swiftpm/configuration"]
+                try Self.need(fixtureEmptyDirectories.isDisjoint(with: Self.ancestors(Set(originals.keys))),
+                              "iOS workspace setup overlaps bundled inputs")
                 iosUnsignedProfile = true
             }
             if androidPositive {
@@ -4464,7 +4471,8 @@ final class NormalAppUITests: XCTestCase {
             directories[""] = root // Replace only admitted facts; never adopt or close the FD twice.
             try Self.need(root.facts.uid == getuid() && root.facts.gid == getgid() && root.facts.mode & 0o7777 == 0o700,
                 "temporary parent policy refused")
-            for path in Self.ancestors(Set(originals.keys)) where !path.isEmpty {
+            let fixtureDirectories = Self.ancestors(Set(originals.keys)) + fixtureEmptyDirectories.sorted()
+            for path in fixtureDirectories where !path.isEmpty {
                 let (parent, name) = Self.parts(path), original = directories[parent]!
                 try Self.need(mkdirat(original.fd, name, 0o700) == 0, "exclusive directory creation failed")
                 let directory = try adoptDirectory(openat(original.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
