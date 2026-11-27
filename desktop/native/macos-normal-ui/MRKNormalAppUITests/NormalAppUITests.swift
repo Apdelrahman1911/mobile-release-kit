@@ -5207,7 +5207,13 @@ final class NormalAppUITests: XCTestCase {
             }
             throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)
         }
-        try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared", line: line)
+        let presentAtReadback = first.exists
+        let readyAtReadback = presentAtReadback && (!enabled || first.isEnabled)
+        if !readyAtReadback && snapshotObservation {
+            print("MRK_GUIDED_READBACK_LOST=v1;line=\(line);present=\(presentAtReadback ? 1 : 0)")
+            observeSnapshotState(root, waiter: result, selectedRecoveryProject: selectedRecoveryProject)
+        }
+        try require(readyAtReadback, "expected UI condition disappeared", line: line)
         return first
     }
     @MainActor private func waitForSnapshotIdentity(_ query: XCUIElementQuery, in renderer: XCUIElement,
@@ -5908,7 +5914,7 @@ final class NormalAppUITests: XCTestCase {
                         "guided product surface requires the scoped signed candidate")
             let project = controls(renderer, [.button], label: "Choose project folder")
             _ = try waitElement(project, in: renderer, enabled: true, timeout: 24,
-                                failures: Self.guidedWorkspaceFailures)
+                                failures: Self.guidedWorkspaceFailures, snapshotObservation: true)
         } else {
             try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         }
@@ -7439,7 +7445,10 @@ final class NormalAppUITests: XCTestCase {
                         "a previous observation is still presented as a current document result")
         }
         @MainActor func releaseSeparation() throws {
-            for label in ["Candidate evidence producer run ID", "Original artifact source commit", "Original marketing version", "Original build number"] {
+            let labels = guidedProductSurface
+                ? ["Candidate evidence producer run ID", "Artifact source commit", "Marketing version", "Build number"]
+                : ["Candidate evidence producer run ID", "Original artifact source commit", "Original marketing version", "Original build number"]
+            for label in labels {
                 let input = try field(renderer, label)
                 try require(input.value as? String == "", "saved evidence populated a protected-release input")
             }
