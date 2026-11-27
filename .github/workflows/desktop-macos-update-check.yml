@@ -99,6 +99,7 @@ jobs:
               ("sdkroot-absent", [anchor, "-version", "-sdk", "iphoneos", "Path"], False),
               ("sdk-info", [anchor, "-version", "-sdk", "iphoneos"], True),
               ("xcrun", ["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-path"], True),
+              ("bound-sdk", [anchor, "-version", "-sdk", str(sdk), "Path"], True),
           )
           report = {"selectedSDK": sdk.name}
           with tempfile.TemporaryDirectory(prefix="mrk-xcode-path-") as work:
@@ -120,6 +121,11 @@ jobs:
                   report[label] = dict(returnCode=result.returncode,
                       stdoutLineCount=len(lines), recognizedSDKPaths=paths[:4],
                       exactMatch=result.stdout.strip() == str(sdk), stderrNonempty=bool(result.stderr))
+                  if len(paths) == 1:
+                      reported = Path(paths[0])
+                      report[label]["sameFilesystemObject"] = reported.exists() and reported.samefile(sdk)
+                      report[label]["directAliasToBoundSDK"] = (reported.parent == sdk_parent
+                          and reported.is_symlink() and reported.readlink() == Path(sdk.name))
           print(json.dumps(report, sort_keys=True))
           PY
 
