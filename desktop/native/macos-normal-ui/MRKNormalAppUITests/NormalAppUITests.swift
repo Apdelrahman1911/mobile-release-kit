@@ -8224,22 +8224,53 @@ final class NormalAppUITests: XCTestCase {
 
     // One ordinary current diagnostics run, not full doctor or project-code execution.
     // No new observer, IPC, app hook or fixture bytes; queries use shipped AX content.
-    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement) throws -> Int {
-        let query = panel.staticTexts
-        try require(query.count <= 256, "diagnostics accessible report exceeds its finite bound")
-        let texts = query.allElementsBoundByIndex
-        try require(!texts.isEmpty && texts.count <= 256, "diagnostics accessible report exceeds its finite bound")
-        var starts: [Int] = []
-        for index in texts.indices {
-            _ = try remaining(1)
-            if try staticTextContent(texts[index]) == "Core outcome" { starts.append(index) }
+    @MainActor private func guidedDiagnosticsTexts(_ panel: XCUIElement) throws -> [String] {
+        _ = try remaining(1)
+        var pending = Array(try panel.snapshot().children.reversed())
+        var labels: [String] = []
+        var visited = 0
+        while let item = pending.popLast() {
+            visited += 1
+            let children = item.children
+            guard visited + pending.count + children.count <= 1024 else {
+                throw Refusal.condition("iOS diagnostics snapshot exceeds its bound")
+            }
+            if item.elementType == .staticText {
+                guard labels.count < 256 else { throw Refusal.condition("iOS diagnostics text exceeds its finite bound") }
+                let value = item.value
+                labels.append(try Self.staticTextContent(value: value, label: value is String ? "" : item.label)
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            pending.append(contentsOf: children.reversed())
         }
-        try require(starts.count == 1, "original core report anchor is missing or ambiguous")
-        let start = starts[0]
+        _ = try remaining(1)
+        return labels
+    }
+
+    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement) throws -> Int {
+        let rows: [String]
+        if guidedProductSurface {
+            let texts = try guidedDiagnosticsTexts(panel)
+            let starts = texts.indices.filter { texts[$0] == "Core outcome" }
+            try require(starts.count == 1 && starts[0] + 22 <= texts.count, "original core report rows do not match")
+            rows = Array(texts[starts[0]..<(starts[0] + 22)])
+        } else {
+            let query = panel.staticTexts
+            try require(query.count <= 256, "diagnostics accessible report exceeds its finite bound")
+            let texts = query.allElementsBoundByIndex
+            try require(!texts.isEmpty && texts.count <= 256, "diagnostics accessible report exceeds its finite bound")
+            var starts: [Int] = []
+            for index in texts.indices {
+                _ = try remaining(1)
+                if try staticTextContent(texts[index]) == "Core outcome" { starts.append(index) }
+            }
+            try require(starts.count == 1, "original core report anchor is missing or ambiguous")
+            let start = starts[0]
+            try require(start + 22 <= texts.count, "original core report rows are incomplete")
+            rows = try texts[start..<(start + 22)].map { try staticTextContent($0, limit: 64) }
+        }
         // Two presentation rows, then the nine immutable lifetime key/value rows.
         // Never filter away unknown rows or combine text from another AX subtree.
-        try require(start + 22 <= texts.count, "original core report rows are incomplete")
-        let rows = try texts[start..<(start + 22)].map { try staticTextContent($0, limit: 64) }
         try require(rows.allSatisfy { $0.utf8.count <= 64 }, "core scalar presentation is not bounded")
         try require(rows[0] == "Core outcome" && rows[1] == "complete" && rows[2] == "Commands attempted",
                     "the actual core outcome is not a complete finite check")
@@ -8570,23 +8601,7 @@ final class NormalAppUITests: XCTestCase {
         let contextMatch = StaticTextMatch.edges(contextPrefix, contextSuffix)
         let provenanceMatch = StaticTextMatch.suffix(provenanceSuffix)
         @MainActor func guidedReport() throws -> (context: String, provenance: String)? {
-            _ = try remaining(1)
-            var pending: [any XCUIElementSnapshot] = [try panel.snapshot()]
-            var labels: [String] = []
-            var visited = 0
-            while let item = pending.popLast() {
-                visited += 1
-                guard visited + pending.count + item.children.count <= 1024 else {
-                    throw Refusal.condition("iOS diagnostics badge snapshot exceeds its bound")
-                }
-                if item.elementType == .staticText {
-                    let value = item.value
-                    let text = try Self.staticTextContent(value: value, label: value is String ? "" : item.label)
-                    labels.append(text.trimmingCharacters(in: .whitespacesAndNewlines))
-                }
-                pending.append(contentsOf: item.children.reversed())
-            }
-            _ = try remaining(1)
+            let labels = try guidedDiagnosticsTexts(panel)
             try require(!labels.contains(where: failures.contains), "terminal iOS diagnostics refusal")
             let adjacent = zip(labels, labels.dropFirst()).map { pair in pair.0 + " " + pair.1 }
             let matches = ["Phase: settled", "Outcome: complete", "Native finality: settled"].map { caption in
@@ -8662,6 +8677,7 @@ final class NormalAppUITests: XCTestCase {
             try expand(panel, prefix: resources, renderer: renderer)
         }
         _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
+        diagnosticCut = "core-ledger-visible"
         let commandsAttempted = try diagnosticsCoreReport(panel)
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
         diagnosticCut = "core-ledger"
