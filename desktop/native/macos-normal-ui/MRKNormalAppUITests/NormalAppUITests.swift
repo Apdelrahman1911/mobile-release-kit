@@ -5970,9 +5970,19 @@ final class NormalAppUITests: XCTestCase {
         let operationLabel = guidedProductSurface ? "Private-input operation" : "Original private-input operation"
         let original = try waitElement(named(storage, operationLabel), in: storage,
                                        timeout: 48, failures: Self.privateInputFailures)
-        try privateValue(storage, original, label: "Private-input operation action", value: action, timeout: 48)
-        try privateValue(storage, original, label: "Private-input operation phase", value: phase, timeout: 48)
-        try privateValue(storage, original, label: "Private-input operation settlement", value: "known", timeout: 48)
+        for (field, value) in [("action", action), ("phase", phase), ("settlement", "known")] {
+            do {
+                try privateValue(storage, original, label: "Private-input operation \(field)", value: value, timeout: 48)
+            } catch {
+                if guidedProductSurface {
+                    let group = named(original, "Private-input operation \(field)").count > 0 ? 1 : 0
+                    let observed = original.staticTexts.matching(identifier: value).count > 0 ? 1 : 0
+                    let preview = named(storage, "Explicit private-input review").count > 0 ? 1 : 0
+                    print("MRK_GUIDED_VAULT_STATUS=v1;action=\(action);field=\(field);group=\(group);value=\(observed);preview=\(preview)")
+                }
+                throw error
+            }
+        }
         if mutation {
             let outcomeLabel = guidedProductSurface ? "Where your keys are kept" : "Private-input storage"
             try privateValue(storage, original, label: outcomeLabel + " effect", value: "known-applied")
@@ -8832,8 +8842,11 @@ final class NormalAppUITests: XCTestCase {
             try stage("ios-unsigned-review") {
                 try press(renderer, "Releases", renderer: renderer)
                 try guidedTaskTab("iOS build", group: "Release tasks", renderer: renderer)
+                // The review button unmounts when the prepared consent appears.
+                // XCTest queries are live, so anchor the original panel to a
+                // persistent control before verifying the consent and result.
                 let panel = try waitElement(named(renderer, panelLabel)
-                    .containing(.button, identifier: "Review saved iOS inputs"), in: renderer)
+                    .containing(.button, identifier: "Refresh saved configuration"), in: renderer)
                 selected = panel
                 try require(named(panel, "Completed local unsigned iOS archive observation").count == 0
                     && named(panel, statusLabel).count == 0, "iOS prior operation cannot supply this journey")
