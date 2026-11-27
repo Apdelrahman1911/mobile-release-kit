@@ -23,38 +23,6 @@ VERSION_FILE = Path("public/version.properties")
 CONFIG_FILE = Path("release/mobile-release.json")
 PAYLOAD_PATTERN = r"[/]MobileReleaseKitPayload\.app/Contents/MacOS/mobile-release-kit-desktop( |$)"
 CONSOLE_OCR = Path(__file__).with_name("macos_release_ui_privacy.swift")
-# Targeted System Events query for the Git form omitted by the pinned driver's
-# node ceiling. Only this test's exact region and control facts leave the query.
-GIT_REVIEW_JXA = """function run(argv) {
-  const [pid, regionName, wantedRole, name, action] = argv;
-  const events = Application('System Events');
-  const processes = events.processes.whose({unixId: Number(pid)});
-  if (processes.length !== 1 || !processes[0].frontmost()) return JSON.stringify({error: 'not-frontmost'});
-  const windows = processes[0].windows();
-  if (windows.length !== 1) return JSON.stringify({error: 'window-count'});
-  const read = (item, key) => { try { return item[key](); } catch (_) { return null; } };
-  const named = (item, title) => ['name', 'title', 'description'].some(key => read(item, key) === title);
-  const all = windows[0].entireContents();
-  if (all.length > 4096) return JSON.stringify({error: 'window-bound'});
-  const regions = all.filter(item => ['AXGroup', 'AXLandmarkRegion'].includes(read(item, 'role')) &&
-    named(item, regionName));
-  if (regions.length !== 1) return JSON.stringify({matches: 0, regions: regions.length});
-  const elements = regions[0].entireContents();
-  if (elements.length > 256) return JSON.stringify({error: 'region-bound'});
-  const controls = elements.filter(item => read(item, 'role') === wantedRole &&
-    (named(item, name) || (wantedRole === 'AXStaticText' && read(item, 'value') === name)));
-  if (controls.length !== 1) return JSON.stringify({matches: controls.length, regions: 1});
-  const control = controls[0];
-  const enabled = read(control, 'enabled');
-  const value = wantedRole === 'AXCheckBox' ? read(control, 'value') : null;
-  const checked = (value === 1 || value === '1' || value === true) ? true :
-    (value === 0 || value === '0' || value === false) ? false : null;
-  if (action === 'press' && enabled === true && ['AXButton', 'AXCheckBox'].includes(wantedRole)) {
-    control.click();
-    return JSON.stringify({matches: 1, regions: 1, enabled, checked, pressed: true});
-  }
-  return JSON.stringify({matches: 1, regions: 1, enabled, checked, pressed: false});
-}"""
 PAGE_HEADINGS = {
     "Overview": "Get your app ready.",
     "Build & release": "Build and release your app",
@@ -1108,11 +1076,13 @@ def observe(work, action, media, suite):
 
             def native_control(region, role, name, *, press=False):
                 fact["nativeReviewQueries"] += 1
-                checked = call("/usr/bin/osascript", "-l", "JavaScript", "-e", GIT_REVIEW_JXA,
+                checked = call("/usr/bin/swift", str(CONSOLE_OCR), "git-review",
                                str(ui.payload_pid()), region, role, name, "press" if press else "inspect",
                                timeout=15, check=False)
                 need(checked.returncode == 0 and len(checked.stdout) <= 1024, "git-native-review-query-failed")
                 observed = json.loads(checked.stdout)
+                need(observed.get("error") not in {"ax-unavailable", "not-frontmost", "window", "window-bound", "region-bound"},
+                     "git-native-review-unavailable-" + str(observed.get("error")))
                 need("error" not in observed and observed["regions"] <= 1 and observed["matches"] <= 1,
                      "git-native-review-query-ambiguous")
                 if press:
