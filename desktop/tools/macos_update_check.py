@@ -2958,6 +2958,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestGuidedIOSTerminal", r"(?m)^MRK_GUIDED_IOS_TERMINAL=v1;(native-reason|failure)=([a-z-]{1,24}|[0-9]{1,2})$"),
         ("xctestGuidedVaultOpen", r"(?m)^MRK_GUIDED_VAULT_OPEN=v1;operation=([01]);action=([01]);uninitialized=([01]);closed=([01])$"),
         ("xctestGuidedVaultStatus", r"(?m)^MRK_GUIDED_VAULT_STATUS=v1;action=([a-z-]{1,26});field=(action|phase|settlement);group=([01]);value=([01]);preview=([01])$"),
+        ("xctestGuidedVaultAssessment", r"(?m)^MRK_GUIDED_VAULT_ASSESSMENT=v1;stage=(heading|envelope|native|service|release)$"),
         ("xctestGuidedIOSReport", r"(?m)^MRK_GUIDED_IOS_REPORT=v1;context=([0-5]);receipt=([0-5])$"),
         ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
         ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),

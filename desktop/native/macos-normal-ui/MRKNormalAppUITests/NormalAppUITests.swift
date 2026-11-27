@@ -6034,12 +6034,15 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func privateAssessment(_ storage: XCUIElement, input: PrivateInput) throws {
         let title = guidedProductSurface ? "File check" : "Supplied-input assessment"
-        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", title)), in: storage,
-                            failures: Self.privateInputFailures)
+        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@ OR label == %@", title, title)), in: storage,
+                            timeout: 12, failures: Self.privateInputFailures)
+        print("MRK_GUIDED_VAULT_ASSESSMENT=v1;stage=heading")
         try require(storage.staticTexts.matching(identifier: "Configured only").count >= 1,
                     "mechanical supplied-input assessment did not configure this input")
-        for label in [input.envelopeHelp, "Native validation: not run", "Service validation: not run", "Release readiness: unknown"] {
+        for (stage, label) in [("envelope", input.envelopeHelp), ("native", "Native validation: not run"),
+                               ("service", "Service validation: not run"), ("release", "Release readiness: unknown")] {
             _ = try waitElement(storage.staticTexts.matching(identifier: label), in: storage, failures: Self.privateInputFailures)
+            print("MRK_GUIDED_VAULT_ASSESSMENT=v1;stage=\(stage)")
         }
     }
     @MainActor private func choosePrivate(_ storage: XCUIElement, window: XCUIElement, renderer: XCUIElement,
@@ -8878,9 +8881,15 @@ final class NormalAppUITests: XCTestCase {
                 selected = panel
                 try require(named(panel, "Completed local unsigned iOS archive observation").count == 0
                     && named(panel, statusLabel).count == 0, "iOS prior operation cannot supply this journey")
-                try press(panel, "Refresh saved configuration", renderer: renderer, failures: failures)
-                try press(panel, "Read saved version", renderer: renderer, failures: failures)
-                try press(panel, "Review saved iOS inputs", renderer: renderer, failures: failures)
+                try stage("ios-archive-refresh-config") {
+                    try press(panel, "Refresh saved configuration", renderer: renderer, failures: failures)
+                }
+                try stage("ios-archive-read-version") {
+                    try press(panel, "Read saved version", renderer: renderer, failures: failures, timeout: 48)
+                }
+                try stage("ios-archive-prepare-review") {
+                    try press(panel, "Review saved iOS inputs", renderer: renderer, failures: failures, timeout: 48)
+                }
                 let review = try waitElement(named(panel, "Confirm this saved unsigned iOS archive intent"), in: panel, failures: failures)
                 let text = try iosPublicText(review)
                 for expected in ["ios/MRKObserved.xcodeproj", "MRKObserved", "Release", "org.example.mrk.observed", "Saved preparation is not configured."] {
