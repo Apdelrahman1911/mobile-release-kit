@@ -936,14 +936,18 @@ def observe(work, action, media, suite):
         need(granted_project() == secondary_id, "reopen-expanded-cli-authority")
         require_denied(primary_id)
         expected_primary = "Values: 1.0.0 · Build 1." if suite == "projects" else "Values: 1.0.1 · Build 2."
-        read_version(expected_primary)
-        checks["primarySavedVersionAndDenialOnReturn"] = True
         observe_pending_state("before-revocation")
         access_panel()
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "switch-cli-grant-revocation")
         require_denied(secondary_id)
+        checks["secondaryGrantRevokedAfterReturn"] = True
+        save()
+        ui.page("Overview")
+        read_version(expected_primary)
+        checks["primarySavedVersionAndDenialOnReturn"] = True
+        observe_pending_state("after-return-version-read")
         need(all(file_hash(path) == digest for path, digest in secondary_original.items())
              and all(file_hash(project / name) == digest for name, digest in primary_before.items()), "switch-changed-fixture")
         checks["bothFixturesPreservedAndGrantRevoked"] = True
@@ -1198,6 +1202,11 @@ def observe(work, action, media, suite):
                  window["y"] + 35 < y < min(window["y"] + window["height"] - 8, ui.screen["height"] - 65),
                  "readme-checkbox-outside-app-viewport")
             ui.command("element.click", snapshot_id=tree["snapshot_id"], id=select[0]["id"])
+            if suite == "git-index":
+                # The workspace journey already verifies the working-file diff.
+                # Leave that extra AX subtree closed for the separate index test.
+                git_index_journey(head)
+                return
             ui.click("Working changes", category="button")
             added_line = "+" + marker.strip().decode()
             diff = wait_for_original_read(lambda nodes: any(added_line in node["text"].splitlines()
@@ -1206,8 +1215,6 @@ def observe(work, action, media, suite):
             ui.reveal("Working-file changes", category="heading")
             need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
                  and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
-            if suite == "git-index":
-                git_index_journey(head)
         finally:
             need(readme.read_bytes() == initial + marker, "git-read-changed-the-synthetic-input")
             readme.write_bytes(initial)

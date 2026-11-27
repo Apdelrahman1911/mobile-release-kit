@@ -8533,16 +8533,23 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func iosCurrentArchiveIdentity(_ container: XCUIElement) throws -> LocalFixture.IOSArchiveIdentity {
-        let details = try unique(container.descendants(matching: .group).matching(identifier: "Archive details"),
-                                 "current unsigned Archive details missing or repeated")
+        let details = try waitElement(container.descendants(matching: .group).matching(identifier: "Archive details"),
+                                      in: container, timeout: 8, snapshotObservation: true)
+        // WebKit can expose a caption and value as consecutive static texts.
+        // Read the exact fields together, scoped to this original details group.
+        let text = try guidedDiagnosticsSnapshot(details).texts.joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         var values: [String] = []
-        for prefix in ["Archive operation ID: ", "Archive owner generation: "] {
-            let fields = try staticTextPrefix(details, prefix) { _ = try remaining(1) }
-            try require(fields.count == 1, "current unsigned archive identity absent or ambiguous", check: .singleton)
-            let field = fields[0]
-            let text = try staticTextContent(field)
-            try require(field.isHittable && text.hasPrefix(prefix), "current unsigned archive identity not visible")
-            values.append(String(text.dropFirst(prefix.count)))
+        for label in ["Archive operation ID:", "Archive owner generation:"] {
+            let field = try NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: label)
+                                                + #" +([0-9a-f]{32})(?= |$)"#)
+            let matches = field.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            try require(matches.count == 1 && text.components(separatedBy: label).count == 2,
+                        "current unsigned archive identity absent or ambiguous", check: .singleton)
+            guard let value = Range(matches[0].range(at: 1), in: text) else {
+                throw Refusal.condition("current unsigned archive identity range")
+            }
+            values.append(String(text[value]))
         }
         return try LocalFixture.IOSArchiveIdentity(operationID: values[0], ownerGeneration: values[1])
     }
@@ -8964,20 +8971,28 @@ final class NormalAppUITests: XCTestCase {
                 for (index, match) in observed.enumerated() {
                     try require(match, "iOS saved unsigned selection differs at field \(index + 1)")
                 }
-                let pair = try iosCurrentArchiveIdentity(review)
-                identity = pair
-                try fixture.beginIOSArchiveObservation(pair) { _ = try self.remaining(5) }
-                let consent = try waitElement(controls(review, [.checkBox], label:
-                    "I trust this project and authorize one unsigned archive of these saved inputs.", prefix: true), in: review, enabled: true)
-                try reveal(consent, in: renderer)
-                try require((consent.value as? String) == "0" || (consent.value as? NSNumber) == NSNumber(value: 0),
-                            "iOS trust consent must begin unchecked")
-                consent.click()
-                try require((consent.value as? String) == "1" || (consent.value as? NSNumber) == NSNumber(value: 1),
-                            "iOS explicit trust consent not observed")
-                try require(try iosCurrentArchiveIdentity(review) == pair, "iOS review identity changed before Start")
-                try fixture.confirmIOSArchiveStart(pair) { _ = try self.remaining(5) }
-                try press(review, "Create unsigned archive", renderer: renderer, failures: failures) // Exactly ONE Start.
+                try stage("ios-archive-original-identity") {
+                    identity = try iosCurrentArchiveIdentity(review)
+                }
+                guard let pair = identity else { throw Refusal.condition("iOS review original identity unavailable") }
+                try stage("ios-archive-fixture-before-start") {
+                    try fixture.beginIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                }
+                try stage("ios-archive-explicit-consent") {
+                    let consent = try waitElement(controls(review, [.checkBox], label:
+                        "I trust this project and authorize one unsigned archive of these saved inputs.", prefix: true), in: review, enabled: true)
+                    try reveal(consent, in: renderer)
+                    try require((consent.value as? String) == "0" || (consent.value as? NSNumber) == NSNumber(value: 0),
+                                "iOS trust consent must begin unchecked")
+                    consent.click()
+                    try require((consent.value as? String) == "1" || (consent.value as? NSNumber) == NSNumber(value: 1),
+                                "iOS explicit trust consent not observed")
+                }
+                try stage("ios-archive-start-once") {
+                    try require(try iosCurrentArchiveIdentity(review) == pair, "iOS review identity changed before Start")
+                    try fixture.confirmIOSArchiveStart(pair) { _ = try self.remaining(5) }
+                    try press(review, "Create unsigned archive", renderer: renderer, failures: failures) // Exactly ONE Start.
+                }
             }
             guard let panel = selected, let pair = identity else { throw Refusal.condition("iOS selected original absent") }
             try stage("ios-unsigned-original-result") {
