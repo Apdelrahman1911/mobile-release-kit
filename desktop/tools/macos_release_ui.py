@@ -669,10 +669,14 @@ def observe(work, action, media, suite):
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
 
     def cli_read_journey():
+        receipts = results["installedCliReads"] = {}
+
         def request(command, *args, kind):
-            reply = json.loads(call(str(CLI), command, *args, "--json").stdout)
+            process = call(str(CLI), command, *args, "--json", check=False)
+            reply = json.loads(process.stdout)
             data = reply["response"]
-            need(reply["version"] == 1 and data["kind"] == kind, f"cli-read-kind-{command}")
+            receipts[command] = {"return": process.returncode, "kind": data["kind"]}
+            need(process.returncode == 0 and reply["version"] == 1 and data["kind"] == kind, f"cli-read-kind-{command}")
             return data["value"]
 
         def reject(command, *args, code, reason):
@@ -689,8 +693,11 @@ def observe(work, action, media, suite):
         ui.click("Allow selected project for 1 hour", category="button")
         ui.node("1 project was allowed at last check", category="statictext", contains=True)
         service = request("status", kind="info")
-        need(service["readOnly"] is True and service["cachedObservationsAreAuthority"] is False and
-             service["readGrantAuthorizesExecution"] is False and service["requiresRunningDesktop"] is True and
+        # readOnly identifies the separate foreground history host. The live
+        # Desktop host can service separately approved operations. This grant cannot.
+        need(service["readOnly"] is False and service["cachedObservationsAreAuthority"] is False and
+             service["readGrantAuthorizesExecution"] is False and service["localChecksRequireSeparateGrant"] is True and
+             service["requiresRunningDesktop"] is True and
              0 < service["remainingAccessMs"] <= 3600000, "cli-session-read-only-contract")
         rows = request("projects", kind="projects")
         need(len(rows) == 1 and rows[0]["registeredInCurrentHost"] is True, "cli-only-current-project")
