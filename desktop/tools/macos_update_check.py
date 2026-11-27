@@ -2911,6 +2911,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestPackagedRequire", r"(?m)^MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=([0-9]{1,5});check=([a-z-]{1,20})$"),
         ("xctestProjectSelection", r"(?m)^MRK_GUIDED_PROJECT_SELECTION=v1;([a-z-]{1,30})=([0-5])$"),
         ("xctestSidebarNavigation", r"(?m)^MRK_GUIDED_NAV=v1;line=([0-9]{1,5});phase=(sidebar-scroll|hittable)$"),
+        ("xctestIOSToolDiagnosticCut", r"(?m)^MRK_GUIDED_IOS_TOOLS=v1;cut=([a-z-]{1,24});expired=([01])$"),
         ("xctestSelectFailure", r"(?m)^MRK_GUIDED_SELECT=v1;phase=(control|reveal|item|written-value);line=([0-9]{1,5})$"),
         ("xctestAndroidSourceFailure", r"(?m)^MRK_GUIDED_ANDROID_SOURCE=v1;role=(jdk|sdk|gradle);phase=(original-group|native-picker|returned-status|retained-selections)$"),
         ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),

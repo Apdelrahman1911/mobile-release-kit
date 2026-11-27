@@ -8343,10 +8343,20 @@ final class NormalAppUITests: XCTestCase {
             try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer,
                        keyboardOptions: guidedProductSurface ? ["Build / archive", "Validate an existing artifact"] : [])
         }
+        var diagnosticCut = "context-selected"
+        defer {
+            if guidedProductSurface {
+                let expired = caseClock?.firstFailure == "original case or stage deadline elapsed"
+                print("MRK_GUIDED_IOS_TOOLS=v1;cut=\(diagnosticCut);expired=\(expired ? 1 : 0)")
+            }
+        }
         let action = guidedProductSurface ? "Check this computer" : "Check build tools"
         let panel = try waitElement(named(renderer, "Observed build-tool checks")
             .containing(.button, identifier: action), in: renderer)
-        let failures = ["Original finality or status integrity is unknown", "Diagnostics status needs attention",
+        diagnosticCut = "panel-ready"
+        let integrityFailure = guidedProductSurface
+            ? "Finality or status integrity is unknown" : "Original finality or status integrity is unknown"
+        let failures = [integrityFailure, "Diagnostics status needs attention",
                         "Start reply unconfirmed", "Earlier / stale tool observations", "Phase: retained-unknown",
                         "Outcome: partial", "Outcome: failed", "Outcome: cancelled", "Outcome: timed-out", "Outcome: unavailable"]
         try require(panel.staticTexts.matching(identifier: "Tool observations from this run").count == 0
@@ -8356,12 +8366,14 @@ final class NormalAppUITests: XCTestCase {
         let start = try waitElement(panel.buttons.matching(identifier: action), in: panel,
                                     enabled: true, timeout: 10, failures: failures)
         try reveal(start, in: renderer)
+        diagnosticCut = "start-hittable"
         guard let wholeDeadline = journeyDeadline, let clock = caseClock else {
             throw Refusal.condition("iOS diagnostics requires the original archive clock")
         }
         journeyDeadline = min(wholeDeadline, try clock.end(within: 15))
         defer { journeyDeadline = wholeDeadline } // SAME absolute success cutoff, not renewed work.
         start.click() // Exactly one diagnostics Start; native work6/finality10 remain unchanged.
+        diagnosticCut = "start-clicked"
         let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))
         let phase = panel.staticTexts.matching(identifier: "Phase: settled")
         let outcome = panel.staticTexts.matching(identifier: "Outcome: complete")
@@ -8371,6 +8383,7 @@ final class NormalAppUITests: XCTestCase {
             " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe.")
         let textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
+        diagnosticCut = "settled-report"
         for query in [fresh, phase, outcome, finality] {
             _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
         }
@@ -8387,6 +8400,7 @@ final class NormalAppUITests: XCTestCase {
         _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
         let commandsAttempted = try diagnosticsCoreReport(panel)
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
+        diagnosticCut = "core-ledger"
         _ = try remaining(1)
         let currentText = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
         let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
@@ -8397,6 +8411,7 @@ final class NormalAppUITests: XCTestCase {
         for query in [fresh, phase, outcome, finality] {
             _ = try unique(query, "same original iOS report did not remain current and settled")
         }
+        diagnosticCut = "readback-confirmed"
         // Missing/unselected/version-mismatch rows remain observations. This
         // does not establish SDK completeness, native tool protection or signing.
     }
