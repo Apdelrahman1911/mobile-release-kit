@@ -3055,6 +3055,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestProjectSelection", r"(?m)^MRK_GUIDED_PROJECT_SELECTION=v1;([a-z-]{1,30})=([0-5])$"),
         ("xctestSidebarNavigation", r"(?m)^MRK_GUIDED_NAV=v1;line=([0-9]{1,5});phase=(sidebar-scroll|hittable)$"),
         ("xctestIOSToolDiagnosticCut", r"(?m)^MRK_GUIDED_IOS_TOOLS=v1;cut=([a-z-]{1,24});expired=([01])$"),
+        ("xctestGuidedIOSResultCut", r"(?m)^MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=(card-observed|identity-matched|bounded-text|result-facts|counts-verified)$"),
         ("xctestGuidedIOSTerminal", r"(?m)^MRK_GUIDED_IOS_TERMINAL=v1;(native-reason|failure)=([a-z-]{1,24}|[0-9]{1,2})$"),
         ("xctestGuidedVaultOpen", r"(?m)^MRK_GUIDED_VAULT_OPEN=v1;operation=([01]);action=([01]);uninitialized=([01]);closed=([01])$"),
         ("xctestGuidedVaultStatus", r"(?m)^MRK_GUIDED_VAULT_STATUS=v1;action=([a-z-]{1,26});field=(action|phase|settlement);group=([01]);value=([01]);preview=([01])$"),

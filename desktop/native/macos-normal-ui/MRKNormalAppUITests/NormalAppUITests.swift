@@ -8687,13 +8687,16 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func iosResult(_ result: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws -> (Int, Int64) {
         try require(try iosCurrentArchiveIdentity(result) == identity, "iOS current complete identity differs")
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=identity-matched")
         let text = try iosPublicText(result)
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=bounded-text")
         for required in ["This local artifact only", "Archive created and structurally checked — not a signed release.",
             "Archive bundle identity and saved version/build.", "Archive symbols under the saved symbols policy.",
             ".mobile-release/desktop-ios-archive/" + identity.operationID + "/archive.xcarchive"] {
             try require(text.contains(required), "iOS current unsigned result fact missing")
         }
         try require(!text.contains("Historical / retained context"), "iOS historical result refused")
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=result-facts")
         let expression = try NSRegularExpression(pattern: #"Saved version 1\.2\.3 · build 7\. ([1-9][0-9]{0,5}) observed entries · ([1-9][0-9]{0,9}) observed bytes\."#)
         let rows = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
         guard rows.count == 1, let entryRange = Range(rows[0].range(at: 1), in: text),
@@ -8701,6 +8704,7 @@ final class NormalAppUITests: XCTestCase {
               let bytes = Int64(text[byteRange]), entries <= 100_000, bytes <= 8 * 1024 * 1024 * 1024 else {
             throw Refusal.condition("iOS typed original result counts absent or outside bounds")
         }
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=counts-verified")
         return (entries, bytes) // Displayed original result, NOT a new archive census.
     }
 
@@ -9232,7 +9236,9 @@ final class NormalAppUITests: XCTestCase {
                 }
                 guard let result = resultCard else { throw Refusal.condition("iOS current terminal result absent") }
                 try stage("ios-archive-terminal-result-facts") {
-                    try reveal(result, in: renderer)
+                    // The read-only AX result region has no invocation target.
+                    // Its exact identity, visible text and bytes are checked below.
+                    print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=card-observed")
                     observed = try iosResult(result, identity: pair)
                 }
                 try stage("ios-archive-terminal-command-facts") {
@@ -9281,6 +9287,12 @@ final class NormalAppUITests: XCTestCase {
         } catch {
             let primary = error
             _ = clock.fail("unsigned iOS observation failed") // Never clear/replace a prior original failure.
+            if let pair = identity, !successBeforeCutoff, !normalQuitObserved {
+                let end = min(clock.deadline, ProcessInfo.processInfo.systemUptime + 5)
+                fixture.recordIOSArchiveFailureOutput(pair) {
+                    _ = try clock.remaining(1, before: end, cleanup: true)
+                }
+            }
             if let (app, window, _) = launched, let panel = selected, let pair = identity, !normalQuitObserved {
                 do { try settleFailedIOSArchive(app, window: window, panel: panel, identity: pair) }
                 catch { /* Same-original failure/unknown retained; teardown still consumes its originals. */ }
