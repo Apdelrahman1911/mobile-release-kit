@@ -10,6 +10,7 @@ import plistlib
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import time
 
@@ -46,6 +47,7 @@ SUITE_SCENARIOS = {
     "projects": {"native-console-admission", "project-picker-and-saved-config", "project-switch-and-cli-isolation"},
     "cli-read": {"native-console-admission", "project-picker-and-saved-config", "installed-cli-read-data-and-refusals"},
     "git-index": {"native-console-admission", "project-picker-and-saved-config", "git-index-review-stage-unstage"},
+    "vault-lifecycle": {"native-console-admission", "project-picker-and-saved-config", "vault-cancel-lock-reopen"},
 }
 METADATA_TITLE = Path("public/store/android/en-US/title.txt")
 
@@ -589,6 +591,68 @@ def observe(work, action, media, suite):
         ui.click("Refresh text", category="button")
         need(title() == replacement, "saved-public-text-readback")
 
+    def vault_journey():
+        vault = Path.home() / "Library/Application Support/dev.mobile-release-kit.desktop/credential-vault-v1"
+        controls = {"vault-lock": 0, "initialization-reservation": 48, "vault-header": 104}
+
+        def assert_no_header():
+            need(not os.path.lexists(vault / "vault-header"), "vault-header-created-before-approval")
+
+        def read_vault_state():
+            info = vault.lstat()
+            need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
+                 "new-vault-directory-custody")
+            need({path.name for path in vault.iterdir()} == controls.keys(), "unexpected-empty-vault-roster")
+            leaves = {}
+            for name, length in controls.items():
+                with os.fdopen(os.open(vault / name, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+                    item = os.fstat(stream.fileno())
+                    need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and item.st_uid == os.getuid() and
+                         item.st_dev == info.st_dev and stat.S_IMODE(item.st_mode) == 0o600 and item.st_size == length,
+                         "vault-control-custody-" + name)
+                    leaves[name] = (item.st_ino, hashlib.file_digest(stream, "sha256").hexdigest())
+            return info.st_ino, leaves
+
+        def await_status(label):
+            def observed():
+                rows = ui.command("tree.snapshot", limit=300)["nodes"]
+                return any(label in (row["name"], row["text"]) for row in rows if row["visible"])
+            until(observed, 45, "vault-state-" + label)
+
+        need(not os.path.lexists(vault), "existing-vault-is-outside-test-scope")
+        facts = results["vaultLifecycle"] = {}
+        ui.page("Signing & accounts")
+        ui.click("Open encrypted vault", category="button")
+        await_status("Encrypted vault · uninitialized")
+        ui.click("Review vault initialization…", category="button")
+        await_status("Create a new encrypted vault?")
+        assert_no_header()
+        ui.click("Discard review", category="button", region="Explicit private-input review")
+        await_status("Encrypted vault · uninitialized")
+        assert_no_header()
+        facts["cancelDidNotInitialize"] = True
+        ui.click("Review vault initialization…", category="button")
+        ui.click("Create encrypted vault", category="button", region="Explicit private-input review")
+        await_status("Encrypted vault · unlocked")
+        initial = read_vault_state()
+        facts["createdOwnedEmptyVault"] = True
+        ui.click("Lock vault…", category="button")
+        ui.click("Go back", category="button", region="Confirm private-input lock")
+        await_status("Encrypted vault · unlocked")
+        need(read_vault_state() == initial, "cancelled-lock-changed-vault")
+        ui.click("Lock vault…", category="button")
+        ui.click("Lock vault", category="button", region="Confirm private-input lock")
+        await_status("Storage closed")
+        need(read_vault_state() == initial, "lock-changed-vault-identity")
+        facts["lockPreservedExactVault"] = True
+        ui.click("Open encrypted vault", category="button")
+        await_status("Encrypted vault · locked")
+        ui.click("Unlock vault", category="button")
+        await_status("Encrypted vault · unlocked")
+        need(read_vault_state() == initial and all(file_hash(project / path) == digest for path, digest in original.items()),
+             "reopen-changed-synthetic-vault-or-project")
+        facts["sameVaultReopenedAndUnlocked"] = True
+
     def permission_lifecycle():
         ui.page("Project settings")
         ui.click("Advanced · CLI / AI access", contains=True)
@@ -964,6 +1028,7 @@ def observe(work, action, media, suite):
             "projects": ("project-switch-and-cli-isolation", project_switch_and_isolation),
             "cli-read": ("installed-cli-read-data-and-refusals", cli_read_journey),
             "git-index": ("git-index-review-stage-unstage", git_observation),
+            "vault-lifecycle": ("vault-cancel-lock-reopen", vault_journey),
         }
         if suite in independent_journeys:
             name, journey = independent_journeys[suite]
