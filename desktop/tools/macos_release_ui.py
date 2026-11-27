@@ -281,7 +281,7 @@ class UI:
         raise AssertionError(f"target-not-reachable-in-app-viewport-{name}")
 
     def click(self, name, *, category=None, contains=False, region=None):
-        for attempt in range(2):
+        for attempt in range(4):
             snapshot, node = self.reveal(name, category=category, contains=contains, region=region,
                                          enabled=True, actionable=True)
             try:
@@ -289,11 +289,13 @@ class UI:
                 return
             except Exception as error:
                 # The pinned action rejects a stale snapshot before sending
-                # any pointer event. Re-observe once, with the same checks.
+                # any pointer event. Let the AX tree settle and resolve the
+                # exact same target again. Never repeat an uncertain click.
                 payload = getattr(error, "payload", None)
-                if (attempt or getattr(error, "status", None) != 409 or not isinstance(payload, dict) or
+                if (attempt == 3 or getattr(error, "status", None) != 409 or not isinstance(payload, dict) or
                     (payload.get("error") or {}).get("code") != "stale_snapshot"):
                     raise
+                time.sleep(0.75)
 
     def edit(self, name, text):
         self.click(name, category="textfield", contains=True)
