@@ -7851,6 +7851,31 @@ final class NormalAppUITests: XCTestCase {
         let failures = ["No new offline-check outcome was confirmed", cleanupFailure]
         let unconfirmed = "The original command acknowledgement is unconfirmed. Do not repeat Start. A status observation can help cancel or settle that original operation, but cannot create consent."
         let historical = "This is retained original-operation data, not permission for the current editor or project context."
+        @MainActor func offlineFailureCount(_ panel: XCUIElement) throws -> Int {
+            let terminal = failures + [unconfirmed, historical, "Historical / stale context"]
+            if !guidedProductSurface {
+                return try staticTextFailureCount(panel, terminal) { _ = try remaining(1) }
+            }
+            _ = try remaining(1)
+            var pending = try panel.snapshot().children
+            var visited = 0
+            var matches = 0
+            while let node = pending.popLast() {
+                visited += 1
+                let children = node.children
+                guard visited + pending.count + children.count <= 1024 else {
+                    throw Refusal.condition("offline finality snapshot exceeds its bound")
+                }
+                if node.elementType == .staticText {
+                    let value = node.value
+                    let observed = try Self.staticTextContent(value: value, label: value is String ? "" : node.label)
+                    if terminal.contains(observed) { matches += 1 }
+                }
+                pending.append(contentsOf: children)
+            }
+            _ = try remaining(1)
+            return matches
+        }
         let panelLabel = guidedProductSurface ? "Saved offline checks review" : "Review the saved inputs and project-code effects"
         let refreshLabel = guidedProductSurface ? "Re-read saved settings" : "Refresh saved configuration observation"
         let reviewLabel = guidedProductSurface ? "Continue" : "Review offline checks"
@@ -7937,30 +7962,7 @@ final class NormalAppUITests: XCTestCase {
             }
             try stage("offline-finality-audit") {
                 try stage("offline-finality-status") {
-                    let terminal = failures + [unconfirmed, historical, "Historical / stale context"]
-                    let count: Int
-                    if guidedProductSurface {
-                        let snapshot = try panel.snapshot()
-                        var pending = snapshot.children
-                        var visited = 0
-                        var matches = 0
-                        while let node = pending.popLast() {
-                            visited += 1
-                            guard visited + pending.count + node.children.count <= 1024 else {
-                                throw Refusal.condition("offline finality snapshot exceeds its bound")
-                            }
-                            if node.elementType == .staticText {
-                                let value = node.value
-                                let observed = try Self.staticTextContent(value: value, label: value is String ? "" : node.label)
-                                if terminal.contains(observed) { matches += 1 }
-                            }
-                            pending.append(contentsOf: node.children)
-                        }
-                        count = matches
-                    } else {
-                        count = try staticTextFailureCount(panel, terminal) { _ = try remaining(1) }
-                    }
-                    try require(count == 0, "the settled offline operation retained a stale or failed state")
+                    try require(try offlineFailureCount(panel) == 0, "the settled offline operation retained a stale or failed state")
                 }
                 try stage("offline-finality-authority") {
                     let consentCount = named(panel, "Confirm this saved offline-check intent").count
@@ -7982,12 +7984,12 @@ final class NormalAppUITests: XCTestCase {
             let report = try unique(named(panel, "Saved offline check findings"), "offline report disappeared before normal Quit")
             _ = try unique(report.staticTexts.matching(identifier: "This invocation only"),
                            "offline report ceased to be current before normal Quit")
-            for label in [unconfirmed, historical] + failures {
-                try require(panel.staticTexts.matching(identifier: label).count == 0, "offline state changed before normal Quit")
+            try require(try offlineFailureCount(panel) == 0, "offline state changed before normal Quit")
+            try stage("offline-native-quit") {
+                let sheet = try quitSheet(app, window)
+                try click(sheet.buttons.matching(identifier: "Quit"), "normal offline Quit unavailable")
+                try completeNormalQuit(app)
             }
-            let sheet = try quitSheet(app, window)
-            try click(sheet.buttons.matching(identifier: "Quit"), "normal offline Quit unavailable")
-            try completeNormalQuit(app)
             try fixture.assertUnchanged()
             try fixture.closeOriginals()
             ownedFixture = nil
