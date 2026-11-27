@@ -405,6 +405,57 @@ class IOSWireTests(unittest.TestCase):
 
 
 class IOSOwnershipDataTests(unittest.TestCase):
+    def test_xcode_reverse_sdk_alias_requires_held_parent_and_exact_bound_object(self):
+        from types import SimpleNamespace
+
+        def attrs(kind, mode, *, uid=0, inode=2, size=0):
+            return SimpleNamespace(st_mode=kind | mode, st_uid=uid, st_gid=0, st_nlink=1,
+                                   st_size=size, st_ino=inode, st_dev=3, st_mtime_ns=4, st_ctime_ns=5)
+
+        parent = attrs(stat.S_IFDIR, 0o755)
+        target = attrs(stat.S_IFDIR, 0o755, inode=3)
+        link = attrs(stat.S_IFLNK, 0o777, inode=4, size=len("iPhoneOS.sdk"))
+        name = "iPhoneOS26.5.sdk"
+        with original() as operation:
+            files = operation.files
+            sdk = Path(request_data()["native"]["toolchain"]["sdk"]).with_name("iPhoneOS.sdk")
+            files.sdk = SimpleNamespace(path=sdk, slots=[SimpleNamespace(number=40), SimpleNamespace(number=41)], fd=41)
+            files.accept_sdk_readback(str(sdk))
+            self.assertIsNone(files.reported_sdk_alias)
+
+            def check(link_data=link, target_data=target, parent_data=parent, destination="iPhoneOS.sdk"):
+                def stat_entry(leaf, *, dir_fd, follow_symlinks):
+                    self.assertEqual(dir_fd, 40)
+                    self.assertFalse(follow_symlinks)
+                    return target_data if leaf == "iPhoneOS.sdk" else link_data
+
+                from contextlib import ExitStack
+                stack = ExitStack()
+                stack.enter_context(patch.object(os, "fstat", side_effect=lambda fd: parent_data if fd == 40 else target))
+                stack.enter_context(patch.object(os, "stat", side_effect=stat_entry))
+                stack.enter_context(patch.object(os, "readlink", return_value=destination))
+                stack.enter_context(patch.object(files, "check_tools"))
+                return stack
+
+            with check():
+                files.accept_sdk_readback(str(sdk.with_name(name)))
+                self.assertEqual(files.reported_sdk_alias, (name, operation_module._tool_data(link)))
+            for source in (
+                str(sdk.with_name("iPhoneOS-other.sdk")), str(sdk.parent.parent / name), str(sdk.parent / ".." / name),
+            ):
+                files.reported_sdk_alias = None
+                with check(), self.assertRaisesRegex(operation_module.IOSArchiveError, "could not complete") as failure:
+                    files.accept_sdk_readback(source)
+                self.assertEqual(failure.exception.reason, "toolchain-mismatch")
+            for wrong in (
+                {"link_data": attrs(stat.S_IFDIR, 0o755)}, {"link_data": attrs(stat.S_IFLNK, 0o777, uid=501, size=12)},
+                {"target_data": attrs(stat.S_IFDIR, 0o755, inode=7)}, {"parent_data": attrs(stat.S_IFDIR, 0o775)},
+                {"destination": "/tmp/other"}, {"destination": "../iPhoneOS.sdk"}, {"destination": "another.sdk"},
+            ):
+                files.reported_sdk_alias = None
+                with self.subTest(wrong=wrong), check(**wrong), self.assertRaises(operation_module.IOSArchiveError):
+                    files.accept_sdk_readback(str(sdk.with_name(name)))
+
     def test_precall_cancellation_and_refusal_have_valid_known_no_attempt_terminal(self):
         for cancelled in (True, False):
             with self.subTest(cancelled=cancelled), original() as operation:
@@ -728,6 +779,56 @@ class IOSOwnershipDataTests(unittest.TestCase):
             close.assert_called_once_with()
             self.assertTrue(operation.resources_closed)
             self.assertFalse(operation.guard.lifetime_ledger.fatal)
+
+    def test_darwin_directory_removal_with_links_requires_the_original_detached_path(self):
+        details = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o700,
+                                  st_uid=501, st_gid=20, st_nlink=2)
+        for case, post_path, post_inode, name_absent in (
+                ("detached", b"/owned/work", 2, True),
+                ("moved-original", b"/owned/elsewhere", 2, True),
+                ("changed-descriptor", b"/owned/work", 3, True),
+                ("recreated-name", b"/owned/work", 2, False)):
+            with self.subTest(case=case), original() as operation:
+                files = operation.files
+                held = operation_module._Held(71, "work", build_inputs._FD(operation.guard), True,
+                                              identity=build_inputs._directory(details))
+                held.slot.number, held.slot.open_state = 72, "OPEN"
+                removal = operation_module._IOSRemoval(files, held)
+                post = SimpleNamespace(**{**vars(details), "st_ino": post_inode})
+                observed_name = FileNotFoundError() if name_absent else details
+                with patch.object(operation_module.sys, "platform", "darwin"), \
+                        patch.object(operation_module, "_darwin_descriptor_path",
+                                     side_effect=[b"/owned", b"/owned/work", post_path]), \
+                        patch.object(files, "require_work_consumers"), patch.object(files, "check_held") as check, \
+                        patch.object(os, "rmdir", return_value=None) as rmdir, \
+                        patch.object(os, "fstat", return_value=post), patch.object(os, "stat", side_effect=[observed_name]):
+                    if case == "detached":
+                        removal.remove()
+                        self.assertTrue(held.deleted)
+                        self.assertEqual(removal.state, "DELETED")
+                    else:
+                        with self.assertRaises((wire.ProtocolError, operation_module.IOSArchiveError)):
+                            removal.remove()
+                        self.assertFalse(held.deleted)
+                        self.assertEqual(removal.state, "UNKNOWN")
+                        self.assertTrue(operation.guard.lifetime_ledger.fatal)
+                    self.assertEqual(check.call_count, 2)
+                    rmdir.assert_called_once_with("work", dir_fd=71)
+
+    def test_darwin_directory_changed_before_remove_is_never_consumed(self):
+        with original() as operation:
+            files = operation.files
+            held = operation_module._Held(71, "work", build_inputs._FD(operation.guard), True)
+            held.slot.number, held.slot.open_state = 72, "OPEN"
+            removal = operation_module._IOSRemoval(files, held)
+            with patch.object(operation_module.sys, "platform", "darwin"), \
+                    patch.object(operation_module, "_darwin_descriptor_path", side_effect=[b"/owned", b"/outside/work"]), \
+                    patch.object(files, "require_work_consumers"), patch.object(files, "check_held"), \
+                    patch.object(os, "rmdir", side_effect=AssertionError("unexpected disposal")) as rmdir:
+                with self.assertRaises(wire.ProtocolError):
+                    removal.remove()
+                self.assertEqual(removal.state, "NEW")
+                rmdir.assert_not_called()
 
 
 if __name__ == "__main__":

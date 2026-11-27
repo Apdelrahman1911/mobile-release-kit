@@ -69,8 +69,9 @@ jobs:
       inputs.build_run == '45996045007' && inputs.carrier_run == '46015331710' && inputs.carrier_attempt == '1'
     name: Compare held directory and regular-file disposal on macOS
     runs-on: macos-26
-    timeout-minutes: 5
-    permissions: {}
+    timeout-minutes: 8
+    permissions:
+      contents: read
     steps:
       - name: Compare descriptor and name identity across native disposal
         env:
@@ -191,6 +192,75 @@ jobs:
                   print("MRK_APFS_DISPOSAL_CONTROL=" + json.dumps(control, sort_keys=True))
               finally:
                   os.close(parent)
+          PYTHON
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.10'
+      - name: Verify source disposes only the exact held directory
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
+          set -euo pipefail
+          python -B -m unittest -v test_ios_archive
+          python -B - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import tempfile
+          from unittest.mock import patch
+
+          import test_ios_archive as test
+
+          digest = Path(test.operation_module.__file__).resolve()
+          assert digest == Path.cwd() / "src/mobile_release/ios_archive_operation.py"
+          original_rmdir = os.rmdir
+          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          with tempfile.TemporaryDirectory(prefix="mrk-source-disposal-", dir="/private/tmp") as root:
+              parent = os.open(root, flags)
+              try:
+                  for move in (False, True):
+                      os.mkdir("work", mode=0o700, dir_fd=parent)
+                      fd = os.open("work", flags, dir_fd=parent)
+                      try:
+                          value = os.fstat(fd)
+                          with test.original() as op:
+                              module = test.operation_module
+                              held = module._Held(parent, "work", test.build_inputs._FD(op.guard),
+                                                  True, identity=test.build_inputs._directory(value))
+                              held.slot.number = fd
+                              held.slot.open_state = "OPEN"
+                              op.files.live.add(held)
+                              removal = module._IOSRemoval(op.files, held)
+                              with patch.object(op.files, "point"), patch.object(op.files, "require_work_consumers"):
+                                  if not move:
+                                      removal.remove()
+                                      assert removal.state == "DELETED" and held.deleted and not op.guard.lifetime_ledger.fatal
+                                  else:
+                                      def substitute(name, *, dir_fd):
+                                          os.rename(name, "retained", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                                          os.mkdir(name, 0o700, dir_fd=dir_fd)
+                                          return original_rmdir(name, dir_fd=dir_fd)
+
+                                      with patch.object(os, "rmdir", side_effect=substitute) as call:
+                                          try:
+                                              removal.remove()
+                                          except test.wire.ProtocolError:
+                                              assert removal.state == "UNKNOWN" and not held.deleted
+                                              assert op.guard.lifetime_ledger.fatal
+                                          else:
+                                              raise AssertionError("renamed original incorrectly accepted")
+                                          call.assert_called_once_with("work", dir_fd=parent)
+                                      assert os.path.samestat(value, os.stat("retained", dir_fd=parent, follow_symlinks=False))
+                              assert "work" not in os.listdir(parent)
+                      finally:
+                          os.close(fd)
+              finally:
+                  os.close(parent)
+          print("MRK_IOS_APFS_SOURCE_CONTROL=exact-descriptor-removed;renamed-original-refused")
           PYTHON
 
   xcode-path-control:
