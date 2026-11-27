@@ -7611,22 +7611,25 @@ final class NormalAppUITests: XCTestCase {
             try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
                         "passive supplied comparison unexpectedly enabled")
             try press(renderer, "Preview GitHub setup", renderer: renderer)
-            if guidedProductSurface {
-                let disclosure = try waitElement(controls(renderer, [.disclosureTriangle, .button],
-                    label: "Optional preview: proposed files and checklist · available", prefix: true),
-                    in: renderer, failures: Self.workflowFailures)
-                // The read-only disclosure has no disabled state in the app.
-                // Its actual click must expose the matching preview below.
-                disclosure.click()
+            try stage("workflow-preview-disclosure") {
+                if guidedProductSurface {
+                    let disclosure = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                        label: "Optional preview: proposed files and checklist · available", prefix: true),
+                        in: renderer, failures: Self.workflowFailures)
+                    // The click must expose the matching read-only preview.
+                    disclosure.click()
+                }
             }
-            let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
-                                          failures: Self.workflowFailures)
-            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
-            for path in LocalFixture.callers {
-                let shownPath = String(path.dropFirst("project/".count))
-                try expand(proposal, prefix: shownPath, renderer: renderer)
-                try displayed(proposal, label: "Read-only proposed content for " + shownPath,
-                              equals: fixture.text(path, stage: "workflows"))
+            try stage("workflow-preview-readback") {
+                let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                              failures: Self.workflowFailures)
+                _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+                for path in LocalFixture.callers {
+                    let shownPath = String(path.dropFirst("project/".count))
+                    try expand(proposal, prefix: shownPath, renderer: renderer)
+                    try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                                  equals: fixture.text(path, stage: "workflows"))
+                }
             }
             try noApplyControls()
             try fixture.assertUnchanged()
@@ -7755,7 +7758,8 @@ final class NormalAppUITests: XCTestCase {
             _ = try unique(report.staticTexts.matching(identifier: summary), "original offline count totals or omission state differ")
         }
         for label in ["Android module configuration.", "Android Gradle wrapper policy.", "Core early-exit or remaining-check policy."] {
-            _ = try unique(report.staticTexts.matching(identifier: label), "the expected negative-report finding is missing or repeated")
+            try require(labels.filter { $0 == label }.count == 1,
+                        "the expected negative-report finding is missing or repeated", check: .singleton)
         }
         return counts
     }
@@ -7867,8 +7871,10 @@ final class NormalAppUITests: XCTestCase {
                           "Release readiness was not assessed. A returned report is not a release candidate or publication authority."] {
                 _ = try unique(report.staticTexts.matching(identifier: label), "offline report lost a required scope limit")
             }
-            let counts = try savedOfflineCounts(report)
-            missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
+            try stage("offline-check-counts-and-findings") {
+                let counts = try savedOfflineCounts(report)
+                missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
+            }
             let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
             try require(panel.staticTexts.matching(identifier: unconfirmed).count == 0
                         && panel.staticTexts.matching(identifier: historical).count == 0

@@ -2906,6 +2906,14 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
     result["cliRevokeCuts"] = re.findall(r"(?m)^MRK_RELEASE_CLI_REVOKE_CUT=(click-returned|off-visible)$", transcript)
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
+    folded_transcript = transcript.lower()
+    runner_events = [event for event, fragment in (
+        ("objective-c-exception", "NSInvalidArgumentException"),
+        ("unsupported-predicate", "Unsupported predicate"),
+        ("execution-timeout", "exceeded execution time allowance"),
+        ("runner-exited", "Test runner exited"),
+        ("test-crashed", "TEST CRASHED"),
+    ) if fragment.lower() in folded_transcript]
     for field, pattern in (
         ("xctestRequireLine", r"MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + r";line=([0-9]{1,5});check="),
         ("xctestPackagedRequire", r"(?m)^MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=([0-9]{1,5});check=([a-z-]{1,20})$"),
@@ -2944,17 +2952,12 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["recoveryProjectObservations"] = re.findall(
             r"(?m)^MRK_RECOVERY_PROJECT_OPEN=v1;(folder|unselected|choose-error|read-error|exact-path|tmp-alias|fixture-parent)=([0-5])$",
             transcript)[-7:]
-        result["recoveryTestRunnerEvents"] = [event for event, fragment in (
-            ("objective-c-exception", "NSInvalidArgumentException"),
-            ("unsupported-predicate", "Unsupported predicate"),
-            ("execution-timeout", "exceeded execution time allowance"),
-            ("runner-exited", "Test runner exited"),
-            ("test-crashed", "TEST CRASHED"),
-        ) if fragment.lower() in transcript.lower()]
+        result["recoveryTestRunnerEvents"] = runner_events
         result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
         result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
         observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]
     elif extra:
+        result["xctestTestRunnerEvents"] = runner_events
         facts = re.findall(r"(?m)^" + completion_marker + r"=([^\r\n]{1,16384})$", transcript)
         result["scenarioFacts"] = facts
         observed = len(facts) == 1
