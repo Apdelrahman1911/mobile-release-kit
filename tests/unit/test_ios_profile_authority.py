@@ -330,12 +330,15 @@ class NativeProfileAuthorityTests(unittest.TestCase):
         signer = pem_certificates((self.root / "fictional.pem").read_bytes())[0]
         with self.assertRaises(ValidationError):
             verify_profile_signer(signer, (signer, *public_certificates().values(), *apple_roots()))
+        self.check_legacy_envelope()
 
-    def test_legacy_envelope_still_requires_a_valid_signature_and_apple_issuer(self):
+    def check_legacy_envelope(self):
         raw = signed_cms(self.root, self.outer_payload, "legacy", digest="sha1")
         with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValidationError):
             verify_cms(raw, Path(directory), mode="--outer-profile")
-        for content in (raw, raw.replace(b"com.example.reader", b"com.example.forged", 1)):
+        tampered = raw.replace(b"com.example.reader", b"com.example.forged", 1)
+        self.assertNotEqual(raw, tampered)
+        for content in (raw, tampered):
             with tempfile.TemporaryDirectory() as directory, \
                     patch("mobile_release.ios_profile_auth.verify_profile_signer") as trust:
                 if content == raw:
