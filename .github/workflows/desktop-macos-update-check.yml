@@ -124,7 +124,7 @@ jobs:
                   if len(paths) == 1:
                       reported = Path(paths[0])
                       report[label]["sameFilesystemObject"] = reported.exists() and reported.samefile(sdk)
-                      report[label]["directAliasToBoundSDK"] = (reported.parent == sdk_parent
+                      report[label]["directAliasToBoundSDK"] = (reported.parent == sdk_root
                           and reported.is_symlink() and reported.readlink() == Path(sdk.name))
           print(json.dumps(report, sort_keys=True))
           PY
