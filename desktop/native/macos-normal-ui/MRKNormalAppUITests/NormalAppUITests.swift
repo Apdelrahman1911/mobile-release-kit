@@ -8951,6 +8951,7 @@ final class NormalAppUITests: XCTestCase {
                 let fields = try guidedDiagnosticsSnapshot(review)
                 let text = fields.texts.joined(separator: " ")
                     .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .replacingOccurrences(of: #" +([.,])"#, with: "$1", options: .regularExpression)
                 let expected = ["ios/MRKObserved.xcodeproj", "scheme MRKObserved", "configuration Release",
                                 "Bundle ID org.example.mrk.observed", "Saved preparation is not configured."]
                 let observed = expected.map { text.contains($0) }
