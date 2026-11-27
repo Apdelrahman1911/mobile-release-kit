@@ -7128,8 +7128,13 @@ final class NormalAppUITests: XCTestCase {
                                 timeout: 48, failures: Self.configurationFailures)
             try fixture.accept("config")
             try press(renderer, "Dashboard", renderer: renderer)
-            let earlier = try waitElement(renderer.staticTexts.matching(identifier: "This static observation predates the last settled save check"), in: renderer)
-            try press(renderer, "Refresh static view", renderer: renderer)
+            let staleLabel = guidedProductSurface ? "Saved settings need another look"
+                : "This static observation predates the last settled save check"
+            let earlier = try waitElement(renderer.staticTexts.matching(identifier: staleLabel), in: renderer)
+            if guidedProductSurface {
+                try observeSelectedProject(renderer, path: fixture.projectPath)
+            }
+            try press(renderer, guidedProductSurface ? "Read project settings again" : "Refresh static view", renderer: renderer)
             try waitGone(earlier)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -7139,11 +7144,20 @@ final class NormalAppUITests: XCTestCase {
             try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
             try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
             try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
+            if guidedProductSurface {
+                try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+            }
             let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
                                         "optional comparison control is unavailable")
             try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
                         "passive supplied comparison unexpectedly enabled")
             try press(renderer, "Preview GitHub setup", renderer: renderer)
+            if guidedProductSurface {
+                let disclosure = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                    label: "Optional preview: proposed files and checklist · available", prefix: true),
+                    in: renderer, failures: Self.workflowFailures)
+                disclosure.click()
+            }
             let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
                                           failures: Self.workflowFailures)
             _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
@@ -8480,17 +8494,42 @@ final class NormalAppUITests: XCTestCase {
             contextPrefix, contextSuffix, contextPrefix, contextSuffix))
         let provenanceQuery = panel.staticTexts.matching(NSPredicate(
             format: "value ENDSWITH %@ OR label ENDSWITH %@", provenanceSuffix, provenanceSuffix))
+        @MainActor func guidedBadges() throws -> Bool {
+            _ = try remaining(1)
+            var pending: [any XCUIElementSnapshot] = [try panel.snapshot()]
+            var labels: [String] = []
+            var visited = 0
+            while let item = pending.popLast() {
+                visited += 1
+                guard visited + pending.count + item.children.count <= 1024 else {
+                    throw Refusal.condition("iOS diagnostics badge snapshot exceeds its bound")
+                }
+                if item.elementType == .staticText {
+                    let value = item.value
+                    let text = try Self.staticTextContent(value: value, label: value is String ? "" : item.label)
+                    labels.append(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+                pending.append(contentsOf: item.children.reversed())
+            }
+            _ = try remaining(1)
+            try require(!labels.contains(where: failures.contains), "terminal iOS diagnostics refusal")
+            let adjacent = zip(labels, labels.dropFirst()).map { pair in pair.0 + " " + pair.1 }
+            let matches = ["Phase: settled", "Outcome: complete", "Native finality: settled"].map { caption in
+                labels.filter { $0 == caption }.count + adjacent.filter { $0 == caption }.count
+            }
+            try require(matches.allSatisfy { $0 <= 1 }, "current iOS diagnostics badges are ambiguous", check: .singleton)
+            return matches.allSatisfy { $0 == 1 }
+        }
         let textRows: [XCUIElement]
         if guidedProductSurface {
             // The heading can be awaited without repeatedly reading every
             // static text while the native operation has no result to show.
             _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
             diagnosticCut = "report-visible"
-            for (query, cut) in [(phase, "settled-phase"), (outcome, "complete-outcome"),
-                                 (finality, "settled-finality")] {
-                _ = try waitElement(query, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
-                diagnosticCut = cut
+            while !(try guidedBadges()) {
+                try clock.progress(until: journeyDeadline ?? wholeDeadline)
             }
+            diagnosticCut = "settled-badges"
             let context = try waitElement(contextQuery, in: panel, timeout: 15, failures: failures)
             diagnosticCut = "report-context"
             let provenance = try waitElement(provenanceQuery, in: panel, timeout: 15, failures: failures)
@@ -8503,7 +8542,7 @@ final class NormalAppUITests: XCTestCase {
                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
         }
         diagnosticCut = "settled-report"
-        for query in [fresh, phase, outcome, finality] {
+        for query in guidedProductSurface ? [fresh] : [fresh, phase, outcome, finality] {
             _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
         }
         let originalContext = try staticTextContent(textRows[0])
@@ -8531,7 +8570,10 @@ final class NormalAppUITests: XCTestCase {
                     "original iOS diagnostics context changed during readback")
         try require(provenanceMatch.accepts(try staticTextContent(currentText[1][0])),
                     "original iOS diagnostics acknowledgement changed during readback")
-        for query in [fresh, phase, outcome, finality] {
+        if guidedProductSurface {
+            try require(try guidedBadges(), "same original iOS report did not remain settled")
+        }
+        for query in guidedProductSurface ? [fresh] : [fresh, phase, outcome, finality] {
             _ = try unique(query, "same original iOS report did not remain current and settled")
         }
         diagnosticCut = "readback-confirmed"
