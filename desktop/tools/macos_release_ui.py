@@ -609,6 +609,24 @@ def observe(work, action, media):
         readme.write_bytes(initial + marker)
         def git(*args):
             return call("/usr/bin/git", "-C", str(project), *args).stdout
+
+        def wait_for_original_read(matches, stage):
+            started = time.monotonic()
+
+            def observe():
+                tree = ui.command("tree.snapshot", limit=300)
+                nodes = tree["nodes"]
+                need(not any(node["role"] == "heading" and node["name"] in (
+                    "Local Git read needs attention", "Local Git read did not complete") for node in nodes),
+                    "original-local-git-read-refused")
+                return tree if matches(nodes) else None
+
+            # The Git reader owns a 45-second work and a 55-second hard
+            # deadline. Observe the original operation without sending Start again.
+            tree = until(observe, 55, "original-local-git-" + stage)
+            results.setdefault("gitLocalReadSeconds", {})[stage] = round(time.monotonic() - started, 2)
+            return tree
+
         before = git("status", "--porcelain=v1")
         head = git("rev-parse", "HEAD")
         need(before == b" M README.md\n", "exact-synthetic-worktree-change")
@@ -618,7 +636,8 @@ def observe(work, action, media):
             ui.click("Check local Git access", category="button")
             ui.node("Local Git reader available", category="heading")
             ui.click("Refresh changes", category="button")
-            ui.node("Local Git read finished", category="heading")
+            wait_for_original_read(lambda nodes: any(node["role"] == "heading" and
+                node["name"] == "Local Git read finished" for node in nodes), "observation")
             _, changes = ui.reveal("Source changes", category="heading")
             bounds = changes["bounds"]
             ui.command("pointer.scroll", x=bounds["x"] + bounds["width"] // 2,
@@ -646,12 +665,11 @@ def observe(work, action, media):
                  "readme-checkbox-outside-app-viewport")
             ui.command("element.click", snapshot_id=tree["snapshot_id"], id=select[0]["id"])
             ui.click("Working changes", category="button")
-            ui.reveal("Working-file changes", category="heading")
             added_line = "+" + marker.strip().decode()
-            diff = ui.command("element.wait", selector={"text_contains": added_line, "visible": True},
-                              state="present", timeout_ms=10000)
-            need(any(added_line in value.splitlines() for node in diff["nodes"]
-                     for value in (node["name"], node["text"])), "exact-added-line-in-working-diff")
+            diff = wait_for_original_read(lambda nodes: any(added_line in node["text"].splitlines()
+                or added_line in node["name"].splitlines() for node in nodes), "working-diff")
+            (evidence / "git-working-diff-tree.json").write_text(json.dumps(diff, indent=2) + "\n")
+            ui.reveal("Working-file changes", category="heading")
             need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
                  and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
         finally:
