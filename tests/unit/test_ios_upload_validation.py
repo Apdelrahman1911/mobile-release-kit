@@ -25,6 +25,7 @@ from mobile_release.reporting import Finding, Status
 from .evidence_helpers import build_lifecycle
 from .helpers import ios_config, write_project
 from .ios_entitlement_helpers import (
+    codesign_certificate_prefix,
     NativeProfileSeam, add_discardable_root_dictionary, binary_dictionary, modernize_ipa_fixture,
     rewrite_zip_members, signed_entitlements,
 )
@@ -110,7 +111,7 @@ class IosCurrentUploadTests(unittest.TestCase):
                 self.validate()
         self.signer.assert_not_called()
         self.assertTrue(any("--entitlements" in argv for argv, _ in native.calls))
-        self.assertFalse(any("--extract-certificates" in argv for argv, _ in native.calls))
+        self.assertFalse(any(codesign_certificate_prefix(argv) is not None for argv, _ in native.calls))
 
     def test_issuer_authentication_failure_never_authorizes_a_new_transporter_send(self) -> None:
         self.native.side_effect = validate_ipa_current_signing
@@ -119,7 +120,7 @@ class IosCurrentUploadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*Apple issuer rejection"):
                 self.validate()
         self.signer.assert_not_called()
-        self.assertFalse(any("--extract-certificates" in argv for argv, _ in native.calls))
+        self.assertFalse(any(codesign_certificate_prefix(argv) is not None for argv, _ in native.calls))
 
     def test_malformed_primary_plist_stops_current_upload_before_native_inspection(self) -> None:
         with zipfile.ZipFile(self.ipa) as archive:

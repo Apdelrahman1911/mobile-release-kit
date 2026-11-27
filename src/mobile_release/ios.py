@@ -832,7 +832,7 @@ def _codesign_slice_fingerprint(
     _observation: _ArtifactIPASigning | None = None,
 ) -> str:
     extract = _run_native(
-        ["codesign", "-d", *_architecture_options(architecture), "--extract-certificates", str(prefix), str(code_path)],
+        ["codesign", "-d", *_architecture_options(architecture), f"--extract-certificates={prefix}", str(code_path)],
         deadline=deadline, cancellation=cancellation, timeout=30,
     )
     certificate = prefix.parent / f"{prefix.name}0"

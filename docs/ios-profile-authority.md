@@ -17,10 +17,14 @@ extensions use their own profiles. Profileless code cannot borrow those grants.
 
 `ios_profile_auth.py` requires a single attached, definite-length DER SignedData
 envelope, id-data payload, version 1 or 3 and exactly one signer. DigestAlgorithms
-and SignerInfo must agree on SHA-256, SHA-384 or SHA-512. Input/output are bounded
-to 4 MiB; there are at most 16 distinct, bounded certificates. Unsigned, detached,
-encrypted, concatenated, malformed, legacy-only or unsupported formats reject.
-There is no decode-only fallback or operator override.
+and SignerInfo must agree. The authoritative inner profile and standalone CMS
+checks require SHA-256, SHA-384 or SHA-512. The outer role of the two-envelope
+decoder also supports Apple's legacy SHA-1 envelope. It still verifies that
+envelope's signature and its Apple signer, then requires the SHA-2 inner
+signature and full correlation before returning any profile authority. Input
+and output are bounded to 4 MiB with at most 16 distinct, bounded certificates.
+Unsigned, detached, encrypted, concatenated, malformed and legacy-only inputs
+fail closed.
 
 System `/usr/bin/openssl cms -verify -binary -inform DER -noverify` verifies the
 signature and returns the signer and content to fresh private files. Here
@@ -30,15 +34,20 @@ different payload or a signer absent from the original CMS certificate set fails
 
 ## Production-purpose trust, not generic X.509 trust
 
-`ios_profile_trust.py` passes that actual signer first to Security.framework's
-`kSecPolicyAppleiPhoneProvisioningProfileSigning` policy. It supplies explicit
-toolkit-pinned Apple roots, disables network fetching and keychain lookup, and
-requires anchors-only evaluation. It checks native statuses, disabled settings,
-successful evaluation and **Unspecified** trust result, not a user-granted Proceed.
-The three-certificate chain must begin with the exact CMS signer, use the exact
-production profile-signing/iPhone CA names, and end in a pinned Apple root.
-TEST-purpose, macOS-profile, arbitrary self-signed and generic trusted certificates
-cannot substitute for the production iOS profile authority.
+`ios_profile_trust.py` evaluates the actual CMS signer through a fixed
+Security.framework policy. The legacy profile signer uses
+`kSecPolicyAppleiPhoneProvisioningProfileSigning` and its exact Apple iPhone CA
+chain. The modern inner signer uses `SecPolicyCreateApplePinned` with leaf
+purpose marker `1.2.840.113635.100.12.19` and intermediate marker
+`1.2.840.113635.100.6.2.17`. That route also requires the WWDR Provisioning
+Profile Signing and Apple System Integration CA 4 names and the Apple Root CA G3
+pin.
+
+Both routes use anchors-only evaluation with independently pinned Apple roots,
+disabled network fetching and disabled keychain lookup. The three-certificate
+chain must start with the exact CMS signer and return **Unspecified** from
+native evaluation. TEST-purpose, macOS-profile, self-signed and generic trusted
+certificates cannot establish the iOS profile's authority.
 
 Only public roots are bundled in `src/mobile_release/data/apple-profile-roots.pem`;
 their entire DER set must match these independent SHA-256 pins:
@@ -59,9 +68,10 @@ commit `db15acbe6a7f257a859ad9a3bb86097bfe0679d9` (`SecPolicy.c`,
 `SecPolicyPriv.h`, `SecTrustPriv.h`); they are not generic stable cross-platform APIs.
 Unavailable required APIs fail closed on unsupported tooling.
 
-Apple's profile-signing policy intentionally omits signer-chain wall-clock
-validity and networked revocation checks. This is **offline cryptographic
-production issuance**, not proof of current account, device or revocation state.
+Apple's legacy profile-signing policy intentionally omits signer-chain wall-clock
+validity and networked revocation checks. These checks establish **offline
+cryptographic production issuance**. Account, device and online revocation state
+require separate evidence.
 Authenticated profile CreationDate/ExpirationDate and the application's actual
 distribution-certificate validity remain separate current-time gates. The old
 public Apple regression CA certificates are not current consumer signing assets.
