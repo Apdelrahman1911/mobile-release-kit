@@ -597,7 +597,29 @@ def observe(work, action, media):
             ui.project_name = None
             ui.pick(project)
         ui.click("Edit version & build number")
-        ui.click("Open saved version editor", category="button")
+        editor = "Open saved version editor"
+        pending = "An original saved-file check is still pending. Wait for it to settle before starting another task."
+        recovery = "A saved-file check needs attention"
+        reopened_read = results["reopenedSavedFileCheck"] = {"observedPending": False, "editorEnabled": False}
+        started = time.monotonic()
+
+        def editor_ready():
+            rows = ui.command("tree.snapshot", limit=300)["nodes"]
+            labels = {label for row in rows for label in (row["name"], row["text"])}
+            reopened_read["observedPending"] |= pending in labels
+            need(recovery not in labels, "reopened-original-saved-file-cleanup-unknown")
+            buttons = [row for row in rows if row["role"] == "button" and row["name"] == editor and row["visible"]]
+            need(len(buttons) <= 1, "reopened-version-editor-ambiguous")
+            return len(buttons) == 1 and buttons[0]["enabled"]
+
+        # The selected workspace's passive observer can own a snapshot and
+        # then a saved-version read sequentially, each with 10 s work and
+        # 2 s cleanup. Wait for native admission without clicking or retrying.
+        try:
+            reopened_read["editorEnabled"] = until(editor_ready, 30, "reopened-version-editor-did-not-enable")
+        finally:
+            reopened_read["waitSeconds"] = round(time.monotonic() - started, 2)
+        ui.click(editor, category="button")
         ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
         need((project / VERSION_FILE).read_bytes() == expected
              and file_hash(project / CONFIG_FILE) == original[CONFIG_FILE], "reopened-saved-values")
