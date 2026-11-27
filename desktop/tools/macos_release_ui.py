@@ -23,6 +23,38 @@ VERSION_FILE = Path("public/version.properties")
 CONFIG_FILE = Path("release/mobile-release.json")
 PAYLOAD_PATTERN = r"[/]MobileReleaseKitPayload\.app/Contents/MacOS/mobile-release-kit-desktop( |$)"
 CONSOLE_OCR = Path(__file__).with_name("macos_release_ui_privacy.swift")
+# Targeted System Events query for the Git form omitted by the pinned driver's
+# node ceiling. Only this test's exact region and control facts leave the query.
+GIT_REVIEW_JXA = """function run(argv) {
+  const [pid, regionName, wantedRole, name, action] = argv;
+  const events = Application('System Events');
+  const processes = events.processes.whose({unixId: Number(pid)});
+  if (processes.length !== 1 || !processes[0].frontmost()) return JSON.stringify({error: 'not-frontmost'});
+  const windows = processes[0].windows();
+  if (windows.length !== 1) return JSON.stringify({error: 'window-count'});
+  const read = (item, key) => { try { return item[key](); } catch (_) { return null; } };
+  const named = (item, title) => ['name', 'title', 'description'].some(key => read(item, key) === title);
+  const all = windows[0].entireContents();
+  if (all.length > 4096) return JSON.stringify({error: 'window-bound'});
+  const regions = all.filter(item => ['AXGroup', 'AXLandmarkRegion'].includes(read(item, 'role')) &&
+    named(item, regionName));
+  if (regions.length !== 1) return JSON.stringify({matches: 0, regions: regions.length});
+  const elements = regions[0].entireContents();
+  if (elements.length > 256) return JSON.stringify({error: 'region-bound'});
+  const controls = elements.filter(item => read(item, 'role') === wantedRole &&
+    (named(item, name) || (wantedRole === 'AXStaticText' && read(item, 'value') === name)));
+  if (controls.length !== 1) return JSON.stringify({matches: controls.length, regions: 1});
+  const control = controls[0];
+  const enabled = read(control, 'enabled');
+  const value = wantedRole === 'AXCheckBox' ? read(control, 'value') : null;
+  const checked = (value === 1 || value === '1' || value === true) ? true :
+    (value === 0 || value === '0' || value === false) ? false : null;
+  if (action === 'press' && enabled === true && ['AXButton', 'AXCheckBox'].includes(wantedRole)) {
+    control.click();
+    return JSON.stringify({matches: 1, regions: 1, enabled, checked, pressed: true});
+  }
+  return JSON.stringify({matches: 1, regions: 1, enabled, checked, pressed: false});
+}"""
 PAGE_HEADINGS = {
     "Overview": "Get your app ready.",
     "Build & release": "Build and release your app",
@@ -1070,7 +1102,22 @@ def observe(work, action, media, suite):
         def git_index_journey(head):
             review = "Review local Git change"
             reviewed = "I reviewed all listed files, including any contents not shown here."
-            fact = results["gitIndex"] = {"originalStatusReads": 0, "visualStatusReads": 0, "reviewViewportScrolls": 0}
+            status_region = "Local Git action status"
+            fact = results["gitIndex"] = {"originalStatusReads": 0, "visualStatusReads": 0,
+                                          "reviewViewportScrolls": 0, "nativeReviewQueries": 0}
+
+            def native_control(region, role, name, *, press=False):
+                fact["nativeReviewQueries"] += 1
+                checked = call("/usr/bin/osascript", "-l", "JavaScript", "-e", GIT_REVIEW_JXA,
+                               str(ui.payload_pid()), region, role, name, "press" if press else "inspect",
+                               timeout=15, check=False)
+                need(checked.returncode == 0 and len(checked.stdout) <= 1024, "git-native-review-query-failed")
+                observed = json.loads(checked.stdout)
+                need("error" not in observed and observed["regions"] <= 1 and observed["matches"] <= 1,
+                     "git-native-review-query-ambiguous")
+                if press:
+                    need(observed.get("pressed") is True, "git-native-review-action-not-confirmed")
+                return observed
 
             def read_visible_original_status(tree):
                 # The macOS driver caps its platform tree at 300 nodes.
@@ -1161,6 +1208,10 @@ def observe(work, action, media, suite):
                     # The mutation controller's initial acknowledgement can
                     # be active. Check the original action as the UI directs.
                     if time.monotonic() >= next_read:
+                        if tree["truncated"]:
+                            region = review if name in {"Review files to stage", "Review files to unstage"} else status_region
+                            if native_control(region, "AXHeading", name)["matches"] == 1:
+                                return True
                         if (tree["truncated"] and name in {"Review files to stage", "Review files to unstage"}
                                 and review_scrolls < 3 and scroll_visible_review(tree)):
                             fact["reviewViewportScrolls"] += 1
@@ -1188,17 +1239,20 @@ def observe(work, action, media, suite):
             ui.click("Check local Git actions", category="button", region="Local Git action status")
             ui.click("Review files to stage", category="button")
             await_heading("Review files to stage")
-            ui.node("README.md", region=review)
-            need(not ui.node("Stage these files", category="button", region=review)[1]["enabled"],
+            need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-stage-review-path")
+            apply = native_control(review, "AXButton", "Stage these files")
+            need(apply["matches"] == 1 and apply["enabled"] is False,
                  "git-index-apply-enabled-without-consent")
-            ui.click("Close review, keep draft", category="button", region="Local Git action status")
+            native_control(status_region, "AXButton", "Close review, keep draft", press=True)
             verify_change(False)
             fact["cancelPreservedIndexAndHead"] = True
             ui.click("Review files to stage", category="button")
             await_heading("Review files to stage")
-            ui.node("README.md", region=review)
-            ui.click(reviewed, category="checkbox", region=review)
-            ui.click("Stage these files", category="button", region=review)
+            need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-stage-review-path")
+            need(native_control(review, "AXCheckBox", reviewed).get("checked") is False, "git-stage-consent-starts-clear")
+            native_control(review, "AXCheckBox", reviewed, press=True)
+            need(native_control(review, "AXCheckBox", reviewed).get("checked") is True, "git-stage-consent-readback")
+            native_control(review, "AXButton", "Stage these files", press=True)
             await_heading("Selected files staged")
             verify_change(True)
             fact["onlyReviewedBlobStaged"] = True
@@ -1208,9 +1262,11 @@ def observe(work, action, media, suite):
             ui.click("Check local Git actions", category="button", region="Local Git action status")
             ui.click("Review files to unstage", category="button")
             await_heading("Review files to unstage")
-            ui.node("README.md", region=review)
-            ui.click(reviewed, category="checkbox", region=review)
-            ui.click("Unstage these files", category="button", region=review)
+            need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-unstage-review-path")
+            need(native_control(review, "AXCheckBox", reviewed).get("checked") is False, "git-unstage-consent-starts-clear")
+            native_control(review, "AXCheckBox", reviewed, press=True)
+            need(native_control(review, "AXCheckBox", reviewed).get("checked") is True, "git-unstage-consent-readback")
+            native_control(review, "AXButton", "Unstage these files", press=True)
             await_heading("Selected files unstaged")
             verify_change(False)
             fact["unstagePreservedHeadAndWorktree"] = True
