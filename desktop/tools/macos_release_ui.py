@@ -149,6 +149,12 @@ def install(media, work):
         installed = dict(sourceCommit=release["sourceCommit"], packageSha256=expected["sha256"],
                          packageVersion=release["packageVersion"], nativeSignaturesVerified=True)
         (work / "evidence/INSTALLED.json").write_text(json.dumps(installed, indent=2) + "\n")
+        capability_bytes = call(str(CLI), "capabilities", "--json").stdout
+        need(0 < len(capability_bytes) <= 65536, "bounded-compiled-cli-capabilities")
+        capability = json.loads(capability_bytes)
+        need(capability["scope"] == "compiled-interface" and capability["runtimeChecked"] is False
+             and capability["supportsDirectMutationCommands"] is False, "static-cli-capability-contract")
+        (work / "evidence/CLI-CAPABILITIES.json").write_bytes(capability_bytes)
     finally:
         detached = detach_install_media(mount, work / "evidence")
     need(detached == 0, "installer-mounted-media-still-busy")
@@ -543,38 +549,63 @@ def observe(work, action, media):
         primary_before = {name: file_hash(project / name) for name in original}
         secondary_original = {path: file_hash(path) for path in secondary.rglob("*") if path.is_file()}
 
-        def granted_projects():
+        def granted_project():
             reply = json.loads(call(str(CLI), "projects", "--json").stdout)["response"]
             need(reply["kind"] == "projects" and len(reply["value"]) == 1
                  and reply["value"][0]["registeredInCurrentHost"] is True, "exact-cli-project-scope")
-            return reply["value"]
+            identity = reply["value"][0]["projectId"]
+            need(re.fullmatch(r"[0-9a-f]{32}", identity) and identity != "0" * 32, "exact-cli-project-identity")
+            return identity
 
-        ui.page("Project settings")
-        panel = ui.command("tree.snapshot", limit=300)
-        if not any(node["role"] == "button" and node["name"] == "Check access" for node in panel["nodes"]):
-            ui.click("Advanced · CLI / AI access", contains=True)
-        ui.click("Check access", category="button")
-        ui.click("Allow selected project for 1 hour", category="button")
-        ui.node("1 project was allowed at last check", category="statictext", contains=True)
-        allowed_before_switch = granted_projects()
+        def access_panel():
+            ui.page("Project settings")
+            panel = ui.command("tree.snapshot", limit=300)
+            if not any(node["role"] == "button" and node["name"] == "Check access" for node in panel["nodes"]):
+                ui.click("Advanced · CLI / AI access", contains=True)
+
+        def grant_selected():
+            access_panel()
+            ui.click("Check access", category="button")
+            ui.click("Allow selected project for 1 hour", category="button")
+            ui.node("1 project was allowed at last check", category="statictext", contains=True)
+
+        def require_denied(identity):
+            denied = call(str(CLI), "observe", identity, "--json", check=False)
+            error = json.loads(denied.stdout)
+            need(denied.returncode == 4 and error["ok"] is False and error["error"] == "access_denied",
+                 "ungranted-project-observation-was-not-denied")
+
+        grant_selected()
+        primary_id = granted_project()
         ui.page("Overview")
         ui.pick(secondary, cancel=True)
         ui.pick(secondary)
-        need(granted_projects() == allowed_before_switch, "switch-expanded-cli-authority")
+        # Saved observation fields can change as selection settles. The grant
+        # must retain the original project ID until another explicit Allow.
+        need(granted_project() == primary_id, "switch-expanded-cli-authority")
         ui.click("Edit version & build number")
         ui.click("Open saved version editor", category="button")
         ui.node("Values: 2.1.0 · Build 41.", category="statictext", contains=True)
+        grant_selected()
+
+        def replacement():
+            candidate = granted_project()
+            return candidate if candidate != primary_id else None
+
+        secondary_id = until(replacement, 10, "secondary-consent-did-not-replace-the-grant")
+        require_denied(primary_id)
+        ui.page("Overview")
         ui.pick(project)
+        need(granted_project() == secondary_id, "reopen-expanded-cli-authority")
+        require_denied(primary_id)
         ui.click("Edit version & build number")
         ui.click("Open saved version editor", category="button")
         ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
-        ui.page("Project settings")
-        panel = ui.command("tree.snapshot", limit=300)
-        if not any(node["role"] == "button" and node["name"] == "Turn off access" for node in panel["nodes"]):
-            ui.click("Advanced · CLI / AI access", contains=True)
+        access_panel()
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "switch-cli-grant-revocation")
+        require_denied(secondary_id)
         need(all(file_hash(path) == digest for path, digest in secondary_original.items())
              and all(file_hash(project / name) == digest for name, digest in primary_before.items()), "switch-changed-fixture")
 
