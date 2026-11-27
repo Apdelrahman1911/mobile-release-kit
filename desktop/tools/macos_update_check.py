@@ -2879,6 +2879,31 @@ def ios_archive_host_facts(release):
     return rows
 
 
+def observe_ios_archive_processes(stop, events):
+    """Record only transitions for Xcode/core descendants of the original app."""
+    previous = set()
+    while not stop.wait(0.25) and len(events) < 40:
+        try:
+            result = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,comm="],
+                                    capture_output=True, text=True, check=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return
+        by_pid = {}
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=2)
+            if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+                by_pid[int(fields[0])] = int(fields[1]), Path(fields[2].strip()).name
+        app = {pid for pid, (_, name) in by_pid.items() if name == PAYLOAD_PROCESS}
+        tree = set(app)
+        while expanded := {pid for pid, (parent, _) in by_pid.items() if parent in tree} - tree:
+            tree.update(expanded)
+        roles = {name for pid, (_, name) in by_pid.items() if pid in tree - app
+                 and name in {"python3", "python3.14", "xcodebuild", "XCBBuildService", "clang", "dsymutil"}}
+        if roles != previous:
+            events.append({"epochMillis": time.time_ns() // 1_000_000, "roles": sorted(roles)})
+            previous = roles
+
+
 def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, result):
     """Run the original production UI check on the caller's verified installed package."""
     origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
@@ -2932,10 +2957,15 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         project_path, baseline = seed_signed_gui_recovery(row, folder, work, env, result)
     bundle = work / (bundle_stem + ".xcresult")
     before_crashes = set(recent_crashes())
-    resource_samples, stop_sampling = [], threading.Event()
+    resource_samples, process_events, stop_sampling = [], [], threading.Event()
     sampler = None
     if mode == "workspace-xctest":
         sampler = threading.Thread(target=workspace_resource_observations, args=(stop_sampling, resource_samples),
+                                   daemon=True)
+        sampler.start()
+    elif ios:
+        result["iosArchiveProcessEvents"] = process_events
+        sampler = threading.Thread(target=observe_ios_archive_processes, args=(stop_sampling, process_events),
                                    daemon=True)
         sampler.start()
     xctest_started_at = time.monotonic()
@@ -2956,7 +2986,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
 
     result["xctestReturn"] = tested.returncode
     transcript = tested.stdout + "\n" + tested.stderr
-    if sampler is not None:
+    if mode == "workspace-xctest":
         result["workspaceResources"] = {
             "method": "ps RSS/%cpu of the signed app process tree, sampled every second during actual XCTest stages",
             "stages": workspace_resource_summary(transcript, resource_samples),
@@ -3031,6 +3061,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
          r"xcode=(-?[0-9]{1,3}|[a-z-]{1,16});sdk=(-?[0-9]{1,3}|[a-z-]{1,16});"
          r"archive=(-?[0-9]{1,3}|[a-z-]{1,16});output=([a-z-]{1,24})$"),
         ("xctestIOSArchiveNotice", r"(?m)^MRK_MACOS_IOS_ARCHIVE_NOTICE=v1;code=([a-z_]{1,40});status=([0-2]);result=([0-2])$"),
+        ("xctestIOSArchiveLastStage", r"(?m)^MRK_MACOS_IOS_ARCHIVE_LAST_STAGE=v1;stage=([a-z-]{1,24})$"),
         ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
         ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),
         ("xctestGuidedWorkflowConflictRow", r"(?m)^MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=([0-9]{1,3});id=(true|false);bytes=(true|false);hash=(true|false)$"),

@@ -8648,6 +8648,14 @@ final class NormalAppUITests: XCTestCase {
                           "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
             let phase = phases.map { text.contains($0) ? "1" : "0" }.joined()
             print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(phase)")
+            let stages = [
+                ("accepted", "Request accepted"), ("inputs-bound", "Saved inputs bound"),
+                ("checking-xcode", "Checking full Xcode and iOS SDK"), ("preparing", "Running saved project preparation"),
+                ("archiving", "Creating the reviewed archive"), ("inspecting", "Inspecting the original archive and any exported IPA"),
+                ("disposing-snapshot", "Disposing inspection snapshot"), ("disposing-work", "Disposing task-owned work")
+            ]
+            let stage = stages.first { text.contains("Reached stage: " + $0.1) }?.0 ?? "unobserved"
+            print("MRK_MACOS_IOS_ARCHIVE_LAST_STAGE=v1;stage=\(stage)")
             // This panel may be stale after a protocol failure. Its state is
             // diagnostic and cannot establish original completion.
         }
