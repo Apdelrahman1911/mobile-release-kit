@@ -45,6 +45,7 @@ SUITE_SCENARIOS = {
     "metadata": {"native-console-admission", "project-picker-and-saved-config", "metadata-negative-cancel-save-readback"},
     "projects": {"native-console-admission", "project-picker-and-saved-config", "project-switch-and-cli-isolation"},
     "cli-read": {"native-console-admission", "project-picker-and-saved-config", "installed-cli-read-data-and-refusals"},
+    "git-index": {"native-console-admission", "project-picker-and-saved-config", "git-index-review-stage-unstage"},
 }
 METADATA_TITLE = Path("public/store/android/en-US/title.txt")
 
@@ -844,6 +845,54 @@ def observe(work, action, media, suite):
             results.setdefault("gitLocalReadSeconds", {})[stage] = round(time.monotonic() - started, 2)
             return tree
 
+        def git_index_journey(head):
+            review = "Review local Git change"
+            reviewed = "I reviewed all listed files, including any contents not shown here."
+
+            def await_heading(name):
+                def observe():
+                    rows = ui.command("tree.snapshot", limit=300)["nodes"]
+                    headings = {row["name"] for row in rows if row["role"] == "heading" and row["visible"]}
+                    need(not headings.intersection({"Git action needs attention", "Git recovery is needed",
+                                                   "Git action did not complete"}), "git-index-original-action-refused")
+                    return name in headings
+                until(observe, 55, "git-index-" + name)
+
+            def verify_change(staged):
+                need(git("rev-parse", "HEAD") == head and readme.read_bytes() == initial + marker,
+                     "git-index-changed-head-or-working-file")
+                expected = b"README.md\n" if staged else b""
+                need(git("diff", "--cached", "--name-only") == expected, "git-index-unexpected-staged-custody")
+                if staged:
+                    need(git("show", ":README.md") == initial + marker, "git-index-wrong-staged-bytes")
+
+            ui.click("Check local Git actions", category="button", region="Local Git action status")
+            ui.click("Review files to stage", category="button")
+            await_heading("Review files to stage")
+            ui.node("README.md", region=review)
+            need(not ui.node("Stage these files", category="button", region=review)[1]["enabled"],
+                 "git-index-apply-enabled-without-consent")
+            ui.click("Close review, keep draft", category="button", region="Local Git action status")
+            verify_change(False)
+            ui.click("Review files to stage", category="button")
+            await_heading("Review files to stage")
+            ui.node("README.md", region=review)
+            ui.click(reviewed, category="checkbox", region=review)
+            ui.click("Stage these files", category="button", region=review)
+            await_heading("Selected files staged")
+            verify_change(True)
+            ui.click("Refresh changes", category="button")
+            wait_for_original_read(lambda rows: any(row["role"] == "heading" and row["name"] == "Local Git read finished"
+                                                    for row in rows), "stage-readback")
+            ui.click("Check local Git actions", category="button", region="Local Git action status")
+            ui.click("Review files to unstage", category="button")
+            await_heading("Review files to unstage")
+            ui.node("README.md", region=review)
+            ui.click(reviewed, category="checkbox", region=review)
+            ui.click("Unstage these files", category="button", region=review)
+            await_heading("Selected files unstaged")
+            verify_change(False)
+
         before = git("status", "--porcelain=v1")
         head = git("rev-parse", "HEAD")
         need(before == b" M README.md\n", "exact-synthetic-worktree-change")
@@ -889,6 +938,8 @@ def observe(work, action, media, suite):
             ui.reveal("Working-file changes", category="heading")
             need(git("status", "--porcelain=v1") == before and git("rev-parse", "HEAD") == head
                  and git("diff", "--cached", "--name-only") == b"", "git-read-affected-repository")
+            if suite == "git-index":
+                git_index_journey(head)
         finally:
             need(readme.read_bytes() == initial + marker, "git-read-changed-the-synthetic-input")
             readme.write_bytes(initial)
@@ -912,6 +963,7 @@ def observe(work, action, media, suite):
             "metadata": ("metadata-negative-cancel-save-readback", metadata_journey),
             "projects": ("project-switch-and-cli-isolation", project_switch_and_isolation),
             "cli-read": ("installed-cli-read-data-and-refusals", cli_read_journey),
+            "git-index": ("git-index-review-stage-unstage", git_observation),
         }
         if suite in independent_journeys:
             name, journey = independent_journeys[suite]
