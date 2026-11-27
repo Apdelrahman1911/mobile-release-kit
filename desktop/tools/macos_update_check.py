@@ -928,6 +928,7 @@ def install_log_excerpt(evidence):
 ADDITIONAL_FROZEN_UI = {
     "project-paths-xctest": ("testSyntheticProjectPathFields", "project-test", "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI"),
     "project-edits-xctest": ("testSyntheticProjectLocalEditsAndImages", "project-test", "MRK_MACOS_NORMAL_PROJECT_UI"),
+    "metadata-xctest": ("testSyntheticProjectLocalEditsAndImages", "project-test", "MRK_MACOS_NORMAL_METADATA_UI"),
     "persistence-xctest": ("testSyntheticPersistentCredentials", "persistence-test", "MRK_MACOS_NORMAL_PERSISTENCE_UI"),
     "offline-checks-xctest": ("testSyntheticProjectSavedOfflineChecks", "saved-checks-test", "MRK_MACOS_NORMAL_OFFLINE_UI"),
     "workflow-refusal-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI"),
@@ -2859,6 +2860,8 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
     if extra:
         method, bundle_stem, completion_marker = extra
         env["TEST_RUNNER_MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] = "exact-0.2.13-frozen-ui"
+        if mode == "metadata-xctest":
+            env["TEST_RUNNER_MRK_NORMAL_UI_METADATA_ONLY"] = "fixed-metadata-journey-v1"
     else:
         method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
                   "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]

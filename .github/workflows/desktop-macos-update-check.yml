@@ -37,7 +37,7 @@ on:
         default: none
         options: [none, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
-                  android-inputs-xctest, unsigned-ios-xctest, release-asset, native-status-unit, recovery-contracts]
+                  android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, release-asset, native-status-unit, recovery-contracts]
   push:
     branches:
       - verify/desktop-macos-update-check

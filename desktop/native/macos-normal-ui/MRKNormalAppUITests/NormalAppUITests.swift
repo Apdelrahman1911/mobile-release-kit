@@ -7079,6 +7079,11 @@ final class NormalAppUITests: XCTestCase {
         try syntheticProjectJourney(includeImages: true)
     }
     @MainActor private func syntheticProjectJourney(includeImages: Bool) throws {
+        let scope = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_METADATA_ONLY"]
+        let metadataOnly = scope == "fixed-metadata-journey-v1"
+        guard scope == nil || (metadataOnly && includeImages && guidedProductSurface) else {
+            throw Refusal.condition("the standalone metadata journey requires the exact guided candidate")
+        }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -7204,67 +7209,80 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
-        try stage("github") {
-            try press(renderer, "GitHub", renderer: renderer)
-            try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
-            try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
-            try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
-            if guidedProductSurface {
-                try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+        if !metadataOnly {
+            try stage("github") {
+                try press(renderer, "GitHub", renderer: renderer)
+                try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
+                try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
+                try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
+                if guidedProductSurface {
+                    try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+                }
+                let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
+                                            "optional comparison control is unavailable")
+                try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
+                            "passive supplied comparison unexpectedly enabled")
+                if guidedProductSurface {
+                    try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
+                }
+                try press(renderer, "Preview GitHub setup", renderer: renderer)
+                let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                              failures: Self.workflowFailures)
+                _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+                for path in LocalFixture.callers {
+                    let shownPath = String(path.dropFirst("project/".count))
+                    try expand(proposal, prefix: shownPath, renderer: renderer)
+                    try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                                  equals: fixture.text(path, stage: "workflows"))
+                }
+                try fixture.assertUnchanged() // All four destinations are still absent.
+                let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
+                try press(review, "Review local workflow files", renderer: renderer, failures: Self.workflowFailures)
+                _ = try waitElement(review.buttons.matching(identifier: "Confirm reviewed local files"), in: review,
+                                    enabled: true, timeout: 48, failures: Self.workflowFailures)
+                let paths = LocalFixture.callers.map { String($0.dropFirst("project/".count)) }
+                try inventory(review, caption: "Complete native workflow inventory — all four or refuse", paths: paths)
+                for path in LocalFixture.callers {
+                    let shownPath = String(path.dropFirst("project/".count))
+                    try expand(review, prefix: shownPath, renderer: renderer)
+                    try displayed(review, label: "Complete added diff for " + shownPath,
+                                  equals: workflowDiff(fixture.text(path, stage: "workflows"), path: shownPath))
+                }
+                try fixture.assertUnchanged()
+                try press(review, "Confirm reviewed local files", renderer: renderer)
+                try confirmedDialog(renderer, title: "Apply this four-caller bundle?", action: "Apply reviewed local files",
+                                    checkbox: "I reviewed all four paths and complete before/after text.")
+                _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,
+                                    timeout: 48, failures: Self.workflowFailures)
+                try fixture.accept("workflows")
             }
-            let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
-                                        "optional comparison control is unavailable")
-            try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
-                        "passive supplied comparison unexpectedly enabled")
-            if guidedProductSurface {
-                try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
-            }
-            try press(renderer, "Preview GitHub setup", renderer: renderer)
-            let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
-                                          failures: Self.workflowFailures)
-            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
-            for path in LocalFixture.callers {
-                let shownPath = String(path.dropFirst("project/".count))
-                try expand(proposal, prefix: shownPath, renderer: renderer)
-                try displayed(proposal, label: "Read-only proposed content for " + shownPath,
-                              equals: fixture.text(path, stage: "workflows"))
-            }
-            try fixture.assertUnchanged() // All four destinations are still absent.
-            let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
-            try press(review, "Review local workflow files", renderer: renderer, failures: Self.workflowFailures)
-            _ = try waitElement(review.buttons.matching(identifier: "Confirm reviewed local files"), in: review,
-                                enabled: true, timeout: 48, failures: Self.workflowFailures)
-            let paths = LocalFixture.callers.map { String($0.dropFirst("project/".count)) }
-            try inventory(review, caption: "Complete native workflow inventory — all four or refuse", paths: paths)
-            for path in LocalFixture.callers {
-                let shownPath = String(path.dropFirst("project/".count))
-                try expand(review, prefix: shownPath, renderer: renderer)
-                try displayed(review, label: "Complete added diff for " + shownPath,
-                              equals: workflowDiff(fixture.text(path, stage: "workflows"), path: shownPath))
-            }
-            try fixture.assertUnchanged()
-            try press(review, "Confirm reviewed local files", renderer: renderer)
-            try confirmedDialog(renderer, title: "Apply this four-caller bundle?", action: "Apply reviewed local files",
-                                checkbox: "I reviewed all four paths and complete before/after text.")
-            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,
-                                timeout: 48, failures: Self.workflowFailures)
-            try fixture.accept("workflows")
         }
         try stage("text") {
             try press(renderer, "Metadata", renderer: renderer)
             let editor = try waitElement(named(renderer, "Configured public locale text")
-                .containing(.button, identifier: "Validate text"), in: renderer)
-            try select(editor, label: "Saved platform / locale", value: "android / fr-FR", renderer: renderer)
-            try press(editor, "Load public text", renderer: renderer, failures: Self.textFailures)
+                .containing(.button, identifier: "Review changes"), in: renderer)
+            try select(editor, label: guidedProductSurface ? "Language" : "Saved platform / locale",
+                       value: "android / fr-FR", renderer: renderer, keyboardOptions: ["android / en-US", "android / fr-FR"])
+            try press(editor, guidedProductSurface ? "Load text" : "Load public text", renderer: renderer, failures: Self.textFailures)
             for (label, file) in [("App title", "title.txt"), ("Short description", "short_description.txt"), ("Full description", "full_description.txt")] {
                 try require(field(editor, label, multiline: true).value as? String
                     == fixture.text("project/release/store/android/fr-FR/" + file), "original locale text was not loaded")
             }
-            try replace(field(editor, "App title", multiline: true), with: fixture.text(LocalFixture.title, stage: "text"), renderer: renderer)
-            try press(editor, "Validate text", renderer: renderer)
-            _ = try waitElement(editor.staticTexts.matching(identifier: "Format-valid selected text"), in: editor, failures: Self.textFailures)
+            let validate = guidedProductSurface ? "Check text" : "Validate text"
+            let title = try field(editor, "App title", multiline: true)
+            if metadataOnly {
+                try replace(title, with: String(repeating: "x", count: 31), renderer: renderer)
+                try press(editor, validate, renderer: renderer)
+                _ = try waitElement(editor.staticTexts.matching(identifier: "Needs changes"), in: editor)
+                let refused = try unique(editor.buttons.matching(identifier: "Review changes"), "invalid text review control is ambiguous")
+                try require(!refused.isEnabled, "over-limit text can enter a save review")
+                try fixture.assertUnchanged()
+            }
+            try replace(title, with: fixture.text(LocalFixture.title, stage: "text"), renderer: renderer)
+            try press(editor, validate, renderer: renderer)
+            _ = try waitElement(editor.staticTexts.matching(identifier: guidedProductSurface ? "Text looks good" : "Format-valid selected text"), in: editor, failures: Self.textFailures)
             try press(editor, "Review changes", renderer: renderer, failures: Self.textFailures)
-            let review = try waitElement(named(renderer, "Original metadata file-save operation"), in: renderer)
+            let review = try waitElement(named(renderer, guidedProductSurface ? "Metadata file-save operation" : "Original metadata file-save operation"), in: renderer)
             _ = try waitElement(review.buttons.matching(identifier: "Save text…"), in: review,
                                 enabled: true, timeout: 48, failures: Self.textFailures)
             let names = ["title.txt", "short_description.txt", "full_description.txt"]
@@ -7278,9 +7296,13 @@ final class NormalAppUITests: XCTestCase {
             }
             try fixture.assertUnchanged()
             try press(review, "Save text…", renderer: renderer)
-            try confirmedDialog(renderer, title: "Save this reviewed locale bundle?", action: "Save text",
-                                checkbox: "I reviewed all exact paths, full original/replacement text, digests and line-ending changes.",
-                                typedLabel: "Type SAVE to confirm only this local text operation")
+            if guidedProductSurface {
+                try confirmedDialog(renderer, title: "Save your Store text?", action: "Save text", checkbox: "I reviewed the changes.")
+            } else {
+                try confirmedDialog(renderer, title: "Save this reviewed locale bundle?", action: "Save text",
+                                    checkbox: "I reviewed all exact paths, full original/replacement text, digests and line-ending changes.",
+                                    typedLabel: "Type SAVE to confirm only this local text operation")
+            }
             _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Text saved")), in: review, timeout: 48, failures: Self.textFailures)
             try fixture.accept("text")
             let older = try waitElement(editor.staticTexts.matching(identifier:
@@ -7291,33 +7313,35 @@ final class NormalAppUITests: XCTestCase {
                         "fresh text observation did not preserve the saved value")
             try fixture.assertUnchanged()
         }
-        try stage("version") {
-            try press(renderer, "Dashboard", renderer: renderer)
-            let editor = try waitElement(named(renderer, "Edit or create saved version values"), in: renderer)
-            try press(editor, "Open saved version editor", renderer: renderer, failures: Self.versionFailures)
-            let name = try field(editor, "Marketing version"), build = try field(editor, "Build number")
-            try require(name.value as? String == "1.2.3" && build.value as? String == "7", "original version was not loaded")
-            try replace(name, with: "2.3.4", renderer: renderer)
-            try replace(build, with: "8", renderer: renderer)
-            try press(editor, "Validate and review values", renderer: renderer, failures: Self.versionFailures)
-            _ = try waitElement(editor.buttons.matching(identifier: "Save version values…"), in: editor,
-                                enabled: true, timeout: 48, failures: Self.versionFailures)
-            try displayed(editor, label: "Complete original version source", equals: fixture.text(LocalFixture.version))
-            try displayed(editor, label: "Complete reviewed version source", equals: fixture.text(LocalFixture.version, stage: "version"))
-            try fixture.assertUnchanged()
-            try press(editor, "Save version values…", renderer: renderer)
-            try confirmedDialog(renderer, title: "Save these reviewed version values?", action: "Save version values",
-                                checkbox: "I reviewed the full original/after text, exact destination, byte comparisons, mode and directory/line-ending facts.",
-                                typedLabel: "Type SAVE to confirm this local operation")
-            _ = try waitElement(editor.staticTexts.matching(identifier: "Submitted version values saved"), in: editor,
-                                timeout: 48, failures: Self.versionFailures)
-            try fixture.accept("version")
-            let saved = try waitElement(named(renderer, "Saved version and build"), in: renderer)
-            try press(saved, "Read saved version", renderer: renderer)
-            _ = try waitElement(saved.staticTexts.matching(identifier: "Observed from saved version file"), in: saved)
-            _ = try unique(saved.staticTexts.matching(identifier: "2.3.4"), "fresh version observation is not the saved name")
-            _ = try unique(saved.staticTexts.matching(identifier: "Build number 8"), "fresh version observation is not the saved build")
-            try fixture.assertUnchanged()
+        if !metadataOnly {
+            try stage("version") {
+                try press(renderer, "Dashboard", renderer: renderer)
+                let editor = try waitElement(named(renderer, "Edit or create saved version values"), in: renderer)
+                try press(editor, "Open saved version editor", renderer: renderer, failures: Self.versionFailures)
+                let name = try field(editor, "Marketing version"), build = try field(editor, "Build number")
+                try require(name.value as? String == "1.2.3" && build.value as? String == "7", "original version was not loaded")
+                try replace(name, with: "2.3.4", renderer: renderer)
+                try replace(build, with: "8", renderer: renderer)
+                try press(editor, "Validate and review values", renderer: renderer, failures: Self.versionFailures)
+                _ = try waitElement(editor.buttons.matching(identifier: "Save version values…"), in: editor,
+                                    enabled: true, timeout: 48, failures: Self.versionFailures)
+                try displayed(editor, label: "Complete original version source", equals: fixture.text(LocalFixture.version))
+                try displayed(editor, label: "Complete reviewed version source", equals: fixture.text(LocalFixture.version, stage: "version"))
+                try fixture.assertUnchanged()
+                try press(editor, "Save version values…", renderer: renderer)
+                try confirmedDialog(renderer, title: "Save these reviewed version values?", action: "Save version values",
+                                    checkbox: "I reviewed the full original/after text, exact destination, byte comparisons, mode and directory/line-ending facts.",
+                                    typedLabel: "Type SAVE to confirm this local operation")
+                _ = try waitElement(editor.staticTexts.matching(identifier: "Submitted version values saved"), in: editor,
+                                    timeout: 48, failures: Self.versionFailures)
+                try fixture.accept("version")
+                let saved = try waitElement(named(renderer, "Saved version and build"), in: renderer)
+                try press(saved, "Read saved version", renderer: renderer)
+                _ = try waitElement(saved.staticTexts.matching(identifier: "Observed from saved version file"), in: saved)
+                _ = try unique(saved.staticTexts.matching(identifier: "2.3.4"), "fresh version observation is not the saved name")
+                _ = try unique(saved.staticTexts.matching(identifier: "Build number 8"), "fresh version observation is not the saved build")
+                try fixture.assertUnchanged()
+            }
         }
         if includeImages {
             try stage("images-cancel") {
@@ -7341,7 +7365,7 @@ final class NormalAppUITests: XCTestCase {
                 try goToFolder(sheet, path: fixture.sourcesPath + "/01.png")
                 sheet.typeKey("a", modifierFlags: .command)
                 try nativeOpen(sheet)
-                let review = try waitElement(named(renderer, "Original localized-image operation"), in: renderer)
+                let review = try waitElement(named(renderer, guidedProductSurface ? "Localized-image operation" : "Original localized-image operation"), in: renderer)
                 _ = try waitElement(review.buttons.matching(identifier: "Review exact copy choices"), in: review,
                                     enabled: true, timeout: 48, failures: Self.imageFailures)
                 try expand(review, prefix: "Native capture metadata (2 sources; not image approval)", renderer: renderer)
@@ -7390,7 +7414,11 @@ final class NormalAppUITests: XCTestCase {
         // These markers remain conditional on original XCTest/xcodebuild exit0,
         // exactly one selected passing test and the independent native owners.
         try acceptFinalScenario()
-        print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        if metadataOnly {
+            print("MRK_MACOS_NORMAL_METADATA_UI=config-fr-FR-over-limit-text-refusal-reviewed-save-image-cancel-reviewed-copy;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        } else {
+            print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        }
     }
 
     // Standalone opt-in preservation/refusal case; not an added project-batch case.
