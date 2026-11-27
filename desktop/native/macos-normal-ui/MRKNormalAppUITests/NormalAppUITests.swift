@@ -7149,7 +7149,9 @@ final class NormalAppUITests: XCTestCase {
                 try expand(renderer, prefix: "Check without saving", renderer: renderer)
             }
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,
+            let validationAttribute = guidedProductSurface ? "title" : "value"
+            let validated = renderer.staticTexts.matching(NSPredicate(format: "%K == %@", validationAttribute, "Format validation complete"))
+            _ = try waitElement(validated, in: renderer,
                                 failures: Self.configurationFailures)
             if guidedProductSurface {
                 try press(renderer, "Project settings", renderer: renderer)
@@ -7672,14 +7674,21 @@ final class NormalAppUITests: XCTestCase {
             }
             try press(renderer, "Preview GitHub setup", renderer: renderer)
             try stage("workflow-preview-readback") {
-                let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
-                                              failures: Self.workflowFailures)
-                _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
-                for path in LocalFixture.callers {
+                var current: XCUIElement?
+                try stage("workflow-preview-heading") {
+                    let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                                  failures: Self.workflowFailures)
+                    _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+                    current = proposal
+                }
+                guard let proposal = current else { throw Refusal.condition("original preview is absent") }
+                for (index, path) in LocalFixture.callers.enumerated() {
                     let shownPath = String(path.dropFirst("project/".count))
-                    try expand(proposal, prefix: shownPath, renderer: renderer)
-                    try displayed(proposal, label: "Read-only proposed content for " + shownPath,
-                                  equals: fixture.text(path, stage: "workflows"))
+                    try stage("workflow-preview-caller-\(index + 1)") {
+                        try expand(proposal, prefix: shownPath, renderer: renderer)
+                        try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                                      equals: fixture.text(path, stage: "workflows"))
+                    }
                 }
             }
             try noApplyControls()
@@ -7929,7 +7938,28 @@ final class NormalAppUITests: XCTestCase {
             try stage("offline-finality-audit") {
                 try stage("offline-finality-status") {
                     let terminal = failures + [unconfirmed, historical, "Historical / stale context"]
-                    let count = try staticTextFailureCount(panel, terminal) { _ = try remaining(1) }
+                    let count: Int
+                    if guidedProductSurface {
+                        let snapshot = try panel.snapshot()
+                        var pending = snapshot.children
+                        var visited = 0
+                        var matches = 0
+                        while let node = pending.popLast() {
+                            visited += 1
+                            guard visited + pending.count + node.children.count <= 1024 else {
+                                throw Refusal.condition("offline finality snapshot exceeds its bound")
+                            }
+                            if node.elementType == .staticText {
+                                let value = node.value
+                                let observed = try Self.staticTextContent(value: value, label: value is String ? "" : node.label)
+                                if terminal.contains(observed) { matches += 1 }
+                            }
+                            pending.append(contentsOf: node.children)
+                        }
+                        count = matches
+                    } else {
+                        count = try staticTextFailureCount(panel, terminal) { _ = try remaining(1) }
+                    }
                     try require(count == 0, "the settled offline operation retained a stale or failed state")
                 }
                 try stage("offline-finality-authority") {
