@@ -37,7 +37,7 @@ NAVIGATION_SCENARIOS = {"nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-"
 EXPECTED_SCENARIOS = {
     "native-console-admission", "cold-runtime-and-cli-denial", "cancel-native-project-picker",
     "project-picker-and-saved-config", *NAVIGATION_SCENARIOS, "cli-grant-and-revoke",
-    "version-cancel-save-quit-reopen", "git-local-diff-and-no-side-effects", "window-layouts",
+    "project-switch-and-cli-isolation", "version-cancel-save-quit-reopen", "git-local-diff-and-no-side-effects", "window-layouts",
 }
 
 
@@ -158,6 +158,9 @@ def install(media, work):
     call("/usr/bin/git", "-C", str(project), "add", "--all")
     call("/usr/bin/git", "-C", str(project), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
          "commit", "-m", "Original synthetic project")
+    secondary = work / "MRK Verification Secondary"
+    shutil.copytree(FIXTURE, secondary)
+    (secondary / VERSION_FILE).write_bytes(b"VERSION_NAME=2.1.0\nBUILD_NUMBER=41\n")
 
 
 class UI:
@@ -327,7 +330,7 @@ class UI:
         self.node("Choose a mobile project folder", contains=True)
         if cancel:
             self.click("Cancel", category="button")
-            self.node(PAGE_HEADINGS["Overview"], category="heading")
+            self.node(self.project_name or PAGE_HEADINGS["Overview"], category="heading")
             return
         self.keys("command", "shift", "g")
         pid = self.payload_pid()
@@ -535,6 +538,46 @@ def observe(work, action, media):
         ui.node("Off at last check", category="statictext", contains=True)
         need(call(str(CLI), "status", "--json", check=False).returncode == 4, "cli-native-revocation")
 
+    def project_switch_and_isolation():
+        secondary = work / "MRK Verification Secondary"
+        primary_before = {name: file_hash(project / name) for name in original}
+        secondary_original = {path: file_hash(path) for path in secondary.rglob("*") if path.is_file()}
+
+        def granted_projects():
+            reply = json.loads(call(str(CLI), "projects", "--json").stdout)["response"]
+            need(reply["kind"] == "projects" and len(reply["value"]) == 1
+                 and reply["value"][0]["registeredInCurrentHost"] is True, "exact-cli-project-scope")
+            return reply["value"]
+
+        ui.page("Project settings")
+        panel = ui.command("tree.snapshot", limit=300)
+        if not any(node["role"] == "button" and node["name"] == "Check access" for node in panel["nodes"]):
+            ui.click("Advanced · CLI / AI access", contains=True)
+        ui.click("Check access", category="button")
+        ui.click("Allow selected project for 1 hour", category="button")
+        ui.node("1 project was allowed at last check", category="statictext", contains=True)
+        allowed_before_switch = granted_projects()
+        ui.page("Overview")
+        ui.pick(secondary, cancel=True)
+        ui.pick(secondary)
+        need(granted_projects() == allowed_before_switch, "switch-expanded-cli-authority")
+        ui.click("Edit version & build number")
+        ui.click("Open saved version editor", category="button")
+        ui.node("Values: 2.1.0 · Build 41.", category="statictext", contains=True)
+        ui.pick(project)
+        ui.click("Edit version & build number")
+        ui.click("Open saved version editor", category="button")
+        ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
+        ui.page("Project settings")
+        panel = ui.command("tree.snapshot", limit=300)
+        if not any(node["role"] == "button" and node["name"] == "Turn off access" for node in panel["nodes"]):
+            ui.click("Advanced · CLI / AI access", contains=True)
+        ui.click("Turn off access", category="button")
+        ui.node("Off at last check", category="statictext", contains=True)
+        need(call(str(CLI), "status", "--json", check=False).returncode == 4, "switch-cli-grant-revocation")
+        need(all(file_hash(path) == digest for path, digest in secondary_original.items())
+             and all(file_hash(project / name) == digest for name, digest in primary_before.items()), "switch-changed-fixture")
+
     def versions():
         nonlocal connection
         ui.page("Overview")
@@ -704,12 +747,17 @@ def observe(work, action, media):
                 scenarios["cli-grant-and-revoke"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
                 scenarios["git-local-diff-and-no-side-effects"] = dict(status="Blocked", reason="Fixture project selection failed")
+                scenarios["project-switch-and-cli-isolation"] = dict(status="Blocked", reason="Fixture project selection failed")
             scenario("window-layouts", window_layouts)
             if selected:
-                scenario("version-cancel-save-quit-reopen", versions)
+                if scenario("version-cancel-save-quit-reopen", versions):
+                    scenario("project-switch-and-cli-isolation", project_switch_and_isolation)
+                else:
+                    scenarios["project-switch-and-cli-isolation"] = dict(status="Blocked", reason="Saved project reopening failed")
         else:
             for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
-                         "version-cancel-save-quit-reopen", "window-layouts", "git-local-diff-and-no-side-effects"):
+                         "version-cancel-save-quit-reopen", "window-layouts", "git-local-diff-and-no-side-effects",
+                         "project-switch-and-cli-isolation"):
                 scenarios[name] = dict(status="Blocked", reason="Original UI session or initialization did not pass")
     finally:
         save()
