@@ -2952,6 +2952,8 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestProjectSelection", r"(?m)^MRK_GUIDED_PROJECT_SELECTION=v1;([a-z-]{1,30})=([0-5])$"),
         ("xctestSidebarNavigation", r"(?m)^MRK_GUIDED_NAV=v1;line=([0-9]{1,5});phase=(sidebar-scroll|hittable)$"),
         ("xctestIOSToolDiagnosticCut", r"(?m)^MRK_GUIDED_IOS_TOOLS=v1;cut=([a-z-]{1,24});expired=([01])$"),
+        ("xctestGuidedIOSTerminal", r"(?m)^MRK_GUIDED_IOS_TERMINAL=v1;(native-reason|failure)=([a-z-]{1,24}|[0-9]{1,2})$"),
+        ("xctestGuidedVaultOpen", r"(?m)^MRK_GUIDED_VAULT_OPEN=v1;operation=([01]);action=([01]);uninitialized=([01]);closed=([01])$"),
         ("xctestGuidedIOSReport", r"(?m)^MRK_GUIDED_IOS_REPORT=v1;context=([0-5]);receipt=([0-5])$"),
         ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
         ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),

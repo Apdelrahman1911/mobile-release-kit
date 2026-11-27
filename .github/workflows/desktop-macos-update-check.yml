@@ -37,7 +37,7 @@ on:
         default: none
         options: [none, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
-                  android-inputs-xctest, unsigned-ios-xctest, release-asset, native-status-unit]
+                  android-inputs-xctest, unsigned-ios-xctest, release-asset, native-status-unit, recovery-contracts]
   push:
     branches:
       - verify/desktop-macos-update-check
@@ -56,6 +56,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  recovery-contracts:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
+      inputs.additional_ui == 'recovery-contracts' && inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f'
+    name: Frozen-source recovery (${{ matrix.suite }})
+    runs-on: macos-26
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: interrupted-project-writers
+            tests: test_project_crash_recovery test_configuration_crash_recovery test_github_workflow_recovery
+          - suite: media-identity-and-rollback
+            tests: test_metadata_images_edit test_metadata_images_recovery test_saved_text_recovery
+          - suite: missing-inputs-and-custody
+            tests: test_android_signed test_ios_signed test_local_recovery_settlement test_macos_vault_helper_startup
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Exercise original core paths with disposable fixtures
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          SUITE: ${{ matrix.tests }}
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 ]]
+          [[ "$(git rev-parse HEAD)" == 4e821384cd912562dd5e30b195e87c113bd2d09f ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == 50393070e54b402a5ac1bac63e411fa1fbd1ad14 ]]
+          umask 077
+          fixtures="$(mktemp -d "$RUNNER_TEMP/mrk-core-recovery.XXXXXXXX")"
+          export TMPDIR="$fixtures"
+          python -m pip install --disable-pip-version-check -e '.[test]'
+          IFS=' ' read -r -a tests <<< "$SUITE"
+          python -B -m unittest -v "${tests[@]}"
+
   native-status-unit:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
@@ -84,14 +128,14 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$(uname -m)" == arm64 ]]
           [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE" && "$(sw_vers -productVersion)" == 26.* ]]
           npm ci --ignore-scripts --no-audit --no-fund
-          node --test --experimental-strip-types tests/workspace-native-status.test.mjs | tee "$RUNNER_TEMP/native-status-unit.tap"
+          node --test --test-reporter=tap --experimental-strip-types tests/workspace-native-status.test.mjs | tee "$RUNNER_TEMP/native-status-unit.tap"
           grep -xF '# pass 1' "$RUNNER_TEMP/native-status-unit.tap"
           grep -xF '# skipped 0' "$RUNNER_TEMP/native-status-unit.tap"
   qualify-frozen:
     name: Qualify frozen media (${{ matrix.mode }})
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' &&
+      github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' && inputs.additional_ui != 'recovery-contracts' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
         inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' &&

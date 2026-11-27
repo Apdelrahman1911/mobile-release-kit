@@ -6285,7 +6285,16 @@ final class NormalAppUITests: XCTestCase {
             @MainActor func openVault() throws {
                 try stage("persistence-open-vault") {
                     try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
-                    try privateStatus(storage, action: "open-vault")
+                    do {
+                        try privateStatus(storage, action: "open-vault")
+                    } catch {
+                        let operation = named(storage, "Private-input operation").count == 1 ? 1 : 0
+                        let action = named(storage, "Private-input operation action").count > 0 ? 1 : 0
+                        let uninitialized = storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized").count > 0 ? 1 : 0
+                        let closed = storage.staticTexts.matching(identifier: "Storage closed").count > 0 ? 1 : 0
+                        print("MRK_GUIDED_VAULT_OPEN=v1;operation=\(operation);action=\(action);uninitialized=\(uninitialized);closed=\(closed)")
+                        throw error
+                    }
                     _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
                                         failures: Self.privateInputFailures)
                 }
@@ -8659,7 +8668,24 @@ final class NormalAppUITests: XCTestCase {
         if guidedProductSurface {
             // The heading can be awaited without repeatedly reading every
             // static text while the native operation has no result to show.
-            _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
+            do {
+                _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
+            } catch {
+                // Keep bounded classifications only. The native deadlines and
+                // original refusal still control the result.
+                if let (labels, _) = try? guidedDiagnosticsSnapshot(panel) {
+                    let joined = labels.joined(separator: " ")
+                    for reason in ["cancelled", "context-changed", "document-lost", "shutdown", "timed-out",
+                                   "protocol-error", "runtime-unavailable", "command-failed", "cleanup-unknown"]
+                    where joined.contains("Native reason: \(reason).") || joined.contains("native reason: \(reason).") {
+                        print("MRK_GUIDED_IOS_TERMINAL=v1;native-reason=\(reason)")
+                    }
+                    for (index, label) in failures.enumerated() where joined.contains(label) {
+                        print("MRK_GUIDED_IOS_TERMINAL=v1;failure=\(index)")
+                    }
+                }
+                throw error
+            }
             diagnosticCut = "report-visible"
             var observed = try guidedReport()
             while observed == nil {
