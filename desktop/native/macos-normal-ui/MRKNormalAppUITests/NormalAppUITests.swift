@@ -5373,14 +5373,13 @@ final class NormalAppUITests: XCTestCase {
         try require(XCTWaiter.wait(for: [wait], timeout: try remaining(timeout)) == .completed,
                     "owned UI did not dismiss in " + journeyStage, line: line)
     }
-    @MainActor private func reveal(_ element: XCUIElement, in renderer: XCUIElement, line: UInt = #line) throws {
-        // Scroll only the original renderer; never an arbitrary screen position,
-        // another application or a filesystem/default-location setter.
+    @MainActor private func reveal(_ element: XCUIElement, in surface: XCUIElement, line: UInt = #line) throws {
+        // Scroll only the identified surface inside the original renderer.
         for direction in [-1.0, 1.0] {
             for _ in 0..<8 {
                 if element.isHittable { return }
                 _ = try remaining(5)
-                renderer.scroll(byDeltaX: 0, deltaY: CGFloat(direction * 550))
+                surface.scroll(byDeltaX: 0, deltaY: CGFloat(direction * 550))
             }
         }
         try require(element.isHittable, "expected renderer control could not be revealed in " + journeyStage, line: line)
@@ -5391,10 +5390,25 @@ final class NormalAppUITests: XCTestCase {
                             "Environment": "Build tools", "Releases": "Build & release", "Artifacts": "Build files",
                             "Recovery": "Recover work", "Metadata": "Store listing", "Dashboard": "Overview",
                             "Preview GitHub setup": "Preview without saving (optional)"]
-        let displayed = guidedProductSurface && root == renderer ? guidedLabels[label] ?? label : label
-        let item = try waitElement(root.buttons.matching(identifier: displayed), in: root, enabled: true,
+        let guided = guidedProductSurface && root == renderer
+        let displayed = guided ? guidedLabels[label] ?? label : label
+        let sidebarLabels = ["Overview", "Build & release", "Store listing", "Signing & accounts",
+                             "Project settings", "Build tools", "GitHub", "Build files", "Recover work", "Automation"]
+        let inSidebar = guided && sidebarLabels.contains(displayed)
+        // The signed guided app scrolls its sidebar independently of the document.
+        // A gesture sent to the renderer's center can scroll the wrong pane.
+        let scope = inSidebar
+            ? try unique(named(renderer, "Workspace navigation"), "workspace navigation missing or ambiguous", line: line)
+            : root
+        let item = try waitElement(scope.buttons.matching(identifier: displayed), in: root, enabled: true,
                                    timeout: timeout, failures: failures, line: line)
-        try reveal(item, in: renderer, line: line)
+        if inSidebar && !item.isHittable {
+            print("MRK_GUIDED_NAV=v1;line=\(line);phase=sidebar-scroll")
+        }
+        try reveal(item, in: inSidebar ? scope : renderer, line: line)
+        if inSidebar {
+            print("MRK_GUIDED_NAV=v1;line=\(line);phase=hittable")
+        }
         item.click()
     }
     private var guidedProductSurface: Bool {
@@ -5906,15 +5920,17 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func privateStatus(_ storage: XCUIElement, action: String,
                                          phase: String = "idle", mutation: Bool = false) throws {
-        let original = try waitElement(named(storage, "Original private-input operation"), in: storage,
+        let operationLabel = guidedProductSurface ? "Private-input operation" : "Original private-input operation"
+        let original = try waitElement(named(storage, operationLabel), in: storage,
                                        timeout: 48, failures: Self.privateInputFailures)
         try privateValue(storage, original, label: "Private-input operation action", value: action, timeout: 48)
         try privateValue(storage, original, label: "Private-input operation phase", value: phase, timeout: 48)
         try privateValue(storage, original, label: "Private-input operation settlement", value: "known", timeout: 48)
         if mutation {
-            try privateValue(storage, original, label: "Private-input storage effect", value: "known-applied")
-            try privateValue(storage, original, label: "Private-input storage durability", value: "confirmed")
-            try privateValue(storage, original, label: "Private-input storage cleanup", value: "known")
+            let outcomeLabel = guidedProductSurface ? "Where your keys are kept" : "Private-input storage"
+            try privateValue(storage, original, label: outcomeLabel + " effect", value: "known-applied")
+            try privateValue(storage, original, label: outcomeLabel + " durability", value: "confirmed")
+            try privateValue(storage, original, label: outcomeLabel + " cleanup", value: "known")
         }
     }
     @MainActor private func privateContext(_ storage: XCUIElement, renderer: XCUIElement,
@@ -7030,14 +7046,17 @@ final class NormalAppUITests: XCTestCase {
             @MainActor func projectDefaults() throws {
                 try press(renderer, "Project settings", renderer: renderer)
                 if guidedProductSurface {
-                    let heading = renderer.staticTexts.matching(identifier: "3. Review the project defaults")
-                    if heading.count == 0 {
+                    let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@",
+                        "3. Review the project defaults"))
+                    let progress = renderer.staticTexts.matching(identifier: "Group 3 of 4 · changes remain in this draft")
+                    if progress.count == 0 {
                         if renderer.buttons.matching(identifier: "Next: Version & build").count == 1 {
                             try press(renderer, "Next: Version & build", renderer: renderer)
                         }
                         try press(renderer, "Next: Project defaults", renderer: renderer)
                     }
                     _ = try waitElement(heading, in: renderer)
+                    _ = try waitElement(progress, in: renderer)
                 } else {
                     let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
                     try settingsTab(settings, "General", renderer: renderer)
