@@ -611,7 +611,7 @@ def observe(work, action, media):
             return call("/usr/bin/git", "-C", str(project), *args).stdout
         before = git("status", "--porcelain=v1")
         head = git("rev-parse", "HEAD")
-        need(b" M README.md\n" in before, "synthetic-worktree-change")
+        need(before == b" M README.md\n", "exact-synthetic-worktree-change")
         try:
             ui.page("GitHub")
             ui.click("Connect", category="radiobutton", region="GitHub tasks")
@@ -623,7 +623,6 @@ def observe(work, action, media):
             bounds = changes["bounds"]
             ui.command("pointer.scroll", x=bounds["x"] + bounds["width"] // 2,
                        y=bounds["y"] + bounds["height"] // 2, dy=6)
-            ui.node("README.md", category="statictext")
             ui.click("Select README.md", category="checkbox", contains=True)
             ui.click("Working changes", category="button")
             ui.node(marker.strip().decode(), contains=True)
@@ -636,8 +635,8 @@ def observe(work, action, media):
     def window_layouts():
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
         # Leave room for the title bar position and the Dock's reserved area.
-        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 100, 740)
-        if width < 980 or height < 660:
+        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 120, 740)
+        if width < 980 or height < 640:
             raise Blocked("The synthetic console is too small for two readable window sizes")
         results["windowBounds"] = []
         for width, height in ((width - 40, height - 20), (width, height)):

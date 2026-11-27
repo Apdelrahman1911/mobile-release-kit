@@ -37,7 +37,7 @@ on:
         default: none
         options: [none, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
-                  android-inputs-xctest, unsigned-ios-xctest, release-asset]
+                  android-inputs-xctest, unsigned-ios-xctest, release-asset, native-status-unit]
   push:
     branches:
       - verify/desktop-macos-update-check
@@ -56,11 +56,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  native-status-unit:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
+      inputs.additional_ui == 'native-status-unit' && inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f'
+    name: Run macOS-only workspace backlog regression from the frozen source
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Verify source identity and run only the omitted check
+        working-directory: desktop
+        env:
+          EXPECTED_SOURCE: ${{ inputs.expected_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$(uname -m)" == arm64 ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE" && "$(sw_vers -productVersion)" == 26.* ]]
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test --experimental-strip-types tests/workspace-native-status.test.mjs | tee "$RUNNER_TEMP/native-status-unit.tap"
+          grep -xF '# pass 1' "$RUNNER_TEMP/native-status-unit.tap"
+          grep -xF '# skipped 0' "$RUNNER_TEMP/native-status-unit.tap"
   qualify-frozen:
     name: Qualify frozen media (${{ matrix.mode }})
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'workflow_dispatch' &&
+      github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' &&
       ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
        (github.ref == 'refs/heads/verify/macos-0213-recovery-project' &&
         inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' &&
