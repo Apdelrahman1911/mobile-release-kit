@@ -27,7 +27,7 @@ on:
         description: Signed application journey suite
         type: choice
         default: workspace
-        options: [workspace, metadata, projects]
+        options: [workspace, metadata, projects, cli-read, vault-lifecycle]
 
 permissions:
   contents: read
