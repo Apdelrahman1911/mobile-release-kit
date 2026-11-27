@@ -2821,6 +2821,64 @@ def android_helper_status():
                           capture_output=True, timeout=10).returncode
 
 
+def ios_archive_host_facts(release):
+    """Compare fixed hosted paths with the native unsigned-archive metadata predicates."""
+    rows = {}
+
+    def observe(path, directory=True):
+        try:
+            info = path.lstat()
+        except OSError as error:
+            rows[str(path)] = {"errno": error.errno}
+            return None
+        mode = stat.S_IMODE(info.st_mode)
+        ordinary = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        rows[str(path)] = {
+            "uid": info.st_uid, "gid": info.st_gid, "mode": f"{mode:04o}", "links": info.st_nlink,
+            "kind": "symlink" if stat.S_ISLNK(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) else "other",
+            "ordinaryMetadataAdmitted": ordinary and info.st_uid == 0 and not mode & 0o7022
+            and (directory or info.st_nlink == 1),
+        }
+        return info
+
+    applications = Path("/Applications")
+    managed = Path("/Library/MobileReleaseKitDeveloper")
+    for path in (Path("/"), Path("/Library"), managed, applications):
+        observe(path)
+    app = applications / "Xcode.app"
+    alias = observe(app)
+    if alias is not None and stat.S_ISLNK(alias.st_mode):
+        target = os.readlink(app).removeprefix("/Applications/")
+        valid = bool(re.fullmatch(r"Xcode[A-Za-z0-9._+-]*\.app", target)) and target != "Xcode.app"
+        rows[str(app)]["siblingAdmitted"] = valid
+        if valid:
+            app = applications / target
+    if rows[str(applications / "Xcode.app")].get("siblingAdmitted", True):
+        developer = app / "Contents/Developer"
+        for path in (app, app / "Contents", developer, developer / "usr", developer / "usr/bin"):
+            observe(path)
+        observe(developer / "usr/bin/xcodebuild", directory=False)
+        sdk = developer
+        for name in ("Platforms", "iPhoneOS.platform", "Developer", "SDKs"):
+            sdk /= name
+            observe(sdk)
+        alias = observe(sdk / "iPhoneOS.sdk")
+        if alias is not None and stat.S_ISLNK(alias.st_mode):
+            target = os.readlink(sdk / "iPhoneOS.sdk")
+            valid = bool(re.fullmatch(r"iPhoneOS[1-9][0-9]{0,2}(?:\.(?:0|[1-9][0-9]{0,2})){0,2}\.sdk", target))
+            rows[str(sdk / "iPhoneOS.sdk")]["siblingAdmitted"] = valid
+            if valid:
+                observe(sdk / target)
+
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", release):
+        return rows
+    runtime = STATE / "versions" / release / "runtime"
+    observe(runtime)
+    for name in ("manifest.json", "core.zip", "ios_archive_bootstrap.py"):
+        observe(runtime / name, directory=False)
+    return rows
+
+
 def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, result):
     """Run the original production UI check on the caller's verified installed package."""
     origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
@@ -2838,6 +2896,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
            "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY": "current-candidate-ordinary-only-v1"}
     ios = mode == "unsigned-ios-xctest"
     if ios:
+        result["iosArchiveHostFacts"] = ios_archive_host_facts(installed["release"])
         del env["TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY"]
         env["TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] = "current-candidate-ios-tools-only-v1"
     if same_frozen_source:

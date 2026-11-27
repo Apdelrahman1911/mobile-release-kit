@@ -1101,6 +1101,30 @@ def observe(work, action, media, suite):
                 fact["visualStatusReads"] += 1
                 return True
 
+            def scroll_visible_review(tree):
+                root = tree["nodes"][0]
+                need(root["id"] == f"mac:{ui.payload_pid()}:0" and root["role"] == "window" and root["bounds"],
+                     "git-review-not-original-window")
+                frame = ui.image(f"git-review-viewport-{fact['reviewViewportScrolls']}")
+                rows = json.loads(call("/usr/bin/swift", str(CONSOLE_OCR), str(frame), timeout=20).stdout)
+                labels = ("Review before changing Git", "Close review, keep draft")
+                matches = [[row for row in rows if row["text"] == label] for label in labels]
+                if any(len(match) != 1 for match in matches):
+                    return False
+                title, close = (match[0] for match in matches)
+                x = round(close["x"] * ui.screen["width"])
+                y = round(close["y"] * ui.screen["height"])
+                bounds = root["bounds"]
+                if not (bounds["x"] + 200 < x < bounds["x"] + bounds["width"] - 8 and
+                        bounds["y"] + 35 < y < min(bounds["y"] + bounds["height"] - 8, ui.screen["height"] - 65)
+                        and 0 < close["y"] - title["y"] < 0.2):
+                    return False
+                focused = ui.command("tree.snapshot", limit=1)["nodes"]
+                need(len(focused) == 1 and focused[0]["id"] == root["id"] and focused[0]["bounds"] == bounds,
+                     "git-review-window-changed")
+                ui.command("pointer.scroll", x=x, y=y, dy=6)
+                return True
+
             def await_heading(name):
                 next_read = time.monotonic() + 2
                 review_scrolls = 0
@@ -1137,6 +1161,11 @@ def observe(work, action, media, suite):
                     # The mutation controller's initial acknowledgement can
                     # be active. Check the original action as the UI directs.
                     if time.monotonic() >= next_read:
+                        if (tree["truncated"] and name in {"Review files to stage", "Review files to unstage"}
+                                and review_scrolls < 3 and scroll_visible_review(tree)):
+                            fact["reviewViewportScrolls"] += 1
+                            review_scrolls += 1
+                            return False
                         if any(row["name"] == "Check action" and row["role"] == "button" and
                                row["enabled"] and row["visible"] for row in rows):
                             ui.click("Check action", category="button", region="Local Git action status")
