@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from desktop.tools import macos_release_media as media
+from desktop.tools import macos_release_ui as ui
 
 
 class FrozenMediaTests(unittest.TestCase):
@@ -82,6 +84,33 @@ class FrozenMediaTests(unittest.TestCase):
         for invalid in (modes[:-1], modes[:-1] + modes[:1], modes[:-1] + ["unknown"], modes[:-1] + [{}]):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "release-qualification-modes"):
                 verify(dict(proof, modes=invalid))
+
+    def test_ui_result_binds_selected_suite_and_requires_its_exact_roster(self):
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        (self.root / "observer-status").write_text("0\n")
+        (evidence / "trace.jsonl").write_text('{}\n')
+        result = {key: self.manifest[key] for key in ("sourceCommit", "sourceTree", "buildRun", "carrierRun")}
+        result.update(manifestSha256=ui.file_hash(self.root / media.MANIFEST),
+                      packageSha256=self.package["sha256"], removeSha256=self.package["sha256"],
+                      suite="metadata", scenarios={name: {"status": "Passed"} for name in ui.SUITE_SCENARIOS["metadata"]})
+
+        def verify(value, suite="metadata"):
+            (evidence / "RESULT.json").write_bytes(media.dump(value))
+            with patch.dict("os.environ", {"GITHUB_SHA": "3" * 40}), patch("builtins.print"):
+                ui.verify_observation(self.root, self.root, suite)
+
+        verify(result)
+        with self.assertRaisesRegex(AssertionError, "observation-suite-identity"):
+            verify(result, "projects")
+        with self.assertRaisesRegex(AssertionError, "observation-scenario-roster"):
+            verify(dict(result, scenarios=dict(result["scenarios"], unexpected={"status": "Passed"})))
+        row = "metadata-negative-cancel-save-readback"
+        missing_row = {name: value for name, value in result["scenarios"].items() if name != row}
+        with self.assertRaisesRegex(AssertionError, "observation-scenario-roster"):
+            verify(dict(result, scenarios=missing_row))
+        with self.assertRaisesRegex(AssertionError, "observation-scenario-failure"):
+            verify(dict(result, scenarios=dict(result["scenarios"], **{row: {"status": "Failed"}})))
 
     def test_remove_producer_must_link_the_exact_install(self):
         source = "a" * 40
