@@ -43,6 +43,7 @@ EXPECTED_SCENARIOS = {
 SUITE_SCENARIOS = {
     "workspace": EXPECTED_SCENARIOS,
     "metadata": {"native-console-admission", "project-picker-and-saved-config", "metadata-negative-cancel-save-readback"},
+    "projects": {"native-console-admission", "project-picker-and-saved-config", "project-switch-and-cli-isolation"},
 }
 METADATA_TITLE = Path("public/store/android/en-US/title.txt")
 
@@ -181,7 +182,7 @@ def install(media, work, suite):
     call("/usr/bin/git", "-C", str(project), "add", "--all")
     call("/usr/bin/git", "-C", str(project), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
          "commit", "-m", "Original synthetic project")
-    if suite == "workspace":
+    if suite in {"workspace", "projects"}:
         secondary = work / "MRK Verification Secondary"
         shutil.copytree(FIXTURE, secondary)
         (secondary / VERSION_FILE).write_bytes(b"VERSION_NAME=2.1.0\nBUILD_NUMBER=41\n")
@@ -617,8 +618,19 @@ def observe(work, action, media, suite):
         def access_panel():
             ui.page("Project settings")
             panel = ui.command("tree.snapshot", limit=300)
-            if not any(node["role"] == "button" and node["name"] == "Check access" for node in panel["nodes"]):
-                ui.click("Advanced · CLI / AI access", contains=True)
+            if not any(node["role"] == "button" and node["name"] == "Check access" and
+                       node["visible"] for node in panel["nodes"]):
+                ui.click("Advanced · CLI / AI access", category="disclosuretriangle", contains=True)
+
+        def observe_pending_state(stage):
+            rows = ui.command("tree.snapshot", limit=300)["nodes"]
+            markers = {"Apple setup · original operation retained", "Request acknowledgement is pending.",
+                       "The outcome or cleanup is unconfirmed. Do not repeat registration or reconnect to dismiss it.",
+                       "A local release-history intent or operation is retained. Cancel or finish it before other work.",
+                       "A local Store access-check intent or operation is retained. Cancel or finish it before other work."}
+            results.setdefault("unsubmittedOperationMarkers", {})[stage] = sorted(
+                markers.intersection({node["name"] for node in rows} | {node["text"] for node in rows}))
+            save()
 
         def grant_selected():
             access_panel()
@@ -645,11 +657,13 @@ def observe(work, action, media, suite):
             ui.node(expected, category="statictext", contains=True)
 
         checks = results["projectSwitchIsolation"] = {}
+        observe_pending_state("before-grant")
         grant_selected()
         primary_id = granted_project()
         ui.page("Overview")
         ui.pick(secondary, cancel=True)
         ui.pick(secondary)
+        observe_pending_state("after-secondary-selection")
         # Saved observation fields can change as selection settles. The grant
         # must retain the original project ID until another explicit Allow.
         need(granted_project() == primary_id, "switch-expanded-cli-authority")
@@ -667,10 +681,13 @@ def observe(work, action, media, suite):
         checks["secondaryGrantReplacedPrimary"] = True
         ui.page("Overview")
         ui.pick(project)
+        observe_pending_state("after-primary-selection")
         need(granted_project() == secondary_id, "reopen-expanded-cli-authority")
         require_denied(primary_id)
-        read_version("Values: 1.0.1 · Build 2.")
+        expected_primary = "Values: 1.0.0 · Build 1." if suite == "projects" else "Values: 1.0.1 · Build 2."
+        read_version(expected_primary)
         checks["primarySavedVersionAndDenialOnReturn"] = True
+        observe_pending_state("before-revocation")
         access_panel()
         ui.click("Turn off access", category="button")
         ui.node("Off at last check", category="statictext", contains=True)
@@ -679,6 +696,7 @@ def observe(work, action, media, suite):
         need(all(file_hash(path) == digest for path, digest in secondary_original.items())
              and all(file_hash(project / name) == digest for name, digest in primary_before.items()), "switch-changed-fixture")
         checks["bothFixturesPreservedAndGrantRevoked"] = True
+        need(not any(results["unsubmittedOperationMarkers"].values()), "unsubmitted-operations-blocked-workspace")
 
     def versions():
         nonlocal connection
@@ -836,12 +854,15 @@ def observe(work, action, media, suite):
             ui.image(f"settings-{width}x{height}")
 
     try:
-        if suite == "metadata":
+        if suite in {"metadata", "projects"}:
+            name, journey = (("metadata-negative-cancel-save-readback", metadata_journey) if suite == "metadata"
+                             else ("project-switch-and-cli-isolation", project_switch_and_isolation))
             if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
                 if scenario("project-picker-and-saved-config", select_project):
-                    scenario("metadata-negative-cancel-save-readback", metadata_journey)
+                    scenario(name, journey)
                 else:
-                    scenarios["metadata-negative-cancel-save-readback"] = dict(status="Blocked", reason="Fixture project selection failed")
+                    scenarios[name] = dict(status="Blocked", reason="Fixture project selection failed")
+                    save()
             return 0 if scenarios.keys() == SUITE_SCENARIOS[suite] and all(row["status"] == "Passed" for row in scenarios.values()) else 1
         if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
             scenario("cold-runtime-and-cli-denial", startup)
