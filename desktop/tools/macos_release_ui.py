@@ -358,6 +358,18 @@ class UI:
         need(len(active) == 1, "exact-original-payload")
         return int(active[0])
 
+    def reopened_payload(self, prior_pid):
+        reply = call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False)
+        need(reply.returncode in (0, 1), "reopened-payload-process-observation")
+        if reply.returncode == 1:
+            return None
+        pids = reply.stdout.splitlines()
+        need(len(pids) == 1, "ambiguous-reopened-payload")
+        pid = int(pids[0])
+        nodes = self.command("tree.snapshot", limit=1)["nodes"]
+        return pid if pid != prior_pid and len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and \
+            nodes[0]["role"] == "window" and nodes[0]["name"] == "Mobile Release Kit" else None
+
     def resize(self, width, height):
         pid = self.payload_pid()
 
@@ -508,12 +520,17 @@ def observe(work, action, media):
         need((project / VERSION_FILE).read_bytes() == expected, "exact-saved-version")
         need(all(file_hash(project / name) == digest for name, digest in original.items() if name != VERSION_FILE),
              "save-touched-another-input")
+        prior_pid = ui.payload_pid()
         ui.keys("command", "q")
         ui.node("Quit and discard unsaved drafts?", category="statictext", contains=True)
         ui.click("Quit", category="button")
         until(lambda: call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN, check=False).returncode == 1,
               18, "original-payload-did-not-quit")
         call("/usr/bin/open", "-a", str(APP))
+        end = time.monotonic() + 12
+        reopened_pid = until(lambda: ui.reopened_payload(prior_pid), end - time.monotonic(),
+                             "exact-reopened-payload-window")
+        results["reopenedPayload"] = {"original": prior_pid, "reopened": reopened_pid}
         ui.click("Overview", category="button")
         empty = PAGE_HEADINGS["Overview"]
         def reopened_overview():
@@ -522,7 +539,7 @@ def observe(work, action, media):
                        for value in (node.get("name"), node.get("text")) if value in (empty, project.name)}
             need(len(matches) <= 1, "ambiguous-reopened-overview")
             return matches.pop() if matches else None
-        if until(reopened_overview, 12, "reopened-overview-not-rendered") == empty:
+        if until(reopened_overview, end - time.monotonic(), "reopened-overview-not-rendered") == empty:
             ui.project_name = None
             ui.pick(project)
         ui.click("Edit version & build number")
