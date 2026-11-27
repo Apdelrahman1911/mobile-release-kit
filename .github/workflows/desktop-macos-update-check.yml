@@ -310,7 +310,7 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
           [[ "$(id -u)" != 0 && "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
           script=desktop/tools/prepare_ci_xcode.py
-          printf '%s  %s\n' d13eadc42dfd7ff491116f49c1c5582998796a7375e87e724540117f4decce1e "$script" |
+          printf '%s  %s\n' fd2b77fe48faa7ace7e21b23319b40123afa35a50df337755576a434ee48d05e "$script" |
             shasum -a 256 -c
           sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
             /usr/bin/python3 -I -B "$script" | tee "$MRK_UPDATE_WORK/prepare-xcode.json"
@@ -367,8 +367,13 @@ jobs:
                                              and re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+){0,2}\.sdk", reported.name)
                                              and reported.readlink() == Path("iPhoneOS.sdk")
                                              and reported.samefile(sdk))
+                          sibling = bool(reported.parent == sdk_parent and reported.is_symlink()
+                                         and re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+){0,2}\.sdk", reported.name))
                           report[label].update(reportsCanonicalSDK=output == str(sdk),
                                                reportsUnversionedAlias=output == str(alias),
+                                               reportsVersionedSibling=sibling,
+                                               versionedSiblingRootOwned=sibling and reported.lstat().st_uid == 0,
+                                               versionedSiblingTargetsBoundSDK=sibling and reported.readlink() == Path("iPhoneOS.sdk"),
                                                reportsVersionedAliasToSameSDK=bool(versioned_alias))
                   except subprocess.TimeoutExpired:
                       report[label] = dict(timedOut=True, elapsedSeconds=round(time.monotonic() - start, 3))
