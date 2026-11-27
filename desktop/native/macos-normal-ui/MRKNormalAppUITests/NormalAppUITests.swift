@@ -7672,7 +7672,24 @@ final class NormalAppUITests: XCTestCase {
                     try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
                 }
             }
-            try press(renderer, "Preview GitHub setup", renderer: renderer)
+            do {
+                try press(renderer, "Preview GitHub setup", renderer: renderer)
+            } catch {
+                if guidedProductSurface {
+                    let reasons = [
+                        ("checking-capabilities", "Desktop capabilities and core setup guidance are loading."),
+                        ("guidance-unavailable", "Core setup guidance is unavailable. Restore the packaged service and reload guidance before requesting a preview."),
+                        ("draft-unavailable", "Choose a project and prepare an in-memory configuration draft in Project settings. Nothing will be saved by this preview."),
+                        ("coordinates-incomplete", "Enter the toolkit repository and full toolkit commit. There is no account or commit default."),
+                        ("preview-in-progress", "The core is preparing a read-only proposal for these inputs."),
+                        ("proposal-unavailable", "The packaged proposal service is unavailable. Restore it and reload capabilities and core guidance."),
+                    ]
+                    for (code, message) in reasons where renderer.staticTexts.matching(identifier: message).count == 1 {
+                        print("MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=\(code)")
+                    }
+                }
+                throw error
+            }
             try stage("workflow-preview-readback") {
                 var current: XCUIElement?
                 try stage("workflow-preview-heading") {
