@@ -234,6 +234,60 @@ jobs:
             shasum -a 256 -c
           sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
             /usr/bin/python3 -I -B "$script" | tee "$MRK_UPDATE_WORK/prepare-xcode.json"
+      - name: Compare native Xcode output with the installed archive predicates
+        if: steps.protected_xcode.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          umask 077
+          /usr/bin/python3 -I -B - "$MRK_UPDATE_WORK/xcode-output-control.json" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          import time
+
+          selected = Path("/Applications/Xcode.app").resolve(strict=True)
+          if selected.parent != Path("/Applications") or selected.stat().st_uid != 0:
+              raise SystemExit("unexpected protected Xcode selection")
+          developer = selected / "Contents/Developer"
+          sdk_parent = developer / "Platforms/iPhoneOS.platform/Developer/SDKs"
+          alias = sdk_parent / "iPhoneOS.sdk"
+          sdk = alias.resolve(strict=True)
+          if sdk.parent != sdk_parent or sdk.stat().st_uid != 0:
+              raise SystemExit("unexpected protected SDK selection")
+          report = {}
+          with tempfile.TemporaryDirectory(prefix="mrk-xcode-output-") as work:
+              root = Path(work)
+              home, tmp = root / "home", root / "tmp"
+              home.mkdir(mode=0o700)
+              tmp.mkdir(mode=0o700)
+              env = {"PATH": str(developer / "usr/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                     "DEVELOPER_DIR": str(developer), "SDKROOT": str(sdk), "HOME": str(home),
+                     "CFFIXED_USER_HOME": str(home), "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
+                     "LC_ALL": "en_US.UTF-8", "CI": "true", "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+                     "MOBILE_RELEASE_VERSION_NAME": "1.0.0", "MOBILE_RELEASE_BUILD_NUMBER": "1"}
+              for label, args in (("version", ("-version",)), ("sdk", ("-version", "-sdk", "iphoneos", "Path"))):
+                  start = time.monotonic()
+                  try:
+                      result = subprocess.run([str(developer / "usr/bin/xcodebuild"), *args], cwd=root,
+                                              env=env, capture_output=True, text=True, timeout=30, check=False)
+                      output = result.stdout.strip()
+                      report[label] = dict(returnCode=result.returncode, stderrNonempty=bool(result.stderr),
+                          elapsedSeconds=round(time.monotonic() - start, 3))
+                      if label == "version":
+                          report[label]["matchesArchivePredicate"] = bool(re.fullmatch(
+                              r"Xcode [0-9]+(?:\.[0-9]+){0,2}\nBuild version [0-9A-Za-z]+\s*", result.stdout))
+                      else:
+                          report[label].update(matchesArchivePredicate=output == str(sdk),
+                                               reportsUnversionedAlias=output == str(alias))
+                  except subprocess.TimeoutExpired:
+                      report[label] = dict(timedOut=True, elapsedSeconds=round(time.monotonic() - start, 3))
+          Path(sys.argv[1]).write_text(json.dumps(report, sort_keys=True) + "\n")
+          print(json.dumps(report, sort_keys=True))
+          PY
       - name: Execute the production lifecycle or original installed XCTest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -252,6 +306,9 @@ jobs:
           if [[ -f "$MRK_UPDATE_WORK/prepare-xcode.json" ]]; then
             mkdir -p "$MRK_UPDATE_WORK/evidence"
             cp "$MRK_UPDATE_WORK/prepare-xcode.json" "$MRK_UPDATE_WORK/evidence/"
+            if [[ -f "$MRK_UPDATE_WORK/xcode-output-control.json" ]]; then
+              cp "$MRK_UPDATE_WORK/xcode-output-control.json" "$MRK_UPDATE_WORK/evidence/"
+            fi
           fi
       - name: Retain scenario result and bounded evidence
         if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
