@@ -8819,7 +8819,24 @@ final class NormalAppUITests: XCTestCase {
         _ = try remaining(1)
         if guidedProductSurface {
             let current = try guidedReport()
-            try require(current?.context == originalContext && current?.provenance == originalProvenance,
+            func receipt(_ value: String?) -> (time: String, revision: UInt64)? {
+                guard let value, value.hasPrefix("Received by this view: "), value.hasSuffix(provenanceSuffix) else {
+                    return nil
+                }
+                let fields = value.dropLast(provenanceSuffix.count).components(separatedBy: " · native status revision ")
+                guard fields.count == 2, let revision = UInt64(fields[1]), revision > 0 else { return nil }
+                return (fields[0], revision)
+            }
+            let first = receipt(originalProvenance)
+            let latest = receipt(current?.provenance)
+            let contextMatches = current?.context == originalContext
+            // The app keeps the original receipt time while the native
+            // status revision can advance for the same settled run.
+            let sameReceipt = first != nil && latest != nil && first?.time == latest?.time
+            let forward = first.map { a in latest.map { $0.revision >= a.revision } ?? false } ?? false
+            let facts = [contextMatches, sameReceipt, forward].map { $0 ? "1" : "0" }.joined()
+            print("MRK_MACOS_GUIDED_IOS_ACK_READBACK=v1;fields=\(facts)")
+            try require(contextMatches && sameReceipt && forward,
                         "same original iOS report did not remain settled and acknowledged")
         } else {
             let rows = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
