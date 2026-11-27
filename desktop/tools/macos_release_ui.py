@@ -1256,7 +1256,26 @@ def observe(work, action, media, suite):
             until(lambda: native_control("Local Git read status", "AXHeading", "Local Git read finished")["matches"] == 1,
                   55, "git-index-original-stage-readback")
             press_after_settlement(status_region, "Check local Git actions")
-            press_after_settlement("Local Git changes", "Review files to unstage")
+            review_button = "Review files to unstage"
+            status_button = "Check local Git actions"
+
+            def unstage_ready():
+                if native_control("Local Git changes", "AXButton", review_button).get("enabled") is True:
+                    return True
+                if fact.get("unstageAvailabilityRechecked"):
+                    return False
+                retry = native_control(status_region, "AXButton", status_button)
+                status_missing = native_control(status_region, "AXStaticText",
+                    "Check local Git actions first. This checks native availability; it does not stage files or create a commit.")
+                if retry.get("enabled") is True and status_missing["matches"] == 1:
+                    # A settled availability read can be invalidated by the
+                    # refresh's new revision. No mutation has been submitted.
+                    native_control(status_region, "AXButton", status_button, press=True)
+                    fact["unstageAvailabilityRechecked"] = True
+                return False
+
+            until(unstage_ready, 45, "git-unstage-missing-current-action-availability")
+            native_control("Local Git changes", "AXButton", review_button, press=True)
             await_heading("Review files to unstage")
             need(native_control(review, "AXStaticText", "README.md")["matches"] == 1, "git-unstage-review-path")
             need(native_control(review, "AXCheckBox", reviewed).get("checked") is False, "git-unstage-consent-starts-clear")
