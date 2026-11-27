@@ -215,3 +215,104 @@ jobs:
           path: ${{ env.MRK_UPDATE_WORK }}/evidence
           if-no-files-found: warn
           retention-days: 30
+
+  ios-input-roster:
+    name: Measure project-directory effects of the original Xcode archive command
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-ios-input-roster' &&
+      inputs.expected_sha == '7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc' &&
+      inputs.build_run == '46048925911' && inputs.carrier_run == '46067290901' && inputs.carrier_attempt == '1'
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc
+          persist-credentials: false
+      - name: Compare the disposable Swift fixture before and after the actual archive
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == fb712e594936256ff1d515cfaa1d269ae4e6d9a1 ]]
+          python3 -I -B - <<'PY'
+          import base64, hashlib, json, os, re, stat, subprocess, tempfile
+          from pathlib import Path
+
+          fixture = Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-ios-unsigned-v1.json")
+          raw = fixture.read_bytes()
+          assert hashlib.sha256(raw).hexdigest() == "999a48f946b2a26164d250086d5ece7588f3ff9b2b88824e596168b82faa8daf"
+          spec = json.loads(raw)
+          assert spec["schemaVersion"] == 1 and len(spec["files"]) == 9 and not spec["stages"]
+
+          def snapshot(project):
+              entries = {}
+              for folder, dirs, files in os.walk(project, followlinks=False):
+                  assert len(entries) < 64 and len(dirs) + len(files) < 64
+                  for leaf in dirs + files:
+                      entry = Path(folder) / leaf
+                      relative = entry.relative_to(project)
+                      assert len(relative.parts) <= 12 and all(re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", item) for item in relative.parts)
+                      info = entry.lstat()
+                      record = {"kind": stat.S_IFMT(info.st_mode), "identity": [info.st_dev, info.st_ino],
+                                "mode": oct(stat.S_IMODE(info.st_mode))}
+                      if stat.S_ISREG(info.st_mode):
+                          assert 0 <= info.st_size <= 32 * 1024
+                          record["sha256"] = hashlib.sha256(entry.read_bytes()).hexdigest()
+                      entries[relative.as_posix()] = record
+              return entries
+
+          with tempfile.TemporaryDirectory(prefix="mrk-archive-project-roster-", dir="/private/tmp") as name:
+              root = Path(name)
+              for relative, encoded in spec["files"].items():
+                  entry = Path(relative)
+                  assert entry.parts[0] == "project" and not {"..", "."} & set(entry.parts)
+                  target = root / entry
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  body = base64.b64decode(encoded, validate=True)
+                  assert 0 < len(body) < 32 * 1024
+                  target.write_bytes(body)
+              project = root / "project"
+              work = root / "work"
+              for directory in ("home", "tmp", "DerivedData"):
+                  (work / directory).mkdir(mode=0o700, parents=True)
+              developer = Path("/Applications/Xcode.app").resolve(strict=True) / "Contents/Developer"
+              assert developer.parents[1].parent == Path("/Applications")
+              sdk = (developer / "Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk").resolve(strict=True)
+              command = developer / "usr/bin/xcodebuild"
+              env = {"PATH": f"{developer}/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin", "DEVELOPER_DIR": str(developer),
+                     "SDKROOT": str(sdk), "HOME": str(work / "home"), "TMPDIR": str(work / "tmp"),
+                     "CFFIXED_USER_HOME": str(work / "home"), "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
+                     "CI": "true", "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+                     "MOBILE_RELEASE_VERSION_NAME": "1.2.3", "MOBILE_RELEASE_BUILD_NUMBER": "7"}
+              archive = work / "archive.xcarchive"
+              argv = [str(command), "-project", str(project / "ios/MRKObserved.xcodeproj"), "-scheme", "MRKObserved",
+                      "-configuration", "Release", "-destination", "generic/platform=iOS",
+                      "-archivePath", str(archive), "-derivedDataPath", str(work / "DerivedData"), "archive",
+                      "MARKETING_VERSION=1.2.3", "CURRENT_PROJECT_VERSION=7",
+                      "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"]
+              before = snapshot(project)
+              result = subprocess.run(argv, cwd=project, env=env, capture_output=True, timeout=120)
+              after = snapshot(project)
+              report = {"source": "7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc", "xcode": developer.parents[1].name,
+                        "archivePresent": archive.is_dir(), "return": result.returncode,
+                        "added": {name: after[name]["kind"] for name in sorted(after.keys() - before.keys())},
+                        "removed": sorted(before.keys() - after.keys()),
+                        "changed": sorted(name for name in before.keys() & after.keys() if before[name] != after[name])}
+              print(json.dumps(report, sort_keys=True))
+              evidence = Path(os.environ["RUNNER_TEMP"]) / "roster-evidence"
+              evidence.mkdir(mode=0o700)
+              (evidence / "XCODE-ROSTER.json").write_text(json.dumps(report, indent=2) + "\n")
+              assert result.returncode == 0 and archive.is_dir()
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: xcode-project-roster-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/roster-evidence/XCODE-ROSTER.json
+          if-no-files-found: error
+          retention-days: 30
