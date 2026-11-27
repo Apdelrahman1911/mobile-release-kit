@@ -8870,7 +8870,12 @@ final class NormalAppUITests: XCTestCase {
                 let identity = renderer.staticTexts.matching(identifier: "org.example.mrk.observed")
                 if guidedProductSurface {
                     let configured = renderer.staticTexts.matching(identifier: "Configured iOS bundle ID")
-                    let label = try waitElement(configured, in: renderer)
+                    // A selected folder is visible before the original native
+                    // snapshot publishes the saved configuration. Do not refresh
+                    // or replace that snapshot to make the test pass.
+                    let label = try waitElement(configured, in: renderer, timeout: 24,
+                        failures: ["Static observation unavailable", "Only a partial static observation is available"])
+                    _ = try waitElement(identity, in: renderer, timeout: 12)
                     let expandedCount = identity.count
                     let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
                         label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
