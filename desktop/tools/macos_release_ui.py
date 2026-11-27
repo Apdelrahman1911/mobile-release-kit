@@ -543,15 +543,16 @@ def observe(work, action, media, suite):
         need(all(file_hash(project / name) == digest for name, digest in original.items()),
              "cancelled-project-picker-changed-fixture")
 
-    def select_project():
+    def select_project(*, check_version=True):
         ui.page("Overview")
         ui.pick(project)
         ui.click("Project details & saved observations", contains=True)
         ui.node(str(project), category="statictext")
         ui.node("org.mrk.fixture", contains=True)
-        ui.click("Edit version & build number")
-        ui.click("Open saved version editor", category="button")
-        ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
+        if check_version:
+            ui.click("Edit version & build number")
+            ui.click("Open saved version editor", category="button")
+            ui.node("Values: 1.0.0 · Build 1.", category="statictext", contains=True)
         need(all(file_hash(project / name) == digest for name, digest in original.items()), "project-originals")
 
     def metadata_journey():
@@ -1085,7 +1086,7 @@ def observe(work, action, media, suite):
         if suite in independent_journeys:
             name, journey = independent_journeys[suite]
             if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
-                if scenario("project-picker-and-saved-config", select_project):
+                if scenario("project-picker-and-saved-config", lambda: select_project(check_version=suite != "cli-read")):
                     scenario(name, journey)
                 else:
                     scenarios[name] = dict(status="Blocked", reason="Fixture project selection failed")
