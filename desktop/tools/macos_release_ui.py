@@ -564,8 +564,15 @@ def observe(work, action, media, suite):
         ui.pick(project)
         ui.click("Project details & saved observations", contains=True)
         ui.node(str(project), category="statictext")
-        identity = "org.example.mrk.observed" if suite == "vault-profile" else "org.mrk.fixture"
-        ui.node(identity, contains=True)
+        if suite == "vault-profile":
+            # The real iOS identity is also shown in Apple setup. This is a
+            # readback under the exact selected path, so identical labels are
+            # allowed. No action targets either result.
+            ui.node("Configured iOS bundle ID", category="statictext")
+            ui.command("element.wait", selector={"text": "org.example.mrk.observed", "role": "statictext", "visible": True},
+                       state="present", timeout_ms=10000)
+        else:
+            ui.node("org.mrk.fixture", contains=True)
         if check_version:
             ui.click("Edit version & build number")
             ui.click("Open saved version editor", category="button")
@@ -1171,7 +1178,7 @@ def observe(work, action, media, suite):
         if suite in independent_journeys:
             name, journey = independent_journeys[suite]
             if scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)):
-                if scenario("project-picker-and-saved-config", lambda: select_project(check_version=suite != "cli-read")):
+                if scenario("project-picker-and-saved-config", lambda: select_project(check_version=suite not in {"cli-read", "vault-profile"})):
                     scenario(name, journey)
                 else:
                     scenarios[name] = dict(status="Blocked", reason="Fixture project selection failed")
