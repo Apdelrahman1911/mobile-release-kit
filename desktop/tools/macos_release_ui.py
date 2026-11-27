@@ -48,6 +48,8 @@ SUITE_SCENARIOS = {
     "cli-read": {"native-console-admission", "project-picker-and-saved-config", "installed-cli-read-data-and-refusals"},
     "git-index": {"native-console-admission", "project-picker-and-saved-config", "git-index-review-stage-unstage"},
     "vault-lifecycle": {"native-console-admission", "project-picker-and-saved-config", "vault-cancel-lock-reopen"},
+    "reopen-projects": {"native-console-admission", "project-picker-and-saved-config", "version-cancel-save-quit-reopen",
+                        "project-switch-and-cli-isolation"},
 }
 METADATA_TITLE = Path("public/store/android/en-US/title.txt")
 
@@ -186,7 +188,7 @@ def install(media, work, suite):
     call("/usr/bin/git", "-C", str(project), "add", "--all")
     call("/usr/bin/git", "-C", str(project), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
          "commit", "-m", "Original synthetic project")
-    if suite in {"workspace", "projects"}:
+    if suite in {"workspace", "projects", "reopen-projects"}:
         secondary = work / "MRK Verification Secondary"
         shutil.copytree(FIXTURE, secondary)
         (secondary / VERSION_FILE).write_bytes(b"VERSION_NAME=2.1.0\nBUILD_NUMBER=41\n")
@@ -886,7 +888,29 @@ def observe(work, action, media, suite):
             ui.project_name = None
             ui.pick(project)
         ui.click("Edit version & build number")
-        ui.click("Open saved version editor", category="button")
+        editor = "Open saved version editor"
+        pending = "An original saved-file check is still pending. Wait for it to settle before starting another task."
+        recovery = "A saved-file check needs attention"
+        reopened_read = results["reopenedSavedFileCheck"] = {"observedPending": False, "editorEnabled": False}
+        started = time.monotonic()
+
+        def editor_ready():
+            rows = ui.command("tree.snapshot", limit=300)["nodes"]
+            labels = {label for row in rows for label in (row["name"], row["text"])}
+            reopened_read["observedPending"] |= pending in labels
+            need(recovery not in labels, "reopened-original-saved-file-cleanup-unknown")
+            buttons = [row for row in rows if row["role"] == "button" and row["name"] == editor and row["visible"]]
+            need(len(buttons) <= 1, "reopened-version-editor-ambiguous")
+            return len(buttons) == 1 and buttons[0]["enabled"]
+
+        # The selected workspace's passive observer can own a snapshot and
+        # then a saved-version read sequentially, each with 10 s work and
+        # 2 s cleanup. Wait for native admission without clicking or retrying.
+        try:
+            reopened_read["editorEnabled"] = until(editor_ready, 30, "reopened-version-editor-did-not-enable")
+        finally:
+            reopened_read["waitSeconds"] = round(time.monotonic() - started, 2)
+        ui.click(editor, category="button")
         ui.node("Values: 1.0.1 · Build 2.", category="statictext", contains=True)
         need((project / VERSION_FILE).read_bytes() == expected
              and file_hash(project / CONFIG_FILE) == original[CONFIG_FILE], "reopened-saved-values")
@@ -1030,6 +1054,12 @@ def observe(work, action, media, suite):
             ui.image(f"settings-{width}x{height}")
 
     try:
+        if suite == "reopen-projects":
+            if (scenario("native-console-admission", lambda: ui.record_session("console-admission", start_observation)) and
+                scenario("project-picker-and-saved-config", select_project) and
+                scenario("version-cancel-save-quit-reopen", versions)):
+                scenario("project-switch-and-cli-isolation", project_switch_and_isolation)
+            return 0 if scenarios.keys() == SUITE_SCENARIOS[suite] and all(row["status"] == "Passed" for row in scenarios.values()) else 1
         independent_journeys = {
             "metadata": ("metadata-negative-cancel-save-readback", metadata_journey),
             "projects": ("project-switch-and-cli-isolation", project_switch_and_isolation),
