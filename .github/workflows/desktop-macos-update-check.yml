@@ -263,18 +263,59 @@ jobs:
           print("MRK_IOS_APFS_SOURCE_CONTROL=exact-descriptor-removed;renamed-original-refused")
           PYTHON
 
-      - name: Inventory Xcode aliases in the exact disposable iOS fixture work directory
+      - name: Run source cleanup on Xcode's exact outputs and refuse an escaping alias
+        env:
+          PYTHONPATH: src:tests:tests/desktop
         run: |
           set -euo pipefail
           umask 077
-          python -I -B - <<'PYTHON'
+          python -B - <<'PYTHON'
           import base64
           import hashlib
           import json
           import os
           from pathlib import Path
+          import stat
           import subprocess
           import tempfile
+          from types import SimpleNamespace
+          from unittest.mock import patch
+
+          import test_ios_archive as test
+
+          def settle(work, *, should_refuse=False):
+              source = test.operation_module
+              native_open, native_close = os.open, os.close
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              parent = os.open(work.parent, flags)
+              fd = os.open(work.name, flags, dir_fd=parent)
+              try:
+                  with test.original() as operation:
+                      files = operation.files
+                      work_identity = test.build_inputs._directory(os.fstat(fd))
+                      held = source._Held(parent, work.name, test.build_inputs._FD(operation.guard), True,
+                                          identity=work_identity, creation={"state": "CREATED"})
+                      held.slot.number, held.slot.open_state = fd, "OPEN"
+                      files.work = held
+                      files.held.append(held)
+                      files.live.add(held)
+                      files.namespace = SimpleNamespace(check=lambda: None)
+                      with patch.object(os, "open", native_open), patch.object(os, "close", native_close), \
+                              patch.object(files, "point"), patch.object(files, "require_work_consumers"):
+                          try:
+                              files.finish_work()
+                          except source.IOSArchiveError as error:
+                              assert should_refuse and error.reason == "work-retained"
+                              assert files.work_disposition() == "retained-work"
+                          else:
+                              assert not should_refuse and files.work_disposition() == "removed"
+                          finally:
+                              files.close()
+                              assert files.closed()
+              finally:
+                  os.close(parent)
+
+
 
           fixture = Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-ios-unsigned-v1.json")
           raw = fixture.read_bytes()
@@ -325,6 +366,27 @@ jobs:
               print("MRK_XCODE_WORK_ALIASES=" + json.dumps(dict(xcode=developer.parents[1].name,
                     archivePresent=archive.is_dir(), returnCode=result.returncode, symlinks=sorted(rows, key=lambda row: row["path"]))))
               assert result.returncode == 0 and archive.is_dir()
+              observed_archive = archive.stat()
+              try:
+                  settle(work)
+              except BaseException:
+                  for row in rows:
+                      path = work / row["path"]
+                      if path.is_symlink():
+                          parts = path.relative_to(work).parts
+                          print("MRK_XCODE_ALIAS_CLASS=" + json.dumps(dict(
+                              path=row["path"], originalTargetRecognized=test.operation_module._work_link_target(
+                                  parts[:-1], parts[-1], str(path.readlink())))))
+                  raise
+              assert not work.exists() and os.path.samestat(archive.stat(), observed_archive)
+              outside = root / "outside"
+              outside.write_bytes(b"untouched")
+              (work / "DerivedData" / "Build").mkdir(parents=True)
+              (work / "DerivedData" / "Build" / "escaping").symlink_to(outside)
+              settle(work, should_refuse=True)
+              assert (work / "DerivedData" / "Build" / "escaping").is_symlink()
+              assert outside.read_bytes() == b"untouched" and os.path.samestat(archive.stat(), observed_archive)
+              print("MRK_XCODE_REAL_WORK_DISPOSAL=archive-retained;work-removed;external-link-refused")
           PYTHON
 
   xcode-path-control:

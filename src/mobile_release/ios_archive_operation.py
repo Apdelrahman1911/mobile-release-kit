@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -39,6 +40,11 @@ _DELETE_REFUSALS = {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM,
 _READ = 64 * 1024
 _MAX_SLOTS = 192
 _MAX_WORK_ENTRIES = 100_000
+_SWIFTPM_WORK_LINKS = {
+    "cache": ("Library", "Caches", "org.swift.swiftpm"),
+    "configuration": ("Library", "org.swift.swiftpm", "configuration"),
+    "security": ("Library", "org.swift.swiftpm", "security"),
+}
 
 
 class IOSArchiveError(Exception):
@@ -66,6 +72,19 @@ def _darwin_descriptor_path(fd: int) -> bytes:
     return path
 
 
+def _work_link_target(relative: tuple[str, ...], name: str, target: str) -> bool:
+    if sys.platform != "darwin" or not target or len(os.fsencode(target)) >= 1024:
+        return False
+    if relative and relative[0] == "DerivedData" and not posixpath.isabs(target):
+        return posixpath.normpath(posixpath.join(*relative, target)).startswith("DerivedData/")
+    if relative == ("home", ".swiftpm") and name in _SWIFTPM_WORK_LINKS:
+        import pwd
+
+        home = pwd.getpwuid(os.geteuid()).pw_dir
+        return posixpath.isabs(home) and target == posixpath.join(home, *_SWIFTPM_WORK_LINKS[name])
+    return False
+
+
 @dataclass(eq=False)
 class _Held:
     parent: int
@@ -76,6 +95,13 @@ class _Held:
     creation: dict | None = None
     parent_record: _Held | None = None
     deleted: bool = False
+    work_link: bool = False
+
+    def observed_identity(self, value: os.stat_result) -> dict:
+        if self.work_link:
+            require(stat.S_ISLNK(value.st_mode))
+            return _tool_data(value)
+        return _directory(value) if self.directory else _file(value)
 
 
 @dataclass(eq=False)
@@ -121,8 +147,8 @@ class _IOSRemoval:
             try:
                 require(result is None and original.slot.number == number)
                 after = os.fstat(number)
-                identity = _directory(after) if original.directory else _file(after)
-                ignored = set() if original.directory else {"ctime", "links"}
+                identity = original.observed_identity(after)
+                ignored = set() if original.directory else {"ctime", "ctimeNs", "links"}
                 require(all(identity[key] == original.identity[key] for key in identity if key not in ignored))
                 # On APFS, an open empty directory can retain two links after
                 # rmdir. Anchor that case to the original descriptor path so
@@ -302,12 +328,13 @@ class _OriginalIOSFiles:
             return values
 
     def _reserve(self, parent: int, name: str, *, directory: bool, creation=None,
-                 parent_record: _Held | None = None) -> _Held:
+                 parent_record: _Held | None = None, work_link: bool = False) -> _Held:
         self.point()
         self.operation.charge("original-file-slots", 1, _MAX_WORK_ENTRIES + 512)
         require(len(self.live) < _MAX_SLOTS)
+        require(not work_link or (not directory and creation is None and parent_record is not None))
         held = _Held(parent, name, _FD(self.guard), directory,
-                     creation=creation, parent_record=parent_record)
+                     creation=creation, parent_record=parent_record, work_link=work_link)
         self.held.append(held)  # Original slot is rooted before open.
         self.live.add(held)
         return held
@@ -315,9 +342,11 @@ class _OriginalIOSFiles:
     def _open(self, held: _Held) -> _Held:
         require(held in self.live and held.identity is None)
         self._known_number(held.parent)
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_DIRECTORY if held.directory else 0)
+        flags = os.O_RDONLY | os.O_NONBLOCK | (os.O_SYMLINK if held.work_link else os.O_NOFOLLOW)
+        if held.directory:
+            flags |= os.O_DIRECTORY
         number = held.slot.open(held.name, flags, dir_fd=held.parent)
-        held.identity = _directory(os.fstat(number)) if held.directory else _file(os.fstat(number))
+        held.identity = held.observed_identity(os.fstat(number))
         self.check_held(held)
         return held
 
@@ -335,9 +364,8 @@ class _OriginalIOSFiles:
         if held.parent_record is not None:
             require(held.parent_record.slot.number == held.parent)
             self.check_held(held.parent_record)
-        project = _directory if held.directory else _file
-        if (project(os.fstat(held.slot.number)) != held.identity
-                or project(os.stat(held.name, dir_fd=held.parent, follow_symlinks=False)) != held.identity):
+        if (held.observed_identity(os.fstat(held.slot.number)) != held.identity
+                or held.observed_identity(os.stat(held.name, dir_fd=held.parent, follow_symlinks=False)) != held.identity):
             self.operation.fail("artifact-changed" if self.operation._artifact is not None else "project-admission-refused")
 
     def _walk(self, relative: str) -> tuple[int, str]:
@@ -368,7 +396,8 @@ class _OriginalIOSFiles:
 
     def _read(self, held: _Held, limit: int) -> bytes:
         self.check_held(held)
-        require(not held.directory and held.identity["size"] <= limit and held.identity["links"] == 1)
+        require(not held.directory and not held.work_link
+                and held.identity["size"] <= limit and held.identity["links"] == 1)
         number = held.slot.number
         os.lseek(number, 0, os.SEEK_SET)
         blocks, size = [], 0
@@ -624,9 +653,9 @@ class _OriginalIOSFiles:
     def finish_work(self) -> None:
         """Finite disposal of only this operation's exclusive build intermediates.
 
-        No symlink, aliased entry, different-user/mount object or unknown
-        consuming result is adopted. The archive is never in this traversal.
-        Original independent descriptor closes still run if disposal refuses.
+        Xcode's recognized work links are held and unlinked as directory
+        entries. No target is opened or traversed. The archive is outside
+        this traversal. Original closes still run if disposal refuses.
         """
         self.operation.owner()
         require(not self.work_claimed)
@@ -638,9 +667,9 @@ class _OriginalIOSFiles:
         self.namespace.check()
         self.check_held(self.work)
 
-        def walk(original: _Held, depth: int) -> None:
+        def walk(original: _Held, relative: tuple[str, ...]) -> None:
             self.operation.cleanup_checkpoint()
-            require(depth <= 32)
+            require(len(relative) <= 32)
             self.check_held(original)
             before = os.fstat(original.slot.number)
             children, keys = [], set()
@@ -657,25 +686,33 @@ class _OriginalIOSFiles:
                     require(key not in keys)
                     keys.add(key)
                     observed = entry.stat(follow_symlinks=False)
+                    directory = stat.S_ISDIR(observed.st_mode)
+                    work_link = stat.S_ISLNK(observed.st_mode)
                     require(observed.st_uid == os.geteuid() and observed.st_dev == original.identity["device"]
                             and stat.S_IMODE(observed.st_mode) & 0o7022 == 0
-                            and (stat.S_ISDIR(observed.st_mode) or stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1))
+                            and (directory or ((stat.S_ISREG(observed.st_mode) or work_link) and observed.st_nlink == 1)))
+                    if work_link:
+                        target = os.readlink(name, dir_fd=original.slot.number)
+                        require(_work_link_target(relative, name, target)
+                                and _tool_data(observed) == _tool_data(
+                                    os.stat(name, dir_fd=original.slot.number, follow_symlinks=False)))
                     self.operation.charge("work-bytes", observed.st_size if stat.S_ISREG(observed.st_mode) else 0, 8 * 1024**3)
-                    children.append((name, observed))
+                    children.append((name, observed, directory, work_link))
             after = os.fstat(original.slot.number)
             require(_directory(before) == _directory(after)
                     and (before.st_mtime_ns, before.st_ctime_ns) == (after.st_mtime_ns, after.st_ctime_ns))
-            for name, observed in children:
+            for name, observed, directory, work_link in children:
                 self.operation.cleanup_checkpoint()
                 self.check_held(original)
-                directory = stat.S_ISDIR(observed.st_mode)
                 child = self.work_children.get(name) if original is self.work else None
                 if child is None:
-                    child = self._hold(original.slot.number, name, directory=directory, parent_record=original)
-                require(child.directory is directory and child.identity == (_directory(observed) if directory else _file(observed)))
+                    child = self._open(self._reserve(original.slot.number, name, directory=directory,
+                                                     parent_record=original, work_link=work_link))
+                require(child.directory is directory and child.work_link is work_link
+                        and child.identity == child.observed_identity(observed))
                 self.check_held(child)
                 if directory:
-                    walk(child, depth + 1)
+                    walk(child, relative + (name,))
                 else:
                     self._remove_work(child)
             require(not self.names(original.slot.number))
@@ -683,7 +720,7 @@ class _OriginalIOSFiles:
 
         try:
             with self.guard.deferred(check_on_exit=False):
-                walk(self.work, 0)
+                walk(self.work, ())
                 self.namespace.check()
         except BaseException as error:
             self.operation.remember(error)

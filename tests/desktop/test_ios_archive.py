@@ -742,6 +742,7 @@ class IOSOwnershipDataTests(unittest.TestCase):
                 files.namespace = SimpleNamespace(check=lambda: None)
                 with patch.object(files, "require_work_consumers"), patch.object(files, "check_held"), \
                         patch.object(files, "entries", side_effect=lambda _: entries(values)), \
+                        patch.object(os, "readlink", return_value="unrecognized"), \
                         patch.object(os, "fstat", return_value=details), \
                         patch.object(os, "unlink", side_effect=AssertionError("no removal")) as unlink, \
                         patch.object(os, "rmdir", side_effect=AssertionError("no removal")) as rmdir:
@@ -829,6 +830,30 @@ class IOSOwnershipDataTests(unittest.TestCase):
                     removal.remove()
                 self.assertEqual(removal.state, "NEW")
                 rmdir.assert_not_called()
+
+    def test_work_links_allow_only_xcode_internal_targets_and_fixed_swiftpm_aliases(self):
+        import pwd
+
+        base = ("DerivedData", "Build", "Products")
+        swiftpm = ("home", ".swiftpm")
+        cases = (
+            (base, "App.app", "../Destination/App.app", True),
+            (base, "App.app", "../../../home/App.app", False),
+            (base, "App.app", "/outside/App.app", False),
+            (base, "App.app", "../" * 400 + "Destination/App.app", False),
+            (("home", ".swiftpm"), "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", True),
+            (swiftpm, "configuration", "/Users/fixture/Library/org.swift.swiftpm/configuration", True),
+            (swiftpm, "security", "/Users/not-fixture/Library/org.swift.swiftpm/security", False),
+            (swiftpm, "security", "/Users/fixture/Library/org.swift.swiftpm/configuration", False),
+            (swiftpm, "other", "/Users/fixture/Library/org.swift.swiftpm/security", False),
+            (("tmp", ".swiftpm"), "cache", "/Users/fixture/Library/Caches/org.swift.swiftpm", False),
+            ((), "DerivedData", "anything", False),
+        )
+        with patch.object(operation_module.sys, "platform", "darwin"), \
+                patch.object(pwd, "getpwuid", return_value=SimpleNamespace(pw_dir="/Users/fixture")):
+            for parent, name, target, expected in cases:
+                with self.subTest(parent=parent, name=name):
+                    self.assertIs(operation_module._work_link_target(parent, name, target), expected)
 
 
 if __name__ == "__main__":
