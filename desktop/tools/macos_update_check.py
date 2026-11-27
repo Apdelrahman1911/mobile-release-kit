@@ -965,11 +965,11 @@ def main():
             historical = (identity == ("4e821384cd912562dd5e30b195e87c113bd2d09f",
                                        "50393070e54b402a5ac1bac63e411fa1fbd1ad14", "45904194634")
                           and args.mode in ("update-credentials", "recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI))
-            ios_regression = (identity == ("4feeced4ee513d824f8e44c50b3a340a7c39beed",
+            candidate_replay = (identity == ("4feeced4ee513d824f8e44c50b3a340a7c39beed",
                                            "40c62080fe8a1ec90034508dbc2ce892f1083fb9", "45996045007")
-                              and args.mode == "unsigned-ios-xctest")
+                               and args.mode in ("unsigned-ios-xctest", "archived-upgrade"))
             diagnostic = (ref == "refs/heads/verify/macos-0213-recovery-project"
-                          and (historical or ios_regression)
+                          and (historical or candidate_replay)
                           and (frozen["carrierRun"], frozen["carrierAttempt"])
                           == (os.environ.get("MRK_FROZEN_CARRIER_RUN"), "1"))
             need((ref == "refs/heads/main" or diagnostic)
@@ -3079,6 +3079,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestAndroidSourceFailure", r"(?m)^MRK_GUIDED_ANDROID_SOURCE=v1;role=(jdk|sdk|gradle);phase=(original-group|native-picker|returned-status|retained-selections)$"),
         ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),
         ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
+        ("maintenanceReadiness", r"(?m)^MRK_MAINTENANCE_READY=v1;phase=(initial|after-disclosure|failure);consent=([0-5]);refresh=([0-5]);enabled=([0-5]);checking=([0-5])$"),
         ("xctestWait", r"MRK_NORMAL_WAIT=v1;line=([0-9]{1,5});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5])"),
         ("installedCLIStatuses", r"MRK_RELEASE_CLI_STATUS=expected=([034]);exit=(-?[0-9]{1,3})"),
         ("postRefusalCliStatus", r"MRK_RELEASE_CLI_POST_REFUSAL_STATUS=exit=(-?[0-9]{1,3});json=([01])"),

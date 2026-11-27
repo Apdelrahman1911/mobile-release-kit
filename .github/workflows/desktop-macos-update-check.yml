@@ -38,7 +38,7 @@ on:
         options: [none, update-credentials, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
                   android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
-                  release-asset, native-status-unit, recovery-contracts, xcode-path-control]
+                  release-asset, native-status-unit, recovery-contracts, xcode-path-control, archived-upgrade]
       protected_xcode_fixture:
         description: Prepare the Apple Xcode fixture for the supplemental unsigned archive only
         type: boolean
@@ -215,7 +215,8 @@ jobs:
         inputs.carrier_attempt == '1' &&
         ((inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' && inputs.build_run == '45904194634') ||
          (inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' && inputs.build_run == '45996045007' &&
-          inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture))))
+          ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
+           (inputs.additional_ui == 'archived-upgrade' && !inputs.protected_xcode_fixture))))))
     runs-on: macos-26
     timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 55 }}
     strategy:
