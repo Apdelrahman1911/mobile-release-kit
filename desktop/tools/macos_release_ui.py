@@ -325,7 +325,19 @@ class UI:
             self.node(PAGE_HEADINGS["Overview"], category="heading")
             return
         self.keys("command", "shift", "g")
-        self.node("Go to Folder", contains=True)
+        pid = self.payload_pid()
+
+        def navigation_field():
+            nodes = self.command("tree.snapshot", limit=40)["nodes"]
+            if not nodes or nodes[0]["id"] != f"mac:{pid}:0" or nodes[0]["role"] != "sheet":
+                return None
+            matching_caption = any(node["visible"] and ("Go to Folder" in node["name"] or
+                                   "Go to Folder" in node["text"] or node["text"] == "Go to:") for node in nodes)
+            edits = [node for node in nodes if node["role"] == "textfield" and node["enabled"] and node["visible"]]
+            need(len(edits) <= 1, "ambiguous-goto-input")
+            return edits[0] if matching_caption and edits else None
+
+        until(navigation_field, 10, "exact-go-to-folder-sheet")
         self.keys("command", "a")
         self.command("text.insert", text=str(project))
         self.keys("return")
@@ -579,6 +591,11 @@ def observe(work, action, media):
             ui.click("Check local Git access", category="button")
             ui.node("Local Git reader available", category="heading")
             ui.click("Refresh changes", category="button")
+            ui.node("Local Git read finished", category="heading")
+            _, changes = ui.reveal("Source changes", category="heading")
+            bounds = changes["bounds"]
+            ui.command("pointer.scroll", x=bounds["x"] + bounds["width"] // 2,
+                       y=bounds["y"] + bounds["height"] // 2, dy=6)
             ui.click("Select README.md", category="checkbox")
             ui.click("Working changes", category="button")
             ui.node(marker.strip().decode(), contains=True)
@@ -590,8 +607,9 @@ def observe(work, action, media):
 
     def window_layouts():
         screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
-        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 75, 740)
-        if width < 980 or height < 690:
+        # Leave room for the title bar position and the Dock's reserved area.
+        width, height = min(screen["width"] - 32, 1180), min(screen["height"] - 100, 740)
+        if width < 980 or height < 660:
             raise Blocked("The synthetic console is too small for two readable window sizes")
         results["windowBounds"] = []
         for width, height in ((width - 40, height - 20), (width, height)):
