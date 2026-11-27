@@ -26,6 +26,7 @@ final class NormalAppUITests: XCTestCase {
         case iosPendingRecovery = "testInstalledIOSPendingAccountRecoveryThroughUI"
         case persistentCredentials = "testSyntheticPersistentCredentials"
         case savedOfflineChecks = "testSyntheticProjectSavedOfflineChecks"
+        case managedWorkflowRefusal = "testSyntheticProjectManagedWorkflowRefusal"
         case emptyBuildInputInspection = "testSyntheticProjectEmptyBuildInputInspection"
         case androidCandidateInputs = "testSyntheticProjectAndroidCandidateInputs"
 
@@ -5571,23 +5572,33 @@ final class NormalAppUITests: XCTestCase {
         try reveal(ready, in: renderer, line: line); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
-    @MainActor private func waitForGuidedProjectPicker(_ window: XCUIElement) throws -> XCUIElement {
+    @MainActor private func waitForGuidedProjectPicker(_ window: XCUIElement,
+                                                       title: String = "Choose a mobile project folder") throws -> XCUIElement {
         guard let clock = caseClock, let journeyDeadline else {
             throw Refusal.condition("original project picker deadline missing")
         }
         let end = min(try clock.end(within: 5), journeyDeadline)
-        let title = "Choose a mobile project folder"
+        var observed = "absent"
+        defer {
+            if guidedProductSurface {
+                print("MRK_GUIDED_PICKER=v1;observed=\(observed)")
+            }
+        }
         // XCTest's predicate waiter can report timeout even when the original
         // window has one matching sheet. Observe that sheet directly and
         // check the same deadline again after the original AX calls return.
         while true {
             try checkOriginalOwners()
             _ = try clock.remaining(1, before: end)
-            if window.sheets.count == 1 {
+            let count = window.sheets.count
+            if count == 1 {
                 let sheet = window.sheets.element(boundBy: 0)
                 let matches = sheet.exists && (sheet.label == title || sheet.staticTexts.matching(identifier: title).count == 1)
                 _ = try clock.remaining(1, before: end)
+                observed = matches ? "expected" : "other"
                 if matches { return sheet }
+            } else if count > 1 {
+                observed = "multiple"
             }
             try clock.progress(until: end)
         }
@@ -6902,7 +6913,8 @@ final class NormalAppUITests: XCTestCase {
         }
         @MainActor func browse(_ label: String, title: String, relative: String, cancel: Bool = false) throws {
             try press(renderer, "Browse existing " + label, renderer: renderer)
-            let sheet = try nativeSheet(window, title: title)
+            let sheet = try guidedProductSurface ? waitForGuidedProjectPicker(window, title: title)
+                                               : nativeSheet(window, title: title)
             if cancel {
                 try click(sheet.buttons.matching(identifier: "Cancel"), "owned project-field Cancel unavailable")
                 try waitGone(sheet)
@@ -7527,6 +7539,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {
+        projectRequireDiagnosticMethod = .managedWorkflowRefusal
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -7566,11 +7581,20 @@ final class NormalAppUITests: XCTestCase {
             try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
             try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
             try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
+            if guidedProductSurface {
+                try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+            }
             let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
                                         "optional comparison control is unavailable")
             try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
                         "passive supplied comparison unexpectedly enabled")
             try press(renderer, "Preview GitHub setup", renderer: renderer)
+            if guidedProductSurface {
+                _ = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                    label: "Optional preview: proposed files and checklist · available", prefix: true),
+                    in: renderer, failures: Self.workflowFailures)
+                try expand(renderer, prefix: "Optional preview: proposed files and checklist · available", renderer: renderer)
+            }
             let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
                                           failures: Self.workflowFailures)
             _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
@@ -7662,7 +7686,8 @@ final class NormalAppUITests: XCTestCase {
         } else {
             try require(labels[start] == "Outcome: complete", "the original saved-operation outcome is not complete")
         }
-        _ = try unique(panel.staticTexts.matching(identifier: "Original operation settled"),
+        let settled = guidedProductSurface ? "Operation settled" : "Original operation settled"
+        _ = try unique(panel.staticTexts.matching(identifier: settled),
                        "the original saved-operation projection is not settled")
     }
 
@@ -7719,31 +7744,53 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
-        let failures = ["No new offline-check outcome was confirmed", "Original cleanup unknown"]
+        let cleanupFailure = guidedProductSurface ? "Cleanup unknown" : "Original cleanup unknown"
+        let failures = ["No new offline-check outcome was confirmed", cleanupFailure]
         let unconfirmed = "The original command acknowledgement is unconfirmed. Do not repeat Start. A status observation can help cancel or settle that original operation, but cannot create consent."
         let historical = "This is retained original-operation data, not permission for the current editor or project context."
+        let panelLabel = guidedProductSurface ? "Saved offline checks review" : "Review the saved inputs and project-code effects"
+        let refreshLabel = guidedProductSurface ? "Re-read saved settings" : "Refresh saved configuration observation"
+        let reviewLabel = guidedProductSurface ? "Continue" : "Review offline checks"
+        let runLabel = guidedProductSurface ? "Run checks" : "Run saved offline checks"
+        let settledLabel = guidedProductSurface ? "Operation settled" : "Original operation settled"
+        let reportTitle = guidedProductSurface ? "Returned full offline-preflight report" : "Returned offline-check report"
+        let fullPreflight = "Full offline release preflight"
         var selected: XCUIElement?
         try stage("offline-review-and-start") {
             try press(renderer, "Releases", renderer: renderer)
             try guidedTaskTab("Local checks", group: "Release tasks", renderer: renderer)
-            let panel = try waitElement(named(renderer, "Review the saved inputs and project-code effects")
-                .containing(.button, identifier: "Refresh saved configuration observation"), in: renderer)
+            let panel = try waitElement(named(renderer, panelLabel)
+                .containing(.button, identifier: refreshLabel), in: renderer)
             selected = panel
             try require(named(panel, "Saved offline check findings").count == 0
-                        && panel.staticTexts.matching(identifier: "Original operation settled").count == 0
-                        && panel.buttons.matching(identifier: "Run saved offline checks").count == 0,
+                        && panel.staticTexts.matching(identifier: settledLabel).count == 0
+                        && panel.buttons.matching(identifier: runLabel).count == 0,
                         "a prior offline operation cannot supply this journey")
-            try press(panel, "Refresh saved configuration observation", renderer: renderer, failures: failures, timeout: 10)
-            try press(panel, "Review offline checks", renderer: renderer, failures: failures, timeout: 10)
+            let savedBytes = try fixture.text(LocalFixture.config).utf8.count
+            try press(panel, refreshLabel, renderer: renderer, failures: failures, timeout: 10)
+            if guidedProductSurface {
+                try select(panel, label: "Which checks do you need?", value: fullPreflight, renderer: renderer,
+                           keyboardOptions: [fullPreflight, "Local project checks — no Store setup"])
+                try expand(panel, prefix: "Technical details", renderer: renderer)
+                _ = try waitStaticText(panel, matching: .contains("Saved configuration comparison available: \(savedBytes) observed bytes."),
+                                       timeout: 10, failures: failures)
+            }
+            try press(panel, reviewLabel, renderer: renderer, failures: failures, timeout: 10)
             let consent = try waitElement(named(panel, "Confirm this saved offline-check intent"), in: panel,
                                           timeout: 10, failures: failures)
-            let savedBytes = try fixture.text(LocalFixture.config).utf8.count
-            let comparison = "Saved comparison: \(savedBytes) bytes. This review expires no later than five minutes after its original preparation; checking status never extends it."
+            if guidedProductSurface {
+                _ = try unique(consent.staticTexts.matching(NSPredicate(format: "title == %@", "Run " + fullPreflight + "?")),
+                               "offline review selected the wrong check scope")
+                _ = try unique(consent.staticTexts.matching(identifier: URL(fileURLWithPath: fixture.projectPath).lastPathComponent),
+                               "offline review selected the wrong project")
+            }
+            let comparison = guidedProductSurface ? "This confirmation expires after five minutes."
+                : "Saved comparison: \(savedBytes) bytes. This review expires no later than five minutes after its original preparation; checking status never extends it."
             let comparisonFields = try staticTextMatching(consent, .contains(comparison)) { _ = try remaining(1) }
             try require(comparisonFields.count == 1,
                         "the visible review is not bound to this fixture's exact saved-byte count", check: .singleton)
             _ = try unique(panel.staticTexts.matching(identifier: "Awaiting explicit consent"), "offline intent is not awaiting consent")
-            let run = try unique(consent.buttons.matching(identifier: "Run saved offline checks"), "offline Run is ambiguous")
+            let run = try unique(consent.buttons.matching(identifier: runLabel), "offline Run is ambiguous")
             let acknowledgement = try unique(consent.checkBoxes, "offline acknowledgement is missing or ambiguous")
             try require(!run.isEnabled, "offline Run began enabled before acknowledgement")
             try require((acknowledgement.value as? String) == "0" || (acknowledgement.value as? NSNumber)?.intValue == 0,
@@ -7752,7 +7799,7 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
             try reveal(acknowledgement, in: renderer)
             acknowledgement.click()
-            let start = try waitElement(consent.buttons.matching(identifier: "Run saved offline checks"), in: panel,
+            let start = try waitElement(consent.buttons.matching(identifier: runLabel), in: panel,
                                         enabled: true, timeout: try remaining(5), failures: failures)
             try require((acknowledgement.value as? String) == "1" || (acknowledgement.value as? NSNumber)?.intValue == 1,
                         "the exact offline acknowledgement was not retained")
@@ -7765,14 +7812,14 @@ final class NormalAppUITests: XCTestCase {
         try stage("offline-original-report") {
             // A transient unconfirmed acknowledgement is normal while awaiting
             // the original reply. It cannot be present in the accepted result.
-            _ = try waitElement(panel.staticTexts.matching(identifier: "Original operation settled"), in: panel,
+            _ = try waitElement(panel.staticTexts.matching(identifier: settledLabel), in: panel,
                                 timeout: 90, failures: failures)
             try savedOperationComplete(panel)
             _ = try unique(panel.staticTexts.matching(identifier:
                 "No lifecycle failure has been reported. Individual findings retain their own core status."),
                 "offline operation did not settle without a lifecycle failure")
             let report = try unique(named(panel, "Saved offline check findings"), "the original offline report is missing or ambiguous")
-            _ = try unique(report.staticTexts.matching(NSPredicate(format: "title == %@", "Returned offline-check report")), "returned offline report heading is missing")
+            _ = try unique(report.staticTexts.matching(NSPredicate(format: "title == %@", reportTitle)), "returned offline report heading is missing")
             _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report is not current to this invocation")
             let scopeFields = try staticTextPrefix(report, "Complete is not PASS or release readiness.") { _ = try remaining(1) }
             try require(scopeFields.count == 1, "offline completion was misrepresented as readiness", check: .singleton)
@@ -7789,7 +7836,7 @@ final class NormalAppUITests: XCTestCase {
                         && report.staticTexts.matching(identifier: "Historical / stale context").count == 0
                         && failedCount == 0
                         && named(panel, "Confirm this saved offline-check intent").count == 0
-                        && panel.buttons.matching(identifier: "Run saved offline checks").count == 0,
+                        && panel.buttons.matching(identifier: runLabel).count == 0,
                         "original offline report remains unconfirmed, stale, failed or rearmed")
             try fixture.assertUnchanged()
             try savedOperationComplete(panel)
