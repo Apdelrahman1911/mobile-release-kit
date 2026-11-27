@@ -215,3 +215,88 @@ jobs:
           path: ${{ env.MRK_UPDATE_WORK }}/evidence
           if-no-files-found: warn
           retention-days: 30
+
+  quarantined-media:
+    name: Verify quarantined copies of the exact frozen Install and Remove media
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-quarantined-media' &&
+      inputs.expected_sha == '7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc' &&
+      inputs.build_run == '46048925911' && inputs.carrier_run == '46067290901' && inputs.carrier_attempt == '1'
+    runs-on: macos-26
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: '46067290901'
+          name: macos-release-frozen-7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc-46067290901-1
+          path: ${{ runner.temp }}/quarantine-media
+      - name: Bind downloaded bytes and observe native signature, staple and Gatekeeper decisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 ]]
+          [[ "$(git rev-parse HEAD)" == 7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == fb712e594936256ff1d515cfaa1d269ae4e6d9a1 ]]
+          python3 -I -B - <<'PY'
+          import json, os, runpy, shutil, subprocess, tempfile
+          from pathlib import Path
+
+          release = runpy.run_path("desktop/tools/macos_release_media.py")
+          update = runpy.run_path("desktop/tools/macos_update_check.py")
+          source = "7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc"
+          tree = "fb712e594936256ff1d515cfaa1d269ae4e6d9a1"
+          product = Path(os.environ["RUNNER_TEMP"]) / "quarantine-media"
+          manifest = release["verify_frozen"](product, source, tree, "46048925911", "46067290901")
+          names = release["image_names"](manifest["version"])
+          invocation = "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/46067290901/attempts/1"
+          for asset in (*names, release["MANIFEST"], release["CHECKSUMS"]):
+              verified = json.loads(subprocess.check_output([
+                  "gh", "attestation", "verify", str(product / asset), "--repo", os.environ["GITHUB_REPOSITORY"],
+                  "--source-ref", "refs/heads/main", "--source-digest", source, "--deny-self-hosted-runners",
+                  "--signer-workflow", release["SIGNER_WORKFLOW"], "--format", "json",
+              ], timeout=45))
+              release["need"](any(entry["verificationResult"]["statement"]["predicate"]["runDetails"]["metadata"]
+                                   ["invocationId"] == invocation for entry in verified), "quarantine-attestation-origin")
+          os.environ.pop("GH_TOKEN", None)
+          package_observations = {}
+          images = []
+          for name, role in zip(names, ("Install", "Remove"), strict=True):
+              image = product / name
+              update["require_quarantine"](image)
+              image_record = release["inspect_image"](image, role)
+              images.append(image_record)
+              package_name = f"{role}.pkg"
+              release["need"](manifest["images"][name] == image_record[0] and
+                              manifest["packages"][package_name] == image_record[1], "quarantine-media-identity")
+              with tempfile.TemporaryDirectory(prefix="mrk-quarantine-copy-") as path:
+                  work = Path(path).resolve()
+                  with release["mount_readonly"](image, work) as volume:
+                      copied = work / package_name
+                      shutil.copyfile(volume / package_name, copied)
+                      facts = update["package_acceptance"](copied)
+                      release["need"](facts["sha256"] == manifest["packages"][package_name]["sha256"],
+                                      "quarantine-package-identity")
+                      package_observations[package_name] = dict(facts, image=name, imageQuarantineVerified=True)
+          release["package_identities"](*images, source=source, release=manifest["release"], version=manifest["version"])
+          proof = {"manifest": manifest, "manifestSha256": release["record"](product / release["MANIFEST"])["sha256"],
+                   "acceptedQuarantinedMedia": package_observations, "attestationInvocation": invocation}
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "quarantine-evidence"
+          evidence.mkdir(mode=0o700)
+          (evidence / "QUARANTINE.json").write_text(json.dumps(proof, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-quarantined-media-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quarantine-evidence/QUARANTINE.json
+          if-no-files-found: error
+          retention-days: 30
