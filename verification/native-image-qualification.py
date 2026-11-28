@@ -112,6 +112,7 @@ def verify_observation(work, media, suite):
         "image-copy-available-before-consent", "exact-image-preview-roster",
         "original-image-copy-review-control-not-ready", "image-picker-not-admitted",
         "original-native-picker-cancellation-projection",
+        "exact-listing-image-choice-Listing language / locale", "exact-listing-image-choice-Image slot / Apple device size",
         "single-enabled-android-configuration", "cli-native-original-preparation",
         "original-cli-prepare-final-without-review", "superseded-preparation-result",
         "original-project-picker-did-not-resume", "exact-go-to-folder-sheet",
@@ -670,13 +671,17 @@ def observe(work, action, media, suite):
 
             if current() == value:
                 return
-            for offset in downward_offsets:
+            attempts = (None, *downward_offsets)
+            for offset in attempts:
                 ui.click(label, category="popupbutton", contains=True)
-                ui.keys("home")
-                for _ in range(offset):
-                    ui.keys("down")
+                if offset is None:
+                    ui.keys(value[0].lower())
+                else:
+                    ui.keys("home")
+                    for _ in range(offset):
+                        ui.keys("down")
                 ui.keys("return")
-                time.sleep(0.5)
+                time.sleep(0.8)
                 observed = current()
                 if observed == value:
                     facts.setdefault("originalPickerOptions", []).append({"field": label, "value": value})
@@ -713,7 +718,7 @@ def observe(work, action, media, suite):
         select("Listing language / locale", "fr-FR", (2, 1, 3))
         results.setdefault("diagnosticStages", []).append("image-slot")
         save()
-        select("Image slot / Apple device size", "Phone screenshots", (4, 3, 5, 2, 1))
+        select("Image slot / Apple device size", "Phone screenshots", (4, 3, 5, 2, 1, 6, 7))
         choose()
         ui.click("Cancel",category="button")
         until(lambda: bool(labels() & {"Image selection cancelled","Original image selection cancelled"}),
