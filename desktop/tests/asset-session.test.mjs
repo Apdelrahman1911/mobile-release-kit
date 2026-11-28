@@ -1432,6 +1432,52 @@ test('generic choose-images status is passive closed DATA, never a credential ki
   assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind: 'choose-images', replacement: null }), false);
 });
 
+test('artifact picker status is passive, and a confirmed cancel releases the shared slot', async () => {
+  const picker = (patch = {}) => operation({ operation: 'choose-artifact', phase: 'picking', source: 'pending',
+    settlement: 'pending', assessment: null, preview: null, ...patch });
+  const cancelled = picker({ phase: 'idle', reason: 'user-cancelled', source: 'refused', settlement: 'known' });
+  for (const frame of [picker(), picker({ phase: 'capturing' }), cancelled,
+    picker({ phase: 'idle', source: 'captured', settlement: 'known' }),
+    picker({ phase: 'unknown', reason: 'cleanup-unknown', source: 'unknown', settlement: 'unknown' })]) {
+    const observed = status(2, { mode: 'closed', context: null, operation: frame });
+    assert.deepEqual(parseAssetStatus(observed), observed);
+  }
+  for (const patch of [
+    { selectionToken: B }, { assessment: assessment() }, { preview: operation().preview },
+    { storageOutcome: { effect: 'known-none', durability: 'not-run', cleanup: 'known' } },
+    { phase: 'selected' }, { phase: 'preview' }, { phase: 'mutating' },
+  ]) assert.equal(parseAssetStatus(status(2, { operation: picker(patch) })), null);
+
+  const h = harness();
+  try {
+    await ready(h);
+    const before = h.calls.length;
+    h.emit(status(2, { operation: picker() }));
+    const active = h.controller.getSnapshot();
+    assert.equal(active.contextCurrent, false);
+    assert.equal(active.observationFailed, false);
+    assert.match(assetCancellationReason(active), /original file picker/);
+    assert.equal(h.controller.discard(), false);
+    assert.equal(h.controller.lock(), false);
+    h.controller.submitContext();
+    await settle();
+    assert.equal(h.calls.length, before);
+    h.emit(status(3, { operation: cancelled }));
+    const after = h.controller.getSnapshot();
+    assert.equal(after.status.operation.reason, 'user-cancelled');
+    assert.equal(after.observationFailed, false);
+    assert.equal(after.blocked, false);
+    assert.equal(after.contextCurrent, true);
+    assert.equal(after.reviewReady, false);
+    assert.equal(h.calls.length, before);
+    h.emit(status(4, { operation: picker({ phase: 'unknown', reason: 'cleanup-unknown',
+      source: 'unknown', settlement: 'unknown' }) }));
+    h.emit(status(5, { operation: cancelled }));
+    assert.equal(h.controller.getSnapshot().blocked, true);
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+  } finally { h.controller.dispose(); }
+});
+
 test('every active image phase blocks credential context, mutations, discard and lock without another cancellation route', async () => {
   for (const phase of ['admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown']) {
     const h = harness();
