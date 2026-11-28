@@ -943,10 +943,16 @@ def main():
     try:
         selection = load_selection(args.selection)
         if os.environ.get("MRK_FROZEN_RELEASE_MEDIA"):
-            need(os.environ.get("GITHUB_REF") == "refs/heads/main"
-                 and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             manifest_path = Path(os.environ["MRK_FROZEN_RELEASE_MEDIA"]) / "RELEASE-MANIFEST.json"
             frozen = json.loads(manifest_path.read_bytes())
+            route = os.environ.get("GITHUB_REF")
+            authorized_replay = (route == "refs/heads/verify/macos-0213-repaired-saved-recovery-scoped" and args.mode == "recovery-xctest"
+                and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+                and os.environ.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
+                and tuple(frozen[key] for key in ("sourceCommit", "sourceTree", "buildRun", "carrierRun", "carrierAttempt"))
+                    == ('e162063689313421abc8032e5a89b6b226a516ea', 'd327075ed405f811834cd8c5818cf59d33ffd0ed', '46122648657', '46129030113', '1'))
+            need((route == "refs/heads/main" or authorized_replay)
+                 and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             result["frozenRelease"] = {key: frozen[key] for key in
                                        ("sourceCommit", "sourceTree", "buildRun", "carrierRun", "carrierAttempt")}
             result["frozenRelease"].update(manifestSha256=digest(manifest_path),

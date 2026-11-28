@@ -6699,19 +6699,7 @@ final class NormalAppUITests: XCTestCase {
             }
             recordRecovery("before")
             let panel = try waitElement(named(renderer, "Saved-version recovery inspection"), in: renderer)
-            let inspect = try waitElement(panel.buttons.matching(identifier: "Inspect recovery"), in: panel,
-                                          enabled: true, timeout: 24)
-            try reveal(inspect, in: renderer)
-            // Put the control well inside the renderer, clear of the application header
-            // and viewport edges where a coordinate can hit a covering element.
-            for _ in 0..<5 {
-                let viewport = renderer.frame
-                if inspect.frame.midY >= viewport.minY + 130 && inspect.frame.midY <= viewport.maxY - 80 { break }
-                _ = try remaining(3)
-                renderer.scroll(byDeltaX: 0, deltaY: inspect.frame.midY < viewport.midY ? 200 : -200)
-            }
-            try require(inspect.isHittable && inspect.isEnabled, "original recovery control is not actionable")
-            inspect.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            try press(panel, "Inspect recovery", renderer: renderer, timeout: 24)
             do {
                 _ = try waitElement(panel.buttons.matching(identifier: "Review recovery confirmation…"), in: panel,
                                     enabled: true, timeout: 48)
