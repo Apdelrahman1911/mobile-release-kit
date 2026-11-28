@@ -1065,10 +1065,39 @@ def observe(work, action, media, suite):
                                                  for value in (row["name"], row["text"]))]
                 save()
                 raise AssertionError("original-artifact-review-disabled")
-            ui.click("Review artifact inspection", category="button")
-            entry["reviewRequested"] = True
+            helper = work / "review-artifact.swift"
+            helper.write_text('import AppKit\nimport ApplicationServices\n\nfunc attribute(_ node: AXUIElement, _ name: String) -> CFTypeRef? {\n    var value: CFTypeRef?\n    return AXUIElementCopyAttributeValue(node, name as CFString, &value) == .success ? value : nil\n}\nfunc nodes(_ root: AXUIElement, limit: Int) -> [AXUIElement]? {\n    var pending = [root]\n    var seen = [AXUIElement]()\n    while let node = pending.popLast() {\n        if seen.contains(where: { CFEqual($0, node) }) { continue }\n        guard seen.count + pending.count < limit else { return nil }\n        seen.append(node)\n        pending.append(contentsOf: attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? [])\n    }\n    return seen\n}\nfunc named(_ node: AXUIElement, _ name: String) -> Bool {\n    [kAXTitleAttribute, kAXDescriptionAttribute].contains { (attribute(node, $0) as? String) == name }\n}\nfunc review() -> String {\n    let arguments = CommandLine.arguments\n    guard arguments.count == 2, let pid = Int32(arguments[1]), pid > 0, AXIsProcessTrusted(),\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "admission" }\n    let app = AXUIElementCreateApplication(pid)\n    guard AXUIElementSetMessagingTimeout(app, 2) == .success,\n          let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1,\n          let all = nodes(windows[0], limit: 1500) else { return "window" }\n    let groups = all.filter { named($0, "Inspect selected artifact bytes") &&\n        ["AXGroup", "AXLandmarkRegion"].contains(attribute($0, kAXRoleAttribute) as? String ?? "") }\n    guard groups.count == 1, let region = nodes(groups[0], limit: 240) else { return "region" }\n    let buttons = region.filter { attribute($0, kAXRoleAttribute) as? String == "AXButton" && named($0, "Review artifact inspection") }\n    guard buttons.count == 1 else { return "control" }\n    guard (attribute(buttons[0], kAXEnabledAttribute) as? NSNumber)?.boolValue == true,\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "disabled-or-changed" }\n    return AXUIElementPerformAction(buttons[0], kAXPressAction as CFString) == .success ? "pressed" : "refused"\n}\nprint(review())\n')
+            pressed = call("/usr/bin/swift", str(helper), str(ui.payload_pid()), timeout=32).stdout.strip()
+            need(pressed in {"admission", "window", "region", "control", "disabled-or-changed", "pressed", "refused"},
+                 "unexpected-artifact-review-control")
+            entry["nativeReviewControl"] = pressed
+            entry["reviewRequested"] = pressed == "pressed"
             save()
-            ui.node("Inspect these selected inputs?", category="heading")
+            need(pressed == "pressed", "original-artifact-review-control-did-not-return")
+            observed = time.monotonic()
+            status_checked = False
+            phrases = {"Inspect these selected inputs?", "Not yet available", "No new artifact outcome confirmed",
+                       "Inspection: prepared", "Inspection: terminal", "Inspection: unknown",
+                       "Inspection: running", "Check artifact status", "Inspect selected bytes"}
+            def original_review():
+                nonlocal status_checked
+                rows = [row for row in ui.command("tree.snapshot", limit=800)["nodes"] if row["visible"]]
+                names = {key for row in rows for key in (row["name"], row["text"])}
+                entry["reviewMarkers"] = sorted(phrases & names)
+                begins = [row for row in rows if row["role"] == "button" and row["name"] == "Inspect selected bytes"]
+                if len(begins) == 1:
+                    return True
+                if not status_checked and time.monotonic() - observed > 4 and any(
+                    row["role"] == "button" and row["name"] == "Check artifact status" and row["enabled"] for row in rows
+                ):
+                    status_checked = True
+                    ui.click("Check artifact status", category="button")
+                    entry["checkedOriginalAfterReview"] = True
+                return False
+            try:
+                until(original_review, 35, "original-artifact-review-consent-absent")
+            finally:
+                save()
             ui.node(file_hash(project / CONFIG_FILE), category="statictext", contains=True, region=consent)
             entry["boundSavedConfigurationDigest"] = True
             save()
