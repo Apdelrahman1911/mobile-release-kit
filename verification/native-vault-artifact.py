@@ -1136,8 +1136,33 @@ def observe(work, action, media, suite):
             need(entry["nativeStartAction"] == "pressed", "artifact-native-start-did-not-return")
             entry["requestedOneInspectedReadAfterConsent"] = True
             save()
-            until(lambda: any(row["visible"] and row["name"] == "Recorded artifact checks" for row in
-                  ui.command("tree.snapshot", limit=800)["nodes"]), 55, "original-artifact-check-report-unavailable")
+            state_helper = work / "artifact-status.swift"
+            state_helper.write_text('import AppKit\nimport ApplicationServices\n\nfunc attribute(_ node: AXUIElement, _ name: String) -> CFTypeRef? {\n    var value: CFTypeRef?\n    return AXUIElementCopyAttributeValue(node, name as CFString, &value) == .success ? value : nil\n}\nfunc nodes(_ root: AXUIElement, limit: Int) -> [AXUIElement]? {\n    var pending = [root]\n    var seen = [AXUIElement]()\n    while let node = pending.popLast() {\n        if seen.contains(where: { CFEqual($0, node) }) { continue }\n        guard seen.count + pending.count < limit else { return nil }\n        seen.append(node)\n        pending.append(contentsOf: attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? [])\n    }\n    return seen\n}\nfunc named(_ node: AXUIElement, _ name: String) -> Bool {\n    [kAXTitleAttribute, kAXDescriptionAttribute].contains { (attribute(node, $0) as? String) == name }\n}\nfunc observe() -> String {\n    let argv = CommandLine.arguments\n    guard argv.count == 2, let pid = Int32(argv[1]), pid > 0, AXIsProcessTrusted(),\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "admission" }\n    let app = AXUIElementCreateApplication(pid)\n    guard AXUIElementSetMessagingTimeout(app, 2) == .success,\n          let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1,\n          let all = nodes(windows[0], limit: 1800) else { return "window" }\n    let labels = ["Recorded artifact checks", "Artifact byte inspection result", "No new artifact outcome confirmed",\n                  "Inspection: awaiting-consent","Inspection: starting","Inspection: running","Inspection: unknown",\n                  "Inspection: terminal","complete","refused","cleanup-unknown","unavailable","cancelled","timed-out"]\n    return labels.filter { title in\n        all.contains { node in\n            [kAXTitleAttribute,kAXDescriptionAttribute,kAXValueAttribute].contains {\n                let value = attribute(node,$0) as? String ?? ""\n                return value == title || (title.hasPrefix("Inspection:") && value.hasPrefix(title))\n            }\n        }\n    }.joined(separator:"|")\n}\nprint(observe())\n')
+            markers = {"Recorded artifact checks","Artifact byte inspection result","No new artifact outcome confirmed",
+                        "Inspection: awaiting-consent","Inspection: starting","Inspection: running","Inspection: unknown",
+                        "Inspection: terminal","complete","refused","cleanup-unknown","unavailable","cancelled","timed-out",
+                        "admission","window"}
+            observed = set()
+            for attempt in range(4):
+                read = call("/usr/bin/swift", str(state_helper), str(ui.payload_pid()), timeout=32).stdout.decode("ascii").strip()
+                keys = set(filter(None,read.split("|")))
+                need(keys <= markers,"invalid-bounded-artifact-status-receipt")
+                observed.update(keys)
+                entry["nativeOriginalAfterStart"] = sorted(observed)
+                save()
+                if "Recorded artifact checks" in keys or "Artifact byte inspection result" in keys:
+                    break
+                if attempt == 0:
+                    try:
+                        ui.click("Check artifact status",category="button")
+                        entry["originalStatusReadRequested"] = True
+                    except (AssertionError,TimeoutError,ClientError):
+                        entry["originalStatusReadRequested"] = False
+                    save()
+                time.sleep(4)
+            need("Recorded artifact checks" in observed or "Artifact byte inspection result" in observed,
+                 "original-artifact-check-report-unavailable")
+            ui.reveal("Recorded artifact checks",category="heading")
             ui.node(input_digest, category="statictext", contains=True, region=report)
             need(file_hash(path) == input_digest and
                  project_snapshot() == original_project,

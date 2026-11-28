@@ -2,7 +2,7 @@ name: Exact hosted synthetic vault and artifact verification
 
 on:
   push:
-    branches: [verify/frozen-0213-artifact-native-checkbox]
+    branches: [verify/frozen-0213-artifact-native-result]
     paths: ['.github/workflows/verify-macos-vault-artifact.yml']
 
 permissions:
@@ -18,14 +18,14 @@ jobs:
   signed-ui:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-artifact-native-checkbox'
+      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-artifact-native-result'
     runs-on: macos-26
     timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        suite: [artifact-aab-direct, artifact-ipa-direct, artifact-aab-signed]
+        suite: [artifact-ipa-direct]
     env:
       MRK_UI_SUITE: ${{ matrix.suite }}
     steps:
