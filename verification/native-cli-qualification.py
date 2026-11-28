@@ -98,6 +98,46 @@ def verify_observation(work, media, suite):
                    suite=suite,
                    resultSha256=file_hash(result_path) if result_path.is_file() else None,
                    sourceCommit=result.get("sourceCommit"), harnessCommit=os.environ["GITHUB_SHA"])
+    safe_errors = {
+        "branch-field-roster", "branch-create-field", "branch-create-field-identity",
+        "branch-create-field-value", "branch-picker-exact-alternate",
+        "branch-create-changed-checkout-files-or-unrelated-refs",
+        "branch-rename-changed-contents-tip-or-unrelated-refs",
+        "original-initialization-region", "initialization-review-precondition",
+        "initialization-exact-preview", "initialization-confirmed-result",
+        "initialization-cancelled-original-review", "initialization-invalid-pin-terminal",
+        "initialization-existing-customized-caller-conflict",
+        "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
+        "review-alone-wrote-files", "only-disposable-clean-initialization-fixture",
+        "image-copy-available-before-consent", "exact-image-preview-roster",
+        "original-image-copy-review-control-not-ready", "image-picker-not-admitted",
+        "original-native-picker-cancellation-projection",
+        "single-enabled-android-configuration", "cli-native-original-preparation",
+        "original-cli-prepare-final-without-review", "superseded-preparation-result",
+        "original-project-picker-did-not-resume", "exact-go-to-folder-sheet",
+        "native-folder-completion-did-not-match-fixture",
+    }
+    failure_codes = {}
+    for name in sorted(expected_scenarios):
+        row = scenarios.get(name, {})
+        if row.get("status") != "Failed":
+            continue
+        kind, _, code = row.get("reason", "").partition(": ")
+        if kind == "AssertionError" and code in safe_errors:
+            failure_codes[name] = code
+        elif kind == "AssertionError" and code.startswith("missing-or-ambiguous-region-"):
+            failure_codes[name] = "ambiguous-region"
+        elif kind == "AssertionError" and code.startswith(("missing-or-ambiguous-element-", "target-not-reachable-")):
+            failure_codes[name] = "missing-or-unreachable-control"
+        elif kind == "ClientError":
+            match = re.fullmatch(r"HTTP (408|409) \((condition_timeout|stale_snapshot)\)", code)
+            failure_codes[name] = match.group(2) if match else "driver-error"
+        else:
+            failure_codes[name] = kind if kind in {
+                "AssertionError", "AttributeError", "DescriptorError", "ImportError",
+                "ModuleNotFoundError", "KeyError", "FileNotFoundError", "CalledProcessError",
+            } else "other"
+    summary["failureCodes"] = failure_codes
     trace = evidence / "trace.jsonl"
     summary["traceSha256"] = file_hash(trace) if trace.is_file() else None
     payload = json.dumps(summary, sort_keys=True)
@@ -666,7 +706,8 @@ def observe(work, action, media, suite):
         # A queued CLI preparation owns its own native Open. Do not open
         # any version drawer or request a parallel ordinary seed operation.
         baseline_pid=ui.payload_pid()
-        start_log=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        launched = time.time()
+        start_log=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(launched))
         def heartbeat():
             code, reply=command("status")
             value=reply.get("response") or {}
@@ -703,7 +744,13 @@ def observe(work, action, media, suite):
                 if found:
                     rows.append({"time":row.get("timestamp"),"source":"payload" if row.get("processIdentifier")==baseline_pid else "web-content",
                                  "allowedMarkers":found})
-            return {"return":event.returncode,"events":len(lines),"classified":rows[-35:]}
+            crash_root = Path.home() / "Library/Logs/DiagnosticReports"
+            reports = ("mobile-release-kit-desktop", "com.apple.WebKit.WebContent", "Python", "mrk")
+            crashes = sorted({name for name in reports if any(
+                p.is_file() and p.stat().st_mtime >= launched for p in crash_root.glob(name + "*")
+            )})
+            return {"return":event.returncode,"events":len(lines),"classified":rows[-35:],
+                    "newCrashReportKinds":crashes}
         facts["initialHeartbeat"]=heartbeat()
         facts["initialProcesses"]=children()
         before = time.monotonic()
@@ -713,11 +760,19 @@ def observe(work, action, media, suite):
                 "Version preparation is unconfirmed", "Check request", "Version operation settled",
                 "Original edit status needs attention", "Editing is not available on this platform in this release",
                 "Recovery in progress", "Saved-version edit ownership is unverified",
+                "Finality or status integrity is unknown", "Artifact inspection owner retained",
+                "Offline-check ownership or finality is unverified",
+                "Android-build ownership or finality is unverified",
+                "iOS-archive ownership or finality is unverified",
+                "Version task in progress", "A saved-version edit is still owned",
+                "View saved values", "Native local service unavailable",
             }
             rows=ui.command("tree.snapshot",limit=800)["nodes"]
             observed={value for row in rows if row["visible"] for value in (row["name"], row["text"])}
             return sorted(key for key in roster if any(key in field for field in observed))
 
+        results.setdefault("diagnosticStages", []).append("cli-grant-intact-before-prepare")
+        save()
         ui.snapshot("before-cli-only-prepare")
         _, reply=command("version-edit-prepare",project_id,instance,"--manual","1.4.9","29",
                          expected="version-edit-preparation")
@@ -750,6 +805,8 @@ def observe(work, action, media, suite):
             if row and row["phase"]=="final":
                 raise AssertionError("original-cli-prepare-final-without-review")
             need(code in {0,5,6},"unrecognized-original-prepare-status")
+            if code == 6 and proof.get("error") == "access_denied":
+                raise AssertionError("cli-native-original-preparation")
             # Diagnostic status reads use the same original request. No
             # preparation is reissued when its outcome is unconfirmed.
             time.sleep(0.15)
@@ -762,6 +819,8 @@ def observe(work, action, media, suite):
             facts["unconfirmedOriginalPrepareLeftProjectUnchanged"]=True
             save()
             raise
+        results.setdefault("diagnosticStages", []).append("cli-review-received")
+        save()
         preview=reviewed["review"]
         need(preview["name"]=="1.4.9" and preview["build"]=="29" and preview["source"]==VERSION_FILE.as_posix()
              and preview["beforeSha256"]==hashlib.sha256(old).hexdigest() and preview["afterSha256"]==hashlib.sha256(new).hexdigest()
