@@ -1116,13 +1116,24 @@ def observe(work, action, media, suite):
             need(entry["boundSavedConfigurationDigest"], "artifact-consent-digest-not-bound")
             need(entry["exactConsentControls"] == {"starts": 1, "checkboxes": 1, "disabledBeforeConsent": True},
                  "artifact-original-consent-controls")
-            ui.reveal("I understand this inspects only the selected bytes", category="checkbox", contains=True, region=consent)
-            ui.click("I understand this inspects only the selected bytes", category="checkbox", contains=True, region=consent)
-            need(ui.node("Inspect selected bytes", category="button", region=consent)[1]["enabled"],
-                 "artifact-original-start-still-unavailable")
-            entry["originalConsentEnabledStart"] = True
+            consent_helper = work / "artifact-consent.swift"
+            consent_helper.write_text('import AppKit\nimport ApplicationServices\n\nfunc attribute(_ node: AXUIElement, _ name: String) -> CFTypeRef? {\n    var value: CFTypeRef?\n    return AXUIElementCopyAttributeValue(node, name as CFString, &value) == .success ? value : nil\n}\nfunc nodes(_ root: AXUIElement, limit: Int) -> [AXUIElement]? {\n    var pending = [root]\n    var seen = [AXUIElement]()\n    while let node = pending.popLast() {\n        if seen.contains(where: { CFEqual($0, node) }) { continue }\n        guard seen.count + pending.count < limit else { return nil }\n        seen.append(node)\n        pending.append(contentsOf: attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? [])\n    }\n    return seen\n}\nfunc named(_ node: AXUIElement, _ name: String) -> Bool {\n    [kAXTitleAttribute, kAXDescriptionAttribute].contains { (attribute(node, $0) as? String) == name }\n}\nfunc pressControl() -> String {\n    let args = CommandLine.arguments\n    guard args.count == 3, let pid = Int32(args[1]), pid > 0, AXIsProcessTrusted(),\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "admission" }\n    let app = AXUIElementCreateApplication(pid)\n    guard AXUIElementSetMessagingTimeout(app, 2) == .success,\n          let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1,\n          let all = nodes(windows[0], limit: 1500) else { return "window" }\n    let groups = all.filter { named($0, "Confirm selected artifact inspection") &&\n        ["AXGroup", "AXLandmarkRegion"].contains(attribute($0, kAXRoleAttribute) as? String ?? "") }\n    guard groups.count == 1, let region = nodes(groups[0], limit: 240) else { return "region" }\n    let acknowledge = args[2] == "acknowledge"\n    guard acknowledge || args[2] == "start" else { return "admission" }\n    let controls = region.filter { node in\n        let role = attribute(node, kAXRoleAttribute) as? String\n        if !acknowledge { return role == "AXButton" && named(node, "Inspect selected bytes") }\n        guard role == "AXCheckBox" else { return false }\n        return [kAXTitleAttribute, kAXDescriptionAttribute].contains {\n            (attribute(node, $0) as? String)?.hasPrefix("I understand this inspects only the selected bytes") ?? false\n        }\n    }\n    guard controls.count == 1 else { return "control" }\n    let control = controls[0]\n    guard (attribute(control, kAXEnabledAttribute) as? NSNumber)?.boolValue == true,\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "disabled-or-changed" }\n    if acknowledge {\n        guard (attribute(control, kAXValueAttribute) as? NSNumber)?.intValue == 0 else { return "initial-value" }\n    }\n    guard AXUIElementPerformAction(control, kAXPressAction as CFString) == .success else { return "refused" }\n    if !acknowledge { return "pressed" }\n    for _ in 0..<12 {\n        if (attribute(control, kAXValueAttribute) as? NSNumber)?.intValue == 1 { return "checked" }\n        Thread.sleep(forTimeInterval: 0.2)\n    }\n    return "not-checked"\n}\nprint(pressControl())\n')
+            def press_exact_control(kind):
+                result = call("/usr/bin/swift", str(consent_helper), str(ui.payload_pid()), kind, timeout=32)
+                value = result.stdout.decode("ascii").strip()
+                need(value in {"admission","window","region","control","disabled-or-changed",
+                               "initial-value","refused","pressed","checked","not-checked"},
+                     "artifact-native-control-response")
+                return value
+            entry["nativeCheckboxAction"] = press_exact_control("acknowledge")
             save()
-            ui.click("Inspect selected bytes", category="button", region=consent)
+            need(entry["nativeCheckboxAction"] == "checked", "artifact-native-acknowledgement-did-not-check")
+            until(lambda: ui.node("Inspect selected bytes", category="button", region=consent)[1]["enabled"],
+                  6, "artifact-original-start-still-unavailable")
+            entry["originalConsentEnabledStart"] = True
+            entry["nativeStartAction"] = press_exact_control("start")
+            save()
+            need(entry["nativeStartAction"] == "pressed", "artifact-native-start-did-not-return")
             entry["requestedOneInspectedReadAfterConsent"] = True
             save()
             until(lambda: any(row["visible"] and row["name"] == "Recorded artifact checks" for row in
