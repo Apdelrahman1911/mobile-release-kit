@@ -58,10 +58,14 @@ impl Chain {
             && !p.accepted()
             && successor(self.stage, step).is_some();
         self.failed = true;
-        if !live || p.tool_source_epoch()? != self.epoch {
+        if !live {
             return Err(invalid_owner());
         }
-        self.pending = Some((self.epoch, p.reserved_version_serial()?, step));
+        let (epoch, serial) = p.version_prepare_publication()?;
+        if epoch != self.epoch {
+            return Err(invalid_owner());
+        }
+        self.pending = Some((epoch, serial, step));
         self.failed = false;
         Ok(())
     }
@@ -69,10 +73,11 @@ impl Chain {
         let live = !self.failed && p.accepted();
         self.failed = true;
         let next = self.epoch.checked_add(1).ok_or_else(edit_unknown)?;
-        if !live
-            || self.pending != Some((self.epoch, p.reserved_version_serial()?, step))
-            || p.tool_source_epoch()? != next
-        {
+        if !live {
+            return Err(invalid_owner());
+        }
+        let (epoch, serial) = p.version_prepare_publication()?;
+        if self.pending != Some((self.epoch, serial, step)) || epoch != next {
             return Err(invalid_owner());
         }
         self.stage = successor(self.stage, step).ok_or_else(invalid_owner)?;
@@ -162,7 +167,7 @@ impl Link {
                 || c.failed
                 || c.pending.is_some()
                 || c.stage != want
-                || p.tool_source_epoch()? != c.epoch
+                || p.version_prepare_publication()?.0 != c.epoch
             {
                 return Err(invalid_owner());
             }

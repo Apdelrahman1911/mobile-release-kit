@@ -279,6 +279,18 @@ impl Publisher {
     pub(crate) fn reserved_version_serial(&self) -> Result<u64, BridgeError> {
         self.tool_source_epoch()?; Ok(self.serial)
     }
+    /// Observe the exact manual-version publisher and epoch in one serialized
+    /// read. A concurrent reader holding the book is not a change of authority.
+    pub(crate) fn version_prepare_publication(&self) -> Result<(u64, u64), BridgeError> {
+        let epoch = self.publisher_epoch_checked(
+            self.slot.book.lock().map_err(TryLockError::from),
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            false,
+        )?;
+        Ok((epoch, self.serial))
+    }
     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
         self.publisher_epoch_checked(self.slot.book.try_lock(),
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
@@ -2385,6 +2397,37 @@ mod lifecycle_book_tests {
         other.reject();
         assert_eq!(publisher.git_local_epoch().unwrap(), 0);
         publisher.reject();
+    }
+
+    #[test]
+    fn manual_version_prepare_waits_for_readers_and_rechecks_the_exact_publication() {
+        let slot = Arc::new(ControlSlot::default());
+        let mut publisher = slot.reserve(PublisherKind::General, false).unwrap();
+        let book = slot.book.lock().unwrap();
+        assert!(publisher.tool_source_epoch().is_err());
+        std::thread::scope(|scope| {
+            let publisher = &publisher;
+            let (started, entered) = std::sync::mpsc::channel();
+            let (finished, completed) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                started.send(()).unwrap();
+                finished.send(publisher.version_prepare_publication()).unwrap();
+            });
+            entered.recv().unwrap();
+            let pending = completed.recv_timeout(Duration::from_millis(100));
+            drop(book);
+            assert!(matches!(pending, Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+            assert_eq!(completed.recv().unwrap().unwrap(), (0, publisher.serial));
+        });
+
+        let competing = slot.reserve(PublisherKind::General, false).unwrap();
+        assert_eq!(publisher.version_prepare_publication(), Err(BridgeError::cleanup_unknown()));
+        competing.reject();
+        assert_eq!(publisher.version_prepare_publication().unwrap(), (0, publisher.serial));
+        publisher.accept(wire::Reason::ContextChanged).unwrap();
+        assert_eq!(publisher.version_prepare_publication().unwrap(), (1, publisher.serial));
+        publisher.finish();
+        assert_eq!(slot.epoch().unwrap(), 1);
     }
 
     #[test]

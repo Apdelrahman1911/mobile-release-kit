@@ -36,7 +36,10 @@ function RecoveryInventory({view}:{view:InitializationRecoveryView}) {
 }
 function Confirm({recover,onConfirm,disabled}:{recover:boolean;onConfirm:()=>void;disabled:boolean}) {
   const [confirmed,setConfirmed]=useState(false);
-  return <div className="notice notice-warning"><label><input type="checkbox" checked={confirmed} onChange={event=>setConfirmed(event.target.checked)}/> I reviewed the complete plan above and confirm {recover?'only these recovery effects':'these local file creations and ignore additions'}.</label>
+  const consentLabel = recover
+    ? 'I reviewed the complete plan above and confirm only these recovery effects.'
+    : 'I reviewed the complete plan above and confirm these local file creations and ignore additions.';
+  return <div className="notice notice-warning"><label><input type="checkbox" aria-label={consentLabel} checked={confirmed} onChange={event=>setConfirmed(event.target.checked)}/> {consentLabel}</label>
     <button type="button" disabled={disabled||!confirmed} onClick={onConfirm}>{recover?'Confirm inspected recovery':'Initialize project'}</button>
   </div>;
 }
