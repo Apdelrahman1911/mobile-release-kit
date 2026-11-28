@@ -204,7 +204,7 @@ jobs:
                 observerExit:$summary[0].observerExit,status:($summary[0].scenarios), failureCodes:$summary[0].failureCodes,
                 diagnosticStages:(.diagnosticStages//[]),
                 branchFacts:(.gitBranches//{}|{observedOriginalLocalBranchControls,twoOriginalLocalRefsObserved,
-                   createdExactBranchWithoutSwitching,renamedExactCurrentRefWithoutChangingFiles,switchedToExactOriginalTarget}),
+                   createdExactBranchWithoutSwitching,renamedExactCurrentRefWithoutChangingFiles,switchedToExactOriginalTarget,nativeReviewStatusMarkers,exactReviewSectionObserved}),
                 initializationFacts:(.releaseInitialization//{}|{reviewCancellationKeptOriginalFiles,
                    exactConfigCallersMetadataAndIgnoreReadback,noOpKeepsAllFileIdentities,customizedCallerRefusedWithoutChanges, latestPlanMissingRelativePaths, latestPlanApplyDisabledBeforeConsent,
                    shortPinRefusedBeforeAnyWrite})}

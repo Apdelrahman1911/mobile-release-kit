@@ -729,15 +729,19 @@ def observe(work, action, media, suite):
             until(lambda: enabled(start),22,"initialization-review-precondition")
             ui.click(start,category="button",region=zone)
 
-        def review():
+        def review(*, full_inventory=True):
             run_state(lambda rows: seen(rows,"Complete local file plan") and
                       any(r["role"]=="button" and r["name"]==confirm for r in rows),"exact-preview")
             # WebKit can separately name a cell and provide its code value.
             # Retain the exact relative path, regardless of which of those
             # two accessibility fields contains it.
             labels = {value.strip() for row in read_region() for value in (row["name"], row["text"])}
-            missing = [str(path) for path in sorted(target) if str(path) not in labels]
-            for path in missing.copy():
+            def path_present(path):
+                exact = re.compile(r"(?<![\w/.-])" + re.escape(path) + r"(?![\w/.-])")
+                return any(exact.search(value) for value in labels)
+
+            missing = [str(path) for path in sorted(target) if not path_present(str(path))]
+            for path in missing.copy() if full_inventory else ():
                 try:
                     _, node = ui.reveal(path, category="statictext", region=zone)
                 except (AssertionError, TimeoutError):
@@ -747,7 +751,8 @@ def observe(work, action, media, suite):
             facts["latestPlanMissingRelativePaths"] = missing
             facts["latestPlanApplyDisabledBeforeConsent"] = not enabled(confirm)
             save()
-            need(not missing, "missing-reviewed-inventory-or-unapproved-apply")
+            if full_inventory:
+                need(not missing, "missing-reviewed-inventory-or-unapproved-apply")
             need(facts["latestPlanApplyDisabledBeforeConsent"], "initialization-unapproved-apply-enabled")
 
         def apply_and_read(label):
@@ -762,7 +767,7 @@ def observe(work, action, media, suite):
         need(ui.node("Full toolkit commit (40 hexadecimal characters)",category="textfield",contains=True,region=zone)[1]["text"]==pin,
              "exact-full-toolkit-pin-entry")
         begin()
-        review()
+        review(full_inventory=False)
         results.setdefault("diagnosticStages", []).append("initialization-review-ready")
         save()
         need(source_state()==baseline,"review-alone-wrote-files")
@@ -771,6 +776,20 @@ def observe(work, action, media, suite):
         need(source_state()==baseline,"cancelled-initialization-wrote-files")
         facts["reviewCancellationKeptOriginalFiles"] = True
         save()
+        results.setdefault("diagnosticStages", []).append("initialization-short-pin-refusal")
+        save()
+        ui.edit("Full toolkit commit (40 hexadecimal characters)",pin[:7],region=zone)
+        begin()
+        def invalid_pin_observed(rows):
+            return ((seen(rows,"This attempt did not confirm initialization") and seen(rows,"Native finality: settled"))
+                    or (enabled(start) and not enabled(confirm)
+                        and any(seen(rows,label) for label in ("invalid","not be confirmed","not available"))))
+        run_state(invalid_pin_observed,"invalid-pin-terminal")
+        need(not enabled(confirm) and source_state()==baseline,"invalid-pin-mutated-fixture")
+        facts["shortPinRefusedBeforeAnyWrite"] = True
+        save()
+        run_state(lambda rows: enabled(start) and not enabled(confirm), "short-pin-settlement")
+        ui.edit("Full toolkit commit (40 hexadecimal characters)", pin, region=zone)
         begin()
         review()
         results.setdefault("diagnosticStages", []).append("initialization-confirm-reviewed-plan")
@@ -802,17 +821,6 @@ def observe(work, action, media, suite):
         facts["customizedCallerRefusedWithoutChanges"] = True
         save()
         run_state(lambda rows: enabled(start) and not enabled(confirm), "refused-original-settlement")
-        results.setdefault("diagnosticStages", []).append("initialization-short-pin-refusal")
-        save()
-        ui.edit("Full toolkit commit (40 hexadecimal characters)",pin[:7],region=zone)
-        begin()
-        def invalid_pin_observed(rows):
-            return ((seen(rows,"This attempt did not confirm initialization") and seen(rows,"Native finality: settled"))
-                    or (enabled(start) and not enabled(confirm)
-                        and any(seen(rows,label) for label in ("invalid","not be confirmed","not available"))))
-        run_state(invalid_pin_observed,"invalid-pin-terminal")
-        need(not enabled(confirm) and source_state()==customized,"invalid-pin-mutated-fixture")
-        facts["shortPinRefusedBeforeAnyWrite"] = True
 
     def git_nodes(region, name, role, *, enabled=False):
         tree = ui.command("tree.snapshot", limit=800)
@@ -916,7 +924,20 @@ def observe(work, action, media, suite):
                         return True
                 return False
 
-            until(observe_review, 60, "git-reviewed-original-heading-missing")
+            try:
+                until(observe_review, 42, "git-reviewed-original-heading-missing")
+            except AssertionError:
+                markers = {"Review before changing Git", "Git action needs attention", "Git recovery is needed",
+                           "Waiting for the original Git request", "Git action is still running", "Git action did not complete",
+                           "Git check finished", "Load the current repository state", "Stop original action"}
+                rows = ui.command("tree.snapshot", limit=800)["nodes"]
+                fact["nativeReviewStatusMarkers"] = sorted(markers & {
+                    value for row in rows if row["visible"] for value in (row["name"], row["text"])
+                })
+                fact["exactReviewSectionObserved"] = any(row["role"] == "group" and row["name"] == review
+                                                        for row in rows if row["visible"])
+                save()
+                raise
             results["diagnosticStages"].append("git-original-review-visible")
             save()
             need(git_has(action, "button", review) and not git_has(action, "button", review, enabled=True),
