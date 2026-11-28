@@ -37,7 +37,7 @@ on:
         default: none
         options: [none, update-credentials, all, exact-coverage, exact-negative, project-paths-xctest, project-edits-xctest, persistence-xctest,
                   offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
-                  android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
+                  android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest, empty-recovery-xctest,
                   release-asset, native-status-unit, recovery-contracts, xcode-path-control, archived-upgrade, apfs-disposal-control]
       protected_xcode_fixture:
         description: Prepare the Apple Xcode fixture for the supplemental unsigned archive only

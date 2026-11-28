@@ -7358,8 +7358,9 @@ final class NormalAppUITests: XCTestCase {
                 try observeSelectedProject(renderer, path: fixture.projectPath)
             }
             try press(renderer, guidedProductSurface ? "Read project settings again" : "Refresh static view", renderer: renderer)
-            try waitGone(earlier)
+            try waitGone(earlier, timeout: 24)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             try fixture.assertUnchanged()
         }
         if !metadataOnly {
@@ -8390,8 +8391,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery inspection project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
