@@ -882,7 +882,7 @@ def observe(work, action, media, suite):
         alternate_bytes = main_bytes + b"\nReviewed alternate fixture content.\n"
 
         def git(*args):
-            return call("/usr/bin/git", "-C", str(project), *args).stdout.rstrip(b"\n")
+            return call("/usr/bin/env", "GIT_OPTIONAL_LOCKS=0", "/usr/bin/git", "-C", str(project), *args).stdout.rstrip(b"\n")
 
         def file_map():
             return {p.relative_to(project): file_hash(p) for p in project.rglob("*")
@@ -994,6 +994,9 @@ def observe(work, action, media, suite):
         need(git("status","--porcelain=v1")==b"" and main_bytes==readme.read_bytes() and original_head!=target_head,
              "branch-preconditions")
         original_files = file_map()
+        index = project / ".git" / "index"
+        need(index.is_file() and not index.is_symlink(), "original-fixture-index")
+        original_index = file_hash(index)
         unchanged_rows = original_files.copy()
         del unchanged_rows[readme.relative_to(project)]
         original_refs = {start_branch: original_head, branch_ref(alternate): target_head}
@@ -1007,7 +1010,12 @@ def observe(work, action, media, suite):
         ui.reveal("Read local branches",category="button")
         fact["observedOriginalLocalBranchControls"] = True
         save()
+        record = results.setdefault("diagnosticStages", [])
+        record.append("git-request-ref-observation")
+        save()
         refresh("main")
+        record.append("git-ref-observation-returned")
+        save()
         need(git_has(alternate, "statictext", group) and git("symbolic-ref","HEAD")==start_branch and refs()==original_refs,
              "local-ref-list-changed-project")
         fact["twoOriginalLocalRefsObserved"] = True
@@ -1050,6 +1058,7 @@ def observe(work, action, media, suite):
             expected_refs = original_refs | {branch_ref(created): original_head}
             need(refs()==expected_refs and git("symbolic-ref","HEAD")==start_branch and file_map()==original_files
                  and git("status","--porcelain=v1")==b"", "branch-create-changed-checkout-files-or-unrelated-refs")
+            need(file_hash(index) == original_index, "branch-create-changed-index-bytes")
             fact["createdExactBranchWithoutSwitching"] = True
             save()
 
@@ -1066,6 +1075,7 @@ def observe(work, action, media, suite):
             expected_refs[branch_ref(renamed)] = original_head
             need(refs()==expected_refs and git("symbolic-ref","HEAD")==branch_ref(renamed) and file_map()==original_files
                  and git("status","--porcelain=v1")==b"", "branch-rename-changed-contents-tip-or-unrelated-refs")
+            need(file_hash(index) == original_index, "branch-rename-changed-index-bytes")
             fact["renamedExactCurrentRefWithoutChangingFiles"] = True
             save()
 
@@ -1074,10 +1084,11 @@ def observe(work, action, media, suite):
             switch_region = "Switch local branch"
             results.setdefault("diagnosticStages", []).append("git-select-switch-target")
             save()
+            ui.reveal("Local branch", category="popupbutton", region=switch_region)
             ui.click("Local branch", category="popupbutton", region=switch_region)
-            _, option = ui.node(alternate, category="menuitem")
-            need(option["enabled"], "branch-picker-exact-alternate")
-            ui.click(alternate, category="menuitem")
+            ui.keys("home")
+            ui.keys("down")
+            ui.keys("return")
             until(lambda: any(node["text"]==alternate for node in git_nodes(
                 switch_region, "Local branch", "popupbutton")), 5, "branch-picker-exact-alternate")
             runnable("Review branch switch", switch_region)

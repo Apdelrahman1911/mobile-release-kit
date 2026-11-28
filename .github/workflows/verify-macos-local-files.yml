@@ -2,7 +2,7 @@ name: Exact hosted Git and initialization verification
 
 on:
   push:
-    branches: [verify/frozen-0213-protected-main-branch-operations]
+    branches: [verify/frozen-0213-branch-index-observation]
     paths: ['.github/workflows/verify-macos-local-files.yml']
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
   signed-ui:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-protected-main-branch-operations'
+      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-branch-index-observation'
     runs-on: macos-26
     timeout-minutes: 40
     strategy:
