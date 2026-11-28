@@ -1,0 +1,96 @@
+name: Exact installed ordinary macOS XCUITests
+on:
+  push:
+    branches: [verify/0213-ordinary-xctests-repaired-menus]
+    paths: ['.github/workflows/verify-ordinary-0213-xctests.yml']
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+jobs:
+  ordinary:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/0213-ordinary-xctests-repaired-menus'
+    runs-on: macos-26
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        suite: [native-menus]
+    env:
+      RELEASE_SOURCE: e162063689313421abc8032e5a89b6b226a516ea
+      RELEASE_TREE: d327075ed405f811834cd8c5818cf59d33ffd0ed
+      BUILD_RUN: '46122648657'
+      CARRIER_RUN: '46129030113'
+      CARRIER_ATTEMPT: '1'
+      INSTALL_DIGEST: fa4862424df13704b11f26afb4fd70c5cbbecdacebc266ce7119a719cee704da
+      REMOVE_DIGEST: c1c071a19bdd60b5069d6ad4b437b78a5fdf7c99b9a4d0262b5dd7d07f939dbb
+      SUITE: ${{ matrix.suite }}
+    steps:
+      - name: Admit a fresh disposable macOS 26 Apple Silicon host
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 && "$(id -un)" == runner ]]
+          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e162063689313421abc8032e5a89b6b226a516ea
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: qualification-observer
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: '46129030113'
+          name: macos-release-frozen-e162063689313421abc8032e5a89b6b226a516ea-46129030113-1
+          path: ${{ runner.temp }}/ordinary-signed-media
+      - name: Verify the original frozen media and install the matching package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SOURCE" && "$(git rev-parse 'HEAD^{tree}')" == "$RELEASE_TREE" ]]
+          [[ "$(git -C qualification-observer rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          media="$RUNNER_TEMP/ordinary-signed-media"
+          work="$(mktemp -d "$RUNNER_TEMP/mrk-original-ordinary.XXXXXXXX")"
+          printf 'MRK_ORDINARY_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          mkdir "$work/evidence"
+          python -I -B desktop/tools/macos_release_media.py verify "$media" \
+            --source "$RELEASE_SOURCE" --tree "$RELEASE_TREE" --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN"
+          jq -e --arg attempt "$CARRIER_ATTEMPT" --arg install "$INSTALL_DIGEST" --arg remove "$REMOVE_DIGEST" \
+            '.carrierAttempt == $attempt and .packages["Install.pkg"].sha256 == $install and .packages["Remove.pkg"].sha256 == $remove' \
+            "$media/RELEASE-MANIFEST.json" > /dev/null
+          invocation="https://github.com/$GITHUB_REPOSITORY/actions/runs/$CARRIER_RUN/attempts/$CARRIER_ATTEMPT"
+          for asset in "$media"/*; do
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
+              --source-digest "$RELEASE_SOURCE" --deny-self-hosted-runners --format json \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml" |
+              jq -e --arg invocation "$invocation" 'any(.[]; .verificationResult.statement.predicate.runDetails.metadata.invocationId == $invocation)' > /dev/null
+          done
+          unset GH_TOKEN
+          python -I -B desktop/tools/macos_release_ui.py install "$media" "$work" --suite cli-read
+      - name: Run the previously exercised first-party XCTest through the current guided UI
+        run: |
+          set -euo pipefail
+          swift=desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift
+          cp qualification-observer/verification/NormalAppUITests.guided.swift "$swift"
+          test "$(git diff --name-only HEAD)" = "$swift"
+          python -I -B qualification-observer/verification/ordinary-xctest.py "$SUITE" "$RELEASE_SOURCE" "$RELEASE_TREE" \
+            "$RUNNER_TEMP/ordinary-signed-media" "$MRK_ORDINARY_WORK"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && env.MRK_ORDINARY_WORK != '' }}
+        with:
+          name: original-ordinary-${{ matrix.suite }}-e162063689313421abc8032e5a89b6b226a516ea-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MRK_ORDINARY_WORK }}/evidence/ORDINARY-XCTEST.json
+          if-no-files-found: warn
+          retention-days: 30
