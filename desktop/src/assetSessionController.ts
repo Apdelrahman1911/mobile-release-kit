@@ -76,6 +76,15 @@ export function assetInstallationOperationPending(status: AssetStatus | null | u
   return operation?.operation === 'inspect-installation' && !(operation.phase === 'idle' && operation.settlement === 'known');
 }
 
+function assetArtifactPickerPending(status: AssetStatus | null | undefined): boolean {
+  const operation = status?.operation;
+  return operation?.operation === 'choose-artifact' && !(operation.phase === 'idle' && operation.settlement === 'known');
+}
+
+function sharedAssetOperationPending(status: AssetStatus | null | undefined): boolean {
+  return assetImageOperationPending(status) || assetInstallationOperationPending(status) || assetArtifactPickerPending(status);
+}
+
 export function assetCancellationReason(state: AssetDisplayState): string | null {
   const operation = state.status?.operation;
   if (assetImageOperationPending(state.status))
@@ -84,6 +93,8 @@ export function assetCancellationReason(state: AssetDisplayState): string | null
     return 'This is a project-path selection, not a credential operation. Cancel belongs to its original native picker; credential discard cannot cancel it.';
   if (operation?.operation === 'inspect-installation')
     return 'This is an installation check, not a credential operation. Cancel belongs to the exact original check in Environment; credential discard cannot cancel it.';
+  if (assetArtifactPickerPending(state.status))
+    return 'The original file picker in Build files owns cancellation. Wait for its confirmed cleanup before using private inputs.';
   if (state.busy === 'prepare-upload-key') return 'Wait for the original signing setup check; it has no credential operation to cancel yet.';
   if (state.originPending) return 'The new action has not supplied a usable acknowledgement of its original operation. Wait for its reply or check status; no cancellation has been sent for it. Cancelling the previous step would not cancel this action.';
   if (cancellationPending(state)) return 'Cancellation has already been requested for the original operation. Wait for its cleanup status.';
@@ -95,6 +106,7 @@ export function assetSessionReason(state: AssetDisplayState): string | null {
   if (state.blocked) return 'This original session is no longer usable. Check its cleanup status; do not start another operation.';
   if (state.observationFailed || !state.status) return 'A current native session status is required. Check status before continuing.';
   if (assetImageOperationPending(state.status)) return 'The original image selection still owns this native slot. Observe or stop it in Metadata; private-input actions must wait for idle and known settlement.';
+  if (assetArtifactPickerPending(state.status)) return 'Wait for the original file picker in Build files to settle before using private inputs.';
   if (state.status.operation?.operation === 'inspect-installation' && !(state.status.operation.phase === 'idle' && state.status.operation.settlement === 'known')) return 'The original installation check still owns this native slot. Observe or cancel it in Environment; credential actions must wait for known cleanup.';
   if (!state.status.capability.available) return ASSET_REASON_HELP[state.status.capability.reason];
   if (cancellationPending(state)) return 'Cancellation was requested for this original operation. Its old selection and review cannot be used; wait for cleanup status.';
@@ -161,7 +173,7 @@ export class AssetSessionController {
   }
   private current(status = this.state.status): boolean {
     const project = this.selectedProject();
-    return !assetImageOperationPending(status) && !assetInstallationOperationPending(status) && !!project?.draft && sameRevision(project, this.projectBinding) && !!status?.context && !!this.contextAcknowledged &&
+    return !sharedAssetOperationPending(status) && !!project?.draft && sameRevision(project, this.projectBinding) && !!status?.context && !!this.contextAcknowledged &&
       this.contextAcknowledged.localRevision === this.localRevision && this.contextAcknowledged.nativeRevision === status.context.revision &&
       status.context.projectId === project.project.id && sameScope(status.context, this.state.scope) && assetStorageWritable(status);
   }
@@ -262,7 +274,7 @@ export class AssetSessionController {
     // A delayed unlock/initialize completion may arrive after its invoke has
     // returned pending. Submit only the already-requested current context, not
     // an automatic credential read, keyring prompt or assignment.
-    if (old?.mode === 'encrypted' && !assetImageOperationPending(old) && !assetInstallationOperationPending(old) && !assetStorageWritable(old) && assetStorageWritable(status) && this.contextDirty) this.submitContext();
+    if (old?.mode === 'encrypted' && !sharedAssetOperationPending(old) && !assetStorageWritable(old) && assetStorageWritable(status) && this.contextDirty) this.submitContext();
     return status;
   }
   async connect(api: DesktopApi): Promise<void> {
@@ -312,7 +324,7 @@ export class AssetSessionController {
     if (!this.disposed && this.selectedProject()?.project.id === projectId) this.invalidateContext();
   }
   setScope(scope: AssetScope): void {
-    if (this.disposed || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || sameScope(scope, this.state.scope)) return;
+    if (this.disposed || sharedAssetOperationPending(this.state.status) || sameScope(scope, this.state.scope)) return;
     this.invalidateContext({ ...scope });
   }
   private invalidateContext(scope = this.state.scope): void {
@@ -325,7 +337,7 @@ export class AssetSessionController {
   }
   submitContext(): void {
     const project = this.selectedProject();
-    if (this.disposed || !this.api || this.contextTask || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || this.otherOperationReason() || this.api.mode !== 'native' || this.state.blocked || this.state.observationFailed ||
+    if (this.disposed || !this.api || this.contextTask || sharedAssetOperationPending(this.state.status) || this.otherOperationReason() || this.api.mode !== 'native' || this.state.blocked || this.state.observationFailed ||
         !assetStorageWritable(this.state.status) || !this.state.status?.capability.available || !project?.draft) return;
     // One in-flight context submission; keystrokes coalesce into the latest
     // context, not a queued list of draft copies. No failed request is retried.
@@ -337,7 +349,7 @@ export class AssetSessionController {
     const input = structuredClone(proposed);
     const work = Promise.resolve().then(async () => {
       try {
-        if ((assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || this.otherOperationReason()) { this.contextDirty = true; return; }
+        if (sharedAssetOperationPending(this.state.status) || this.otherOperationReason()) { this.contextDirty = true; return; }
         const reply = this.receive(await api.setAssetContext(input));
         if (!this.disposed && reply?.context && localRevision === this.localRevision && reply.context.projectId === input.projectId && sameScope(reply.context, input)) {
           this.contextAcknowledged = { localRevision, nativeRevision: reply.context.revision };
@@ -354,7 +366,7 @@ export class AssetSessionController {
     });
   }
   private run(action: NonNullable<AssetDisplayState['busy']>, invoke: () => Promise<AssetStatus>, phase?: IntentPhase): boolean {
-    if (this.disposed || this.state.busy || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || action !== 'lock' && this.otherOperationReason()) return false;
+    if (this.disposed || this.state.busy || sharedAssetOperationPending(this.state.status) || action !== 'lock' && this.otherOperationReason()) return false;
     if (phase) this.intentPhase = phase;
     this.update({ busy: action, error: null, originPending: this.uploadPreparationPending || (phase ? true : this.state.originPending), reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
     void (async () => {
@@ -708,7 +720,7 @@ export class AssetSessionController {
     const operation = this.state.status?.operation;
     if (!this.api || this.state.mode !== 'native' || !operation || (operation.phase === 'idle' && operation.settlement === 'known') || this.cancelling === operation.operationId || this.disposed) return false;
     if (this.uploadPreparationPending) return false;
-    if (operation.operation === 'inspect-installation' || operation.operation === 'choose-images' || operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
+    if (operation.operation === 'inspect-installation' || operation.operation === 'choose-images' || operation.operation === 'choose-artifact' || operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
     // Each explicit phase has a fresh native ID. A prior selected/preview
     // status cannot identify a new in-flight operation, even if an event has
     // overtaken its originating acknowledgement. Never fake accepting Cancel.
@@ -722,7 +734,7 @@ export class AssetSessionController {
   lock(): boolean {
     if (!this.api || this.state.mode !== 'native' || this.state.busy || this.disposed || !this.state.status || this.state.status.mode === 'closed' ||
         this.state.status.operation?.operation === 'choose-images' && (this.state.blocked || !this.idle()) ||
-        (this.state.status.operation?.operation === 'choose-project-path' || this.state.status.operation?.operation === 'inspect-installation') && !this.idle()) return false;
+        (this.state.status.operation?.operation === 'choose-project-path' || this.state.status.operation?.operation === 'inspect-installation' || this.state.status.operation?.operation === 'choose-artifact') && !this.idle()) return false;
     this.contextAcknowledged = null;
     this.intentPhase = null;
     this.update({ contextCurrent: false, reviewReady: false, originPending: false, intent: null, selectionKind: null, previewDeadline: null });
