@@ -1220,6 +1220,37 @@ for (const kind of ['google-wif', 'asc-p8']) test(`${kind} encrypted Save ends u
   } finally { h.controller.dispose(); }
 });
 
+test('a loaded encrypted file needs a new public revision before its own assignment review', async () => {
+  const scope = { platform: 'ios', stage: 'candidate', purpose: 'signing' };
+  const record = vaultRecord({ kind: 'apple-profile' });
+  const native = (revision, patch = {}) => vaultStatus(revision, { context: { ...context, ...scope }, records: [record], ...patch });
+  for (const reusedRevision of [true, false]) {
+    const h = harness(native(0));
+    try {
+      h.controller.setScope(scope);
+      await ready(h, { ...native(1) });
+      assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), true);
+      const admitting = operation({ phase: 'admitting', settlement: 'pending', assessment: null, preview: null });
+      h.emit(native(2, { operation: admitting }));
+      h.emit(native(reusedRevision ? 2 : 3, { operation: { ...admitting, source: 'captured',
+        phase: reusedRevision ? 'admitting' : 'assessing' } }));
+      assert.equal(h.controller.getSnapshot().blocked, reusedRevision);
+      if (reusedRevision) assert.equal(h.controller.getSnapshot().error.code, 'AssetStatusInvalid');
+      h.latest('prepare').resolve(native(4, { operation: operation({ source: 'captured', assessment: appleAssessment('apple-profile'),
+        preview: { token: B, action: 'bind', expiresInMs: 10000, subject: {
+          type: 'record', kind: 'apple-profile', change: 'assign', recordId: C, recordRevision: 1,
+        } } }) }));
+      await settle();
+      assert.equal(h.controller.getSnapshot().reviewReady, !reusedRevision);
+      assert.equal(h.controller.getSnapshot().blocked, reusedRevision);
+      if (reusedRevision) assert.equal(h.controller.getSnapshot().error.code, 'assessment_context_stale');
+      assert.equal(h.controller.discard(), !reusedRevision);
+      assert.equal(h.latest('discard')?.args, reusedRevision ? undefined : 3);
+      assert.equal(h.calls.some((call) => ['bind', 'commit'].includes(call.command)), false);
+    } finally { h.controller.dispose(); }
+  }
+});
+
 test('encrypted save refuses an inherited source Bind review even when its record and native operation IDs are plausible', async () => {
   const h = harness(vaultStatus());
   try {

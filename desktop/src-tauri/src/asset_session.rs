@@ -5758,7 +5758,15 @@ fn prepare_copy_start(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> R
     // Its memory is not the native parser's 6MiB arena and is not in the census.
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     owner.large_work_started.store(true, Ordering::SeqCst);
-    let changed = slot.phase != Phase::Assessing; slot.phase = Phase::Assessing; Ok(changed)
+    let source = slot.source;
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    let source = slot.vault.loaded.as_ref().map_or(source, |payload| {
+        if payload.material.is_some() { SourceState::Captured } else { SourceState::NotRun }
+    });
+    let changed = slot.phase != Phase::Assessing || slot.source != source;
+    slot.phase = Phase::Assessing;
+    slot.source = source;
+    Ok(changed)
 }
 
 fn assemble_request(payload: &Payload, context: &NativeContext) -> Result<AssessmentRequest, CommandError> {
