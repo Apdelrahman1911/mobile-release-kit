@@ -1,7 +1,9 @@
-// Inert DTOs and original-promise scripts only. No native, disk mutation, DOM,
-// toolkit generation, credential, network, process or filesystem-authority test.
+// Inert DTOs, original-promise scripts and synthetic rendering. Native
+// authority, toolkit generation and installed accessibility are exercised separately.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createNativeApi } from '../src/bridge.ts';
 import { GITHUB_WORKFLOWS } from '../src/githubSetupProtocol.ts';
 import { initialWorkspace, workspaceReducer, isDirty, retainedEditAttention } from '../src/drafts.ts';
@@ -49,6 +51,37 @@ async function harness(){
  return{controller,setup,calls,pending,completions,project:()=>workspace.projects.p,workspace:()=>workspace,applied:()=>applied,dispatch:(a)=>{controller.beforeWorkspaceAction(a);workspace=workspaceReducer(workspace,a);controller.syncContext();},emit:(n,p)=>{current=status(n,p);event(current);},reply:(label,n,p)=>{current=status(n,p);const i=pending.findIndex(x=>x.label===label);assert.notEqual(i,-1);pending.splice(i,1)[0].resolve(current);},dispose:()=>controller.dispose()};
 }
 async function reviewed(h){assert.equal(h.controller.startReason(),null);assert.equal(h.controller.start(),true);assert.equal(h.controller.start(),false);h.reply('open',1,owner('editing'));await tick();const proposal=owner('reviewing');assert.ok(parseProjectInitializationStatus(status(2,proposal)),'fresh native review fixture satisfies the closed contract');h.reply('prepare',2,proposal);await tick();assert.ok(currentInitializationApplyBinding(h.controller.getSnapshot()));}
+
+test('initialization renders explicitly named consent and keeps Apply disabled before it', async () => {
+ const h = await harness();
+ try {
+  await reviewed(h);
+  const result = spawnSync(process.execPath, ['--import',
+   fileURLToPath(new URL('./helpers/workspace-jsx-loader.mjs', import.meta.url)),
+   '--input-type=module', '--eval', `
+    import { readFileSync } from 'node:fs';
+    import { createElement } from 'react';
+    import { renderToStaticMarkup } from 'react-dom/server';
+    import { ProjectInitialization } from './src/components/ProjectInitialization.tsx';
+    const props = JSON.parse(readFileSync(0, 'utf8'));
+    const controller = {
+      startReason: () => null, recoveryStartReason: () => null,
+      agent: { getSnapshot: () => ({}), isLinked: () => false },
+    };
+    process.stdout.write(renderToStaticMarkup(createElement(ProjectInitialization, {
+      ...props, controller, setup: {},
+    })));
+   `], {
+   cwd: fileURLToPath(new URL('../', import.meta.url)),
+   input: JSON.stringify({ state: h.controller.getSnapshot(), setupState: h.setup }),
+   encoding: 'utf8', timeout: 20_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /<input type="checkbox" aria-label="I reviewed the complete plan above and confirm these local file creations and ignore additions\."\/>/);
+  assert.match(result.stdout, /<button type="button" disabled="">Initialize project<\/button>/);
+ } finally { h.dispose(); }
+});
 
 test('initialization closed requests and complete inventory preserve limits, intent and private data boundaries',()=>{
  const request={projectId:'p',intent:'initialize',draft:{schemaVersion:1},toolingRepository:repository,toolingSha:sha,draftRevision:1,baselineGeneration:0};
