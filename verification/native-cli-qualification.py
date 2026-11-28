@@ -703,8 +703,6 @@ def observe(work, action, media, suite):
         save()
 
         ui.page("Overview")
-        ui.click("Edit version & build number", category="disclosuretriangle", contains=True)
-        ui.node("Open saved version editor", category="button")
         # A queued CLI preparation owns its own native Open. Do not open
         # any version drawer or request a parallel ordinary seed operation.
         baseline_pid=ui.payload_pid()
@@ -777,7 +775,8 @@ def observe(work, action, media, suite):
                 "Reason: protocol_error.", "Reason: caller_lost.", "Reason: cleanup_unknown.",
                 "Reason: runtime_unavailable.", "Reason: document_lost.",
                 "Reason: user_cancelled.", "Reason: invalid_params.", "Reason: io.",
-                "Reason: output_limit.", "Reason: timed_out.",
+                "Reason: output_limit.", "Reason: active_timeout.", "Reason: io_error.",
+                "Reason: window_lost.", "Reason: spawn_failed.", "Reason: cancelled.",
                 "native finality: unknown.", "native finality: settled.",
             }
             rows=ui.command("tree.snapshot",limit=800)["nodes"]
@@ -808,11 +807,20 @@ def observe(work, action, media, suite):
                 state["elapsedMilliseconds"]=round((time.monotonic()-before)*1000)
                 state["publicUiMarkers"]=semantic_keypoints()
 
-                if code==6:
-                    state["systemWindowProcessEvents"]=diagnostic()
+                if code == 6:
+                    state["systemWindowProcessEvents"] = diagnostic()
                 history.append(state)
                 save()
                 ui.snapshot("original-cli-prepare-status-" + str(len(history)))
+                if code == 6 and proof.get("error") == "access_denied":
+                    # Expose the originally retained projection after denial;
+                    # this disclosure never invokes Open or reissues a CLI command.
+                    try:
+                        ui.click("Edit version & build number", category="disclosuretriangle", contains=True)
+                        state["postDenialVersionEditorMarkers"] = semantic_keypoints()
+                    except Exception:
+                        state["postDenialVersionEditorMarkers"] = []
+                    save()
             if code==0 and row and row["review"] is not None:
                 return row
             if row and row["phase"]=="final":
@@ -840,6 +848,7 @@ def observe(work, action, media, suite):
              and version_path.read_bytes()==old, "cli-review-preview-not-bound-to-the-exact-bytes")
         facts["nativeOpenAndPrepareReadbackUnchangedBeforeConsent"] = True
         save()
+        ui.click("Edit version & build number", category="disclosuretriangle", contains=True)
         ui.node("Edit only the two selected value spans",category="heading",contains=True)
         ui.click("Advanced: allow installed CLI to save this review",category="disclosuretriangle")
         ui.click("I reviewed the complete original/after file",category="checkbox",contains=True)
