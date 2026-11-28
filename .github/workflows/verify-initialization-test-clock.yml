@@ -1,0 +1,46 @@
+name: Native initialization countdown regression
+on:
+  push:
+    branches: [verify/0213-initialization-test-clock]
+    paths: ['.github/workflows/verify-initialization-test-clock.yml']
+permissions:
+  contents: read
+jobs:
+  native:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: desktop/src-tauri
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Confirm the candidate difference is limited to the countdown test
+        working-directory: .
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD~2)" = 'e162063689313421abc8032e5a89b6b226a516ea'
+          test "$(git diff --name-only HEAD~2 HEAD~1)" = 'desktop/src-tauri/src/service_initialization_requests_tests.rs'
+          test "$(git diff --name-only HEAD~1 HEAD)" = '.github/workflows/verify-initialization-test-clock.yml'
+      - name: Install the pinned toolchain and native libraries
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Run the complete native library test suite
+        run: cargo test --locked --lib --no-default-features
+      - name: Repeat the regression to cover elapsed-time boundaries
+        run: |
+          set -euo pipefail
+          test_name=service_initialization_requests::tests::check_revision_is_consumed_before_wait_and_revoke_or_duplicate_cannot_rearm
+          cargo test --locked --lib --no-default-features "$test_name" -- --exact --list | grep -Fx "$test_name: test"
+          for ((trial=1; trial<=12; trial++)); do
+            cargo test --locked --lib --no-default-features "$test_name" -- --exact
+          done
