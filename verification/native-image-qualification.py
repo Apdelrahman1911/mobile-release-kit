@@ -403,7 +403,8 @@ class UI:
         self.node(project.name, category="heading")
         self.project_name = project.name
 
-    def choose_path(self, path, title):
+    def choose_path(self, path, title, *, stage=lambda _: None):
+        stage("image-open-go-to-folder")
         self.keys("command", "shift", "g")
         pid = self.payload_pid()
 
@@ -418,6 +419,7 @@ class UI:
             return (edits[0], nodes) if matching_caption and edits else None
 
         until(navigation_field, 10, "exact-go-to-folder-sheet")
+        stage("image-enter-exact-path")
         self.keys("command", "a")
         self.command("text.insert", text=str(path))
 
@@ -439,7 +441,13 @@ class UI:
                 nodes[0]["name"].lower() == title.lower()
 
         until(original_picker, 5, "original-project-picker-did-not-resume")
-        self.click("Open", category="button")
+        stage("image-confirm-original-file-pane")
+        opened = self.command("tree.snapshot", limit=240)
+        controls = [node for node in opened["nodes"] if node["role"] == "button" and node["enabled"]
+                    and node["visible"] and node["name"] in {"Open", "Choose"}]
+        need(len(controls) == 1, "original-native-picker-open-control")
+        self.click(controls[0]["name"], category="button")
+        stage("image-original-file-pane-returned")
 
     def record_session(self, name, exercise):
         self.command("recording.start", duration_seconds=25)
@@ -720,15 +728,25 @@ def observe(work, action, media, suite):
         choose()
         results.setdefault("diagnosticStages", []).append("image-select-original-file")
         save()
-        ui.choose_path(picture,panel)
+        def record_stage(name):
+            results["diagnosticStages"].append(name)
+            save()
+
+        ui.choose_path(picture, panel, stage=record_stage)
         await_label("Check images and choose exact replacements")
-        until(lambda: ui.node("Review exact copy choices",category="button")[1]["enabled"],
-              30,"original-image-copy-review-control-not-ready")
+        record_stage("image-native-checkout-visible")
+        operation = "Localized-image operation"
+        def review_ready():
+            rows = ui.command("tree.snapshot", limit=800)["nodes"]
+            return any(row["role"] == "button" and row["name"] == "Review exact copy choices"
+                       and row["visible"] and row["enabled"] for row in rows)
+        until(review_ready, 30, "original-image-copy-review-control-not-ready")
         approved_relative=approved.relative_to(project).as_posix()
         def observed_text(value):
-            nodes = ui.command("element.wait",selector={"text_contains":value,"role":"statictext","visible":True},
-                               state="present",timeout_ms=10000)["nodes"]
-            return any(value in {node["name"],node["text"]} for node in nodes)
+            rows = ui.command("tree.snapshot", limit=800)["nodes"]
+            sections = {row["id"] + "." for row in rows if row["name"] == operation and row["role"] == "group"}
+            return any(any(row["id"].startswith(section) for section in sections)
+                       and value in {row["name"], row["text"]} for row in rows)
         results.setdefault("diagnosticStages", []).append("image-exact-destination")
         save()
         facts["exactDestinationObserved"] = observed_text(approved_relative)
@@ -736,7 +754,7 @@ def observe(work, action, media, suite):
         need(facts["exactDestinationObserved"],"exact-image-preview-roster")
         save()
         unchanged()
-        ui.click("Review exact copy choices",category="button")
+        ui.click("Review exact copy choices",category="button",region=operation)
         await_label("Review the exact local image action")
         _, apply=ui.node("Confirm local image copy",category="button")
         need(not apply["enabled"],"image-copy-available-before-consent")
