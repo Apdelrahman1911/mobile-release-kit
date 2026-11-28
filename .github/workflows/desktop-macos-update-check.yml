@@ -547,7 +547,8 @@ jobs:
          (inputs.expected_sha == '7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc' && inputs.build_run == '46048925911' && inputs.carrier_run == '46067290901' &&
           ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
            ((inputs.additional_ui == 'exact-coverage' || inputs.additional_ui == 'exact-negative' || inputs.additional_ui == 'project-edits-xctest' ||
-             inputs.additional_ui == 'persistence-xctest') && !inputs.protected_xcode_fixture))) ||
+             inputs.additional_ui == 'persistence-xctest' || inputs.additional_ui == 'empty-recovery-xctest' ||
+             inputs.additional_ui == 'metadata-xctest') && !inputs.protected_xcode_fixture))) ||
          (inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' && inputs.build_run == '45996045007' &&
           ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
            (inputs.additional_ui == 'archived-upgrade' && !inputs.protected_xcode_fixture))))))
