@@ -201,5 +201,5 @@ jobs:
                 diagnosticStages:(.diagnosticStages//[]),
                 imageFacts:(.listingImages//{}|{originalListingImagePanelExposed,originalPickerOptions,
                     nativePickerCancelledWithoutWriting,exactDestinationObserved,copiedExactBytesOnlyToReviewedFrenchLocale,
-                    sourceSha256,originalGitIndexAndOtherPathsUnchanged,checkoutStatusMarkers,checkedOutCopyHadNoSideEffects})}
+                    sourceSha256,originalGitIndexAndOtherPathsUnchanged,checkoutStatusMarkers,checkedOutCopyHadNoSideEffects,visibleReviewControlAfterScrolling})}
           ' RESULT.json

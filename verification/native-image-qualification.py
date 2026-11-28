@@ -747,10 +747,27 @@ def observe(work, action, media, suite):
         await_label("Check images and choose exact replacements")
         record_stage("image-native-checkout-visible")
         operation = "Localized-image operation"
-        next_status = time.monotonic() + 3
+        # Native Accessibility snapshots can omit descendants below the
+        # current scroll position. Observe the original narrow content lane.
+        title = "Check images and choose exact replacements"
+        _, anchor = ui.reveal(title, category="heading")
+        roots = ui.command("tree.snapshot", limit=1)["nodes"]
+        need(len(roots) == 1 and roots[0]["role"] == "window", "original-image-content-window")
+        area, bounds = anchor["bounds"], roots[0]["bounds"]
+        x = area["x"] + area["width"] // 2
+        y = bounds["y"] + bounds["height"] // 2
+        visited = set()
+        next_status = time.monotonic() + 8
+        next_scroll = time.monotonic() + 0.5
+        scroll_passes = 0
         def review_ready():
-            nonlocal next_status
+            nonlocal next_status, next_scroll, scroll_passes
             rows = ui.command("tree.snapshot", limit=800)["nodes"]
+            visited.update(value for row in rows if row["visible"] for value in (row["name"],row["text"]))
+            if time.monotonic() >= next_scroll and scroll_passes < 11:
+                ui.command("pointer.scroll", x=x, y=y, dy=4 if scroll_passes < 8 else -3)
+                scroll_passes += 1
+                next_scroll = time.monotonic() + 0.85
             visible = [row for row in rows if row["role"] == "button" and row["visible"]]
             if any("Review exact copy choices" in (row["name"],row["text"]) and row["enabled"] for row in visible):
                 return True
@@ -770,7 +787,8 @@ def observe(work, action, media, suite):
                "Authority is unverified.", "image.header", "image.device", "image.format", "image.sibling",
                "Create this absent public copy", "Retained original review", "1080 × 1920 pixels"}
             facts["checkoutStatusMarkers"] = sorted(key for key in diagnostics
-                                                   if any(key in value for value in labels()))
+                                                   if any(key in value for value in (visited | labels())))
+            facts["visibleReviewControlAfterScrolling"] = "Review exact copy choices" in visited
             unchanged()
             facts["checkedOutCopyHadNoSideEffects"] = True
             save()
@@ -783,8 +801,9 @@ def observe(work, action, media, suite):
                        and value in {row["name"], row["text"]} for row in rows)
         results.setdefault("diagnosticStages", []).append("image-exact-destination")
         save()
-        facts["exactDestinationObserved"] = observed_text(approved_relative)
-        ui.reveal("Final lexical Store input order",category="heading")
+        facts["exactDestinationObserved"] = approved_relative in visited or observed_text(approved_relative)
+        if "Final lexical Store input order" not in visited:
+            ui.reveal("Final lexical Store input order",category="heading")
         need(facts["exactDestinationObserved"],"exact-image-preview-roster")
         save()
         unchanged()
