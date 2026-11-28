@@ -1469,6 +1469,32 @@ mod tests {
             context_revision: context.revision, availability: AssignmentAvailability::Available };
         (slot, assignment)
     }
+    #[test]
+    fn stored_file_capture_is_published_when_assessment_advances_the_revision() {
+        let (mut state, _) = model(Operation::Prepare, false);
+        state.context = Some(context_data());
+        let (mut slot, _) = loan_slot(&mut state, Kind::AppleProfile, 11);
+        slot.operation = Operation::Prepare;
+        let owner = slot.owner.clone();
+        let loaded = slot.vault.loaded.take().unwrap();
+        assert!(loaded.material.is_some());
+        state.slot = Some(slot);
+        let observe = |state: &DocumentState| {
+            serde_json::to_value(DocumentBinding::status_data_modes(state, true, true)).unwrap()
+        };
+        let before = observe(&state);
+        assert_eq!(before["operation"]["source"], "not-run");
+        state.slot.as_mut().unwrap().vault.loaded = Some(loaded);
+        assert_eq!(observe(&state), before, "the loaded private payload alone is not a new public observation");
+        // The existing coordinator calls bump only on this actual change.
+        assert_eq!(prepare_copy_start(&mut state, &owner), Ok(true));
+        let after = observe(&state);
+        assert_eq!(after["operation"]["operationId"], before["operation"]["operationId"]);
+        assert_eq!(after["operation"]["source"], "captured");
+        assert_eq!(after["operation"]["phase"], "assessing");
+        assert_eq!(prepare_copy_start(&mut state, &owner), Ok(false));
+        assert_eq!(observe(&state), after, "checking the same transition does not reissue the revision");
+    }
     pub(super) fn publish_loan_data(state: &mut DocumentState, kind: Kind, record: u8) -> RecordKey {
         drop(state.slot.take()); // Prior DATA-only owner; no task/native originals.
         let (mut slot, assignment) = loan_slot(state, kind, record);
@@ -2294,7 +2320,9 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
                 let mut state = document.lock(); current_gate(document, &state, owner)?;
                 let slot = state.slot.as_mut().ok_or(Reason::CleanupUnknown)?;
                 slot.vault.reference = Some(reference); slot.vault.loaded = Some(payload.clone());
-                slot.kind = Some(payload.kind); slot.source = if payload.material.is_some() { SourceState::Captured } else { SourceState::NotRun };
+                // Keep the loaded payload private until begin_prepare_copy
+                // publishes its source state with the assessing revision.
+                slot.kind = Some(payload.kind);
             }
             Ok(super::prepare_job(document, owner, payload, context).await)
         },
