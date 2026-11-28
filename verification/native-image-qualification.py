@@ -11,6 +11,8 @@ import re
 import secrets
 import shutil
 import stat
+import struct
+import zlib
 import subprocess
 import time
 
@@ -655,11 +657,19 @@ def observe(work, action, media, suite):
 
     def listing_images():
         facts=results["listingImages"]={}
-        fixture=json.loads(Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json").read_bytes())
-        images=work/"listing-image-sources"
+        images = work / "listing-image-sources"
         images.mkdir(mode=0o700)
-        picture=images/"01.png"
-        picture.write_bytes(base64.b64decode(fixture["files"]["sources/01.png"],validate=True))
+        picture = images / "01.png"
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        # A complete, deterministic RGB phone image. The header, compressed
+        # pixels and checksums are valid regardless of file-picker heuristics.
+        width, height = 1080, 1920
+        scanline = b"\x00" + b"\x24\x6a\xa8" * width
+        picture.write_bytes(b"\x89PNG\r\n\x1a\n"
+                            + chunk(b"IHDR", struct.pack(">IIBBBBB", width,height,8,2,0,0,0))
+                            + chunk(b"IDAT", zlib.compress(scanline*height,level=6))
+                            + chunk(b"IEND", b""))
         initial=file_hash(picture)
         panel="Choose up to 10 public PNG or JPEG listing images"
         approved=project/"public/store/android/fr-FR/images/phoneScreenshots/01.png"
@@ -737,11 +747,34 @@ def observe(work, action, media, suite):
         await_label("Check images and choose exact replacements")
         record_stage("image-native-checkout-visible")
         operation = "Localized-image operation"
+        next_status = time.monotonic() + 3
         def review_ready():
+            nonlocal next_status
             rows = ui.command("tree.snapshot", limit=800)["nodes"]
-            return any(row["role"] == "button" and row["name"] == "Review exact copy choices"
-                       and row["visible"] and row["enabled"] for row in rows)
-        until(review_ready, 30, "original-image-copy-review-control-not-ready")
+            visible = [row for row in rows if row["role"] == "button" and row["visible"]]
+            if any("Review exact copy choices" in (row["name"],row["text"]) and row["enabled"] for row in visible):
+                return True
+            if time.monotonic() >= next_status and any(row["enabled"] and
+               "Observe original status" in (row["name"],row["text"]) for row in visible):
+                ui.click("Observe original status",category="button",region=operation)
+                next_status = time.monotonic() + 4
+            return False
+        try:
+            until(review_ready, 45, "original-image-copy-review-control-not-ready")
+        except Exception:
+            diagnostics = {"Review exact copy choices", "Header/dimensions checked", "Needs correction",
+               "The original image context or native status is no longer ready for review.",
+               "This original checkout cannot be prepared again.",
+               "Wait for the exact original file roster.", "Image operation status needs attention",
+               "The earlier project or selection context was retired.", "Show original image project",
+               "Authority is unverified.", "image.header", "image.device", "image.format", "image.sibling",
+               "Create this absent public copy", "Retained original review", "1080 × 1920 pixels"}
+            facts["checkoutStatusMarkers"] = sorted(key for key in diagnostics
+                                                   if any(key in value for value in labels()))
+            unchanged()
+            facts["checkedOutCopyHadNoSideEffects"] = True
+            save()
+            raise
         approved_relative=approved.relative_to(project).as_posix()
         def observed_text(value):
             rows = ui.command("tree.snapshot", limit=800)["nodes"]
