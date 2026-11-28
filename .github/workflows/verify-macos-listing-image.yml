@@ -177,7 +177,7 @@ jobs:
           token-sha256: ${{ steps.reopen.outputs.token-digest }}
           duration-minutes: '5'
           startup-timeout-seconds: '180'
-      - name: Require the original UI observer result after recording bounded stages
+      - name: Require the original UI result with the established native picker confirmation
         if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
         run: |
           set -euo pipefail

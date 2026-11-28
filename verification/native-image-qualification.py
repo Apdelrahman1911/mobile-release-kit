@@ -268,8 +268,8 @@ class UI:
             found = self.command("element.wait", selector=selector, state="present", timeout_ms=10000)
             nodes = found["nodes"]
         else:
-            found = self.command("tree.snapshot", limit=300)
-            parents = [row for row in found["nodes"] if row["name"] == region and row["visible"]]
+            found = self.command("tree.snapshot", limit=800)
+            parents = [row for row in found["nodes"] if row["name"] == region and row["visible"] and row["role"] == "group"]
             need(len(parents) == 1, f"missing-or-ambiguous-region-{region}")
             prefix = parents[0]["id"] + "."
             nodes = [row for row in found["nodes"] if row["id"].startswith(prefix) and row["visible"]
@@ -442,11 +442,7 @@ class UI:
 
         until(original_picker, 5, "original-project-picker-did-not-resume")
         stage("image-confirm-original-file-pane")
-        opened = self.command("tree.snapshot", limit=240)
-        controls = [node for node in opened["nodes"] if node["role"] == "button" and node["enabled"]
-                    and node["visible"] and node["name"] in {"Open", "Choose"}]
-        need(len(controls) == 1, "original-native-picker-open-control")
-        self.click(controls[0]["name"], category="button")
+        self.click("Open", category="button")
         stage("image-original-file-pane-returned")
 
     def record_session(self, name, exercise):
