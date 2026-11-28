@@ -1,0 +1,215 @@
+name: Exact hosted synthetic vault and artifact verification
+
+on:
+  push:
+    branches: [verify/frozen-0213-vault-artifact-version-fault-consent]
+    paths: ['.github/workflows/verify-macos-vault-artifact.yml']
+
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+concurrency:
+  group: macos-release-ui-e162063689313421abc8032e5a89b6b226a516ea-vault-artifact-frozen-0213-vault-artifact-version-fault-consent
+  cancel-in-progress: false
+
+jobs:
+  signed-ui:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-vault-artifact-version-fault-consent'
+    runs-on: macos-26
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        suite: [version-substitution, version-permissions, version-storage]
+    env:
+      MRK_UI_SUITE: ${{ matrix.suite }}
+    steps:
+      - name: Admit a fresh hosted Apple Silicon console and the protected source
+        id: admit
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RELEASE_SOURCE: e162063689313421abc8032e5a89b6b226a516ea
+          BUILD_RUN: 46122648657
+          CARRIER_RUN: 46129030113
+          CARRIER_ATTEMPT: 1
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 && "$RELEASE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          for run in "$BUILD_RUN" "$CARRIER_RUN"; do
+            [[ "$run" =~ ^[1-9][0-9]{0,19}$ ]]
+          done
+          [[ "$CARRIER_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]]
+          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
+          if [[ "$RELEASE_SOURCE" != "$GITHUB_SHA" ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SOURCE...$GITHUB_SHA?per_page=1" |
+              jq -e --arg source "$RELEASE_SOURCE" '
+                .status == "ahead" and .base_commit.sha == $source and .merge_base_commit.sha == $source
+              ' > /dev/null
+          fi
+          source_tree="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$RELEASE_SOURCE" --jq .tree.sha)"
+          [[ "$source_tree" == "d327075ed405f811834cd8c5818cf59d33ffd0ed" ]]
+          printf 'release-tree=%s\n' "$source_tree" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ui-test-actions/ui-test-actions
+          ref: 0c818c5d72e8c30c59bd1287c330a40392bf8e89 # v3.0.1
+          path: ui-action-source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          run-id: 46129030113
+          github-token: ${{ github.token }}
+          name: macos-release-frozen-e162063689313421abc8032e5a89b6b226a516ea-46129030113-1
+          path: ${{ runner.temp }}/signed-ui-media
+      - name: Select the synthetic vault and artifact observer and leave product source intact
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cp verification/native-vault-artifact.py desktop/tools/macos_release_ui.py
+      - name: Bind assets and attestations and install the exact signed DMG
+        env:
+          BUILD_RUN: 46122648657
+          RELEASE_SOURCE: e162063689313421abc8032e5a89b6b226a516ea
+          CARRIER_RUN: 46129030113
+          CARRIER_ATTEMPT: 1
+          RELEASE_TREE: ${{ steps.admit.outputs.release-tree }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/mrk-signed-ui.XXXXXXXX")"
+          media="$RUNNER_TEMP/signed-ui-media"
+          printf 'MRK_UI_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          mkdir "$work/evidence"
+          python -I -B desktop/tools/macos_release_media.py verify "$media" \
+            --source "$RELEASE_SOURCE" --tree "$RELEASE_TREE" \
+            --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN"
+          jq -e --arg attempt "$CARRIER_ATTEMPT" '.carrierAttempt==$attempt' "$media/RELEASE-MANIFEST.json" > /dev/null
+          for asset in "$media"/*; do
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
+              --source-digest "$RELEASE_SOURCE" --deny-self-hosted-runners \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
+          done
+          unset GH_TOKEN
+          if [[ "$MRK_UI_SUITE" == version-storage ]]; then
+            mkdir "$work/fault-volume"
+            hdiutil create -size 64m -fs APFS -volname MRKCapacityFixture -type UDIF "$work/fault.dmg"
+            hdiutil attach "$work/fault.dmg" -nobrowse -owners on -mountpoint "$work/fault-volume"
+          fi
+          python -I -B desktop/tools/macos_release_ui.py install "$media" "$work" --suite "$MRK_UI_SUITE"
+      - name: Launch the signed app before connecting the UI driver
+        run: |
+          set -euo pipefail
+          /usr/sbin/screencapture -x "$MRK_UI_WORK/evidence/before-app-launch.png"
+          date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MRK_UI_WORK/evidence/app-launch-at.txt"
+          /usr/bin/open -a '/Applications/Mobile Release Kit.app'
+          sleep 6
+          /usr/sbin/screencapture -x "$MRK_UI_WORK/evidence/before-ui-driver.png"
+      - name: Start the same-runner observer with a one-time bearer
+        id: observer
+        run: |
+          set -euo pipefail
+          umask 077
+          python -I -B - <<'PY'
+          import hashlib, json, os, secrets
+          from pathlib import Path
+          work = Path(os.environ['MRK_UI_WORK'])
+          token = secrets.token_hex(32)
+          (work / 'token').write_text(token + '\n')
+          previous = sorted(map(str, Path(os.environ['RUNNER_TEMP']).glob('ui-session-*/connection.json')))
+          (work / 'previous-sessions.json').write_text(json.dumps(previous))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('token-digest=' + hashlib.sha256(token.encode('ascii')).hexdigest() + '\n')
+          PY
+          (
+            set +e
+            python -I -B desktop/tools/macos_release_ui.py observe "$RUNNER_TEMP/signed-ui-media" "$MRK_UI_WORK" \
+              --action "$GITHUB_WORKSPACE/ui-action-source" --suite "$MRK_UI_SUITE"
+            printf '%s\n' "$?" > "$MRK_UI_WORK/observer-status"
+          ) > "$MRK_UI_WORK/evidence/observer.log" 2>&1 &
+      - uses: ui-test-actions/ui-test-actions@0c818c5d72e8c30c59bd1287c330a40392bf8e89 # v3.0.1
+        with:
+          target: macos
+          transport: local
+          token-sha256: ${{ steps.observer.outputs.token-digest }}
+          duration-minutes: '15'
+          startup-timeout-seconds: '180'
+      - name: Admit the single fresh driver for the reopened signed app
+        id: reopen
+        if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          request="$MRK_UI_WORK/reopen-token-digest"
+          if [[ -f "$request" ]]; then
+            IFS= read -r digest < "$request"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            printf 'token-digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: ui-test-actions/ui-test-actions@0c818c5d72e8c30c59bd1287c330a40392bf8e89 # v3.0.1
+        if: ${{ !cancelled() && steps.reopen.outputs.token-digest != '' }}
+        with:
+          target: macos
+          transport: local
+          token-sha256: ${{ steps.reopen.outputs.token-digest }}
+          duration-minutes: '5'
+          startup-timeout-seconds: '180'
+      - name: Require the original UI observer result after recording bounded stages
+        if: ${{ !cancelled() && steps.observer.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          for ((waited=0; waited<10; waited++)); do
+            [[ ! -f "$MRK_UI_WORK/observer-status" ]] || break
+            sleep 1
+          done
+          python -I -B desktop/tools/macos_release_ui.py require "$RUNNER_TEMP/signed-ui-media" "$MRK_UI_WORK" --suite "$MRK_UI_SUITE"
+      - name: Detach the disposable bounded APFS fixture
+        if: ${{ !cancelled() && matrix.suite == 'version-storage' && env.MRK_UI_WORK != '' }}
+        run: |
+          set -euo pipefail
+          [[ "$MRK_UI_WORK" == "$RUNNER_TEMP"/mrk-signed-ui.* ]]
+          volume="$MRK_UI_WORK/fault-volume"
+          if mount | grep -F " on $volume (" > /dev/null; then
+            hdiutil detach "$volume"
+          fi
+      - name: Print derived source-bound facts for the synthetic fixtures
+        if: ${{ !cancelled() && env.MRK_UI_WORK != '' }}
+        run: |
+          set -euo pipefail
+          cd "$MRK_UI_WORK/evidence"
+          test -f RESULT.json && test -f INSTALLED.json && test -f SCENARIO-SUMMARY.json && test -f CLI-CAPABILITIES.json
+          jq -ce --slurpfile installed INSTALLED.json --slurpfile summary SCENARIO-SUMMARY.json --slurpfile cli CLI-CAPABILITIES.json '
+             select(.sourceCommit=="e162063689313421abc8032e5a89b6b226a516ea" and .sourceTree=="d327075ed405f811834cd8c5818cf59d33ffd0ed")
+             | select(.packageSha256=="fa4862424df13704b11f26afb4fd70c5cbbecdacebc266ce7119a719cee704da" and .removeSha256=="c1c071a19bdd60b5069d6ad4b437b78a5fdf7c99b9a4d0262b5dd7d07f939dbb")
+             | select($installed[0].nativeSignaturesVerified==true and .packageSha256==$installed[0].packageSha256)
+             | {sourceCommit,sourceTree,buildRun,carrierRun,packageSha256,removeSha256,suite,
+                observerExit:$summary[0].observerExit,status:($summary[0].scenarios),
+                failureCode:(.scenarios|map_values(if .status=="Failed" then
+                  ((.reason//"")|split(": ")|if .[0]=="AssertionError" and (.[1]//""|test("^[a-z][a-z0-9-]{0,80}$"))
+                    then .[1] elif (.[0]|test("^[A-Za-z]+Error$")) then .[0] else "observer-error" end) else null end)),
+                compiledCli:($cli[0] | {scope, runtimeChecked, supportsDirectMutationCommands,
+                    commandGroups:([.commands, (.[]|objects|.commands?|select(type=="array"))]|length),
+                    uniqueCommands:([.foregroundHistory.command, .commands,
+                      (.[]|objects|.commands?|select(type=="array"))] | flatten |
+                      map(if type=="object" then .command else . end) | unique | length)}),
+                vaultFacts:(.vaultLifecycle//{}),
+                versionFacts:(.versionFault//{}|del(.reopenedExactCandidateNewPid,.killedExactPidBeforeSubmit)),
+                gitIndexFacts:(.gitIndex//{}),
+                gitInitializationFacts:(.gitInitialize//{}),
+                gitInputFacts:(.gitInputRefusals//{}),
+                installationFacts:(.installationAudit//{}),
+                artifactFacts:(.artifactInspection//{})}
+          ' RESULT.json
