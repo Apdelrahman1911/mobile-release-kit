@@ -748,11 +748,38 @@ def observe(work, action, media, suite):
         record_stage("image-native-checkout-visible")
         results["diagnosticStages"].append("image-find-review-by-element")
         save()
-        _, review = ui.reveal("Review exact copy choices", category="button")
-        facts["reviewControlReachedByElementQuery"] = True
-        facts["reviewControlEnabled"] = review["enabled"]
-        save()
-        need(review["enabled"], "original-image-review-control-disabled")
+        label = "Review exact copy choices"
+        observe = "Observe original status"
+        limit = time.monotonic()
+        read_requested = False
+        markers = {"Check images and choose exact replacements", "Image operation status needs attention",
+                   "Source images captured, not imported", "The original image context or native status is no longer ready for review.",
+                   "This original checkout cannot be prepared again.", "Wait for the exact original file roster.",
+                   "Checking the original image context…", "Authority is unverified."}
+        def review_available():
+            nonlocal read_requested
+            rows = ui.command("tree.snapshot", limit=1200)["nodes"]
+            visible = {value for row in rows if row["visible"] for value in (row["name"], row["text"])}
+            facts["checkoutStatusMarkers"] = sorted(
+                marker for marker in markers if any(marker in value for value in visible))
+            matches = [row for row in rows if row["role"] == "button" and row["name"] == label]
+            facts["reviewControlReachedByElementQuery"] = len(matches) == 1
+            facts["reviewControlEnabled"] = len(matches) == 1 and matches[0]["enabled"]
+            if facts["reviewControlEnabled"]:
+                return True
+            if not read_requested and time.monotonic() - limit >= 4 and any(
+                row["role"] == "button" and row["name"] == observe and row["visible"] and row["enabled"] for row in rows
+            ):
+                read_requested = True
+                ui.click(observe, category="button", region="Localized-image operation")
+            return False
+        try:
+            until(review_available, 35, "original-image-review-control-disabled")
+        finally:
+            unchanged()
+            facts["checkedOutCopyHadNoSideEffects"] = True
+            save()
+        ui.reveal(label, category="button")
         approved_relative = approved.relative_to(project).as_posix()
         match = ui.command("element.wait",
                            selector={"text_contains": approved_relative, "visible": True},

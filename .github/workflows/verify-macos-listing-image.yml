@@ -2,7 +2,7 @@ name: Exact hosted listing image copy verification
 
 on:
   push:
-    branches: [verify/frozen-0213-protected-main-listing-review]
+    branches: [verify/frozen-0213-listed-image-review-state]
     paths: ['.github/workflows/verify-macos-listing-image.yml']
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
   signed-ui:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-protected-main-listing-review'
+      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-listed-image-review-state'
     runs-on: macos-26
     timeout-minutes: 40
     env:
