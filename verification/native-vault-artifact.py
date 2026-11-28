@@ -1051,13 +1051,23 @@ def observe(work, action, media, suite):
                 save()
             facts["originalDiscardSettledKnown"] = True
             save()
-            # The status moved the records below the fold. Read the actual
-            # original stored record after settlement as a separate witness.
-            ui.reveal("Assess and assign…", category="button", region=stored_profile)
+            # STOP for a vault-owned assessment releases the original key
+            # lease. Require the closed UI before making a new open decision.
+            await_status("Storage closed")
+            _, opener = ui.node("Open encrypted vault", category="button")
+            need(opener["enabled"], "discarded-vault-open-not-enabled")
+            facts["closedVaultAfterDiscard"] = True
+            need(read_vault_state(with_profile=True) == initial and project_snapshot() == original_project,
+                 "discarded-vault-or-project-changed")
+            save()
+            ui.click("Open encrypted vault", category="button")
+            await_status("Encrypted vault · locked")
+            ui.click("Unlock vault", category="button")
+            await_status("Encrypted vault · unlocked")
             await_status("Not assigned to the current draft")
+            facts["sameVaultReopenedAfterDiscard"] = True
+            save()
             ui.node("1", category="statictext", region="Private-input record revision")
-            _, assess = ui.node("Assess and assign…", category="button", region=stored_profile)
-            need(assess["enabled"], "original-vault-record-not-ready-after-discard")
             facts["originalDiscardSettledAndUnassigned"] = True
             save()
             need(read_vault_state(with_profile=True) == initial, "assessment-changed-original-encrypted-record")
