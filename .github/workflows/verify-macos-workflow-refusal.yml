@@ -205,5 +205,5 @@ jobs:
                 diagnosticStages:(.diagnosticStages//[]),
                 workflowFacts:(.workflowFacts//{}|{fourExactDestinationsAndGeneratedDigestsReviewed,
                     reviewCreatedNoWorkflowOrOtherFile,cancelKeptOriginalProject,customizedCallerRefusedWithoutApply,
-                    conflictKeptOriginalFilesIndexAndRefs,changedCallerAfterReviewWasPreserved,fourExactPathByteCountDigestRows,fourGeneratedByteCountsVisible})}
+                    conflictKeptOriginalFilesIndexAndRefs,changedCallerAfterReviewWasPreserved,fourExactPathByteCountDigestRows,fourGeneratedByteCountsVisible,passiveOptionalPreviewHadFourExactProposalsWithoutWrites})}
           ' RESULT.json

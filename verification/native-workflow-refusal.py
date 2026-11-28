@@ -111,6 +111,7 @@ def verify_observation(work, media, suite):
         "initialization-cancelled-original-review", "initialization-invalid-pin-terminal",
         "initialization-existing-customized-caller-conflict",
         "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
+        "exact-passive-preview-byte-count-or-digest", "passiveOptionalPreviewHadFourExactProposalsWithoutWrites",
         "workflow-stale-original-finality", "changedCallerAfterReviewWasPreserved",
         "workflow-original-admission", "workflow-native-review-missing", "workflow-cancel-settlement",
         "workflow-original-conflict-missing", "workflow-review-region-ambiguous",
@@ -717,6 +718,22 @@ def observe(work, action, media, suite):
         ui.click("Release workflows", category="radiobutton", region="GitHub tasks")
         ui.edit("Toolkit repository", toolkit)
         ui.edit("Full toolkit commit", pin)
+
+        preview = "Preview without saving (optional)"
+        ui.click(preview, category="button")
+        passive = "Optional preview: proposed files and checklist · available"
+        ui.click(passive, category="disclosuretriangle", contains=True)
+        ui.node("Four read-only workflow previews", category="heading", contains=True)
+        for item in proposal["workflows"]:
+            ui.click(item["path"], category="disclosuretriangle", contains=True)
+            nodes = ui.command("tree.snapshot", limit=800)["nodes"]
+            text = {value.strip() for row in nodes if row["visible"] for value in (row["name"], row["text"])}
+            need(item["sha256"] in text and any(str(item["byteLength"])+" UTF-8 bytes" in value for value in text),
+                 "exact-passive-preview-byte-count-or-digest")
+            ui.click(item["path"], category="disclosuretriangle", contains=True)
+        record("passiveOptionalPreviewHadFourExactProposalsWithoutWrites",
+               inventory() == before and git("ls-files","--stage") == original_index)
+        ui.click(passive, category="disclosuretriangle", contains=True)
         until(lambda: in_region(review, "button", True), 20, "workflow-original-admission")
         ui.click(review, category="button", region=region)
         until(lambda: in_region("Confirm reviewed local files", "button", True), 50, "workflow-native-review-missing")
