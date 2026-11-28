@@ -1035,7 +1035,7 @@ def observe(work, action, media, suite):
                     "cleanupUnknown": "asset_cleanup_unknown" in values or matches("Private-input operation settlement", "unknown"),
                 }
                 facts["postDiscardStatus"] = phase
-                if all(phase[key] for key in ("dismissed", "unassigned", "idle", "known", "discard")):
+                if all(phase[key] for key in ("dismissed", "idle", "known", "discard")) and not phase["cleanupUnknown"]:
                     return True
                 if not checked_original and time.monotonic() - began > 4 and any(
                     row["role"] == "button" and row["name"] == "Check storage status" and row["enabled"] for row in rows
@@ -1049,6 +1049,15 @@ def observe(work, action, media, suite):
                 facts["originalCiphertextAfterDiscardPreserved"] = read_vault_state(with_profile=True) == initial
                 facts["checkedOriginalDiscardStatus"] = checked_original
                 save()
+            facts["originalDiscardSettledKnown"] = True
+            save()
+            # The status moved the records below the fold. Read the actual
+            # original stored record after settlement as a separate witness.
+            ui.reveal("Assess and assign…", category="button", region=stored_profile)
+            await_status("Not assigned to the current draft")
+            ui.node("1", category="statictext", region="Private-input record revision")
+            _, assess = ui.node("Assess and assign…", category="button", region=stored_profile)
+            need(assess["enabled"], "original-vault-record-not-ready-after-discard")
             facts["originalDiscardSettledAndUnassigned"] = True
             save()
             need(read_vault_state(with_profile=True) == initial, "assessment-changed-original-encrypted-record")
