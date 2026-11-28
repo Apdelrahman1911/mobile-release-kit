@@ -1,0 +1,51 @@
+name: Exact macOS Git source custody
+on:
+  push:
+    branches: [verify/0213-macos-git-source-custody]
+    paths: [.github/workflows/verify-0213-macos-git-source-custody.yml]
+permissions:
+  contents: read
+jobs:
+  git-sources:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+      MRK_SOURCE: e162063689313421abc8032e5a89b6b226a516ea
+      MRK_TREE: d327075ed405f811834cd8c5818cf59d33ffd0ed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MRK_SOURCE }}
+          persist-credentials: false
+      - name: Admit only the exact protected source and a fresh hosted Mac
+        env:
+          MRK_HOST_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$MRK_HOST_ENVIRONMENT" == github-hosted && "$(uname -m)" == arm64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 ]]
+          [[ "$(git rev-parse HEAD)" == "$MRK_SOURCE" && "$(git rev-parse 'HEAD^{tree}')" == "$MRK_TREE" ]]
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+      - name: Observe the real Git read and local source identities independently
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$(cd -P "$RUNNER_TEMP" && pwd -P)"
+          TMPDIR="$(mktemp -d "$root/git-native-source.XXXXXXXX")"
+          export TMPDIR
+          [[ "$(stat -f '%u:%Lp' "$TMPDIR")" == "$(id -u):700" ]]
+          cd desktop/src-tauri
+          cargo=(rustup run 1.98.1 cargo test --locked --lib --no-default-features --jobs 2)
+          failed=0
+          for kind in read local; do
+            name="asset_source::macos::git_sources_native_tests::native_git_${kind}_sources_inspect_recheck_and_close"
+            "${cargo[@]}" "$name" -- --exact --ignored --list | grep -Fx "$name: test"
+            if ! "${cargo[@]}" "$name" -- --exact --ignored --test-threads=1 | tee "$RUNNER_TEMP/git-$kind-result.txt" ||
+                ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/git-$kind-result.txt"; then
+              failed=1
+            fi
+          done
+          # The test retires only its own successful fixture. The runner owns teardown after a refusal.
+          if (( failed == 0 )); then rmdir "$TMPDIR"; fi
+          exit "$failed"
