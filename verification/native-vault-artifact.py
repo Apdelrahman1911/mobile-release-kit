@@ -1257,12 +1257,37 @@ def observe(work, action, media, suite):
                 capacity = os.statvfs(mounted)
                 fact["availableBytesWhenSubmitting"] = capacity.f_bavail * capacity.f_frsize
                 save()
-                ui.click("Save version values", category="button")
-                needles = {"Version operation settled — no success assumed", "Version outcome or cleanup is unverified",
-                           "Submitted version values saved", "This review is no longer eligible."}
-                seen = until(lambda: {label for node in ui.command("tree.snapshot", limit=800)["nodes"] if node["visible"]
-                                      for label in (node["name"], node["text"]) if label in needles},
-                             55, "no-visible-result-from-original-no-space-save")
+                submission_returned = False
+                try:
+                    ui.click("Save version values", category="button")
+                    submission_returned = True
+                    fact["originalApplyControlReturned"] = True
+                    save()
+                    needles = {"Version operation settled — no success assumed", "Version outcome or cleanup is unverified",
+                               "Submitted version values saved", "This review is no longer eligible."}
+                    seen = until(lambda: {label for node in ui.command("tree.snapshot", limit=800)["nodes"] if node["visible"]
+                                          for label in (node["name"], node["text"]) if label in needles or
+                                          label.startswith("This review is no longer eligible.")},
+                                 55, "no-visible-result-from-original-no-space-save")
+                finally:
+                    journal = project / ".mobile-release"
+                    observed = {path.relative_to(project): (file_hash(path), path.stat().st_ino)
+                                for path in project.rglob("*") if path.is_file()
+                                and ".git" not in path.relative_to(project).parts}
+                    affected = target.relative_to(project)
+                    fact["afterOriginalControl"] = {
+                        "submissionReturned": submission_returned,
+                        "originalVersionIdentityAndBytes": observed.get(affected) == initial_files[affected],
+                        "approvedVersionBytes": target.is_file() and
+                            target.read_bytes() == b"VERSION_NAME=1.1.5\nBUILD_NUMBER=7\n",
+                        "originalInventory": {path for path in observed if
+                            not path.is_relative_to(".mobile-release")} == {path for path in initial_files if
+                            not path.is_relative_to(".mobile-release")},
+                        "otherOriginalFilesPreserved": all(observed.get(path) == identity
+                            for path, identity in initial_files.items() if path != affected),
+                        "privateStatePresent": journal.is_dir() and not journal.is_symlink(),
+                    }
+                    save()
                 fact["observedOriginalOutcome"] = sorted(seen)
                 expected_bytes = b"VERSION_NAME=1.1.5\nBUILD_NUMBER=7\n"
                 current = target.read_bytes()
