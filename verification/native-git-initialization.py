@@ -111,6 +111,8 @@ def verify_observation(work, media, suite):
         "initialization-existing-customized-caller-conflict",
         "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
         "review-alone-wrote-files", "only-disposable-clean-initialization-fixture",
+        "initialization-unapproved-apply-enabled", "git-reviewed-original-heading-missing",
+        "git-branch-apply-admitted-before-consent", "git-review-ambiguous",
         "image-copy-available-before-consent", "exact-image-preview-roster",
         "original-image-copy-review-control-not-ready", "image-picker-not-admitted",
         "original-native-picker-cancellation-projection",
@@ -730,9 +732,23 @@ def observe(work, action, media, suite):
         def review():
             run_state(lambda rows: seen(rows,"Complete local file plan") and
                       any(r["role"]=="button" and r["name"]==confirm for r in rows),"exact-preview")
-            labels = {r["name"] or r["text"] for r in read_region()}
-            need(all(str(path) in labels for path in target) and not enabled(confirm),
-                 "missing-reviewed-inventory-or-unapproved-apply")
+            # WebKit can separately name a cell and provide its code value.
+            # Retain the exact relative path, regardless of which of those
+            # two accessibility fields contains it.
+            labels = {value.strip() for row in read_region() for value in (row["name"], row["text"])}
+            missing = [str(path) for path in sorted(target) if str(path) not in labels]
+            for path in missing.copy():
+                try:
+                    _, node = ui.reveal(path, category="statictext", region=zone)
+                except (AssertionError, TimeoutError):
+                    continue
+                if path in (node["name"], node["text"]):
+                    missing.remove(path)
+            facts["latestPlanMissingRelativePaths"] = missing
+            facts["latestPlanApplyDisabledBeforeConsent"] = not enabled(confirm)
+            save()
+            need(not missing, "missing-reviewed-inventory-or-unapproved-apply")
+            need(facts["latestPlanApplyDisabledBeforeConsent"], "initialization-unapproved-apply-enabled")
 
         def apply_and_read(label):
             ui.click(consent,category="checkbox",region=zone)
@@ -884,12 +900,32 @@ def observe(work, action, media, suite):
             ui.command("text.insert", text=value)
 
         def apply(review, heading, action, consent, outcome):
-            wait_for_git_original(heading, review)
+            def observe_review():
+                rows = ui.command("tree.snapshot", limit=800)["nodes"]
+                sections = [row["id"] + "." for row in rows if row["role"] == "group"
+                            and row["name"] == review and row["visible"]]
+                need(len(sections) <= 1, "git-review-ambiguous")
+                if not sections:
+                    return False
+                original_headings = [row for row in rows if row["role"] == "heading"
+                                     and row["id"].startswith(sections[0])]
+                for item in original_headings:
+                    descendants = [row["text"] or row["name"] for row in rows
+                                   if row["role"] == "statictext" and row["id"].startswith(item["id"] + ".")]
+                    if heading in {item["text"], item["name"], " ".join(" ".join(descendants).split())}:
+                        return True
+                return False
+
+            until(observe_review, 60, "git-reviewed-original-heading-missing")
+            results["diagnosticStages"].append("git-original-review-visible")
+            save()
             need(git_has(action, "button", review) and not git_has(action, "button", review, enabled=True),
                  "git-branch-apply-admitted-before-consent")
             ui.click(consent, category="checkbox", region=review)
             ui.click(action, category="button", region=review)
-            wait_for_git_original(outcome, action_status)
+            results["diagnosticStages"].append("git-original-confirmation-submitted")
+            save()
+            wait_for_git_original(outcome, action_status, outcome=None)
 
         original_head = git("rev-parse", "HEAD")
         git("switch", "-c", alternate)

@@ -206,6 +206,6 @@ jobs:
                 branchFacts:(.gitBranches//{}|{observedOriginalLocalBranchControls,twoOriginalLocalRefsObserved,
                    createdExactBranchWithoutSwitching,renamedExactCurrentRefWithoutChangingFiles,switchedToExactOriginalTarget}),
                 initializationFacts:(.releaseInitialization//{}|{reviewCancellationKeptOriginalFiles,
-                   exactConfigCallersMetadataAndIgnoreReadback,noOpKeepsAllFileIdentities,customizedCallerRefusedWithoutChanges,
+                   exactConfigCallersMetadataAndIgnoreReadback,noOpKeepsAllFileIdentities,customizedCallerRefusedWithoutChanges, latestPlanMissingRelativePaths, latestPlanApplyDisabledBeforeConsent,
                    shortPinRefusedBeforeAnyWrite})}
           ' RESULT.json
