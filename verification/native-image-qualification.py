@@ -98,6 +98,46 @@ def verify_observation(work, media, suite):
                    suite=suite,
                    resultSha256=file_hash(result_path) if result_path.is_file() else None,
                    sourceCommit=result.get("sourceCommit"), harnessCommit=os.environ["GITHUB_SHA"])
+    safe_errors = {
+        "branch-field-roster", "branch-create-field", "branch-create-field-identity",
+        "branch-create-field-value", "branch-picker-exact-alternate",
+        "branch-create-changed-checkout-files-or-unrelated-refs",
+        "branch-rename-changed-contents-tip-or-unrelated-refs",
+        "original-initialization-region", "initialization-review-precondition",
+        "initialization-exact-preview", "initialization-confirmed-result",
+        "initialization-cancelled-original-review", "initialization-invalid-pin-terminal",
+        "initialization-existing-customized-caller-conflict",
+        "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
+        "review-alone-wrote-files", "only-disposable-clean-initialization-fixture",
+        "image-copy-available-before-consent", "exact-image-preview-roster",
+        "original-image-copy-review-control-not-ready", "image-picker-not-admitted",
+        "original-native-picker-cancellation-projection",
+        "single-enabled-android-configuration", "cli-native-original-preparation",
+        "original-cli-prepare-final-without-review", "superseded-preparation-result",
+        "original-project-picker-did-not-resume", "exact-go-to-folder-sheet",
+        "native-folder-completion-did-not-match-fixture",
+    }
+    failure_codes = {}
+    for name in sorted(expected_scenarios):
+        row = scenarios.get(name, {})
+        if row.get("status") != "Failed":
+            continue
+        kind, _, code = row.get("reason", "").partition(": ")
+        if kind == "AssertionError" and code in safe_errors:
+            failure_codes[name] = code
+        elif kind == "AssertionError" and code.startswith("missing-or-ambiguous-region-"):
+            failure_codes[name] = "ambiguous-region"
+        elif kind == "AssertionError" and code.startswith(("missing-or-ambiguous-element-", "target-not-reachable-")):
+            failure_codes[name] = "missing-or-unreachable-control"
+        elif kind == "ClientError":
+            match = re.fullmatch(r"HTTP (408|409) \((condition_timeout|stale_snapshot)\)", code)
+            failure_codes[name] = match.group(2) if match else "driver-error"
+        else:
+            failure_codes[name] = kind if kind in {
+                "AssertionError", "AttributeError", "DescriptorError", "ImportError",
+                "ModuleNotFoundError", "KeyError", "FileNotFoundError", "CalledProcessError",
+            } else "other"
+    summary["failureCodes"] = failure_codes
     trace = evidence / "trace.jsonl"
     summary["traceSha256"] = file_hash(trace) if trace.is_file() else None
     payload = json.dumps(summary, sort_keys=True)
@@ -359,6 +399,11 @@ class UI:
             self.click("Cancel", category="button")
             self.node(self.project_name or PAGE_HEADINGS["Overview"], category="heading")
             return
+        self.choose_path(project, "Choose a mobile project folder")
+        self.node(project.name, category="heading")
+        self.project_name = project.name
+
+    def choose_path(self, path, title):
         self.keys("command", "shift", "g")
         pid = self.payload_pid()
 
@@ -374,15 +419,15 @@ class UI:
 
         until(navigation_field, 10, "exact-go-to-folder-sheet")
         self.keys("command", "a")
-        self.command("text.insert", text=str(project))
+        self.command("text.insert", text=str(path))
 
         def completed_path():
             observation = navigation_field()
             if observation is None:
                 return None
             field, nodes = observation
-            return field["text"] == str(project) and any(
-                node["role"] == "statictext" and project.name in (node["name"], node["text"])
+            return field["text"] == str(path) and any(
+                node["role"] == "statictext" and path.name in (node["name"], node["text"])
                 for node in nodes)
 
         until(completed_path, 10, "native-folder-completion-did-not-match-fixture")
@@ -391,12 +436,10 @@ class UI:
         def original_picker():
             nodes = self.command("tree.snapshot", limit=1)["nodes"]
             return len(nodes) == 1 and nodes[0]["id"] == f"mac:{pid}:0" and nodes[0]["role"] == "sheet" and \
-                nodes[0]["name"].lower() == "choose a mobile project folder"
+                nodes[0]["name"].lower() == title.lower()
 
         until(original_picker, 5, "original-project-picker-did-not-resume")
         self.click("Open", category="button")
-        self.node(project.name, category="heading")
-        self.project_name = project.name
 
     def record_session(self, name, exercise):
         self.command("recording.start", duration_seconds=25)
@@ -617,42 +660,25 @@ def observe(work, action, media, suite):
         approved=project/"public/store/android/fr-FR/images/phoneScreenshots/01.png"
         need(project.is_relative_to(work) and not approved.exists(),"disposable-listing-target-absent")
 
-        def select(label,value):
-            _, field = ui.reveal(label,category="popupbutton",contains=True,enabled=True)
-            if field["text"]==value:
+        def select(label, value, downward_offsets):
+            def current():
+                return ui.node(label, category="popupbutton", contains=True)[1]["text"]
+
+            if current() == value:
                 return
-            field_box = field["bounds"]
-            ui.click(label,category="popupbutton",contains=True)
-            def visible_menu_option():
-                try:
-                    data = ui.command("element.wait",selector={"name":value,"role":"menuitem","visible":True,"enabled":True},
-                                      state="present",timeout_ms=1500)
-                    hits = data["nodes"]
-                    if len(hits)==1 and hits[0]["id"].startswith("mac:"+str(ui.payload_pid())+":"):
-                        return (data["snapshot_id"], hits[0])
-                except Exception:
-                    pass
-                return None
-            item = visible_menu_option()
-            if item:
-                ui.command("element.click",snapshot_id=item[0],id=item[1]["id"])
-            else:
-                screen = ui.screen
-                prefix = "local-listing-menu-" + label.split()[0].lower()
-                def menu_center():
-                    png = ui.image(prefix)
-                    rows = json.loads(call("/usr/bin/swift",str(CONSOLE_OCR),str(png),timeout=22).stdout)
-                    hits = [row for row in rows if row["text"].strip() == value
-                            and field_box["x"]-20 <= row["x"]*screen["width"] <= field_box["x"]+field_box["width"]+60
-                            and abs(row["y"]*screen["height"]-field_box["y"]) < 350]
-                    need(len(hits)<=1,"ambiguous-native-listing-menu-option")
-                    return hits[0] if hits else None
-                target=until(menu_center,8,"original-local-listing-menu-option-unavailable-"+label)
-                ui.command("pointer.click",x=round(target["x"]*screen["width"]),y=round(target["y"]*screen["height"]))
-            observed = ui.node(label,category="popupbutton",contains=True)[1]["text"]
-            facts.setdefault("originalPickerOptions", []).append({"field":label,"value":observed})
-            save()
-            need(observed==value,"exact-listing-image-choice-"+label)
+            for offset in downward_offsets:
+                ui.click(label, category="popupbutton", contains=True)
+                ui.keys("home")
+                for _ in range(offset):
+                    ui.keys("down")
+                ui.keys("return")
+                time.sleep(0.5)
+                observed = current()
+                if observed == value:
+                    facts.setdefault("originalPickerOptions", []).append({"field": label, "value": value})
+                    save()
+                    return
+            raise AssertionError("exact-listing-image-choice-" + label)
 
         def labels():
             return {value for row in ui.command("tree.snapshot",limit=800)["nodes"] if row["visible"]
@@ -678,8 +704,12 @@ def observe(work, action, media, suite):
         save()
         _, platform = ui.node("Listing platform",category="popupbutton",contains=True)
         need(platform["enabled"] and platform["text"]=="Android / Google Play","single-enabled-android-configuration")
-        select("Listing language / locale","fr-FR")
-        select("Image slot / Apple device size","Phone screenshots")
+        results.setdefault("diagnosticStages", []).append("image-locale")
+        save()
+        select("Listing language / locale", "fr-FR", (2, 1, 3))
+        results.setdefault("diagnosticStages", []).append("image-slot")
+        save()
+        select("Image slot / Apple device size", "Phone screenshots", (4, 3, 5, 2, 1))
         choose()
         ui.click("Cancel",category="button")
         until(lambda: bool(labels() & {"Image selection cancelled","Original image selection cancelled"}),
@@ -688,6 +718,8 @@ def observe(work, action, media, suite):
         facts["nativePickerCancelledWithoutWriting"] = True
         save()
         choose()
+        results.setdefault("diagnosticStages", []).append("image-select-original-file")
+        save()
         ui.choose_path(picture,panel)
         await_label("Check images and choose exact replacements")
         until(lambda: ui.node("Review exact copy choices",category="button")[1]["enabled"],
@@ -697,6 +729,8 @@ def observe(work, action, media, suite):
             nodes = ui.command("element.wait",selector={"text_contains":value,"role":"statictext","visible":True},
                                state="present",timeout_ms=10000)["nodes"]
             return any(value in {node["name"],node["text"]} for node in nodes)
+        results.setdefault("diagnosticStages", []).append("image-exact-destination")
+        save()
         facts["exactDestinationObserved"] = observed_text(approved_relative)
         ui.reveal("Final lexical Store input order",category="heading")
         need(facts["exactDestinationObserved"],"exact-image-preview-roster")
@@ -708,6 +742,8 @@ def observe(work, action, media, suite):
         need(not apply["enabled"],"image-copy-available-before-consent")
         unchanged()
         ui.click("I reviewed every destination, replacement and final order.",category="checkbox",contains=True)
+        results.setdefault("diagnosticStages", []).append("image-confirm-reviewed-copy")
+        save()
         ui.click("Confirm local image copy",category="button")
         await_label("Reviewed public images copied locally")
         actual={p.relative_to(project) for p in project.rglob("*") if p.is_file() and ".git" not in p.parts}
