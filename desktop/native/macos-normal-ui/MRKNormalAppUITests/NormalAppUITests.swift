@@ -7425,7 +7425,27 @@ final class NormalAppUITests: XCTestCase {
             let validate = guidedProductSurface ? "Check text" : "Validate text"
             let title = try field(editor, "App title", multiline: true)
             if metadataOnly {
-                try replace(title, with: String(repeating: "x", count: 31), renderer: renderer)
+                let synthetic = String(repeating: "x", count: 31)
+                // Ordinary native Paste avoids per-keystroke focus drift. Use
+                // only the fixed public fixture in an empty disposable clipboard.
+                let clipboard = NSPasteboard.general
+                let before = clipboard.changeCount
+                try require(title.isEnabled && (clipboard.types ?? []).isEmpty
+                            && (clipboard.pasteboardItems ?? []).isEmpty && clipboard.changeCount == before,
+                            "synthetic metadata clipboard is not empty")
+                try reveal(title, in: renderer)
+                title.click()
+                try require(clipboard.changeCount == before, "clipboard changed before synthetic metadata paste")
+                let own = clipboard.clearContents()
+                defer {
+                    if clipboard.changeCount == own { clipboard.clearContents() }
+                }
+                try require(clipboard.setString(synthetic, forType: .string) && clipboard.changeCount == own,
+                            "synthetic metadata clipboard generation changed")
+                title.typeKey("a", modifierFlags: .command)
+                title.typeKey("v", modifierFlags: .command)
+                try require(title.value as? String == synthetic && clipboard.changeCount == own,
+                            "ordinary paste did not retain exact over-limit synthetic title")
                 try press(editor, validate, renderer: renderer)
                 _ = try waitElement(editor.staticTexts.matching(identifier: "Needs changes"), in: editor)
                 let refused = try unique(editor.buttons.matching(identifier: "Review changes"), "invalid text review control is ambiguous")
@@ -8397,6 +8417,7 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
         let failures = ["No new recovery outcome was confirmed", "Original cleanup unknown"]
+        let settled = guidedProductSurface ? "Operation settled" : "Original operation settled"
         let unconfirmed = "The original acknowledgement is unconfirmed. Do not repeat the recovery action. Check its original status; a status observation never creates consent."
         let historical = "This retained observation is historical; it is not recovery permission for the current context."
         var selected: XCUIElement?
@@ -8406,7 +8427,7 @@ final class NormalAppUITests: XCTestCase {
                 .containing(.button, identifier: "Help: Project build-input recovery"), in: renderer)
             selected = panel
             try require(panel.staticTexts.matching(identifier: "No pending build-input record observed").count == 0
-                        && panel.staticTexts.matching(identifier: "Original operation settled").count == 0,
+                        && panel.staticTexts.matching(identifier: settled).count == 0,
                         "a prior recovery inspection cannot supply this journey")
             let review = try unique(panel.buttons.matching(identifier: "Review recovery attempt"), "recovery Review is ambiguous")
             try require(!review.isEnabled && named(panel, "Confirm the exact build-input recovery attempt").count == 0,
@@ -8419,7 +8440,7 @@ final class NormalAppUITests: XCTestCase {
         }
         guard let panel = selected else { throw Refusal.condition("original project-recovery section is missing") }
         try stage("recovery-idle-original-report") {
-            _ = try waitElement(panel.staticTexts.matching(identifier: "Original operation settled"), in: panel,
+            _ = try waitElement(panel.staticTexts.matching(identifier: settled), in: panel,
                                 timeout: 135, failures: failures)
             try savedOperationComplete(panel)
             _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", "No pending build-input record observed")),
