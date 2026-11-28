@@ -1473,7 +1473,7 @@ mod tests {
     fn stored_file_capture_is_published_when_assessment_advances_the_revision() {
         let (mut state, _) = model(Operation::Prepare, false);
         state.context = Some(context_data());
-        let (mut slot, _) = loan_slot(&mut state, Kind::AppleProfile, 11);
+        let (mut slot, _) = loan_slot(&mut state, Kind::AndroidKeystore, 11);
         slot.operation = Operation::Prepare;
         let owner = slot.owner.clone();
         let loaded = slot.vault.loaded.take().unwrap();
