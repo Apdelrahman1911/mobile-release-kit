@@ -6689,32 +6689,26 @@ final class NormalAppUITests: XCTestCase {
                 print("MRK_RELEASE_RECOVERY_FACT=\(stage);panel=\(panel.exists);review=\(min(action.count, 3))")
                 print("MRK_RELEASE_RECOVERY_CONTROL=\(stage);inspect=\(inspect.exists && inspect.isEnabled);close=\(close.exists)")
                 guard stage == "refused" else { return }
-                for (kind, marker) in checks {
+                let additional = [
+                    ("review-timer", "Review expires in about"),
+                    ("finality-pending", "Native: pending"),
+                    ("finality-settled", "Native: settled"),
+                    ("finality-unknown", "Native: unknown"),
+                ]
+                for (kind, marker) in checks + additional {
                     // The accessibility label is a string. Some static text
                     // elements expose non-string values to XCTest predicates.
                     let matches = renderer.staticTexts.matching(NSPredicate(
-                        format: "label CONTAINS %@", marker)).count
+                        format: "label CONTAINS %@ OR title CONTAINS %@", marker, marker)).count
                     if matches > 0 { print("MRK_RELEASE_RECOVERY_MATCH=\(stage);state=\(kind)") }
                 }
             }
             recordRecovery("before")
             let panel = try waitElement(named(renderer, "Saved-version recovery inspection"), in: renderer)
-            let inspect = try waitElement(panel.buttons.matching(identifier: "Inspect recovery"), in: panel,
-                                          enabled: true, timeout: 24)
-            try reveal(inspect, in: renderer)
-            // Put the control well inside the renderer, clear of the application header
-            // and viewport edges where a coordinate can hit a covering element.
-            for _ in 0..<5 {
-                let viewport = renderer.frame
-                if inspect.frame.midY >= viewport.minY + 130 && inspect.frame.midY <= viewport.maxY - 80 { break }
-                _ = try remaining(3)
-                renderer.scroll(byDeltaX: 0, deltaY: inspect.frame.midY < viewport.midY ? 200 : -200)
-            }
-            try require(inspect.isHittable && inspect.isEnabled, "original recovery control is not actionable")
-            inspect.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            try press(panel, "Inspect recovery", renderer: renderer, timeout: 24)
             do {
-                _ = try waitElement(panel.buttons.matching(identifier: "Review recovery confirmation…"), in: panel,
-                                    enabled: true, timeout: 48)
+                let review = controls(renderer, [.button], label: "Review recovery confirmation…")
+                _ = try waitElement(review, in: renderer, enabled: true, timeout: 48)
             } catch {
                 recordRecovery("refused")
                 throw error
