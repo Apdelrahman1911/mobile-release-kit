@@ -283,8 +283,10 @@ class UI:
             prefix = parents[0]["id"] + "."
             nodes = [row for row in found["nodes"] if row["id"].startswith(prefix) and row["visible"]
                      and (not enabled or row["enabled"]) and (category is None or row["role"] == category)]
-        if not contains:
-            nodes = [node for node in nodes if name in (node.get("name"), node.get("text"))]
+        if contains:
+            nodes = [node for node in nodes if any(name in value for value in (node["name"], node["text"]))]
+        else:
+            nodes = [node for node in nodes if name in (node["name"], node["text"])]
         if actionable and not category:
             nodes = [node for node in nodes if node["role"] in ("button", "disclosuretriangle")]
         need(len(nodes) == 1, f"missing-or-ambiguous-element-{name}")
