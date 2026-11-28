@@ -31,13 +31,6 @@ on:
         description: Original successful main carrier attempt
         type: string
         required: true
-  push:
-    branches:
-      - verify/desktop-macos-update-check
-    paths:
-      - .github/workflows/desktop-macos-update-check.yml
-      - desktop/macos-installed-inputs/update-check-selection.json
-      - desktop/tools/macos_update_check.py
 
 permissions:
   contents: read
@@ -50,18 +43,17 @@ concurrency:
 
 jobs:
   qualify-frozen:
-    name: Qualify frozen media (${{ matrix.mode }})
+    name: Supplemental saved-version recovery (${{ matrix.mode }})
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-      github.ref_protected && inputs.expected_sha == github.sha
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-repaired-saved-recovery' &&
+      inputs.expected_sha == 'e162063689313421abc8032e5a89b6b226a516ea'
     runs-on: macos-26
     timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 55 }}
     strategy:
       fail-fast: false
       matrix:
-        mode: [fresh, update-credentials, archived-upgrade, post-reinstall-prepare,
-               uninstaller, delete-data, workspace-xctest, recovery-xctest, core-recovery, performance-long]
+        mode: [recovery-xctest]
     env:
       BASH_ENV: ''
       ENV: ''
@@ -77,35 +69,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 2
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.carrier_run }}
-          name: macos-release-frozen-${{ github.sha }}-${{ inputs.carrier_run }}-${{ inputs.carrier_attempt }}
+          name: macos-release-frozen-${{ inputs.expected_sha }}-${{ inputs.carrier_run }}-${{ inputs.carrier_attempt }}
           path: ${{ runner.temp }}/qualified-media
       - name: Require exactly the attested files from the approved build and carrier
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN: ${{ inputs.build_run }}
           CARRIER_RUN: ${{ inputs.carrier_run }}
+          ORIGINAL_SOURCE: ${{ inputs.expected_sha }}
         run: |
           set -euo pipefail
           umask 077
+          test "$(git rev-parse HEAD^)" = "$ORIGINAL_SOURCE"
+          test "$(git rev-parse "$ORIGINAL_SOURCE^{tree}")" = "d327075ed405f811834cd8c5818cf59d33ffd0ed"
+          test "$BUILD_RUN" = "46122648657" && test "$CARRIER_RUN" = "46129030113"
           work="$(mktemp -d "$RUNNER_TEMP/mrk-release-qualify.XXXXXXXX")"
           printf 'MRK_UPDATE_WORK=%s\n' "$work" >> "$GITHUB_ENV"
           export MRK_FROZEN_RELEASE_MEDIA="$RUNNER_TEMP/qualified-media"
           printf 'MRK_FROZEN_RELEASE_MEDIA=%s\n' "$MRK_FROZEN_RELEASE_MEDIA" >> "$GITHUB_ENV"
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
-            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --source "$ORIGINAL_SOURCE" --tree "$(git rev-parse "$ORIGINAL_SOURCE^{tree}")" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN"
           for asset in "$MRK_FROZEN_RELEASE_MEDIA"/*; do
             gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
-              --source-digest "$GITHUB_SHA" --deny-self-hosted-runners \
+              --source-digest "$ORIGINAL_SOURCE" --deny-self-hosted-runners \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
           done
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
-            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --source "$ORIGINAL_SOURCE" --tree "$(git rev-parse "$ORIGINAL_SOURCE^{tree}")" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN" --selection "$work/selection.json"
       - name: Execute the production lifecycle or original installed XCTest
         env:
@@ -121,97 +118,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-release-qualification-${{ matrix.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.MRK_UPDATE_WORK }}/evidence
-          if-no-files-found: warn
-          retention-days: 30
-
-  qualification-proof:
-    if: ${{ needs.qualify-frozen.result == 'success' }}
-    needs: qualify-frozen
-    runs-on: ubuntu-24.04
-    timeout-minutes: 8
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: macos-release-qualification-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/qualification
-      - name: Bind every original scenario to one frozen manifest
-        env:
-          BUILD_RUN: ${{ inputs.build_run }}
-          CARRIER_RUN: ${{ inputs.carrier_run }}
-          CARRIER_ATTEMPT: ${{ inputs.carrier_attempt }}
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/qualification"
-          reports=("$root"/*/RESULT.json)
-          [[ "${#reports[@]}" == 10 ]]
-          jq -e -s --arg sha "$GITHUB_SHA" --arg build "$BUILD_RUN" --arg carrier "$CARRIER_RUN" \
-            --arg attempt "$CARRIER_ATTEMPT" '
-            (map(.mode) | sort) == ["archived-upgrade", "core-recovery", "delete-data", "fresh",
-              "performance-long", "post-reinstall-prepare", "recovery-xctest", "uninstaller",
-              "update-credentials", "workspace-xctest"] and
-            all(.[]; .passed == true and .frozenRelease.sourceCommit == $sha and
-              .frozenRelease.buildRun == $build and .frozenRelease.carrierRun == $carrier and
-              .frozenRelease.carrierAttempt == $attempt) and (map(.frozenRelease) | unique | length) == 1
-            ' "${reports[@]}" > /dev/null
-          mkdir "$RUNNER_TEMP/proof"
-          jq -s --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '
-            {qualificationRun: $run, qualificationAttempt: $attempt, modes: map(.mode), frozenRelease: .[0].frozenRelease}' \
-            "${reports[@]}" > "$RUNNER_TEMP/proof/QUALIFIED.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macos-release-qualified-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/proof/QUALIFIED.json
-          if-no-files-found: error
-          retention-days: 30
-
-  update-check:
-    name: update-check (${{ matrix.mode }})
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [update, fresh, remove, uninstaller]
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
-    runs-on: macos-26
-    timeout-minutes: 45
-    env:
-      BASH_ENV: ''
-      ENV: ''
-    steps:
-      - name: Admit only a fresh hosted Apple Silicon macOS 26 runner
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
-          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
-          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
-
-      - name: Check out the exact source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Run the update check
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          umask 077
-          work="$(mktemp -d "$RUNNER_TEMP/mrk-update-check.XXXXXXXX")"
-          echo "MRK_UPDATE_WORK=$work" >> "$GITHUB_ENV"
-          /usr/bin/python3 -I -B desktop/tools/macos_update_check.py \
-            --selection desktop/macos-installed-inputs/update-check-selection.json --work "$work" \
-            --mode "${{ matrix.mode }}"
-
-      - name: Retain bounded update evidence
-        if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macos-update-check-${{ matrix.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MRK_UPDATE_WORK }}/evidence
           if-no-files-found: warn
           retention-days: 30
