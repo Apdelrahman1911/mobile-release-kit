@@ -1,0 +1,75 @@
+name: Build a disposable Android artifact inspection fixture
+
+on:
+  push:
+    branches: [verify/0213-disposable-android-artifact]
+    paths: ['.github/workflows/verify-disposable-android-artifact.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e162063689313421abc8032e5a89b6b226a516ea
+          persist-credentials: false
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+      - name: Build fixed public fixture with the existing Android SDK
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = e162063689313421abc8032e5a89b6b226a516ea
+          test "$(git rev-parse 'HEAD^{tree}')" = d327075ed405f811834cd8c5818cf59d33ffd0ed
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          root="$(mktemp -d "$RUNNER_TEMP/mrk-synthetic-android.XXXXXXXX")"
+          printf 'MRK_SYNTHETIC_ANDROID=%s\n' "$root" >> "$GITHUB_ENV"
+          mkdir "$root/gradle" "$root/android" "$root/retained"
+          cp -R tests/fixtures/macos_android_journey "$root/project"
+          export GRADLE_USER_HOME="$root/gradle" ANDROID_USER_HOME="$root/android"
+          gradle -p "$root/project" --no-daemon --max-workers=1 --console=plain :app:bundleRelease :app:assembleRelease
+      - name: Sign the disposable fixtures and verify both original outputs
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$MRK_SYNTHETIC_ANDROID"
+          apksigner="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          aapt="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          export MRK_SYNTHETIC_FIXTURE_PASS="$(openssl rand -hex 24)"
+          trap 'rm -f "$root/disposable-signing.p12" "$root/trust-only.p12"' EXIT
+          keytool -genkeypair -alias synthetic-fixture -dname 'CN=Disposable MRK Fixture' -keyalg RSA -keysize 2048 +            -validity 14 -keystore "$root/disposable-signing.p12" -storetype PKCS12 -storepass:env MRK_SYNTHETIC_FIXTURE_PASS
+          keytool -exportcert -alias synthetic-fixture -keystore "$root/disposable-signing.p12" +            -storepass:env MRK_SYNTHETIC_FIXTURE_PASS -file "$root/fixture.der"
+          keytool -importcert -noprompt -alias synthetic-fixture -file "$root/fixture.der" -keystore "$root/trust-only.p12" +            -storetype PKCS12 -storepass:env MRK_SYNTHETIC_FIXTURE_PASS
+          jarsigner -keystore "$root/disposable-signing.p12" -storepass:env MRK_SYNTHETIC_FIXTURE_PASS +            -signedjar "$root/retained/signed-synthetic.aab" "$root/project/app/build/outputs/bundle/release/app-release.aab" synthetic-fixture
+          jarsigner -verify -strict -keystore "$root/trust-only.p12" -storepass:env MRK_SYNTHETIC_FIXTURE_PASS +            "$root/retained/signed-synthetic.aab" synthetic-fixture
+          "$apksigner" sign --ks "$root/disposable-signing.p12" --ks-key-alias synthetic-fixture +            --ks-pass env:MRK_SYNTHETIC_FIXTURE_PASS --out "$root/retained/signed-synthetic.apk" +            "$root/project/app/build/outputs/apk/release/app-release-unsigned.apk"
+          "$apksigner" verify --verbose --print-certs "$root/retained/signed-synthetic.apk" > "$root/apk-verification.txt"
+          leaf="$(sha256sum "$root/fixture.der" | cut -d' ' -f1)"
+          grep -Fx "Signer #1 certificate SHA-256 digest: $leaf" "$root/apk-verification.txt" >/dev/null
+          "$aapt" dump badging "$root/retained/signed-synthetic.apk" | +            sed -n '1p' | grep -F "name='org.mrk.fixture' versionCode='1' versionName='1.0.0'" >/dev/null
+          unzip -Z1 "$root/retained/signed-synthetic.aab" > "$root/aab-roster.txt"
+          grep -Fx 'base/manifest/AndroidManifest.xml' "$root/aab-roster.txt" >/dev/null
+          grep -Fx 'base/dex/classes.dex' "$root/aab-roster.txt" >/dev/null
+          grep -Fx 'BundleConfig.pb' "$root/aab-roster.txt" >/dev/null
+          cd "$root/retained"
+          sha256sum signed-synthetic.aab signed-synthetic.apk > SHA256SUMS
+          jq -n --arg source e162063689313421abc8032e5a89b6b226a516ea --arg runner "$GITHUB_RUN_ID" --arg leaf "$leaf" +            '{sourceCommit:$source,fixtureRun:$runner,identity:"org.mrk.fixture",version:"1.0.0",build:1,
+              signerSha256:$leaf,independentlyVerifiedAab:true,independentlyVerifiedApk:true,disposable:true}' > FIXTURE.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: disposable-android-artifact-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MRK_SYNTHETIC_ANDROID }}/retained/
+          if-no-files-found: error
+          retention-days: 7
