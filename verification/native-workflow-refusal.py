@@ -111,9 +111,10 @@ def verify_observation(work, media, suite):
         "initialization-cancelled-original-review", "initialization-invalid-pin-terminal",
         "initialization-existing-customized-caller-conflict",
         "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
+        "workflow-stale-original-finality", "changedCallerAfterReviewWasPreserved",
         "workflow-original-admission", "workflow-native-review-missing", "workflow-cancel-settlement",
         "workflow-original-conflict-missing", "workflow-review-region-ambiguous",
-        "fourExactDestinationsAndGeneratedDigestsReviewed", "reviewCreatedNoWorkflowOrOtherFile",
+        "fourExactPathByteCountDigestRows", "fourExactDestinationsAndGeneratedDigestsReviewed", "reviewCreatedNoWorkflowOrOtherFile",
         "cancelKeptOriginalProject", "customizedCallerRefusedWithoutApply", "conflictKeptOriginalFilesIndexAndRefs",
         "review-alone-wrote-files", "only-disposable-clean-initialization-fixture",
         "initialization-unapproved-apply-enabled", "git-reviewed-original-heading-missing",
@@ -721,6 +722,17 @@ def observe(work, action, media, suite):
         until(lambda: in_region("Confirm reviewed local files", "button", True), 50, "workflow-native-review-missing")
         seen = labels()
         record("fourExactDestinationsAndGeneratedDigestsReviewed", expected_paths <= seen and expected_digests <= seen)
+        raw = scoped_rows()
+        expected = {item["path"]: (f"{item['byteLength']:,} bytes", item["sha256"]) for item in proposal["workflows"]}
+        rows = [node for node in raw if node["role"] == "row"]
+        matched = set()
+        for row in rows:
+            values = {v.strip() for node in raw if node["id"].startswith(row["id"] + ".")
+                      for v in (node["name"], node["text"])}
+            for path, (size, digest) in expected.items():
+                if {path, size, digest} <= values:
+                    matched.add(path)
+        record("fourExactPathByteCountDigestRows", matched == expected_paths)
         record("reviewCreatedNoWorkflowOrOtherFile", before == inventory())
         ui.click(close, category="button", region=region)
         until(lambda: in_region(review, "button", True)
@@ -728,10 +740,23 @@ def observe(work, action, media, suite):
         record("cancelKeptOriginalProject", inventory() == before)
 
         custom = project / ".github/workflows/mobile-candidate.yml"
+        ui.click(review, category="button", region=region)
+        until(lambda: in_region("Confirm reviewed local files", "button", True), 50, "workflow-native-review-missing")
+        ui.click("Confirm reviewed local files", category="button", region=region)
+        ui.node("Apply this four-caller bundle?", category="heading", contains=True)
+        ui.click("I reviewed all four paths and complete before/after text.", category="checkbox", contains=True)
+        ui.node("Apply reviewed local files", category="button", enabled=True)
         custom.parent.mkdir(parents=True)
         custom.write_bytes(b"name: Disposable test customization\non: [workflow_dispatch]\njobs: {}\n")
         custom_state = inventory()
         digest = file_hash(custom)
+        ui.click("Apply reviewed local files", category="button")
+        until(lambda: "Workflow review ended; configuration draft kept" in labels()
+              or "Not installed; original transaction changes rolled back" in labels(),
+              50, "workflow-stale-original-finality")
+        record("changedCallerAfterReviewWasPreserved", inventory() == custom_state and
+               git("ls-files", "--stage") == original_index and git("rev-parse", "HEAD") == head)
+        until(lambda: in_region(review, "button", True), 30, "workflow-cancel-settlement")
         ui.click(review, category="button", region=region)
         until(lambda: "Local workflow bundle refused" in labels(), 45, "workflow-original-conflict-missing")
         seen = labels()
