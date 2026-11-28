@@ -224,9 +224,11 @@ class AndroidProviderDataTests(unittest.TestCase):
                              for index, row in enumerate(contract["files"])]
         with patch.object(M, "_context", return_value=original), patch.object(M.os, "getuid", return_value=123), \
              patch.object(M.os, "getgid", return_value=456), patch.object(M, "_host_state", return_value=(contract, generated)), \
+             patch.object(M, "_stock_trust_state", return_value={}) as stock, \
              patch.object(M.Path, "mkdir") as mkdir, patch.object(M, "_space") as capacity, patch.object(M, "_download") as acquire:
             with self.assertRaisesRegex(M.D.Refused, r"tool\+OS byte bound"):
                 M.prepare(check, Path("/source"), Path("/inert/mrk-android-material-17-2"), context=context, host={})
+        stock.assert_called_once_with(value, {}, end)
         mkdir.assert_not_called(); capacity.assert_not_called(); acquire.assert_not_called(); check.private_command.assert_not_called()
         self.assertTrue(check.failed)
         files = M._control(value, "layout.json.gz")["files"]
@@ -278,9 +280,10 @@ class AndroidProviderDataTests(unittest.TestCase):
                              "androidLoader": {"/etc/ld.so.preload": {"absent": True}}}}
         with patch.object(M, "_protected_binding", side_effect=lambda row, _: {key: row[key] for key in ("path", "size", "sha256", "mode")}), \
              patch.object(M, "_protected_namespace") as namespace, patch.object(M, "_provider_boundary") as boundary:
-            state = M._provider_state(value, host, time.monotonic() + 30)
+            end = time.monotonic() + 30
+            state = M._provider_state(value, host, end)
             self.assertTrue({"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d/libc.conf"} <= set(state["osFiles"]))
-            namespace.assert_called_once_with({"inert": "directory"}, "/etc/ld.so.conf.d", children=["libc.conf"])
+            namespace.assert_called_once_with({"inert": "directory"}, "/etc/ld.so.conf.d", children=["libc.conf"], deadline=end)
             boundary.side_effect = M.D.Refused("original alternative changed")
             with self.assertRaisesRegex(M.D.Refused, "original alternative changed"):
                 M._provider_state(value, host, time.monotonic() + 30)

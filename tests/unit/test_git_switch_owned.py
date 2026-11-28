@@ -142,6 +142,26 @@ class OwnedSwitchTests(unittest.TestCase):
         self.assertEqual(self.checkout_calls, 0)
         self.case_returned = True
 
+    def test_real_restrictive_file_mode_refuses_without_broadening_access(self):
+        self.commit_text("main contents\n")
+        self.git("switch", "-c", "next")
+        self.commit_text("next contents\n")
+        self.git("switch", "main")
+        selected = self.root / "selected.txt"
+        selected.chmod(0o600)
+        catalog = self.observed()
+        paths = (selected, self.root / ".git/HEAD", self.root / ".git/index")
+        before = [(path.read_bytes(), path.stat().st_mode, path.stat().st_ino) for path in paths]
+        repository = self.repo()
+        with self.assertRaises(switch.SwitchError) as caught:
+            repository.prepare_switch("next", expected_revision=catalog.revision,
+                expected_reference_revision=catalog.reference_revision)
+        self.assertEqual(caught.exception.reason, "switch-layout")
+        self.closed(repository)
+        self.assertEqual([(path.read_bytes(), path.stat().st_mode, path.stat().st_ino) for path in paths], before)
+        self.assertEqual(self.checkout_calls, 0)
+        self.case_returned = True
+
     def test_real_stale_target_and_foreign_target_lock_never_checkout(self):
         self.commit_text("one\n")
         self.git("branch", "next")

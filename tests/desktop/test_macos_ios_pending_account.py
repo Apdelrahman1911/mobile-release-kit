@@ -645,8 +645,9 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
         # compiled only on the intended native observation target; keep their
         # existing clocks while preventing a removed single-original field
         # from escaping focused local SOURCE checks.
-        signed = owner.split("let clocks = if prepared.projection.context.signed_ios()\n", 1)[1].split("let material_matches", 1)[0]
-        unsigned = owner.split("fn start_clocks(&self, admitted: Instant) -> Clocks {", 1)[1].split("fn offline_installed_selected", 1)[0]
+        signed = owner.split("let clocks = if prepared.projection.context.signed_ios() &&", 1)[1].split("let artifact_matches", 1)[0]
+        self.assertIn("!prepared.projection.context.signing_check_ios()", signed)
+        unsigned = owner.split("fn start_clocks(&self, admitted: Instant) -> Clocks {", 1)[1].split("fn artifact_installed_selected", 1)[0]
         for block, operation, selected in ((signed, "IOSSignedExport", "Clocks::installed_ios_signed(admitted_at)"),
                                            (unsigned, "IOSUnsignedArchive", "Clocks::installed_ios(admitted)")):
             self.assertIn(f"o.originals[0].is_none() && o.control.permits_mode(ios_wire::Operation::{operation})", block)
@@ -660,7 +661,13 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
         exports = workflow.split("      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n", 1)[1].split("      - name:", 1)[0]
         self.assertNotIn("account-baseline.json", exports); self.assertNotIn(".mobile-release-signing", exports)
         for leaf in ("aqua-ios-account-results.jsonl", "aqua-ios-account-failure.jsonl", "aqua-ios-account.status"):
-            self.assertIn("${{ steps.work.outputs.root }}/" + leaf + "\n", exports)
+            self.assertIn("$MRK_MACOS_WORK/" + leaf, step)
+            self.assertNotIn(leaf, exports)
+        self.assertIn("steps.public_evidence.outcome == 'success'", exports)
+        self.assertEqual(
+            [line.strip() for line in exports.splitlines() if line.strip().startswith("path:")],
+            ["path: ${{ steps.work.outputs.root }}/public-verification-evidence.json"],
+        )
 
 
 if __name__ == "__main__":
