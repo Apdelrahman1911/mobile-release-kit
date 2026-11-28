@@ -47,25 +47,35 @@ jobs:
           root="$MRK_SYNTHETIC_ANDROID"
           apksigner="$ANDROID_HOME/build-tools/35.0.0/apksigner"
           aapt="$ANDROID_HOME/build-tools/35.0.0/aapt"
-          export MRK_SYNTHETIC_FIXTURE_PASS="$(openssl rand -hex 24)"
+          MRK_SYNTHETIC_FIXTURE_PASS="$(openssl rand -hex 24)"
+          export MRK_SYNTHETIC_FIXTURE_PASS
           trap 'rm -f "$root/disposable-signing.p12" "$root/trust-only.p12"' EXIT
-          keytool -genkeypair -alias synthetic-fixture -dname 'CN=Disposable MRK Fixture' -keyalg RSA -keysize 2048 +            -validity 14 -keystore "$root/disposable-signing.p12" -storetype PKCS12 -storepass:env MRK_SYNTHETIC_FIXTURE_PASS
-          keytool -exportcert -alias synthetic-fixture -keystore "$root/disposable-signing.p12" +            -storepass:env MRK_SYNTHETIC_FIXTURE_PASS -file "$root/fixture.der"
-          keytool -importcert -noprompt -alias synthetic-fixture -file "$root/fixture.der" -keystore "$root/trust-only.p12" +            -storetype PKCS12 -storepass:env MRK_SYNTHETIC_FIXTURE_PASS
-          jarsigner -keystore "$root/disposable-signing.p12" -storepass:env MRK_SYNTHETIC_FIXTURE_PASS +            -signedjar "$root/retained/signed-synthetic.aab" "$root/project/app/build/outputs/bundle/release/app-release.aab" synthetic-fixture
-          jarsigner -verify -strict -keystore "$root/trust-only.p12" -storepass:env MRK_SYNTHETIC_FIXTURE_PASS +            "$root/retained/signed-synthetic.aab" synthetic-fixture
-          "$apksigner" sign --ks "$root/disposable-signing.p12" --ks-key-alias synthetic-fixture +            --ks-pass env:MRK_SYNTHETIC_FIXTURE_PASS --out "$root/retained/signed-synthetic.apk" +            "$root/project/app/build/outputs/apk/release/app-release-unsigned.apk"
+          keytool -genkeypair -alias synthetic-fixture -dname 'CN=Disposable MRK Fixture' -keyalg RSA -keysize 2048 \
+            -validity 14 -keystore "$root/disposable-signing.p12" -storetype PKCS12 -storepass:env MRK_SYNTHETIC_FIXTURE_PASS
+          keytool -exportcert -alias synthetic-fixture -keystore "$root/disposable-signing.p12" \
+            -storepass:env MRK_SYNTHETIC_FIXTURE_PASS -file "$root/fixture.der"
+          keytool -importcert -noprompt -alias synthetic-fixture -file "$root/fixture.der" -keystore "$root/trust-only.p12" \
+            -storetype PKCS12 -storepass:env MRK_SYNTHETIC_FIXTURE_PASS
+          jarsigner -keystore "$root/disposable-signing.p12" -storepass:env MRK_SYNTHETIC_FIXTURE_PASS \
+            -signedjar "$root/retained/signed-synthetic.aab" "$root/project/app/build/outputs/bundle/release/app-release.aab" synthetic-fixture
+          jarsigner -verify -strict -keystore "$root/trust-only.p12" -storepass:env MRK_SYNTHETIC_FIXTURE_PASS \
+            "$root/retained/signed-synthetic.aab" synthetic-fixture
+          "$apksigner" sign --ks "$root/disposable-signing.p12" --ks-key-alias synthetic-fixture \
+            --ks-pass env:MRK_SYNTHETIC_FIXTURE_PASS --out "$root/retained/signed-synthetic.apk" \
+            "$root/project/app/build/outputs/apk/release/app-release-unsigned.apk"
           "$apksigner" verify --verbose --print-certs "$root/retained/signed-synthetic.apk" > "$root/apk-verification.txt"
           leaf="$(sha256sum "$root/fixture.der" | cut -d' ' -f1)"
           grep -Fx "Signer #1 certificate SHA-256 digest: $leaf" "$root/apk-verification.txt" >/dev/null
-          "$aapt" dump badging "$root/retained/signed-synthetic.apk" | +            sed -n '1p' | grep -F "name='org.mrk.fixture' versionCode='1' versionName='1.0.0'" >/dev/null
+          "$aapt" dump badging "$root/retained/signed-synthetic.apk" | \
+            sed -n '1p' | grep -F "name='org.mrk.fixture' versionCode='1' versionName='1.0.0'" >/dev/null
           unzip -Z1 "$root/retained/signed-synthetic.aab" > "$root/aab-roster.txt"
           grep -Fx 'base/manifest/AndroidManifest.xml' "$root/aab-roster.txt" >/dev/null
           grep -Fx 'base/dex/classes.dex' "$root/aab-roster.txt" >/dev/null
           grep -Fx 'BundleConfig.pb' "$root/aab-roster.txt" >/dev/null
           cd "$root/retained"
           sha256sum signed-synthetic.aab signed-synthetic.apk > SHA256SUMS
-          jq -n --arg source e162063689313421abc8032e5a89b6b226a516ea --arg runner "$GITHUB_RUN_ID" --arg leaf "$leaf" +            '{sourceCommit:$source,fixtureRun:$runner,identity:"org.mrk.fixture",version:"1.0.0",build:1,
+          jq -n --arg source e162063689313421abc8032e5a89b6b226a516ea --arg runner "$GITHUB_RUN_ID" --arg leaf "$leaf" \
+            '{sourceCommit:$source,fixtureRun:$runner,identity:"org.mrk.fixture",version:"1.0.0",build:1,
               signerSha256:$leaf,independentlyVerifiedAab:true,independentlyVerifiedApk:true,disposable:true}' > FIXTURE.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
