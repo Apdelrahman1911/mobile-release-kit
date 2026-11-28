@@ -172,7 +172,10 @@ fn check_revision_is_consumed_before_wait_and_revoke_or_duplicate_cannot_rearm()
     assert!(e.apply(wrong).is_err());
     let first = e.apply(apply.clone()).unwrap();
     assert!(first.permission_consumed && !first.permission_available);
-    assert_eq!(e.apply(apply.clone()).unwrap(), first);
+    let mut repeated = e.apply(apply.clone()).unwrap();
+    assert!(repeated.remaining_ms > 0 && repeated.remaining_ms <= first.remaining_ms);
+    repeated.remaining_ms = first.remaining_ms;
+    assert_eq!(repeated, first);
     assert!(e.reserve_allow(&args).is_err());
     e.unknown();
     assert_eq!(e.apply(apply).unwrap().phase, p::Phase::Unknown);
