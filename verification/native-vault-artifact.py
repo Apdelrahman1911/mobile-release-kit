@@ -1007,8 +1007,25 @@ def observe(work, action, media, suite):
             save()
             need(facts["unchangedAtReassessment"], "assessment-changed-original-before-decision")
             need(discardable, "original-reassessment-discard-unavailable")
-            ui.click("Discard review", category="button", region="Explicit private-input review")
+            helper = work / "discard-reassessment.swift"
+            helper.write_text('import AppKit\nimport ApplicationServices\n\nfunc attribute(_ node: AXUIElement, _ name: String) -> CFTypeRef? {\n    var value: CFTypeRef?\n    return AXUIElementCopyAttributeValue(node, name as CFString, &value) == .success ? value : nil\n}\nfunc nodes(_ root: AXUIElement, limit: Int) -> [AXUIElement]? {\n    var pending = [root]\n    var seen = [AXUIElement]()\n    while let node = pending.popLast() {\n        if seen.contains(where: { CFEqual($0, node) }) { continue }\n        guard seen.count + pending.count < limit else { return nil }\n        seen.append(node)\n        pending.append(contentsOf: attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? [])\n    }\n    return seen\n}\nfunc named(_ node: AXUIElement, _ name: String) -> Bool {\n    [kAXTitleAttribute, kAXDescriptionAttribute].contains { (attribute(node, $0) as? String) == name }\n}\nfunc discard() -> String {\n    let arguments = CommandLine.arguments\n    guard arguments.count == 2, let pid = Int32(arguments[1]), pid > 0, AXIsProcessTrusted(),\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "admission" }\n    let app = AXUIElementCreateApplication(pid)\n    guard AXUIElementSetMessagingTimeout(app, 2) == .success,\n          let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1,\n          let all = nodes(windows[0], limit: 1500) else { return "window" }\n    let groups = all.filter { named($0, "Explicit private-input review") &&\n        ["AXGroup", "AXLandmarkRegion"].contains(attribute($0, kAXRoleAttribute) as? String ?? "") }\n    guard groups.count == 1, let region = nodes(groups[0], limit: 240) else { return "region" }\n    let buttons = region.filter { attribute($0, kAXRoleAttribute) as? String == "AXButton" && named($0, "Discard review") }\n    guard buttons.count == 1 else { return "control" }\n    guard (attribute(buttons[0], kAXEnabledAttribute) as? NSNumber)?.boolValue == true,\n          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return "disabled-or-changed" }\n    return AXUIElementPerformAction(buttons[0], kAXPressAction as CFString) == .success ? "pressed" : "refused"\n}\nprint(discard())\n')
+            result = call("/usr/bin/swift", str(helper), str(ui.payload_pid()), timeout=32).stdout.strip()
+            need(result in {"admission", "window", "region", "control", "disabled-or-changed", "pressed", "refused"},
+                 "unexpected-native-discard-status")
+            facts["nativeDiscardControl"] = result
+            save()
+            need(result == "pressed", "native-discard-control-did-not-return")
+            def review_dismissed():
+                rows = ui.command("tree.snapshot", limit=800)["nodes"]
+                return not any(row["visible"] and row["name"] == "Discard review" and row["role"] == "button"
+                               for row in rows)
+            until(review_dismissed, 20, "original-review-remained-after-dismiss")
             await_status("Not assigned to the current draft")
+            await_status("known", region="Private-input operation settlement")
+            await_status("idle", region="Private-input operation phase")
+            await_status("discard", region="Private-input operation action")
+            facts["originalDiscardSettledAndUnassigned"] = True
+            save()
             need(read_vault_state(with_profile=True) == initial, "assessment-changed-original-encrypted-record")
             need(project_snapshot() == original_project and file_hash(profile_file) == source_hash,
                  "assessment-changed-project-or-selected-profile")
