@@ -1,0 +1,163 @@
+name: Exact source signing matrix remainder
+
+on:
+  push:
+    branches: [verify/0213-source-signing-remainder]
+    paths: ['.github/workflows/verify-0213-source-signing-remainder.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  test-signing-matrix:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/0213-source-signing-remainder'
+    name: Exact source and wheel (${{ matrix.os }}, group ${{ matrix.group }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            group: 1
+            shards: '32 33 34 35 36 37 38'
+          - os: ubuntu-24.04
+            group: 2
+            shards: '39 40 41 42 43 44 45'
+          - os: ubuntu-24.04
+            group: 3
+            shards: '46 47'
+          - os: macos-26
+            group: 1
+            shards: '14 15 16 17 18 19 20'
+          - os: macos-26
+            group: 2
+            shards: '21 22 23 24 25 26 27'
+          - os: macos-26
+            group: 3
+            shards: '28 29 30 31 32 33 34'
+          - os: macos-26
+            group: 4
+            shards: '35 36 37 38 39 40 41'
+          - os: macos-26
+            group: 5
+            shards: '42 43 44 45 46 47'
+    steps:
+      - name: Require a disposable GitHub-hosted runner
+        env:
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e162063689313421abc8032e5a89b6b226a516ea
+          persist-credentials: false
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Set up the fixed Python 3.12 compatibility runtime
+        id: python312
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up the fixed Python 3.13 compatibility runtime
+        id: python313
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up the fixed Python 3.14 compatibility runtime
+        id: python314
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Set up pinned Ruby without project installation
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler: none
+          bundler-cache: false
+      - name: Install the distribution-signed Linux isolation tool if needed
+        if: ${{ matrix.os == 'ubuntu-24.04' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x /usr/bin/bwrap ]]; then
+            # Bubblewrap comes from Ubuntu's signed archive.
+            ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+            [[ -s "$ubuntu_sources" ]]
+            sources=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=/dev/null)
+            sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" \
+              -o APT::Get::List-Cleanup=0 update
+            sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get "${sources[@]}" install \
+              --yes --no-install-recommends bubblewrap
+          fi
+          [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
+      - name: Require the original source and installed-wheel matrix pair
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
+          MRK_OS: ${{ matrix.os }}
+          MRK_SHARDS: ${{ matrix.shards }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby_executable="$(command -v ruby)"
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
+          case "$MRK_OS" in
+            ubuntu-24.04) platform=linux ;;
+            macos-26) platform=macos ;;
+            *) exit 1 ;;
+          esac
+          test "$(git rev-parse HEAD)" = "e162063689313421abc8032e5a89b6b226a516ea"
+          test "$(git rev-parse 'HEAD^{tree}')" = "d327075ed405f811834cd8c5818cf59d33ffd0ed"
+          umask 077
+          mkdir "$RUNNER_TEMP/exact-signing-proofs"
+          failed=0
+          read -ra shards <<< "$MRK_SHARDS"
+          (( ${#shards[@]} > 0 && ${#shards[@]} <= 8 ))
+          for MRK_SHARD in "${shards[@]}"; do
+            [[ "$MRK_SHARD" =~ ^([0-9]|[1-3][0-9]|4[0-7])$ ]]
+            shard_temp="$(cd -P -- "$RUNNER_TEMP" && mktemp -d "$PWD/mrk-exact-shard.XXXXXXXX")"
+            shard_summary="$shard_temp/step_summary_shard-$MRK_SHARD"
+            touch "$shard_summary"
+            verifier_args=("$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
+              --platform "$platform" --source "$GITHUB_WORKSPACE" \
+              --python "$MRK_PYTHON" --ruby "$ruby_executable" \
+              --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
+              --runner-home "$HOME" --runner-temp "$shard_temp" \
+              --commit "e162063689313421abc8032e5a89b6b226a516ea" --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
+              --summary "$shard_summary" \
+              --scope signing-matrix --repository "$GITHUB_REPOSITORY" \
+              --job "$GITHUB_JOB" --shard "$MRK_SHARD")
+            if [[ "$platform" == linux ]]; then
+              verifier_args+=(--java-home "$JAVA_HOME_21_X64")
+              verifier_args=(/bin/bash .github/scripts/stage_ci_linux_ruby.sh "${verifier_args[@]}")
+            fi
+            if sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 "${verifier_args[@]}"; then
+              sudo -n /usr/bin/install -m 644 "$shard_temp/signing-matrix-proof/proof.json" \
+                "$RUNNER_TEMP/exact-signing-proofs/$MRK_SHARD.json"
+              printf 'Verified the original %s shard %s source and wheel pair.\n' "$MRK_OS" "$MRK_SHARD"
+            else
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Preserve the individual compact pair proofs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exact-source-signing-${{ matrix.os }}-${{ matrix.group }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/exact-signing-proofs/*.json
+          if-no-files-found: warn
+          retention-days: 90
