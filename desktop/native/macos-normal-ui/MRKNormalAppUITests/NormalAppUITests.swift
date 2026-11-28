@@ -26,6 +26,7 @@ final class NormalAppUITests: XCTestCase {
         case iosPendingRecovery = "testInstalledIOSPendingAccountRecoveryThroughUI"
         case persistentCredentials = "testSyntheticPersistentCredentials"
         case savedOfflineChecks = "testSyntheticProjectSavedOfflineChecks"
+        case managedWorkflowRefusal = "testSyntheticProjectManagedWorkflowRefusal"
         case emptyBuildInputInspection = "testSyntheticProjectEmptyBuildInputInspection"
         case androidCandidateInputs = "testSyntheticProjectAndroidCandidateInputs"
 
@@ -2972,6 +2973,83 @@ final class NormalAppUITests: XCTestCase {
             try check()
             iosStarted = true
         }
+        // Diagnostic only after the original reports a terminal issue. Never read
+        // contents or follow aliases, and never let this prove archive success.
+        func recordIOSArchiveFailureOutput(_ identity: IOSArchiveIdentity, check: () throws -> Void) {
+            guard iosIdentity == identity, iosStarted, !iosCompleted, let project = directories["project"] else { return }
+            var archive = 0, work = 0, entries = 0, symlinks = 0, hardlinks = 0, foreign = 0, unsafeMode = 0, other = 0
+            var complete = false, closeFailed = false
+            func statEntry(_ fd: Int32, _ name: String) throws -> StatFacts? {
+                var value = stat()
+                if fstatat(fd, name, &value, AT_SYMLINK_NOFOLLOW) == 0 { return StatFacts(value) }
+                try Self.need(errno == ENOENT, "iOS diagnostic entry stat")
+                return nil
+            }
+            func withDirectory(_ fd: Int32, _ name: String, _ value: StatFacts,
+                               _ body: (Directory) throws -> Void) throws {
+                try check()
+                try Self.need(value.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                    && value.device == project.facts.device && value.uid == getuid()
+                    && value.mode & 0o7022 == 0, "iOS diagnostic directory scope")
+                let opened = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                try Self.need(opened >= 0, "iOS diagnostic directory open")
+                defer { if Darwin.close(opened) != 0 { closeFailed = true } }
+                try Self.need(value == Self.facts(opened), "iOS diagnostic directory replaced")
+                try body(Directory(fd: opened, parent: fd, name: name, facts: value))
+                try Self.need(value == Self.facts(opened) && value == statEntry(fd, name),
+                              "iOS diagnostic directory changed")
+            }
+            func scan(_ directory: Directory, depth: Int) throws {
+                try check()
+                try Self.need(depth <= 32, "iOS diagnostic depth limit")
+                for name in try children(directory).sorted() {
+                    try check()
+                    try Self.need(entries < 8192, "iOS diagnostic entry limit")
+                    entries += 1
+                    guard let value = try statEntry(directory.fd, name) else {
+                        throw Refusal.condition("iOS diagnostic entry disappeared")
+                    }
+                    let kind = value.mode & mode_t(S_IFMT)
+                    let foreignEntry = value.device != project.facts.device || value.uid != getuid()
+                    let writable = value.mode & 0o7022 != 0
+                    if foreignEntry { foreign += 1 }
+                    if writable { unsafeMode += 1 }
+                    switch kind {
+                    case mode_t(S_IFLNK): symlinks += 1
+                    case mode_t(S_IFREG): if value.links != 1 { hardlinks += 1 }
+                    case mode_t(S_IFDIR):
+                        if !foreignEntry && !writable {
+                            try withDirectory(directory.fd, name, value) { try scan($0, depth: depth + 1) }
+                        }
+                    default: other += 1
+                    }
+                }
+            }
+            func inspect() throws {
+                try checkDirectory(project)
+                guard let meta = try statEntry(project.fd, ".mobile-release") else { return }
+                try withDirectory(project.fd, ".mobile-release", meta) { meta in
+                    guard let namespace = try statEntry(meta.fd, "desktop-ios-archive") else { return }
+                    try withDirectory(meta.fd, "desktop-ios-archive", namespace) { namespace in
+                        guard let original = try statEntry(namespace.fd, identity.operationID) else { return }
+                        try withDirectory(namespace.fd, identity.operationID, original) { original in
+                            if let output = try statEntry(original.fd, "archive.xcarchive") {
+                                archive = output.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) ? 1 : 2
+                            }
+                            if let output = try statEntry(original.fd, "work") {
+                                work = output.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) ? 1 : 2
+                                try withDirectory(original.fd, "work", output) { try scan($0, depth: 0) }
+                            }
+                        }
+                    }
+                }
+                try checkDirectory(project)
+            }
+            do { try inspect(); complete = !closeFailed } catch { /* Keep bounded partial counts. */ }
+            print("MRK_MACOS_IOS_ARCHIVE_DISPOSAL=v1;archive=\(archive);work=\(work);entries=\(entries)"
+                + ";symlinks=\(symlinks);hardlinks=\(hardlinks);foreign=\(foreign);unsafe=\(unsafeMode);other=\(other)"
+                + ";complete=\(complete ? 1 : 0)")
+        }
         private func checkIOSDirectories(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
             try check()
             try Self.need(iosIdentity == identity && iosStarted && iosDirectories.count == 4,
@@ -2991,6 +3069,7 @@ final class NormalAppUITests: XCTestCase {
                 && iosDirectories.isEmpty && acceptedStages.isEmpty, "iOS terminal original identity or state")
             guard var parent = directories["project"] else { throw Refusal.condition("fixture: iOS input project absent") }
             let device = parent.facts.device
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=input-state")
             for (index, name) in [".mobile-release", "desktop-ios-archive", identity.operationID, "archive.xcarchive"].enumerated() {
                 try check(); try checkDirectory(parent)
                 let original = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
@@ -3001,14 +3080,31 @@ final class NormalAppUITests: XCTestCase {
                     "iOS output original mode owner or filesystem")
                 // Xcode archive group/mode is not a toolkit-created 0700 root.
                 parent = original
+                print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=held-\(index)")
             }
             try checkIOSDirectories(identity, check: check)
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=output-roster")
             // Entered only after the caller's current typed complete result AND
             // all four originals/exact three immediate rosters above. No running
             // output or pathname alone can enable checkRoster's one exception.
             iosCompleted = true
-            try assertUnchanged()
+            do { try assertUnchanged() }
+            catch {
+                let cause: String
+                if case Refusal.condition(let reason) = error {
+                    if reason.contains("unexpected file change") { cause = "input-file-changed" }
+                    else if reason.contains("unexpected owned output") { cause = "input-roster-changed" }
+                    else if reason.contains("unexpected project control") { cause = "unexpected-control" }
+                    else if reason.contains("directory") { cause = "directory-identity" }
+                    else if reason.contains("close") { cause = "close" }
+                    else { cause = "other-check" }
+                } else { cause = "untyped" }
+                print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=\(cause)")
+                throw error
+            }
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=inputs-verified")
             try checkIOSDirectories(identity, check: check)
+            print("MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=output-rechecked")
         }
         func assertIOSArchiveClosure(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
             try Self.need(iosCompleted && iosIdentity == identity && !iosClosing, "iOS output closure is not terminal")
@@ -4147,7 +4243,21 @@ final class NormalAppUITests: XCTestCase {
                 if path == "project" && iosUnsignedProfile && iosCompleted && iosIdentity != nil && iosDirectories.count == 4 {
                     expected.insert(".mobile-release") // Fixed completed iOS namespace; no other input-parent exception.
                 }
-                try Self.need(try children(directory) == expected, "unexpected owned output under " + path)
+                let actual = try children(directory)
+                if iosUnsignedProfile && iosCompleted && actual != expected {
+                    let extra = actual.subtracting(expected)
+                    let kinds = ["project.xcworkspace", "xcuserdata", ".DS_Store", ".swiftpm", "Package.resolved"]
+                    let knownDirectories = Self.ancestors(Self.iosUnsignedPaths).sorted()
+                    let directory = knownDirectories.firstIndex(of: path) ?? 99
+                    let supplementalKinds = [".git", ".gitignore", "xcshareddata", "xcdebugger", ".xcbuild", "build", "DerivedData", "Info.plist", "IDEWorkspaceChecks.plist", "WorkspaceSettings.xcsettings", "project.pbxproj", ".xcode.env"]
+                    let supplementalMatch = supplementalKinds.map { extra.contains($0) ? "1" : "0" }.joined()
+                    let hidden = extra.contains { $0.hasPrefix(".") }
+                    print("MRK_GUIDED_IOS_ARCHIVE_ROSTER_DIAGNOSTIC=v1;directory=\(directory);known=\(supplementalMatch);hidden=\(hidden ? 1 : 0)")
+                    let matched = kinds.map { extra.contains($0) ? "1" : "0" }.joined()
+                    let scope = path == "project" ? "project" : path.isEmpty ? "root" : "nested"
+                    print("MRK_GUIDED_IOS_ARCHIVE_ROSTER=v1;scope=\(scope);extra=\(min(extra.count, 99));missing=\(min(expected.subtracting(actual).count, 99));known=\(matched)")
+                }
+                try Self.need(actual == expected, "unexpected owned output under " + path)
             }
             let project = directories["project"]!
             for name in Self.controls + (androidCandidateProfile ? [] : [".git"]) {
@@ -4699,6 +4809,11 @@ final class NormalAppUITests: XCTestCase {
             for path in current.keys.sorted() {
                 let old = current[path]!
                 let observed = try androidPositiveProfile && path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
+                if iosUnsignedProfile && iosCompleted && (old.bytes != observed.bytes || old.facts != observed.facts) {
+                    let originals = Self.iosUnsignedPaths.sorted()
+                    let index = originals.firstIndex(of: path) ?? 99
+                    print("MRK_GUIDED_IOS_ARCHIVE_INPUT=v1;index=\(index);bytes=\(old.bytes != observed.bytes ? 1 : 0);identity=\(old.facts != observed.facts ? 1 : 0)")
+                }
                 try Self.need(old.bytes == observed.bytes && old.facts == observed.facts, "unexpected file change: " + path)
             }
             try checkRoster()
@@ -5138,6 +5253,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func waitElement(_ query: XCUIElementQuery, in root: XCUIElement,
                                        enabled: Bool = false, timeout: TimeInterval = 5,
                                        failures: [String] = [], snapshotObservation: Bool = false,
+                                       selectedRecoveryProject: String? = nil,
                                        consentObservation: IOSRecoveryConsentPhase? = nil,
                                        projectFieldObservation: (String, XCUIElementQuery, String)? = nil, line: UInt = #line) throws -> XCUIElement {
         let first = query.element(boundBy: 0)
@@ -5157,7 +5273,7 @@ final class NormalAppUITests: XCTestCase {
         if snapshotObservation && (failureCount > 0 || result != .completed || matchCount != 1) {
             // Same original wait, before its existing refusal. Finite public
             // facts only; exhausted observation budget cannot replace its error.
-            observeSnapshotState(root, waiter: result)
+            observeSnapshotState(root, waiter: result, selectedRecoveryProject: selectedRecoveryProject)
         }
         if let phase = consentObservation, failureCount > 0 || result != .completed || matchCount != 1 {
             observeRecoveryConsent(root, phase: phase, waiter: result, matches: matchCount)
@@ -5205,7 +5321,13 @@ final class NormalAppUITests: XCTestCase {
             }
             throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)
         }
-        try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared", line: line)
+        let presentAtReadback = first.exists
+        let readyAtReadback = presentAtReadback && (!enabled || first.isEnabled)
+        if !readyAtReadback && snapshotObservation {
+            print("MRK_GUIDED_READBACK_LOST=v1;line=\(line);present=\(presentAtReadback ? 1 : 0)")
+            observeSnapshotState(root, waiter: result, selectedRecoveryProject: selectedRecoveryProject)
+        }
+        try require(readyAtReadback, "expected UI condition disappeared", line: line)
         return first
     }
     @MainActor private func waitForSnapshotIdentity(_ query: XCUIElementQuery, in renderer: XCUIElement,
@@ -5219,7 +5341,8 @@ final class NormalAppUITests: XCTestCase {
             "Static observation unavailable", "Only a partial static observation is available",
         ], snapshotObservation: true, line: line)
     }
-    @MainActor private func observeSnapshotState(_ root: XCUIElement, waiter: XCTWaiter.Result) {
+    @MainActor private func observeSnapshotState(_ root: XCUIElement, waiter: XCTWaiter.Result,
+                                                 selectedRecoveryProject: String? = nil) {
         guard let clock = caseClock else { return }
         let end = min(clock.deadline, journeyDeadline ?? clock.deadline)
         let start = ProcessInfo.processInfo.systemUptime
@@ -5352,30 +5475,132 @@ final class NormalAppUITests: XCTestCase {
         guard finish >= last, clock.observationAllowed(finish, before: end) else { return }
         let state = waiter == .completed ? "completed" : waiter == .timedOut ? "timed-out" : "other"
         print("MRK_NORMAL_SNAPSHOT_STATE=v2;sample=post-wait;waiter=\(state);\(fields.joined(separator: ";"));firstKnownReason=\(firstKnownReason);nonAtomic=1")
+        if let project = selectedRecoveryProject, projectRequireDiagnosticMethod == .guidedRecovery {
+            let alias = "/tmp/" + String(project.dropFirst("/private/tmp/".count))
+            let parent = URL(fileURLWithPath: project).deletingLastPathComponent().path
+            let projectFacts = [
+                ("folder", "Selected project folder"), ("unselected", "No folder selected"),
+                ("choose-error", "The project could not be selected"), ("read-error", "Project read details"),
+                ("exact-path", project), ("tmp-alias", alias), ("fixture-parent", parent),
+            ]
+            for (key, value) in projectFacts {
+                let count = min(observed.filter { $0.contains(value) }.count, 5)
+                print("MRK_RECOVERY_PROJECT_OPEN=v1;\(key)=\(count)")
+            }
+        }
     }
     @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5, line: UInt = #line) throws {
         let wait = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
         try require(XCTWaiter.wait(for: [wait], timeout: try remaining(timeout)) == .completed,
                     "owned UI did not dismiss in " + journeyStage, line: line)
     }
-    @MainActor private func reveal(_ element: XCUIElement, in renderer: XCUIElement, line: UInt = #line) throws {
-        // Scroll only the original renderer; never an arbitrary screen position,
-        // another application or a filesystem/default-location setter.
+    @MainActor private func waitForGuidedStartupProject(_ renderer: XCUIElement) throws {
+        guard let clock = caseClock, let journeyDeadline else {
+            throw Refusal.condition("original guided startup deadline missing")
+        }
+        let end = min(journeyDeadline, try clock.end(within: 24))
+        let query = controls(renderer, [.button], label: "Choose project folder")
+        let failures = Self.guidedWorkspaceFailures
+        let terminal = renderer.staticTexts.matching(NSPredicate(
+            format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
+        var ready = false
+        while true {
+            try checkOriginalOwners()
+            _ = try clock.remaining(1, before: end)
+            try require(terminal.count == 0, "terminal UI refusal during guided startup")
+            let count = query.count
+            try require(count <= 1, "guided startup project control is ambiguous", check: .singleton)
+            let item = query.element(boundBy: 0)
+            let observed = count == 1 && item.exists && item.isEnabled
+            _ = try clock.remaining(1, before: end)
+            // Bootstrap may briefly change the enabled state after the window
+            // appears. Require two affirmative observations within one cutoff.
+            if observed && ready { return }
+            ready = observed
+            try clock.progress(until: end)
+        }
+    }
+    @MainActor private func reveal(_ element: XCUIElement, in surface: XCUIElement, line: UInt = #line) throws {
+        // Scroll only the identified surface inside the original renderer.
         for direction in [-1.0, 1.0] {
             for _ in 0..<8 {
                 if element.isHittable { return }
                 _ = try remaining(5)
-                renderer.scroll(byDeltaX: 0, deltaY: CGFloat(direction * 550))
+                surface.scroll(byDeltaX: 0, deltaY: CGFloat(direction * 550))
             }
         }
         try require(element.isHittable, "expected renderer control could not be revealed in " + journeyStage, line: line)
     }
     @MainActor private func press(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
                                  failures: [String] = [], timeout: TimeInterval = 5, line: UInt = #line) throws {
-        let item = try waitElement(root.buttons.matching(identifier: label), in: root, enabled: true,
+        let guidedLabels = ["Open project folder": "Choose project folder", "Credentials": "Signing & accounts",
+                            "Environment": "Build tools", "Releases": "Build & release", "Artifacts": "Build files",
+                            "Recovery": "Recover work", "Metadata": "Store listing", "Dashboard": "Overview",
+                            "Preview GitHub setup": "Preview without saving (optional)"]
+        let guided = guidedProductSurface && root == renderer
+        let displayed = guided ? guidedLabels[label] ?? label : label
+        let sidebarLabels = ["Overview", "Build & release", "Store listing", "Signing & accounts",
+                             "Project settings", "Build tools", "GitHub", "Build files", "Recover work", "Automation"]
+        let inSidebar = guided && sidebarLabels.contains(displayed)
+        // The signed guided app scrolls its sidebar independently of the document.
+        // A gesture sent to the renderer's center can scroll the wrong pane.
+        let scope = inSidebar
+            ? try unique(named(renderer, "Workspace navigation"), "workspace navigation missing or ambiguous", line: line)
+            : root
+        let item = try waitElement(scope.buttons.matching(identifier: displayed), in: root, enabled: true,
                                    timeout: timeout, failures: failures, line: line)
-        try reveal(item, in: renderer, line: line)
+        if inSidebar && !item.isHittable {
+            print("MRK_GUIDED_NAV=v1;line=\(line);phase=sidebar-scroll")
+        }
+        try reveal(item, in: inSidebar ? scope : renderer, line: line)
+        if inSidebar {
+            print("MRK_GUIDED_NAV=v1;line=\(line);phase=hittable")
+        }
         item.click()
+    }
+    private var guidedProductSurface: Bool {
+        let context = ProcessInfo.processInfo.environment
+        return context["MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] == "exact-0.2.13-frozen-ui"
+            && ["4e821384cd912562dd5e30b195e87c113bd2d09f",
+                "4feeced4ee513d824f8e44c50b3a340a7c39beed",
+                "e162063689313421abc8032e5a89b6b226a516ea"].contains(context["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? "")
+    }
+    @MainActor private func observeSelectedProject(_ renderer: XCUIElement, path: String) throws {
+        let failures = ["Static observation unavailable", "Only a partial static observation is available"]
+        if guidedProductSurface {
+            let title = URL(fileURLWithPath: path).lastPathComponent
+            let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", title))
+            _ = try waitElement(heading, in: renderer, failures: failures)
+            let caption = renderer.staticTexts.matching(identifier: "Selected project folder")
+            if caption.count == 0 {
+                let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                    label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
+                try reveal(details, in: renderer)
+                if caption.count == 0 {
+                    // Target the disclosure indicator within the verified
+                    // summary. Its native center can fall outside the control.
+                    details.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
+                }
+            }
+            do {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: path), in: renderer,
+                                    timeout: 24, failures: failures)
+            } catch {
+                let facts = ["selected-heading": heading.count,
+                    "folder-caption": renderer.staticTexts.matching(identifier: "Selected project folder").count,
+                    "unselected": renderer.staticTexts.matching(identifier: "No folder selected").count,
+                    "path-by-value": renderer.staticTexts.matching(NSPredicate(format: "value == %@", path)).count,
+                    "path-by-title": renderer.staticTexts.matching(NSPredicate(format: "title == %@", path)).count,
+                    "path-by-label": renderer.staticTexts.matching(NSPredicate(format: "label == %@", path)).count]
+                for (key, count) in facts.sorted(by: { $0.key < $1.key }) {
+                    print("MRK_GUIDED_PROJECT_SELECTION=v1;\(key)=\(min(count, 5))")
+                }
+                throw error
+            }
+        } else {
+            let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready."))
+            _ = try waitElement(heading, in: renderer, failures: failures)
+        }
     }
     @MainActor private func settingsTab(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
                                        line: UInt = #line) throws {
@@ -5385,6 +5610,17 @@ final class NormalAppUITests: XCTestCase {
         let item = try waitElement(root.checkBoxes.matching(identifier: label), in: root,
                                    enabled: true, line: line)
         try reveal(item, in: renderer, line: line)
+        item.click()
+    }
+    @MainActor private func guidedTaskTab(_ label: String, group: String, renderer: XCUIElement) throws {
+        guard guidedProductSurface else { return }
+        let tabs = try waitElement(named(renderer, group), in: renderer)
+        let captions = [label, label + " Needs attention", label + " Running"]
+        let query = tabs.descendants(matching: .any).matching(NSPredicate(
+            format: "elementType != %@ AND (identifier IN %@ OR label IN %@ OR title IN %@)",
+            NSNumber(value: XCUIElement.ElementType.staticText.rawValue), captions, captions, captions))
+        let item = try waitElement(query, in: tabs, enabled: true)
+        try reveal(item, in: renderer)
         item.click()
     }
     @MainActor private func field(_ root: XCUIElement, _ label: String, multiline: Bool = false) throws -> XCUIElement {
@@ -5400,22 +5636,54 @@ final class NormalAppUITests: XCTestCase {
         try require(input.value as? String == text, "typed synthetic field did not retain its exact value")
     }
     @MainActor private func select(_ root: XCUIElement, label: String, value: String,
-                                  renderer: XCUIElement, line: UInt = #line) throws {
+                                  renderer: XCUIElement, keyboardOptions: [String] = [], line: UInt = #line) throws {
+        var phase = "control"
+        defer {
+            if guidedProductSurface && phase != "settled" {
+                print("MRK_GUIDED_SELECT=v1;phase=\(phase);line=\(line)")
+            }
+        }
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
-                                     in: root, enabled: true, line: line)
+                                     in: root, enabled: true, snapshotObservation: guidedProductSurface, line: line)
+        let previous = control.value as? String
+        if guidedProductSurface && previous == value {
+            phase = "settled"
+            return
+        }
+        phase = "reveal"
         try reveal(control, in: renderer, line: line)
         // WebKit presents an AppKit NSMenu on a transient view, not as a
         // descendant of the HTML select. Monitor the already-owned payload;
         // this never launches or adopts another application.
         let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         control.click()
+        phase = "item"
+        if !keyboardOptions.isEmpty {
+            guard let previous, let from = keyboardOptions.firstIndex(of: previous),
+                  let destination = keyboardOptions.firstIndex(of: value) else {
+                throw Refusal.condition("the menu's current value or intended choice is unknown")
+            }
+            let direction = destination > from ? XCUIKeyboardKey.downArrow : XCUIKeyboardKey.upArrow
+            for _ in 0..<abs(destination - from) {
+                app.typeKey(direction.rawValue, modifierFlags: [])
+            }
+            app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+            phase = "written-value"
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: control)
+            try require(XCTWaiter.wait(for: [selected], timeout: try remaining(5)) == .completed,
+                        "the exact keyboard menu choice was not selected", line: line)
+            phase = "settled"
+            return
+        }
         // A menu-tree query can include closed menu-bar subtrees. The intended
         // exact menu item, not an empty application menu census, is the action.
         let item = try waitElement(app.menuItems.matching(identifier: value), in: app, enabled: true, line: line)
         try require(item.isHittable, "owned selection menu item is not actionable")
         item.click()
+        phase = "written-value"
         try waitGone(item, line: line)
         try require(control.value as? String == value, "selected value was not observed")
+        phase = "settled"
     }
     @MainActor private func expand(_ root: XCUIElement, prefix: String, renderer: XCUIElement,
                                   line: UInt = #line) throws {
@@ -5462,23 +5730,33 @@ final class NormalAppUITests: XCTestCase {
         try reveal(ready, in: renderer, line: line); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
-    @MainActor private func waitForGuidedProjectPicker(_ window: XCUIElement) throws -> XCUIElement {
+    @MainActor private func waitForGuidedProjectPicker(_ window: XCUIElement,
+                                                       title: String = "Choose a mobile project folder") throws -> XCUIElement {
         guard let clock = caseClock, let journeyDeadline else {
             throw Refusal.condition("original project picker deadline missing")
         }
         let end = min(try clock.end(within: 5), journeyDeadline)
-        let title = "Choose a mobile project folder"
+        var observed = "absent"
+        defer {
+            if guidedProductSurface {
+                print("MRK_GUIDED_PICKER=v1;observed=\(observed)")
+            }
+        }
         // XCTest's predicate waiter can report timeout even when the original
         // window has one matching sheet. Observe that sheet directly and
         // check the same deadline again after the original AX calls return.
         while true {
             try checkOriginalOwners()
             _ = try clock.remaining(1, before: end)
-            if window.sheets.count == 1 {
+            let count = window.sheets.count
+            if count == 1 {
                 let sheet = window.sheets.element(boundBy: 0)
                 let matches = sheet.exists && (sheet.label == title || sheet.staticTexts.matching(identifier: title).count == 1)
                 _ = try clock.remaining(1, before: end)
+                observed = matches ? "expected" : "other"
                 if matches { return sheet }
+            } else if count > 1 {
+                observed = "multiple"
             }
             try clock.progress(until: end)
         }
@@ -5783,6 +6061,10 @@ final class NormalAppUITests: XCTestCase {
                 }
                 throw error
             }
+        } else if guidedProductSurface {
+            try require(profile == .currentCandidateOrdinary || profile == .currentCandidateIOSTools,
+                        "guided product surface requires the scoped signed candidate")
+            try waitForGuidedStartupProject(renderer)
         } else {
             try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         }
@@ -5805,15 +6087,27 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func privateStatus(_ storage: XCUIElement, action: String,
                                          phase: String = "idle", mutation: Bool = false) throws {
-        let original = try waitElement(named(storage, "Original private-input operation"), in: storage,
+        let operationLabel = guidedProductSurface ? "Private-input operation" : "Original private-input operation"
+        let original = try waitElement(named(storage, operationLabel), in: storage,
                                        timeout: 48, failures: Self.privateInputFailures)
-        try privateValue(storage, original, label: "Private-input operation action", value: action, timeout: 48)
-        try privateValue(storage, original, label: "Private-input operation phase", value: phase, timeout: 48)
-        try privateValue(storage, original, label: "Private-input operation settlement", value: "known", timeout: 48)
+        for (field, value) in [("action", action), ("phase", phase), ("settlement", "known")] {
+            do {
+                try privateValue(storage, original, label: "Private-input operation \(field)", value: value, timeout: 48)
+            } catch {
+                if guidedProductSurface {
+                    let group = named(original, "Private-input operation \(field)").count > 0 ? 1 : 0
+                    let observed = original.staticTexts.matching(identifier: value).count > 0 ? 1 : 0
+                    let preview = named(storage, "Explicit private-input review").count > 0 ? 1 : 0
+                    print("MRK_GUIDED_VAULT_STATUS=v1;action=\(action);field=\(field);group=\(group);value=\(observed);preview=\(preview)")
+                }
+                throw error
+            }
+        }
         if mutation {
-            try privateValue(storage, original, label: "Private-input storage effect", value: "known-applied")
-            try privateValue(storage, original, label: "Private-input storage durability", value: "confirmed")
-            try privateValue(storage, original, label: "Private-input storage cleanup", value: "known")
+            let outcomeLabel = guidedProductSurface ? "Where your keys are kept" : "Private-input storage"
+            try privateValue(storage, original, label: outcomeLabel + " effect", value: "known-applied")
+            try privateValue(storage, original, label: outcomeLabel + " durability", value: "confirmed")
+            try privateValue(storage, original, label: outcomeLabel + " cleanup", value: "known")
         }
     }
     @MainActor private func privateContext(_ storage: XCUIElement, renderer: XCUIElement,
@@ -5859,18 +6153,25 @@ final class NormalAppUITests: XCTestCase {
         return review
     }
     @MainActor private func privateAssessment(_ storage: XCUIElement, input: PrivateInput) throws {
-        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", "Supplied-input assessment")), in: storage,
-                            failures: Self.privateInputFailures)
+        let title = guidedProductSurface ? "File check" : "Supplied-input assessment"
+        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@ OR label == %@", title, title)), in: storage,
+                            timeout: 12, failures: Self.privateInputFailures)
+        print("MRK_GUIDED_VAULT_ASSESSMENT=v1;stage=heading")
         try require(storage.staticTexts.matching(identifier: "Configured only").count >= 1,
                     "mechanical supplied-input assessment did not configure this input")
-        for label in [input.envelopeHelp, "Native validation: not run", "Service validation: not run", "Release readiness: unknown"] {
+        for (stage, label) in [("envelope", input.envelopeHelp), ("native", "Native validation: not run"),
+                               ("service", "Service validation: not run"), ("release", "Release readiness: unknown")] {
             _ = try waitElement(storage.staticTexts.matching(identifier: label), in: storage, failures: Self.privateInputFailures)
+            print("MRK_GUIDED_VAULT_ASSESSMENT=v1;stage=\(stage)")
         }
     }
     @MainActor private func choosePrivate(_ storage: XCUIElement, window: XCUIElement, renderer: XCUIElement,
                                          fixture: LocalFixture, input: PrivateInput, replacement: String? = nil,
                                          cancel: Bool = false) throws {
-        try select(storage, label: "What would you like to provide?", value: input.rawValue, renderer: renderer)
+        let fileKinds = ["Android upload keystore", "Android Firebase client document", "iOS Firebase client document",
+                         PrivateInput.p12.rawValue, PrivateInput.profile.rawValue, "App Store Connect API key"]
+        try select(storage, label: "What would you like to provide?", value: input.rawValue, renderer: renderer,
+                   keyboardOptions: guidedProductSurface ? fileKinds : [])
         try select(storage, label: "New or replacement copy?", value: replacement ?? "Save a new encrypted record", renderer: renderer)
         try press(storage, "Select file…", renderer: renderer, failures: Self.privateInputFailures)
         let sheet = try nativeSheet(window, title: "Choose a signing or iOS build-input file")
@@ -5887,23 +6188,34 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func savePrivate(_ storage: XCUIElement, renderer: XCUIElement, fixture: LocalFixture,
                                        input: PrivateInput, label: String, reviewTarget: String,
                                        replacement: Bool = false) throws {
-        if input == .p12 {
-            let password = try waitElement(controls(storage, [.secureTextField], label: "P12 export password", prefix: true),
-                                           in: storage, enabled: true, failures: Self.privateInputFailures)
-            try reveal(password, in: renderer); password.click()
-            // Fictional DATA typed into the ordinary write-only field. Do not
-            // inspect its masked value, use the clipboard or change app state.
-            password.typeText(replacement ? "MRK-inert-password-v2" : "MRK-inert-password-v1")
+        try stage("vault-write-only-fields") {
+            if input == .p12 {
+                let password = try waitElement(controls(storage, [.secureTextField], label: "P12 export password", prefix: true),
+                                               in: storage, enabled: true, failures: Self.privateInputFailures)
+                try reveal(password, in: renderer); password.click()
+                // Never inspect the masked field or use the clipboard.
+                password.typeText(replacement ? "MRK-inert-password-v2" : "MRK-inert-password-v1")
+            }
+            try replace(field(storage, "Vault label (optional)"), with: label, renderer: renderer)
         }
-        try replace(field(storage, "Vault label (optional)"), with: label, renderer: renderer)
-        try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
-        try privateStatus(storage, action: "prepare", phase: "preview")
-        try privateAssessment(storage, input: input)
-        let review = try privateReview(storage, title: "Save this encrypted input?", target: reviewTarget)
-        try fixture.assertUnchanged()
-        try press(review, "Save encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
-        try privateStatus(storage, action: "commit", mutation: true)
-        try require(named(storage, "Explicit private-input review").count == 0, "saving retained an assignment review")
+        try stage("vault-file-assessment") {
+            try stage("vault-prepare-request") {
+                try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
+            }
+            try stage("vault-prepare-receipt") {
+                try privateStatus(storage, action: "prepare", phase: "preview")
+            }
+            try stage("vault-assessment-readback") {
+                try privateAssessment(storage, input: input)
+            }
+        }
+        try stage("vault-file-commit") {
+            let review = try privateReview(storage, title: "Save this encrypted input?", target: reviewTarget)
+            try fixture.assertUnchanged()
+            try press(review, "Save encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "commit", mutation: true)
+            try require(named(storage, "Explicit private-input review").count == 0, "saving retained an assignment review")
+        }
     }
     @MainActor private func assignPrivate(_ storage: XCUIElement, renderer: XCUIElement, fixture: LocalFixture,
                                          input: PrivateInput, label: String, revision: Int) throws {
@@ -6079,6 +6391,8 @@ final class NormalAppUITests: XCTestCase {
         try beginCase(seconds: 300)
         let fixture = LocalFixture()
         ownedFixture = fixture
+        let platforms = guidedProductSurface ? ["Android", "iOS", "Project dependency access"] : []
+        let purposes = guidedProductSurface ? ["All selected input roles", "Build / signing only", "Store access only"] : []
         try stage("persistence-admission") {
             _ = try admittedJourneyApplication(profile: normalJourneyProfile(for: "persistence-test.xcresult"))
             try fixture.admitDefaultVault() // Before any application launch.
@@ -6095,19 +6409,38 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Open project folder", renderer: renderer)
             let project = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected persistence project differs")
             try press(renderer, "Credentials", renderer: renderer)
-            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+            let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
+            let storage = try waitElement(named(renderer, storageLabel), in: renderer)
             selectedStorage = storage
-            try select(storage, label: "Platform", value: "iOS", renderer: renderer)
-            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
-            try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
-            try privateStatus(storage, action: "open-vault")
-            _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
-                                failures: Self.privateInputFailures)
+            @MainActor func openVault() throws {
+                try stage("persistence-open-vault") {
+                    try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+                    do {
+                        try privateStatus(storage, action: "open-vault")
+                    } catch {
+                        let operation = named(storage, "Private-input operation").count == 1 ? 1 : 0
+                        let action = named(storage, "Private-input operation action").count > 0 ? 1 : 0
+                        let uninitialized = storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized").count > 0 ? 1 : 0
+                        let closed = storage.staticTexts.matching(identifier: "Storage closed").count > 0 ? 1 : 0
+                        print("MRK_GUIDED_VAULT_OPEN=v1;operation=\(operation);action=\(action);uninitialized=\(uninitialized);closed=\(closed)")
+                        throw error
+                    }
+                    _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
+                                        failures: Self.privateInputFailures)
+                }
+            }
+            // The current Signing & accounts page starts by choosing storage.
+            // Check vault admission independently of release-context selection.
+            if guidedProductSurface { try openVault() }
+            try stage("persistence-scope") {
+                try select(storage, label: "Platform", value: "iOS", renderer: renderer, keyboardOptions: platforms)
+                try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+                try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
+            }
+            if !guidedProductSurface { try openVault() }
             try fixture.assertDefaultVaultAbsent()
             try privateRecordCount(storage, count: 0, assigned: 0)
             try press(storage, "Review vault initialization…", renderer: renderer, failures: Self.privateInputFailures)
@@ -6137,10 +6470,10 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("persistence-context-invalidation") {
             try privateRecordCount(storage, count: 2, assigned: 2)
-            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer, keyboardOptions: purposes)
             try privateContext(storage, renderer: renderer)
             try privateRecordCount(storage, count: 2, assigned: 0)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer, keyboardOptions: purposes)
             try privateContext(storage, renderer: renderer)
             try privateRecordCount(storage, count: 2, assigned: 0)
             try fixture.assertStoreUnchanged()
@@ -6219,18 +6552,18 @@ final class NormalAppUITests: XCTestCase {
             try press(restartedRenderer, "Open project folder", renderer: restartedRenderer)
             let project = try nativeSheet(restartedWindow, title: "Choose a mobile project folder")
             try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
-            _ = try waitElement(restartedRenderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: restartedRenderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(restartedRenderer, path: fixture.projectPath)
             _ = try unique(restartedRenderer.staticTexts.matching(identifier: fixture.projectPath), "restarted persistence project differs")
             try press(restartedRenderer, "Credentials", renderer: restartedRenderer)
-            let storage = try waitElement(named(restartedRenderer, "Private-input storage controls"), in: restartedRenderer)
+            let storageLabel = guidedProductSurface ? "Where your keys are kept controls" : "Private-input storage controls"
+            let storage = try waitElement(named(restartedRenderer, storageLabel), in: restartedRenderer)
             restartedStorage = storage
             _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
                                 failures: Self.privateInputFailures)
             try privateRecordCount(storage, count: 0, assigned: 0)
-            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer)
+            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer, keyboardOptions: platforms)
             try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: restartedRenderer)
-            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer, keyboardOptions: purposes)
             // Same default vault/provider/helper, never a second Initialize or
             // fixture admission. Opening must be locked with no exposed rows.
             try openAndUnlockPrivateVault(storage, renderer: restartedRenderer)
@@ -6280,8 +6613,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -6305,14 +6637,14 @@ final class NormalAppUITests: XCTestCase {
                 if let name = chosen {
                     // WebKit may expose the strong text separately or coalesce
                     // that one paragraph. Both comparisons name the exact leaf.
-                    _ = try waitStaticText(group, matching: .equalOrContains(name,
-                        "Selected folder: " + name + " · folder selection only."), timeout: 48)
+                    let caption = guidedProductSurface ? "Selected: " + name : "Selected folder: " + name + " · folder selection only."
+                    _ = try waitStaticText(group, matching: .equalOrContains(name, caption), timeout: 48)
                 } else {
                     // The unselected paragraph has only these two complete
                     // renderings (separate conditional text or coalesced text).
                     // Exact native equality avoids scanning every AX attribute
                     // under the original five-second observation allowance.
-                    let captions = ["No folder selected for this project.",
+                    let captions = guidedProductSurface ? ["Not selected yet."] : ["No folder selected for this project.",
                                     "Required before registering Android tools. No folder selected for this project."]
                     _ = try waitElement(group.staticTexts.matching(NSPredicate(
                         format: "value IN %@ OR label IN %@ OR title IN %@",
@@ -6333,9 +6665,16 @@ final class NormalAppUITests: XCTestCase {
         @MainActor func androidBrowse(_ role: String, title: String, relative: String,
                                       cancel: Bool = false, refused: Bool = false) throws {
             try require(!(cancel && refused), "fixed Android source outcome is ambiguous")
+            var phase = "original-group"
+            defer {
+                if guidedProductSurface && phase != "settled" {
+                    print("MRK_GUIDED_ANDROID_SOURCE=v1;role=\(role);phase=\(phase)")
+                }
+            }
             let group = try androidGroup(role)
             try press(group, androidSelections[role] == nil ? "Browse for folder" : "Choose a different folder",
                       renderer: renderer, timeout: 48)
+            phase = "native-picker"
             let sheet = try nativeSheet(window, title: title)
             if cancel {
                 try click(sheet.buttons.matching(identifier: "Cancel"), "owned Android source Cancel unavailable")
@@ -6345,13 +6684,14 @@ final class NormalAppUITests: XCTestCase {
             } else {
                 try goToFolder(sheet, path: fixture.rootPath + "/" + relative)
                 try nativeOpen(sheet) // Genuine enabled Open, never file exclusion or Cancel.
+                phase = "returned-status"
                 if refused {
                     // Mac source parts rejects the 128th normal component
                     // before SourceBook.begin. Other outcomes must fail.
                     try androidStatus("Folder selection could not be used",
                         reason: "Choose a real, readable local folder, not an alias or archive. This check does not inspect the tools inside it.")
                 } else {
-                    try androidStatus("Original folder selection retained",
+                    try androidStatus(guidedProductSurface ? "Folder selection retained" : "Original folder selection retained",
                         reason: "Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status.")
                     guard let name = relative.split(separator: "/").last else {
                         throw Refusal.condition("fixed Android source leaf is absent")
@@ -6361,11 +6701,13 @@ final class NormalAppUITests: XCTestCase {
             }
             // Cancel/refusal never replace the prior three role selections.
             // Enabled Browse also waits for the original Status gate to settle.
+            phase = "retained-selections"
             try androidRetained()
             try fixture.assertUnchanged()
+            phase = "settled"
         }
         try stage("android-source-jdk") {
-            try press(renderer, "Releases", renderer: renderer)
+            try press(renderer, guidedProductSurface ? "Build tools" : "Releases", renderer: renderer)
             try androidRetained()
             try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk.jdk")
         }
@@ -6375,15 +6717,25 @@ final class NormalAppUITests: XCTestCase {
         try stage("android-source-gradle") {
             try androidBrowse("gradle", title: "Choose an extracted Gradle distribution folder", relative: "sources/tool-gradle")
         }
+        @MainActor func verifyRefusedAndroidSource() throws {
+            try stage("android-source-refused") {
+                try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder",
+                                  relative: LocalFixture.androidRefusedDirectory, refused: true)
+            }
+        }
+        // Check refusal while all three original targets are already selected
+        // and before the independent Cancel and Replace gestures use the clock.
+        if guidedProductSurface {
+            try verifyRefusedAndroidSource()
+        }
         try stage("android-source-cancel") {
             try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk.jdk", cancel: true)
         }
         try stage("android-source-reselect") {
             try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk-replacement.jdk")
         }
-        try stage("android-source-refused") {
-            try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder",
-                              relative: LocalFixture.androidRefusedDirectory, refused: true)
+        if !guidedProductSurface {
+            try verifyRefusedAndroidSource()
         }
 
         try stage("quit") {
@@ -6641,22 +6993,11 @@ final class NormalAppUITests: XCTestCase {
             let picker = try waitForGuidedProjectPicker(window)
             try goToFolder(picker, path: project)
             try nativeOpen(picker)
-            let failures = Self.guidedWorkspaceFailures + ["The project could not be selected", "Project read details"]
-            guard let clock = caseClock, let journeyDeadline else {
-                throw Refusal.condition("recovery project selection deadline is missing")
-            }
-            let selectionDeadline = min(journeyDeadline, try clock.end(within: 24))
-            let title = URL(fileURLWithPath: project).lastPathComponent
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", title)),
-                                in: renderer, timeout: try clock.remaining(5, before: selectionDeadline),
-                                failures: failures, snapshotObservation: true)
-            let selectedPath = renderer.staticTexts.matching(identifier: project)
-            if selectedPath.count == 0 {
-                try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
-            }
-            _ = try waitElement(selectedPath, in: renderer,
-                                timeout: try clock.remaining(24, before: selectionDeadline), failures: failures,
-                                snapshotObservation: true)
+            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
+                                timeout: 24,
+                                failures: Self.guidedWorkspaceFailures + ["The project could not be selected", "Project read details"],
+                                snapshotObservation: true, selectedRecoveryProject: project)
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)
@@ -6765,8 +7106,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -6774,6 +7114,15 @@ final class NormalAppUITests: XCTestCase {
 
         @MainActor func settings(_ tab: String) throws {
             try press(renderer, "Project settings", renderer: renderer)
+            if guidedProductSurface {
+                let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@",
+                    "2. Point to the app’s build inputs"))
+                if heading.count == 0 {
+                    try press(renderer, "Next: Version & build", renderer: renderer)
+                }
+                _ = try waitElement(heading, in: renderer)
+                return
+            }
             let tabs = try waitElement(named(renderer, "Settings section"), in: renderer)
             try settingsTab(tabs, tab, renderer: renderer)
         }
@@ -6784,11 +7133,12 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(fields.matching(NSPredicate(format: "value == %@", relative)), in: renderer, timeout: 48,
                                 projectFieldObservation: field.map { ($0, fields, relative) })
             _ = try waitElement(renderer.buttons.matching(identifier: "Browse existing " + label),
-                                in: renderer, enabled: true, timeout: 48)
+                                in: renderer, enabled: true, timeout: 48, snapshotObservation: guidedProductSurface)
         }
         @MainActor func browse(_ label: String, title: String, relative: String, cancel: Bool = false) throws {
             try press(renderer, "Browse existing " + label, renderer: renderer)
-            let sheet = try nativeSheet(window, title: title)
+            let sheet = try guidedProductSurface ? waitForGuidedProjectPicker(window, title: title)
+                                               : nativeSheet(window, title: title)
             if cancel {
                 try click(sheet.buttons.matching(identifier: "Cancel"), "owned project-field Cancel unavailable")
                 try waitGone(sheet)
@@ -6840,10 +7190,11 @@ final class NormalAppUITests: XCTestCase {
             try selected("Store metadata folder", relative: "metadata")
             try settings("General")
             try selected("Committed version file", relative: "inputs/VERSION")
-            try settings("iOS")
+            // The guided version and Xcode inputs share one group.
+            if !guidedProductSurface { try settings("iOS") }
             try selected("Xcode project", relative: "ios/Example.xcodeproj")
             try selected("Xcode workspace", relative: "ios/Example.xcworkspace")
-            try press(renderer, "Review draft changes", renderer: renderer)
+            try press(renderer, guidedProductSurface ? "Check what’s needed" : "Review draft changes", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "Current draft · retained baseline"), in: renderer)
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation needs attention")),
                                 in: renderer)
@@ -6874,6 +7225,11 @@ final class NormalAppUITests: XCTestCase {
         try syntheticProjectJourney(includeImages: true)
     }
     @MainActor private func syntheticProjectJourney(includeImages: Bool) throws {
+        let scope = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_METADATA_ONLY"]
+        let metadataOnly = scope == "fixed-metadata-journey-v1"
+        guard scope == nil || (metadataOnly && includeImages && guidedProductSurface) else {
+            throw Refusal.condition("the standalone metadata journey requires the exact guided candidate")
+        }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -6897,7 +7253,14 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try click(sheet.buttons.matching(identifier: "Cancel"), "native folder Cancel unavailable")
             try waitGone(sheet)
-            try dashboard(renderer)
+            if guidedProductSurface {
+                let choose = renderer.buttons.matching(identifier: "Choose project folder")
+                _ = try waitElement(choose, in: renderer, enabled: true)
+                try require(renderer.staticTexts.matching(identifier: "Get your app ready.").count > 0,
+                            "the original empty Overview did not return after Cancel")
+            } else {
+                try dashboard(renderer)
+            }
             try fixture.assertUnchanged()
         }
         try stage("project-open") {
@@ -6905,8 +7268,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             // Fixed public fixture expectations only. Snapshot before the original
             // wait; never inspect new AX values after its first failure.
@@ -6923,9 +7285,24 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
         try stage("config") {
-            try press(renderer, "Project settings", renderer: renderer)
-            let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
-            try settingsTab(settings, "General", renderer: renderer)
+            @MainActor func projectDefaults() throws {
+                try press(renderer, "Project settings", renderer: renderer)
+                if guidedProductSurface {
+                    let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@",
+                        "3. Review the project defaults"))
+                    if heading.count == 0 {
+                        if renderer.buttons.matching(identifier: "Next: Version & build").count == 1 {
+                            try press(renderer, "Next: Version & build", renderer: renderer)
+                        }
+                        try press(renderer, "Next: Project defaults", renderer: renderer)
+                    }
+                    _ = try waitElement(heading, in: renderer)
+                } else {
+                    let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
+                    try settingsTab(settings, "General", renderer: renderer)
+                }
+            }
+            try projectDefaults()
             let candidate = try field(renderer, "Candidate branch")
             try require(candidate.value as? String == "main", "saved candidate branch was not loaded")
             try replace(candidate, with: "qa-candidate", renderer: renderer)
@@ -6934,15 +7311,25 @@ final class NormalAppUITests: XCTestCase {
             try press(locales, "Add entry", renderer: renderer)
             try replace(field(locales, "Android locales, entry 2"), with: "fr-FR", renderer: renderer)
             // The SAME unsaved configuration must survive page navigation.
-            try press(renderer, "Project settings", renderer: renderer)
+            try projectDefaults()
             try require(field(renderer, "Candidate branch").value as? String == "qa-candidate", "navigation lost the branch draft")
             try press(renderer, "Metadata", renderer: renderer)
             try require(field(renderer, "Android locales, entry 2").value as? String == "fr-FR", "navigation lost the locale draft")
+            if guidedProductSurface {
+                try expand(renderer, prefix: "Check without saving", renderer: renderer)
+            }
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "value == %@", "Format validation complete")), in: renderer,
+            let validationAttribute = guidedProductSurface ? "title" : "value"
+            let validated = renderer.staticTexts.matching(NSPredicate(format: "%K == %@", validationAttribute, "Format validation complete"))
+            _ = try waitElement(validated, in: renderer,
                                 failures: Self.configurationFailures)
-            try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
-            let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
+            if guidedProductSurface {
+                try press(renderer, "Project settings", renderer: renderer)
+            }
+            try press(renderer, guidedProductSurface ? "Review & save…" : "Prepare save review", renderer: renderer,
+                      failures: Self.configurationFailures)
+            let reviewLabel = guidedProductSurface ? "Review and save project settings" : "Native configuration save"
+            let review = try waitElement(named(renderer, reviewLabel), in: renderer)
             _ = try waitElement(review.buttons.matching(identifier: "Apply reviewed save"), in: review,
                                 enabled: true, timeout: 48, failures: Self.configurationFailures)
             try inventory(review, caption: "Exact native destination inventory", paths: ["release/mobile-release.json", ".gitignore"])
@@ -6957,66 +7344,91 @@ final class NormalAppUITests: XCTestCase {
                                 timeout: 48, failures: Self.configurationFailures)
             try fixture.accept("config")
             try press(renderer, "Dashboard", renderer: renderer)
-            let earlier = try waitElement(renderer.staticTexts.matching(identifier: "This static observation predates the last settled save check"), in: renderer)
-            try press(renderer, "Refresh static view", renderer: renderer)
+            let staleLabel = guidedProductSurface ? "Saved settings need another look"
+                : "This static observation predates the last settled save check"
+            let earlier = try waitElement(renderer.staticTexts.matching(identifier: staleLabel), in: renderer)
+            if guidedProductSurface {
+                try observeSelectedProject(renderer, path: fixture.projectPath)
+            }
+            try press(renderer, guidedProductSurface ? "Read project settings again" : "Refresh static view", renderer: renderer)
             try waitGone(earlier)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
-        try stage("github") {
-            try press(renderer, "GitHub", renderer: renderer)
-            try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
-            try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
-            let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
-                                        "optional comparison control is unavailable")
-            try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
-                        "passive supplied comparison unexpectedly enabled")
-            try press(renderer, "Preview GitHub setup", renderer: renderer)
-            let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
-                                          failures: Self.workflowFailures)
-            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
-            for path in LocalFixture.callers {
-                let shownPath = String(path.dropFirst("project/".count))
-                try expand(proposal, prefix: shownPath, renderer: renderer)
-                try displayed(proposal, label: "Read-only proposed content for " + shownPath,
-                              equals: fixture.text(path, stage: "workflows"))
+        if !metadataOnly {
+            try stage("github") {
+                try press(renderer, "GitHub", renderer: renderer)
+                try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
+                try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
+                try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
+                if guidedProductSurface {
+                    try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+                }
+                let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
+                                            "optional comparison control is unavailable")
+                try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
+                            "passive supplied comparison unexpectedly enabled")
+                if guidedProductSurface {
+                    try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
+                }
+                try press(renderer, "Preview GitHub setup", renderer: renderer)
+                let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                              failures: Self.workflowFailures)
+                _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+                for path in LocalFixture.callers {
+                    let shownPath = String(path.dropFirst("project/".count))
+                    try expand(proposal, prefix: shownPath, renderer: renderer)
+                    try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                                  equals: fixture.text(path, stage: "workflows"))
+                }
+                try fixture.assertUnchanged() // All four destinations are still absent.
+                let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
+                try press(review, "Review local workflow files", renderer: renderer, failures: Self.workflowFailures)
+                _ = try waitElement(review.buttons.matching(identifier: "Confirm reviewed local files"), in: review,
+                                    enabled: true, timeout: 48, failures: Self.workflowFailures)
+                let paths = LocalFixture.callers.map { String($0.dropFirst("project/".count)) }
+                try inventory(review, caption: "Complete native workflow inventory — all four or refuse", paths: paths)
+                for path in LocalFixture.callers {
+                    let shownPath = String(path.dropFirst("project/".count))
+                    try expand(review, prefix: shownPath, renderer: renderer)
+                    try displayed(review, label: "Complete added diff for " + shownPath,
+                                  equals: workflowDiff(fixture.text(path, stage: "workflows"), path: shownPath))
+                }
+                try fixture.assertUnchanged()
+                try press(review, "Confirm reviewed local files", renderer: renderer)
+                try confirmedDialog(renderer, title: "Apply this four-caller bundle?", action: "Apply reviewed local files",
+                                    checkbox: "I reviewed all four paths and complete before/after text.")
+                _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,
+                                    timeout: 48, failures: Self.workflowFailures)
+                try fixture.accept("workflows")
             }
-            try fixture.assertUnchanged() // All four destinations are still absent.
-            let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
-            try press(review, "Review local workflow files", renderer: renderer, failures: Self.workflowFailures)
-            _ = try waitElement(review.buttons.matching(identifier: "Confirm reviewed local files"), in: review,
-                                enabled: true, timeout: 48, failures: Self.workflowFailures)
-            let paths = LocalFixture.callers.map { String($0.dropFirst("project/".count)) }
-            try inventory(review, caption: "Complete native workflow inventory — all four or refuse", paths: paths)
-            for path in LocalFixture.callers {
-                let shownPath = String(path.dropFirst("project/".count))
-                try expand(review, prefix: shownPath, renderer: renderer)
-                try displayed(review, label: "Complete added diff for " + shownPath,
-                              equals: workflowDiff(fixture.text(path, stage: "workflows"), path: shownPath))
-            }
-            try fixture.assertUnchanged()
-            try press(review, "Confirm reviewed local files", renderer: renderer)
-            try confirmedDialog(renderer, title: "Apply this four-caller bundle?", action: "Apply reviewed local files",
-                                checkbox: "I reviewed all four paths and complete before/after text.")
-            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,
-                                timeout: 48, failures: Self.workflowFailures)
-            try fixture.accept("workflows")
         }
         try stage("text") {
             try press(renderer, "Metadata", renderer: renderer)
             let editor = try waitElement(named(renderer, "Configured public locale text")
-                .containing(.button, identifier: "Validate text"), in: renderer)
-            try select(editor, label: "Saved platform / locale", value: "android / fr-FR", renderer: renderer)
-            try press(editor, "Load public text", renderer: renderer, failures: Self.textFailures)
+                .containing(.button, identifier: "Review changes"), in: renderer)
+            try select(editor, label: guidedProductSurface ? "Language" : "Saved platform / locale",
+                       value: "android / fr-FR", renderer: renderer, keyboardOptions: ["android / en-US", "android / fr-FR"])
+            try press(editor, guidedProductSurface ? "Load text" : "Load public text", renderer: renderer, failures: Self.textFailures)
             for (label, file) in [("App title", "title.txt"), ("Short description", "short_description.txt"), ("Full description", "full_description.txt")] {
                 try require(field(editor, label, multiline: true).value as? String
                     == fixture.text("project/release/store/android/fr-FR/" + file), "original locale text was not loaded")
             }
-            try replace(field(editor, "App title", multiline: true), with: fixture.text(LocalFixture.title, stage: "text"), renderer: renderer)
-            try press(editor, "Validate text", renderer: renderer)
-            _ = try waitElement(editor.staticTexts.matching(identifier: "Format-valid selected text"), in: editor, failures: Self.textFailures)
+            let validate = guidedProductSurface ? "Check text" : "Validate text"
+            let title = try field(editor, "App title", multiline: true)
+            if metadataOnly {
+                try replace(title, with: String(repeating: "x", count: 31), renderer: renderer)
+                try press(editor, validate, renderer: renderer)
+                _ = try waitElement(editor.staticTexts.matching(identifier: "Needs changes"), in: editor)
+                let refused = try unique(editor.buttons.matching(identifier: "Review changes"), "invalid text review control is ambiguous")
+                try require(!refused.isEnabled, "over-limit text can enter a save review")
+                try fixture.assertUnchanged()
+            }
+            try replace(title, with: fixture.text(LocalFixture.title, stage: "text"), renderer: renderer)
+            try press(editor, validate, renderer: renderer)
+            _ = try waitElement(editor.staticTexts.matching(identifier: guidedProductSurface ? "Text looks good" : "Format-valid selected text"), in: editor, failures: Self.textFailures)
             try press(editor, "Review changes", renderer: renderer, failures: Self.textFailures)
-            let review = try waitElement(named(renderer, "Original metadata file-save operation"), in: renderer)
+            let review = try waitElement(named(renderer, guidedProductSurface ? "Metadata file-save operation" : "Original metadata file-save operation"), in: renderer)
             _ = try waitElement(review.buttons.matching(identifier: "Save text…"), in: review,
                                 enabled: true, timeout: 48, failures: Self.textFailures)
             let names = ["title.txt", "short_description.txt", "full_description.txt"]
@@ -7030,9 +7442,13 @@ final class NormalAppUITests: XCTestCase {
             }
             try fixture.assertUnchanged()
             try press(review, "Save text…", renderer: renderer)
-            try confirmedDialog(renderer, title: "Save this reviewed locale bundle?", action: "Save text",
-                                checkbox: "I reviewed all exact paths, full original/replacement text, digests and line-ending changes.",
-                                typedLabel: "Type SAVE to confirm only this local text operation")
+            if guidedProductSurface {
+                try confirmedDialog(renderer, title: "Save your Store text?", action: "Save text", checkbox: "I reviewed the changes.")
+            } else {
+                try confirmedDialog(renderer, title: "Save this reviewed locale bundle?", action: "Save text",
+                                    checkbox: "I reviewed all exact paths, full original/replacement text, digests and line-ending changes.",
+                                    typedLabel: "Type SAVE to confirm only this local text operation")
+            }
             _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Text saved")), in: review, timeout: 48, failures: Self.textFailures)
             try fixture.accept("text")
             let older = try waitElement(editor.staticTexts.matching(identifier:
@@ -7043,33 +7459,35 @@ final class NormalAppUITests: XCTestCase {
                         "fresh text observation did not preserve the saved value")
             try fixture.assertUnchanged()
         }
-        try stage("version") {
-            try press(renderer, "Dashboard", renderer: renderer)
-            let editor = try waitElement(named(renderer, "Edit or create saved version values"), in: renderer)
-            try press(editor, "Open saved version editor", renderer: renderer, failures: Self.versionFailures)
-            let name = try field(editor, "Marketing version"), build = try field(editor, "Build number")
-            try require(name.value as? String == "1.2.3" && build.value as? String == "7", "original version was not loaded")
-            try replace(name, with: "2.3.4", renderer: renderer)
-            try replace(build, with: "8", renderer: renderer)
-            try press(editor, "Validate and review values", renderer: renderer, failures: Self.versionFailures)
-            _ = try waitElement(editor.buttons.matching(identifier: "Save version values…"), in: editor,
-                                enabled: true, timeout: 48, failures: Self.versionFailures)
-            try displayed(editor, label: "Complete original version source", equals: fixture.text(LocalFixture.version))
-            try displayed(editor, label: "Complete reviewed version source", equals: fixture.text(LocalFixture.version, stage: "version"))
-            try fixture.assertUnchanged()
-            try press(editor, "Save version values…", renderer: renderer)
-            try confirmedDialog(renderer, title: "Save these reviewed version values?", action: "Save version values",
-                                checkbox: "I reviewed the full original/after text, exact destination, byte comparisons, mode and directory/line-ending facts.",
-                                typedLabel: "Type SAVE to confirm this local operation")
-            _ = try waitElement(editor.staticTexts.matching(identifier: "Submitted version values saved"), in: editor,
-                                timeout: 48, failures: Self.versionFailures)
-            try fixture.accept("version")
-            let saved = try waitElement(named(renderer, "Saved version and build"), in: renderer)
-            try press(saved, "Read saved version", renderer: renderer)
-            _ = try waitElement(saved.staticTexts.matching(identifier: "Observed from saved version file"), in: saved)
-            _ = try unique(saved.staticTexts.matching(identifier: "2.3.4"), "fresh version observation is not the saved name")
-            _ = try unique(saved.staticTexts.matching(identifier: "Build number 8"), "fresh version observation is not the saved build")
-            try fixture.assertUnchanged()
+        if !metadataOnly {
+            try stage("version") {
+                try press(renderer, "Dashboard", renderer: renderer)
+                let editor = try waitElement(named(renderer, "Edit or create saved version values"), in: renderer)
+                try press(editor, "Open saved version editor", renderer: renderer, failures: Self.versionFailures)
+                let name = try field(editor, "Marketing version"), build = try field(editor, "Build number")
+                try require(name.value as? String == "1.2.3" && build.value as? String == "7", "original version was not loaded")
+                try replace(name, with: "2.3.4", renderer: renderer)
+                try replace(build, with: "8", renderer: renderer)
+                try press(editor, "Validate and review values", renderer: renderer, failures: Self.versionFailures)
+                _ = try waitElement(editor.buttons.matching(identifier: "Save version values…"), in: editor,
+                                    enabled: true, timeout: 48, failures: Self.versionFailures)
+                try displayed(editor, label: "Complete original version source", equals: fixture.text(LocalFixture.version))
+                try displayed(editor, label: "Complete reviewed version source", equals: fixture.text(LocalFixture.version, stage: "version"))
+                try fixture.assertUnchanged()
+                try press(editor, "Save version values…", renderer: renderer)
+                try confirmedDialog(renderer, title: "Save these reviewed version values?", action: "Save version values",
+                                    checkbox: "I reviewed the full original/after text, exact destination, byte comparisons, mode and directory/line-ending facts.",
+                                    typedLabel: "Type SAVE to confirm this local operation")
+                _ = try waitElement(editor.staticTexts.matching(identifier: "Submitted version values saved"), in: editor,
+                                    timeout: 48, failures: Self.versionFailures)
+                try fixture.accept("version")
+                let saved = try waitElement(named(renderer, "Saved version and build"), in: renderer)
+                try press(saved, "Read saved version", renderer: renderer)
+                _ = try waitElement(saved.staticTexts.matching(identifier: "Observed from saved version file"), in: saved)
+                _ = try unique(saved.staticTexts.matching(identifier: "2.3.4"), "fresh version observation is not the saved name")
+                _ = try unique(saved.staticTexts.matching(identifier: "Build number 8"), "fresh version observation is not the saved build")
+                try fixture.assertUnchanged()
+            }
         }
         if includeImages {
             try stage("images-cancel") {
@@ -7093,7 +7511,7 @@ final class NormalAppUITests: XCTestCase {
                 try goToFolder(sheet, path: fixture.sourcesPath + "/01.png")
                 sheet.typeKey("a", modifierFlags: .command)
                 try nativeOpen(sheet)
-                let review = try waitElement(named(renderer, "Original localized-image operation"), in: renderer)
+                let review = try waitElement(named(renderer, guidedProductSurface ? "Localized-image operation" : "Original localized-image operation"), in: renderer)
                 _ = try waitElement(review.buttons.matching(identifier: "Review exact copy choices"), in: review,
                                     enabled: true, timeout: 48, failures: Self.imageFailures)
                 try expand(review, prefix: "Native capture metadata (2 sources; not image approval)", renderer: renderer)
@@ -7142,7 +7560,11 @@ final class NormalAppUITests: XCTestCase {
         // These markers remain conditional on original XCTest/xcodebuild exit0,
         // exactly one selected passing test and the independent native owners.
         try acceptFinalScenario()
-        print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        if metadataOnly {
+            print("MRK_MACOS_NORMAL_METADATA_UI=config-fr-FR-over-limit-text-refusal-reviewed-save-image-cancel-reviewed-copy;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        } else {
+            print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        }
     }
 
     // Standalone opt-in preservation/refusal case; not an added project-batch case.
@@ -7281,7 +7703,10 @@ final class NormalAppUITests: XCTestCase {
                         "a previous observation is still presented as a current document result")
         }
         @MainActor func releaseSeparation() throws {
-            for label in ["Candidate evidence producer run ID", "Original artifact source commit", "Original marketing version", "Original build number"] {
+            let labels = guidedProductSurface
+                ? ["Candidate evidence producer run ID", "Artifact source commit", "Marketing version", "Build number"]
+                : ["Candidate evidence producer run ID", "Original artifact source commit", "Original marketing version", "Original build number"]
+            for label in labels {
                 let input = try field(renderer, label)
                 try require(input.value as? String == "", "saved evidence populated a protected-release input")
             }
@@ -7295,8 +7720,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Open project folder", renderer: renderer)
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "source project path differs")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
@@ -7305,6 +7729,12 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Artifacts", renderer: renderer)
             let selected = try waitElement(controls(renderer, [.popUpButton, .comboBox], label: "Evidence stage", prefix: true), in: renderer)
             try require(selected.value as? String == "Candidate", "initial evidence stage is not candidate")
+            if guidedProductSurface {
+                let choose = try unique(renderer.buttons.matching(identifier: "Choose evidence folder"), "evidence chooser is ambiguous")
+                if !choose.isEnabled {
+                    try press(renderer, "Check operation status", renderer: renderer)
+                }
+            }
             try press(renderer, "Choose evidence folder", renderer: renderer)
             let sheet = try nativeSheet(window, title: "Choose a release evidence folder")
             try goToFolder(sheet, path: fixture.evidencePath); try nativeOpen(sheet)
@@ -7323,7 +7753,10 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
         try stage("evidence-shared-navigation") {
-            try press(renderer, "Releases", renderer: renderer); try currentDocuments()
+            try press(renderer, "Releases", renderer: renderer)
+            try guidedTaskTab("Results", group: "Release tasks", renderer: renderer)
+            try currentDocuments()
+            try guidedTaskTab("GitHub release", group: "Release tasks", renderer: renderer)
             try select(renderer, label: "Release step", value: "External testing · reuse candidate", renderer: renderer)
             try select(renderer, label: "Release platform", value: "Android · Google Play", renderer: renderer)
             _ = try waitStaticText(renderer, matching: .contains("Promote the original candidate to the configured external testing track without rebuilding it."))
@@ -7338,6 +7771,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("evidence-stage-and-cancel") {
             try press(renderer, "Releases", renderer: renderer)
+            try guidedTaskTab("Results", group: "Release tasks", renderer: renderer)
             try select(renderer, label: "Evidence stage", value: "External testing", renderer: renderer)
             try currentDocuments() // Stage choice alone does not stale the existing result.
             let inspect = try unique(renderer.buttons.matching(identifier: "Inspect documents"), "Inspect control missing")
@@ -7346,8 +7780,12 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a release evidence folder")
             try click(sheet.buttons.matching(identifier: "Cancel"), "replacement evidence Cancel unavailable")
             try waitGone(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Original operation cancelled and settled. No new result was accepted."), in: renderer, failures: failures)
-            try staleDocuments(); try releaseSeparation()
+            let cancelled = guidedProductSurface ? "Operation cancelled and settled. No new result was accepted."
+                : "Original operation cancelled and settled. No new result was accepted."
+            _ = try waitElement(renderer.staticTexts.matching(identifier: cancelled), in: renderer, failures: failures)
+            try staleDocuments()
+            try guidedTaskTab("GitHub release", group: "Release tasks", renderer: renderer)
+            try releaseSeparation()
             try press(renderer, "Artifacts", renderer: renderer); try staleDocuments()
             try press(renderer, "Recovery", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "No current saved-document guidance. Project recovery remains unassessed."), in: renderer)
@@ -7356,6 +7794,9 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("evidence-readback-and-quit") {
             try press(renderer, "Dashboard", renderer: renderer)
+            if guidedProductSurface && renderer.staticTexts.matching(identifier: fixture.projectPath).count == 0 {
+                try observeSelectedProject(renderer, path: fixture.projectPath)
+            }
             _ = try waitElement(renderer.staticTexts.matching(identifier: fixture.projectPath), in: renderer)
             try fixture.assertUnchanged()
             let sheet = try quitSheet(app, window)
@@ -7370,6 +7811,14 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {
+        let scope = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_WORKFLOW_CONFLICT_ONLY"]
+        let conflictOnly = scope == "fixed-workflow-conflict-v1"
+        guard scope == nil || (conflictOnly && guidedProductSurface) else {
+            throw Refusal.condition("the standalone conflict journey requires the exact guided candidate")
+        }
+        projectRequireDiagnosticMethod = .managedWorkflowRefusal
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -7399,32 +7848,71 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
-        try stage("workflow-refusal-preview") {
+        try stage("workflow-refusal-coordinates") {
             try press(renderer, "GitHub", renderer: renderer)
+            try guidedTaskTab("Release workflows", group: "GitHub tasks", renderer: renderer)
             try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
             try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
-            let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
-                                        "optional comparison control is unavailable")
-            try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
-                        "passive supplied comparison unexpectedly enabled")
-            try press(renderer, "Preview GitHub setup", renderer: renderer)
-            let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
-                                          failures: Self.workflowFailures)
-            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
-            for path in LocalFixture.callers {
-                let shownPath = String(path.dropFirst("project/".count))
-                try expand(proposal, prefix: shownPath, renderer: renderer)
-                try displayed(proposal, label: "Read-only proposed content for " + shownPath,
-                              equals: fixture.text(path, stage: "workflows"))
-            }
-            try noApplyControls()
             try fixture.assertUnchanged()
+        }
+        if !conflictOnly {
+            try stage("workflow-refusal-preview") {
+                if guidedProductSurface {
+                    try expand(renderer, prefix: "Advanced: compare with a manually supplied file summary", renderer: renderer)
+                }
+                let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
+                                            "optional comparison control is unavailable")
+                try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
+                            "passive supplied comparison unexpectedly enabled")
+                try stage("workflow-preview-disclosure") {
+                    if guidedProductSurface {
+                        try expand(renderer, prefix: "Optional preview: proposed files and checklist", renderer: renderer)
+                    }
+                }
+                do {
+                    try press(renderer, "Preview GitHub setup", renderer: renderer)
+                } catch {
+                    if guidedProductSurface {
+                        let reasons = [
+                            ("checking-capabilities", "Desktop capabilities and core setup guidance are loading."),
+                            ("guidance-unavailable", "Core setup guidance is unavailable. Restore the packaged service and reload guidance before requesting a preview."),
+                            ("draft-unavailable", "Choose a project and prepare an in-memory configuration draft in Project settings. Nothing will be saved by this preview."),
+                            ("coordinates-incomplete", "Enter the toolkit repository and full toolkit commit. There is no account or commit default."),
+                            ("preview-in-progress", "The core is preparing a read-only proposal for these inputs."),
+                            ("proposal-unavailable", "The packaged proposal service is unavailable. Restore it and reload capabilities and core guidance."),
+                        ]
+                        for (code, message) in reasons where renderer.staticTexts.matching(identifier: message).count == 1 {
+                            print("MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=\(code)")
+                        }
+                    }
+                    throw error
+                }
+                try stage("workflow-preview-readback") {
+                    var current: XCUIElement?
+                    try stage("workflow-preview-heading") {
+                        let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                                      failures: Self.workflowFailures)
+                        _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+                        current = proposal
+                    }
+                    guard let proposal = current else { throw Refusal.condition("original preview is absent") }
+                    for (index, path) in LocalFixture.callers.enumerated() {
+                        let shownPath = String(path.dropFirst("project/".count))
+                        try stage("workflow-preview-caller-\(index + 1)") {
+                            try expand(proposal, prefix: shownPath, renderer: renderer)
+                            try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                                          equals: fixture.text(path, stage: "workflows"))
+                        }
+                    }
+                }
+                try noApplyControls()
+                try fixture.assertUnchanged()
+            }
         }
         let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
         // Only this exact final conflict is expected here. The shared failure
@@ -7446,12 +7934,26 @@ final class NormalAppUITests: XCTestCase {
             }
             try require(headings.count == 1 && endings.count == 1 && headings[0] < endings[0],
                         "the original no-token conflict summary is missing or ambiguous")
-            // The shipped number uses toLocaleString(): bind the hosted grouped
-            // presentation, not the unformatted integer or unrelated byte labels.
-            try require(Array(labels[(headings[0] + 1)..<endings[0]]) == [
-                "candidate", "2,368 observed bytes",
-                "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
-            ], "the refused bundle did not report exactly the customized candidate")
+            try fixture.assertUnchanged()
+            try noApplyControls()
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_SAFETY=v1;originals=preserved;apply=absent")
+            // WebKit can expose a list bullet as its own static text. The
+            // list descendants need not appear between the heading and the
+            // trailing paragraph in a flattened staticText enumeration.
+            let candidates = review.descendants(matching: .any).matching(NSPredicate(
+                format: "elementType != %@ AND (label == %@ OR identifier == %@)",
+                NSNumber(value: XCUIElement.ElementType.staticText.rawValue), "candidate", "candidate"))
+            let digest = "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
+            let suffix = " observed bytes"
+            let sizeLabels = labels.filter { $0.hasSuffix(suffix) }
+            let sizes = sizeLabels.map { label in
+                String(label.dropLast(suffix.count)).replacingOccurrences(of: ",", with: "")
+                    .replacingOccurrences(of: "\u{00a0}", with: "").replacingOccurrences(of: "\u{202f}", with: "")
+            }
+            let idMatches = labels.filter { $0 == "candidate" }.count == 1 || candidates.count == 1
+            let hashMatches = labels.filter { $0 == digest }.count == 1
+            let sizeMatches = sizes == ["2368"]
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=\(sizeLabels.count);id=\(idMatches);bytes=\(sizeMatches);hash=\(hashMatches)")
             try require(!labels.contains { $0.contains("# MRK synthetic user customization; preserve exactly.") },
                         "the refusal exposed customized original YAML")
             let facts = try waitElement(named(review, "Independent native workflow outcome facts"), in: review,
@@ -7462,6 +7964,9 @@ final class NormalAppUITests: XCTestCase {
             try require(pairs == ["Transaction effect", "not_started", "Journal", "not_created",
                                   "Core resources", "settled", "Native finality", "settled"],
                         "the named original effect/journal/resource/finality facts are not settled refusal")
+            print("MRK_GUIDED_WORKFLOW_CONFLICT_SAFETY=v1;effect=not_started;journal=not_created;cleanup=settled")
+            try require(idMatches && sizeMatches && hashMatches,
+                        "the refused bundle did not report exactly the customized candidate")
             try noApplyControls()
         }
         try stage("workflow-refusal-native-review") {
@@ -7484,7 +7989,11 @@ final class NormalAppUITests: XCTestCase {
             ownedFixture = nil
         }
         try acceptFinalScenario()
-        print("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        if conflictOnly {
+            print("MRK_MACOS_NORMAL_WORKFLOW_CONFLICT_UI=customized-candidate-whole-bundle-refused-no-apply-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        } else {
+            print("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        }
     }
 
     // Ordinary saved offline checks and empty project-recovery inspection only.
@@ -7505,7 +8014,8 @@ final class NormalAppUITests: XCTestCase {
         } else {
             try require(labels[start] == "Outcome: complete", "the original saved-operation outcome is not complete")
         }
-        _ = try unique(panel.staticTexts.matching(identifier: "Original operation settled"),
+        let settled = guidedProductSurface ? "Operation settled" : "Original operation settled"
+        _ = try unique(panel.staticTexts.matching(identifier: settled),
                        "the original saved-operation projection is not settled")
     }
 
@@ -7532,9 +8042,25 @@ final class NormalAppUITests: XCTestCase {
         try require((1...128).contains(total) && counts["MISSING", default: 0] >= 2 && counts["SKIP", default: 0] >= 1,
                     "the fixture's missing module/wrapper and early-exit findings were not retained")
         let summary = "\(total) total findings · \(total) included in the returned list · 0 omitted from that list. Counts below include every reported finding."
-        _ = try unique(report.staticTexts.matching(identifier: summary), "original offline count totals or omission state differ")
+        if guidedProductSurface {
+            // WebKit can expose one paragraph as adjacent static texts at the
+            // interpolation boundaries. Require the same complete summary.
+            let matches = labels.indices.filter { index in
+                var joined = labels[index]
+                for part in labels.dropFirst(index + 1).prefix(6) {
+                    if joined == summary || !summary.hasPrefix(joined) { break }
+                    joined += " " + part
+                }
+                return joined == summary
+            }
+            print("MRK_GUIDED_OFFLINE_COUNT=v1;total=\(total);missing=\(counts["MISSING", default: 0]);skipped=\(counts["SKIP", default: 0]);summary=\(min(matches.count, 5))")
+            try require(matches.count == 1, "original offline count totals or omission state differ", check: .singleton)
+        } else {
+            _ = try unique(report.staticTexts.matching(identifier: summary), "original offline count totals or omission state differ")
+        }
         for label in ["Android module configuration.", "Android Gradle wrapper policy.", "Core early-exit or remaining-check policy."] {
-            _ = try unique(report.staticTexts.matching(identifier: label), "the expected negative-report finding is missing or repeated")
+            try require(labels.filter { $0 == label }.count == 1,
+                        "the expected negative-report finding is missing or repeated", check: .singleton)
         }
         return counts
     }
@@ -7557,36 +8083,83 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
-                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            try observeSelectedProject(renderer, path: fixture.projectPath)
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "offline project path is not exact")
             _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
-        let failures = ["No new offline-check outcome was confirmed", "Original cleanup unknown"]
+        let cleanupFailure = guidedProductSurface ? "Cleanup unknown" : "Original cleanup unknown"
+        let failures = ["No new offline-check outcome was confirmed", cleanupFailure]
         let unconfirmed = "The original command acknowledgement is unconfirmed. Do not repeat Start. A status observation can help cancel or settle that original operation, but cannot create consent."
         let historical = "This is retained original-operation data, not permission for the current editor or project context."
+        @MainActor func offlineFailureCount(_ panel: XCUIElement) throws -> Int {
+            let terminal = failures + [unconfirmed, historical, "Historical / stale context"]
+            if !guidedProductSurface {
+                return try staticTextFailureCount(panel, terminal) { _ = try remaining(1) }
+            }
+            _ = try remaining(1)
+            var pending = try panel.snapshot().children
+            var visited = 0
+            var matches = 0
+            while let node = pending.popLast() {
+                visited += 1
+                let children = node.children
+                guard visited + pending.count + children.count <= 1024 else {
+                    throw Refusal.condition("offline finality snapshot exceeds its bound")
+                }
+                if node.elementType == .staticText {
+                    let value = node.value
+                    let observed = try Self.staticTextContent(value: value, label: value is String ? "" : node.label)
+                    if terminal.contains(observed) { matches += 1 }
+                }
+                pending.append(contentsOf: children)
+            }
+            _ = try remaining(1)
+            return matches
+        }
+        let panelLabel = guidedProductSurface ? "Saved offline checks review" : "Review the saved inputs and project-code effects"
+        let refreshLabel = guidedProductSurface ? "Re-read saved settings" : "Refresh saved configuration observation"
+        let reviewLabel = guidedProductSurface ? "Continue" : "Review offline checks"
+        let runLabel = guidedProductSurface ? "Run checks" : "Run saved offline checks"
+        let settledLabel = guidedProductSurface ? "Operation settled" : "Original operation settled"
+        let reportTitle = guidedProductSurface ? "Returned full offline-preflight report" : "Returned offline-check report"
+        let fullPreflight = "Full offline release preflight"
         var selected: XCUIElement?
         try stage("offline-review-and-start") {
             try press(renderer, "Releases", renderer: renderer)
-            let panel = try waitElement(named(renderer, "Review the saved inputs and project-code effects")
-                .containing(.button, identifier: "Refresh saved configuration observation"), in: renderer)
+            try guidedTaskTab("Local checks", group: "Release tasks", renderer: renderer)
+            let panel = try waitElement(named(renderer, panelLabel)
+                .containing(.button, identifier: refreshLabel), in: renderer)
             selected = panel
             try require(named(panel, "Saved offline check findings").count == 0
-                        && panel.staticTexts.matching(identifier: "Original operation settled").count == 0
-                        && panel.buttons.matching(identifier: "Run saved offline checks").count == 0,
+                        && panel.staticTexts.matching(identifier: settledLabel).count == 0
+                        && panel.buttons.matching(identifier: runLabel).count == 0,
                         "a prior offline operation cannot supply this journey")
-            try press(panel, "Refresh saved configuration observation", renderer: renderer, failures: failures, timeout: 10)
-            try press(panel, "Review offline checks", renderer: renderer, failures: failures, timeout: 10)
+            let savedBytes = try fixture.text(LocalFixture.config).utf8.count
+            try press(panel, refreshLabel, renderer: renderer, failures: failures, timeout: 10)
+            if guidedProductSurface {
+                try select(panel, label: "Which checks do you need?", value: fullPreflight, renderer: renderer,
+                           keyboardOptions: [fullPreflight, "Local project checks — no Store setup"])
+                try expand(panel, prefix: "Technical details", renderer: renderer)
+                _ = try waitStaticText(panel, matching: .contains("Saved configuration comparison available: \(savedBytes) observed bytes."),
+                                       timeout: 10, failures: failures)
+            }
+            try press(panel, reviewLabel, renderer: renderer, failures: failures, timeout: 10)
             let consent = try waitElement(named(panel, "Confirm this saved offline-check intent"), in: panel,
                                           timeout: 10, failures: failures)
-            let savedBytes = try fixture.text(LocalFixture.config).utf8.count
-            let comparison = "Saved comparison: \(savedBytes) bytes. This review expires no later than five minutes after its original preparation; checking status never extends it."
+            if guidedProductSurface {
+                _ = try unique(consent.staticTexts.matching(NSPredicate(format: "title == %@", "Run " + fullPreflight + "?")),
+                               "offline review selected the wrong check scope")
+                _ = try unique(consent.staticTexts.matching(identifier: URL(fileURLWithPath: fixture.projectPath).lastPathComponent),
+                               "offline review selected the wrong project")
+            }
+            let comparison = guidedProductSurface ? "This confirmation expires after five minutes."
+                : "Saved comparison: \(savedBytes) bytes. This review expires no later than five minutes after its original preparation; checking status never extends it."
             let comparisonFields = try staticTextMatching(consent, .contains(comparison)) { _ = try remaining(1) }
             try require(comparisonFields.count == 1,
                         "the visible review is not bound to this fixture's exact saved-byte count", check: .singleton)
             _ = try unique(panel.staticTexts.matching(identifier: "Awaiting explicit consent"), "offline intent is not awaiting consent")
-            let run = try unique(consent.buttons.matching(identifier: "Run saved offline checks"), "offline Run is ambiguous")
+            let run = try unique(consent.buttons.matching(identifier: runLabel), "offline Run is ambiguous")
             let acknowledgement = try unique(consent.checkBoxes, "offline acknowledgement is missing or ambiguous")
             try require(!run.isEnabled, "offline Run began enabled before acknowledgement")
             try require((acknowledgement.value as? String) == "0" || (acknowledgement.value as? NSNumber)?.intValue == 0,
@@ -7595,7 +8168,7 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
             try reveal(acknowledgement, in: renderer)
             acknowledgement.click()
-            let start = try waitElement(consent.buttons.matching(identifier: "Run saved offline checks"), in: panel,
+            let start = try waitElement(consent.buttons.matching(identifier: runLabel), in: panel,
                                         enabled: true, timeout: try remaining(5), failures: failures)
             try require((acknowledgement.value as? String) == "1" || (acknowledgement.value as? NSNumber)?.intValue == 1,
                         "the exact offline acknowledgement was not retained")
@@ -7608,14 +8181,14 @@ final class NormalAppUITests: XCTestCase {
         try stage("offline-original-report") {
             // A transient unconfirmed acknowledgement is normal while awaiting
             // the original reply. It cannot be present in the accepted result.
-            _ = try waitElement(panel.staticTexts.matching(identifier: "Original operation settled"), in: panel,
+            _ = try waitElement(panel.staticTexts.matching(identifier: settledLabel), in: panel,
                                 timeout: 90, failures: failures)
             try savedOperationComplete(panel)
             _ = try unique(panel.staticTexts.matching(identifier:
                 "No lifecycle failure has been reported. Individual findings retain their own core status."),
                 "offline operation did not settle without a lifecycle failure")
             let report = try unique(named(panel, "Saved offline check findings"), "the original offline report is missing or ambiguous")
-            _ = try unique(report.staticTexts.matching(NSPredicate(format: "title == %@", "Returned offline-check report")), "returned offline report heading is missing")
+            _ = try unique(report.staticTexts.matching(NSPredicate(format: "title == %@", reportTitle)), "returned offline report heading is missing")
             _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report is not current to this invocation")
             let scopeFields = try staticTextPrefix(report, "Complete is not PASS or release readiness.") { _ = try remaining(1) }
             try require(scopeFields.count == 1, "offline completion was misrepresented as readiness", check: .singleton)
@@ -7624,19 +8197,26 @@ final class NormalAppUITests: XCTestCase {
                           "Release readiness was not assessed. A returned report is not a release candidate or publication authority."] {
                 _ = try unique(report.staticTexts.matching(identifier: label), "offline report lost a required scope limit")
             }
-            let counts = try savedOfflineCounts(report)
-            missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
-            let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
-            try require(panel.staticTexts.matching(identifier: unconfirmed).count == 0
-                        && panel.staticTexts.matching(identifier: historical).count == 0
-                        && report.staticTexts.matching(identifier: "Historical / stale context").count == 0
-                        && failedCount == 0
-                        && named(panel, "Confirm this saved offline-check intent").count == 0
-                        && panel.buttons.matching(identifier: "Run saved offline checks").count == 0,
-                        "original offline report remains unconfirmed, stale, failed or rearmed")
-            try fixture.assertUnchanged()
-            try savedOperationComplete(panel)
-            _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report changed during readback")
+            try stage("offline-check-counts-and-findings") {
+                let counts = try savedOfflineCounts(report)
+                missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
+            }
+            try stage("offline-finality-audit") {
+                try stage("offline-finality-status") {
+                    try require(try offlineFailureCount(panel) == 0, "the settled offline operation retained a stale or failed state")
+                }
+                try stage("offline-finality-authority") {
+                    let consentCount = named(panel, "Confirm this saved offline-check intent").count
+                    let runCount = panel.buttons.matching(identifier: runLabel).count
+                    print("MRK_GUIDED_OFFLINE_AUTHORITY=v1;consent=\(min(consentCount, 5));run=\(min(runCount, 5))")
+                    try require(consentCount == 0 && runCount == 0, "settled offline request retained original Start authority")
+                }
+            }
+            try stage("offline-originals-and-readback") {
+                try fixture.assertUnchanged()
+                try savedOperationComplete(panel)
+                _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report changed during readback")
+            }
         }
         try stage("offline-readback-and-quit") {
             try require(missing >= 2 && skipped >= 1, "no actual negative offline report was observed")
@@ -7645,12 +8225,12 @@ final class NormalAppUITests: XCTestCase {
             let report = try unique(named(panel, "Saved offline check findings"), "offline report disappeared before normal Quit")
             _ = try unique(report.staticTexts.matching(identifier: "This invocation only"),
                            "offline report ceased to be current before normal Quit")
-            for label in [unconfirmed, historical] + failures {
-                try require(panel.staticTexts.matching(identifier: label).count == 0, "offline state changed before normal Quit")
+            try require(try offlineFailureCount(panel) == 0, "offline state changed before normal Quit")
+            try stage("offline-native-quit") {
+                let sheet = try quitSheet(app, window)
+                try click(sheet.buttons.matching(identifier: "Quit"), "normal offline Quit unavailable")
+                try completeNormalQuit(app)
             }
-            let sheet = try quitSheet(app, window)
-            try click(sheet.buttons.matching(identifier: "Quit"), "normal offline Quit unavailable")
-            try completeNormalQuit(app)
             try fixture.assertUnchanged()
             try fixture.closeOriginals()
             ownedFixture = nil
@@ -7885,22 +8465,54 @@ final class NormalAppUITests: XCTestCase {
 
     // One ordinary current diagnostics run, not full doctor or project-code execution.
     // No new observer, IPC, app hook or fixture bytes; queries use shipped AX content.
-    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement) throws -> Int {
-        let query = panel.staticTexts
-        try require(query.count <= 256, "diagnostics accessible report exceeds its finite bound")
-        let texts = query.allElementsBoundByIndex
-        try require(!texts.isEmpty && texts.count <= 256, "diagnostics accessible report exceeds its finite bound")
-        var starts: [Int] = []
-        for index in texts.indices {
-            _ = try remaining(1)
-            if try staticTextContent(texts[index]) == "Core outcome" { starts.append(index) }
+    @MainActor private func guidedDiagnosticsSnapshot(_ panel: XCUIElement) throws -> (texts: [String], titles: [String]) {
+        _ = try remaining(1)
+        var pending = Array(try panel.snapshot().children.reversed())
+        var labels: [String] = []
+        var titles: [String] = []
+        var visited = 0
+        while let item = pending.popLast() {
+            visited += 1
+            let children = item.children
+            guard visited + pending.count + children.count <= 1024 else {
+                throw Refusal.condition("iOS diagnostics snapshot exceeds its bound")
+            }
+            if item.elementType == .staticText {
+                guard labels.count < 256 else { throw Refusal.condition("iOS diagnostics text exceeds its finite bound") }
+                let value = item.value
+                labels.append(try Self.staticTextContent(value: value, label: value is String ? "" : item.label)
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+                titles.append(item.title)
+            }
+            pending.append(contentsOf: children.reversed())
         }
-        try require(starts.count == 1, "original core report anchor is missing or ambiguous")
-        let start = starts[0]
+        _ = try remaining(1)
+        return (labels, titles)
+    }
+
+    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement, guidedTexts: [String]? = nil) throws -> Int {
+        let rows: [String]
+        if let texts = guidedTexts {
+            let starts = texts.indices.filter { texts[$0] == "Core outcome" }
+            try require(starts.count == 1 && starts[0] + 22 <= texts.count, "original core report rows do not match")
+            rows = Array(texts[starts[0]..<(starts[0] + 22)])
+        } else {
+            let query = panel.staticTexts
+            try require(query.count <= 256, "diagnostics accessible report exceeds its finite bound")
+            let texts = query.allElementsBoundByIndex
+            try require(!texts.isEmpty && texts.count <= 256, "diagnostics accessible report exceeds its finite bound")
+            var starts: [Int] = []
+            for index in texts.indices {
+                _ = try remaining(1)
+                if try staticTextContent(texts[index]) == "Core outcome" { starts.append(index) }
+            }
+            try require(starts.count == 1, "original core report anchor is missing or ambiguous")
+            let start = starts[0]
+            try require(start + 22 <= texts.count, "original core report rows are incomplete")
+            rows = try texts[start..<(start + 22)].map { try staticTextContent($0, limit: 64) }
+        }
         // Two presentation rows, then the nine immutable lifetime key/value rows.
         // Never filter away unknown rows or combine text from another AX subtree.
-        try require(start + 22 <= texts.count, "original core report rows are incomplete")
-        let rows = try texts[start..<(start + 22)].map { try staticTextContent($0, limit: 64) }
         try require(rows.allSatisfy { $0.utf8.count <= 64 }, "core scalar presentation is not bounded")
         try require(rows[0] == "Core outcome" && rows[1] == "complete" && rows[2] == "Commands attempted",
                     "the actual core outcome is not a complete finite check")
@@ -8064,20 +8676,39 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func iosCurrentArchiveIdentity(_ container: XCUIElement) throws -> LocalFixture.IOSArchiveIdentity {
-        let details = try unique(container.descendants(matching: .group).matching(identifier: "Archive details"),
-                                 "current unsigned Archive details missing or repeated")
+        let details = try waitElement(container.descendants(matching: .group).matching(identifier: "Archive details"),
+                                      in: container, timeout: 8, snapshotObservation: true)
+        // WebKit can expose a caption and value as consecutive static texts.
+        // Read the exact fields together, scoped to this original details group.
+        let text = try guidedDiagnosticsSnapshot(details).texts.joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         var values: [String] = []
-        for prefix in ["Archive operation ID: ", "Archive owner generation: "] {
-            let fields = try staticTextPrefix(details, prefix) { _ = try remaining(1) }
-            try require(fields.count == 1, "current unsigned archive identity absent or ambiguous", check: .singleton)
-            let field = fields[0]
-            let text = try staticTextContent(field)
-            try require(field.isHittable && text.hasPrefix(prefix), "current unsigned archive identity not visible")
-            values.append(String(text.dropFirst(prefix.count)))
+        for label in ["Archive operation ID:", "Archive owner generation:"] {
+            let field = try NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: label)
+                                                + #" +([0-9a-f]{32})(?= |$)"#)
+            let matches = field.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            try require(matches.count == 1 && text.components(separatedBy: label).count == 2,
+                        "current unsigned archive identity absent or ambiguous", check: .singleton)
+            guard let value = Range(matches[0].range(at: 1), in: text) else {
+                throw Refusal.condition("current unsigned archive identity range")
+            }
+            values.append(String(text[value]))
         }
         return try LocalFixture.IOSArchiveIdentity(operationID: values[0], ownerGeneration: values[1])
     }
+    private func normalizedIOSFacts(_ text: String) -> String {
+        // WKWebView can expose punctuation and adjacent inline text in separate AX nodes.
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #" +([.,:])"#, with: "$1", options: .regularExpression)
+    }
+
     @MainActor private func iosPublicText(_ container: XCUIElement) throws -> String {
+        if guidedProductSurface {
+            let fields = try guidedDiagnosticsSnapshot(container).texts
+            let text = fields.joined(separator: "\n")
+            try require(text.utf8.count <= 32768, "iOS fixed panel text bound")
+            return normalizedIOSFacts(text)
+        }
         let query = container.staticTexts
         try require(query.count <= 256, "iOS fixed panel text count")
         var text = ""
@@ -8092,21 +8723,97 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func iosResult(_ result: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws -> (Int, Int64) {
         try require(try iosCurrentArchiveIdentity(result) == identity, "iOS current complete identity differs")
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=identity-matched")
         let text = try iosPublicText(result)
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=bounded-text")
         for required in ["This local artifact only", "Archive created and structurally checked — not a signed release.",
             "Archive bundle identity and saved version/build.", "Archive symbols under the saved symbols policy.",
             ".mobile-release/desktop-ios-archive/" + identity.operationID + "/archive.xcarchive"] {
             try require(text.contains(required), "iOS current unsigned result fact missing")
         }
         try require(!text.contains("Historical / retained context"), "iOS historical result refused")
-        let expression = try NSRegularExpression(pattern: #"Saved version 1\.2\.3 · build 7\. ([1-9][0-9]{0,5}) observed entries · ([1-9][0-9]{0,9}) observed bytes\."#)
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=result-facts")
+        let expression = try NSRegularExpression(pattern: #"Saved version 1\. *2\. *3 · build 7\. ([1-9][0-9]{0,5}) observed entries · ([1-9][0-9]{0,9}) observed bytes\."#)
         let rows = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
         guard rows.count == 1, let entryRange = Range(rows[0].range(at: 1), in: text),
               let byteRange = Range(rows[0].range(at: 2), in: text), let entries = Int(text[entryRange]),
               let bytes = Int64(text[byteRange]), entries <= 100_000, bytes <= 8 * 1024 * 1024 * 1024 else {
             throw Refusal.condition("iOS typed original result counts absent or outside bounds")
         }
+        print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=counts-verified")
         return (entries, bytes) // Displayed original result, NOT a new archive census.
+    }
+
+    private func recordIOSArchiveTerminal(_ text: String) -> String {
+        let outcomes = ["complete", "refused", "failed", "cancelled", "timed-out", "unknown"]
+        let outcome = outcomes.first { text.contains("Outcome: " + $0 + " ") } ?? "unobserved"
+        let reasons = [
+            ("none", "The operation completed within its stated local scope."),
+            ("command-failed", "A known Xcode or preparation command returned a nonzero code."),
+            ("command-incomplete", "No usable original command outcome was obtained."),
+            ("artifact-missing", "The expected task-owned archive was not created."),
+            ("artifact-unsafe", "The archive layout could not be safely inspected."),
+            ("artifact-changed", "Original captured inputs or output changed during inspection."),
+            ("archive-validation-failed", "The archive did not pass the required identity/version or symbols checks."),
+            ("project-admission-refused", "Resolve pending toolkit work or unsafe private-directory state"),
+            ("toolchain-unavailable", "Install full Xcode in Applications"),
+            ("toolchain-mismatch", "The protected Xcode/SDK layout does not match the supported profile."),
+            ("runtime-unavailable", "The required installed Desktop runtime is unavailable."),
+            ("protocol-error", "Original archive communication did not match its fixed contract."),
+            ("timed-out", "The original deadline was reached."),
+            ("work-retained", "Original task work is known to remain."),
+            ("cleanup-unknown", "Original cleanup is unconfirmed and ownership is retained."),
+            ("input-limit", "A bounded saved input or archive-processing limit was reached."),
+            ("result-limit", "The bounded result could not be represented safely.")
+        ]
+        let reason = reasons.first { text.contains($0.1) }?.0 ?? "unobserved"
+        func command(_ name: String) -> String {
+            let prefix = name + ": known exit "
+            if let start = text.range(of: prefix),
+               let end = text[start.upperBound...].firstIndex(of: "."),
+               let value = Int(text[start.upperBound..<end]), (-255...255).contains(value) {
+                return String(value)
+            }
+            if text.contains(name + ": not dispatched.") { return "not-dispatched" }
+            if text.contains(name + ": no usable original outcome.") { return "unknown" }
+            return "unobserved"
+        }
+        let outputs = ["not-created", "retained-incomplete", "retained-local-result", "unknown"]
+        let output = outputs.first { text.contains("Archive output: " + $0 + ".") } ?? "unobserved"
+        // Publish only fixed categories and bounded numeric exit codes.
+        print("MRK_MACOS_IOS_ARCHIVE_TERMINAL=v1;outcome=\(outcome);reason=\(reason);xcode=\(command("Xcode version"));sdk=\(command("iOS SDK selection"));archive=\(command("Archive"));output=\(output)")
+        return outcome
+    }
+
+    @MainActor private func recordIOSArchiveNotice(_ panel: XCUIElement, original: XCUIElementQuery,
+                                                    result: XCUIElementQuery) throws {
+        let rows = try guidedDiagnosticsSnapshot(panel).texts
+        let codes = ["ios_archive_invalid", "ios_archive_unavailable", "ios_archive_busy",
+                     "ios_archive_owner", "ios_archive_protocol", "ios_archive_signing_inputs"]
+        let observed = codes.filter { code in rows.contains { $0.contains(code) } }
+        let code = observed.count == 1 ? observed[0] : "unobserved"
+        let originalCount = min(2, original.count)
+        let resultCount = min(2, result.count)
+        print("MRK_MACOS_IOS_ARCHIVE_NOTICE=v1;code=\(code);status=\(originalCount);result=\(resultCount)")
+        if originalCount == 1 {
+            let status = original.element(boundBy: 0)
+            let text = try guidedDiagnosticsSnapshot(status).texts.joined(separator: " ")
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            let phases = ["Awaiting your approval", "Starting iOS operation", "iOS operation running",
+                          "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
+            let phase = phases.map { text.contains($0) ? "1" : "0" }.joined()
+            print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(phase)")
+            let stages = [
+                ("accepted", "Request accepted"), ("inputs-bound", "Saved inputs bound"),
+                ("checking-xcode", "Checking full Xcode and iOS SDK"), ("preparing", "Running saved project preparation"),
+                ("archiving", "Creating the reviewed archive"), ("inspecting", "Inspecting the original archive and any exported IPA"),
+                ("disposing-snapshot", "Disposing inspection snapshot"), ("disposing-work", "Disposing task-owned work")
+            ]
+            let stage = stages.first { text.contains("Reached stage: " + $0.1) }?.0 ?? "unobserved"
+            print("MRK_MACOS_IOS_ARCHIVE_LAST_STAGE=v1;stage=\(stage)")
+            // This panel may be stale after a protocol failure. Its state is
+            // diagnostic and cannot establish original completion.
+        }
     }
     @MainActor private func settleFailedIOSArchive(_ app: XCUIApplication, window: XCUIElement,
                                                    panel: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws {
@@ -8134,9 +8841,10 @@ final class NormalAppUITests: XCTestCase {
             item.click()
         }
         var cancelRequested = false, statusRequested = false
+        let statusLabel = guidedProductSurface ? "IOS archive status" : "Original iOS archive status"
         while true {
             try check()
-            let status = try only(panel.descendants(matching: .any).matching(identifier: "Original iOS archive status"))
+            let status = try only(named(panel, statusLabel))
             let details = try only(status.descendants(matching: .group).matching(identifier: "Archive details"))
             for (prefix, expected) in [("Archive operation ID: ", identity.operationID), ("Archive owner generation: ", identity.ownerGeneration)] {
                 let fields = try staticTextPrefix(details, prefix, check: check)
@@ -8179,62 +8887,211 @@ final class NormalAppUITests: XCTestCase {
     // One ordinary iOS diagnostics invocation before archive consent. This
     // observes the global developer selection, not managed-Xcode admission.
     @MainActor private func observeIOSToolDiagnostics(_ renderer: XCUIElement) throws {
-        try press(renderer, "Environment", renderer: renderer)
-        try select(renderer, label: "Release platform", value: "iOS", renderer: renderer)
-        try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer)
-        let panel = try waitElement(named(renderer, "Observed build-tool checks")
-            .containing(.button, identifier: "Check build tools"), in: renderer)
-        let failures = ["Original finality or status integrity is unknown", "Diagnostics status needs attention",
+        try stage("ios-tools-page") { try press(renderer, "Environment", renderer: renderer) }
+        try stage("ios-tools-context") {
+            try select(renderer, label: "Release platform", value: "iOS", renderer: renderer,
+                       keyboardOptions: guidedProductSurface ? ["Android", "iOS"] : [])
+            try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer,
+                       keyboardOptions: guidedProductSurface ? ["Build / archive", "Validate an existing artifact"] : [])
+        }
+        var diagnosticCut = "context-selected"
+        defer {
+            if guidedProductSurface {
+                let expired = caseClock?.firstFailure == "original case or stage deadline elapsed"
+                print("MRK_GUIDED_IOS_TOOLS=v1;cut=\(diagnosticCut);expired=\(expired ? 1 : 0)")
+            }
+        }
+        let action = guidedProductSurface ? "Check this computer" : "Check build tools"
+        var toolPanel: XCUIElement?
+        try stage("ios-tools-panel") {
+            toolPanel = try waitElement(named(renderer, "Observed build-tool checks")
+                .containing(.button, identifier: action), in: renderer)
+        }
+        guard let panel = toolPanel else { throw Refusal.condition("iOS tool panel unavailable") }
+        diagnosticCut = "panel-ready"
+        let integrityFailure = guidedProductSurface
+            ? "Finality or status integrity is unknown" : "Original finality or status integrity is unknown"
+        let failures = [integrityFailure, "Diagnostics status needs attention",
                         "Start reply unconfirmed", "Earlier / stale tool observations", "Phase: retained-unknown",
                         "Outcome: partial", "Outcome: failed", "Outcome: cancelled", "Outcome: timed-out", "Outcome: unavailable"]
         try require(panel.staticTexts.matching(identifier: "Tool observations from this run").count == 0
                     && panel.staticTexts.matching(identifier: "Earlier / stale tool observations").count == 0,
                     "a previous diagnostics report cannot supply the iOS archive journey")
         // Availability permits only the click, never a tool or native result.
-        let start = try waitElement(panel.buttons.matching(identifier: "Check build tools"), in: panel,
+        let start = try waitElement(panel.buttons.matching(identifier: action), in: panel,
                                     enabled: true, timeout: 10, failures: failures)
         try reveal(start, in: renderer)
+        diagnosticCut = "start-hittable"
         guard let wholeDeadline = journeyDeadline, let clock = caseClock else {
             throw Refusal.condition("iOS diagnostics requires the original archive clock")
         }
-        journeyDeadline = min(wholeDeadline, try clock.end(within: 15))
+        // Preserve the 15-second report-arrival gate. Allow separate bounded
+        // time for accessibility readback of the same report and its ledger.
+        journeyDeadline = min(wholeDeadline, try clock.end(within: 55))
         defer { journeyDeadline = wholeDeadline } // SAME absolute success cutoff, not renewed work.
         start.click() // Exactly one diagnostics Start; native work6/finality10 remain unchanged.
+        diagnosticCut = "start-clicked"
         let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))
         let phase = panel.staticTexts.matching(identifier: "Phase: settled")
         let outcome = panel.staticTexts.matching(identifier: "Outcome: complete")
         let finality = panel.staticTexts.matching(identifier: "Native finality: settled")
-        let contextMatch = StaticTextMatch.edges("iOS / build · draft ", " · core host macos")
-        let provenanceMatch = StaticTextMatch.suffix(
-            " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe.")
-        let textRows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
-                                          ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
-        for query in [fresh, phase, outcome, finality] {
-            _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
+        let contextPrefix = "iOS / build · draft "
+        let contextSuffix = " · core host macos"
+        let provenanceSuffix = " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe."
+        let contextMatch = StaticTextMatch.edges(contextPrefix, contextSuffix)
+        let provenanceMatch = StaticTextMatch.suffix(provenanceSuffix)
+        @MainActor func guidedReport() throws -> (context: String, provenance: String)? {
+            diagnosticCut = "report-snapshot-start"
+            let (labels, titles) = try guidedDiagnosticsSnapshot(panel)
+            diagnosticCut = "report-snapshot-return"
+            try require(!labels.contains(where: failures.contains), "terminal iOS diagnostics refusal")
+            let adjacent = zip(labels, labels.dropFirst()).map { pair in pair.0 + " " + pair.1 }
+            let matches = ["Phase: settled", "Outcome: complete", "Native finality: settled"].map { caption in
+                labels.filter { $0 == caption }.count + adjacent.filter { $0 == caption }.count
+            }
+            try require(matches.allSatisfy { $0 <= 1 }, "current iOS diagnostics badges are ambiguous", check: .singleton)
+            guard matches.allSatisfy({ $0 == 1 }) else { return nil }
+            diagnosticCut = "settled-badges"
+            try require(titles.filter { $0 == "Tool observations from this run" }.count == 1,
+                        "current acknowledged iOS diagnostics report is missing or ambiguous")
+            for title in ["macOS developer selection", "Git version", "Xcode version and build"] {
+                try require(titles.filter { $0 == title }.count == 1, "fixed iOS diagnostics card is missing or repeated")
+            }
+            for title in ["Java runtime version", "Java compiler version"] {
+                try require(!titles.contains(title), "Android diagnostics cannot supply the iOS observation")
+            }
+            let contexts = labels.filter(contextMatch.accepts)
+            // Read the fixed receipt paragraph even when WebKit splits its
+            // timestamp, revision and acknowledgement into adjacent texts.
+            let receipts = labels.indices.compactMap { index -> String? in
+                guard labels[index].hasPrefix("Received by this view:") else { return nil }
+                var joined = labels[index]
+                for part in labels.dropFirst(index + 1).prefix(8) {
+                    if provenanceMatch.accepts(joined) { break }
+                    joined += part.hasPrefix(".") ? part : " " + part
+                }
+                return provenanceMatch.accepts(joined) ? joined : nil
+            }
+            print("MRK_GUIDED_IOS_REPORT=v1;context=\(min(contexts.count, 5));receipt=\(min(receipts.count, 5))")
+            try require(contexts.count <= 1 && receipts.count <= 1, "iOS diagnostics context or receipt is ambiguous")
+            guard let context = contexts.first, let provenance = receipts.first else { return nil }
+            return (context, provenance)
         }
-        let originalContext = try staticTextContent(textRows[0])
-        for label in ["macOS developer selection", "Git version", "Xcode version and build"] {
-            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)),
-                           "fixed iOS diagnostics card is missing or repeated")
+        let originalContext: String
+        let originalProvenance: String?
+        if guidedProductSurface {
+            // The heading can be awaited without repeatedly reading every
+            // static text while the native operation has no result to show.
+            do {
+                _ = try waitElement(fresh, in: panel, timeout: 15, failures: failures, snapshotObservation: true)
+            } catch {
+                // Keep bounded classifications only. The native deadlines and
+                // original refusal still control the result.
+                if let (labels, _) = try? guidedDiagnosticsSnapshot(panel) {
+                    let joined = labels.joined(separator: " ")
+                    for reason in ["cancelled", "context-changed", "document-lost", "shutdown", "timed-out",
+                                   "protocol-error", "runtime-unavailable", "command-failed", "cleanup-unknown"]
+                    where joined.contains("Native reason: \(reason).") || joined.contains("native reason: \(reason).") {
+                        print("MRK_GUIDED_IOS_TERMINAL=v1;native-reason=\(reason)")
+                    }
+                    for (index, label) in failures.enumerated() where joined.contains(label) {
+                        print("MRK_GUIDED_IOS_TERMINAL=v1;failure=\(index)")
+                    }
+                }
+                throw error
+            }
+            diagnosticCut = "report-visible"
+            var observed = try guidedReport()
+            while observed == nil {
+                try clock.progress(until: journeyDeadline ?? wholeDeadline)
+                observed = try guidedReport()
+            }
+            guard let observed else { throw Refusal.condition("iOS diagnostics observation missing") }
+            originalContext = observed.context
+            originalProvenance = observed.provenance
+        } else {
+            let rows = try waitStaticTexts(panel, matching: [contextMatch, provenanceMatch],
+                                           ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures)
+            originalContext = try staticTextContent(rows[0])
+            originalProvenance = nil
         }
-        for label in ["Java runtime version", "Java compiler version"] {
-            try require(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)).count == 0,
-                        "Android diagnostics cannot supply the iOS observation")
+        diagnosticCut = "settled-report"
+        if !guidedProductSurface {
+            for query in [fresh, phase, outcome, finality] {
+                _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
+            }
+            for label in ["macOS developer selection", "Git version", "Xcode version and build"] {
+                _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)),
+                               "fixed iOS diagnostics card is missing or repeated")
+            }
+            for label in ["Java runtime version", "Java compiler version"] {
+                try require(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)).count == 0,
+                            "Android diagnostics cannot supply the iOS observation")
+            }
         }
-        try expand(panel, prefix: "Core resource observations — provisional, not native finality", renderer: renderer)
-        _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
-        let commandsAttempted = try diagnosticsCoreReport(panel)
+        let resources = "Core resource observations — provisional, not native finality"
+        let commandsAttempted: Int
+        if guidedProductSurface {
+            let summary = try waitElement(controls(panel, [.disclosureTriangle, .button], label: resources, prefix: true),
+                                          in: panel, enabled: true, failures: failures)
+            try reveal(summary, in: renderer)
+            // Target the disclosure's own indicator. A full-width WebKit
+            // summary may report a different native center than its control.
+            summary.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
+            diagnosticCut = "core-disclosure-clicked"
+            var ledger = try guidedDiagnosticsSnapshot(panel).texts
+            while !ledger.contains("Core outcome") {
+                try require(!ledger.contains(where: failures.contains), "terminal iOS diagnostics refusal")
+                try clock.progress(until: journeyDeadline ?? wholeDeadline)
+                ledger = try guidedDiagnosticsSnapshot(panel).texts
+            }
+            diagnosticCut = "core-ledger-visible"
+            try require(!ledger.contains(where: failures.contains), "terminal iOS diagnostics refusal")
+            commandsAttempted = try diagnosticsCoreReport(panel, guidedTexts: ledger)
+        } else {
+            try expand(panel, prefix: resources, renderer: renderer)
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
+            diagnosticCut = "core-ledger-visible"
+            commandsAttempted = try diagnosticsCoreReport(panel)
+        }
         try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
+        diagnosticCut = "core-ledger"
         _ = try remaining(1)
-        let currentText = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
-        let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
-        try require(failedCount == 0 && currentText.allSatisfy { $0.count == 1 },
-                    "original iOS diagnostics context changed during readback")
-        try require(try staticTextContent(currentText[0][0]) == originalContext,
-                    "original iOS diagnostics context changed during readback")
-        for query in [fresh, phase, outcome, finality] {
+        if guidedProductSurface {
+            let current = try guidedReport()
+            func receipt(_ value: String?) -> (time: String, revision: UInt64)? {
+                guard let value, value.hasPrefix("Received by this view: "), value.hasSuffix(provenanceSuffix) else {
+                    return nil
+                }
+                let fields = value.dropLast(provenanceSuffix.count).components(separatedBy: " · native status revision ")
+                guard fields.count == 2, let revision = UInt64(fields[1]), revision > 0 else { return nil }
+                return (fields[0], revision)
+            }
+            let first = receipt(originalProvenance)
+            let latest = receipt(current?.provenance)
+            let contextMatches = current?.context == originalContext
+            // The app keeps the original receipt time while the native
+            // status revision can advance for the same settled run.
+            let sameReceipt = first != nil && latest != nil && first?.time == latest?.time
+            let forward = first.map { a in latest.map { $0.revision >= a.revision } ?? false } ?? false
+            let facts = [contextMatches, sameReceipt, forward].map { $0 ? "1" : "0" }.joined()
+            print("MRK_MACOS_GUIDED_IOS_ACK_READBACK=v1;fields=\(facts)")
+            try require(contextMatches && sameReceipt && forward,
+                        "same original iOS report did not remain settled and acknowledged")
+        } else {
+            let rows = try staticTextSelections(panel, matching: [contextMatch, provenanceMatch]) { _ = try remaining(1) }
+            let failedCount = try staticTextFailureCount(panel, failures) { _ = try remaining(1) }
+            try require(failedCount == 0 && rows.allSatisfy { $0.count == 1 },
+                        "original iOS diagnostics context changed during readback")
+            try require(try staticTextContent(rows[0][0]) == originalContext,
+                        "original iOS diagnostics context changed during readback")
+            try require(provenanceMatch.accepts(try staticTextContent(rows[1][0])),
+                        "original iOS diagnostics acknowledgement changed during readback")
+        }
+        for query in guidedProductSurface ? [fresh] : [fresh, phase, outcome, finality] {
             _ = try unique(query, "same original iOS report did not remain current and settled")
         }
+        diagnosticCut = "readback-confirmed"
         // Missing/unselected/version-mismatch rows remain observations. This
         // does not establish SDK completeness, native tool protection or signing.
     }
@@ -8276,61 +9133,167 @@ final class NormalAppUITests: XCTestCase {
                 try press(renderer, "Open project folder", renderer: renderer)
                 let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
                 try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
-                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),
-                                    in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
+                try observeSelectedProject(renderer, path: fixture.projectPath)
                 _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "iOS selected fixture differs")
-                _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
+                let identity = renderer.staticTexts.matching(identifier: "org.example.mrk.observed")
+                if guidedProductSurface {
+                    let configured = renderer.staticTexts.matching(identifier: "Configured iOS bundle ID")
+                    // A selected folder is visible before the original native
+                    // snapshot publishes the saved configuration. Do not refresh
+                    // or replace that snapshot to make the test pass.
+                    let label = try waitElement(configured, in: renderer, timeout: 24,
+                        failures: ["Static observation unavailable", "Only a partial static observation is available"])
+                    // The same value may also appear in the Overview summary.
+                    // The disclosure delta below binds the one additional row.
+                    let expandedCount = identity.count
+                    let details = try waitElement(controls(renderer, [.disclosureTriangle, .button],
+                        label: "Project details & saved observations", prefix: true), in: renderer, enabled: true)
+                    try reveal(details, in: renderer)
+                    details.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
+                    try waitGone(label)
+                    let collapsedCount = identity.count
+                    try require(collapsedCount <= 1 && expandedCount == collapsedCount + 1,
+                                "the current project details did not display exactly one matching configured iOS identity")
+                } else {
+                    _ = try waitForSnapshotIdentity(identity, in: renderer)
+                }
                 try fixture.assertUnchanged()
+            }
+            try stage("ios-unsigned-diagnostics") {
                 try observeIOSToolDiagnostics(renderer)
                 try fixture.assertUnchanged()
             }
             let failures = ["No new iOS archive outcome was confirmed", "Cleanup needs attention"]
+            let panelLabel = guidedProductSurface ? "What will be built" : "Review the current saved inputs"
+            let statusLabel = guidedProductSurface ? "IOS archive status" : "Original iOS archive status"
             try stage("ios-unsigned-review") {
                 try press(renderer, "Releases", renderer: renderer)
-                let panel = try waitElement(named(renderer, "Review the current saved inputs")
-                    .containing(.button, identifier: "Review saved iOS inputs"), in: renderer)
+                try guidedTaskTab("iOS build", group: "Release tasks", renderer: renderer)
+                // The review button unmounts when the prepared consent appears.
+                // XCTest queries are live, so anchor the original panel to a
+                // persistent control before verifying the consent and result.
+                let panel = try waitElement(named(renderer, panelLabel)
+                    .containing(.button, identifier: "Refresh saved configuration"), in: renderer)
                 selected = panel
                 try require(named(panel, "Completed local unsigned iOS archive observation").count == 0
-                    && named(panel, "Original iOS archive status").count == 0, "iOS prior operation cannot supply this journey")
-                try press(panel, "Refresh saved configuration", renderer: renderer, failures: failures)
-                try press(panel, "Read saved version", renderer: renderer, failures: failures)
-                try press(panel, "Review saved iOS inputs", renderer: renderer, failures: failures)
-                let review = try waitElement(named(panel, "Confirm this saved unsigned iOS archive intent"), in: panel, failures: failures)
-                let text = try iosPublicText(review)
-                for expected in ["ios/MRKObserved.xcodeproj", "MRKObserved", "Release", "org.example.mrk.observed", "Saved preparation is not configured."] {
-                    try require(text.contains(expected), "iOS saved unsigned selection differs")
+                    && named(panel, statusLabel).count == 0, "iOS prior operation cannot supply this journey")
+                try stage("ios-archive-refresh-config") {
+                    try press(panel, "Refresh saved configuration", renderer: renderer, failures: failures)
                 }
-                let pair = try iosCurrentArchiveIdentity(review)
-                identity = pair
-                try fixture.beginIOSArchiveObservation(pair) { _ = try self.remaining(5) }
-                let consent = try waitElement(controls(review, [.checkBox], label:
-                    "I trust this project and authorize one unsigned archive of these saved inputs.", prefix: true), in: review, enabled: true)
-                try reveal(consent, in: renderer)
-                try require((consent.value as? String) == "0" || (consent.value as? NSNumber) == NSNumber(value: 0),
-                            "iOS trust consent must begin unchecked")
-                consent.click()
-                try require((consent.value as? String) == "1" || (consent.value as? NSNumber) == NSNumber(value: 1),
-                            "iOS explicit trust consent not observed")
-                try require(try iosCurrentArchiveIdentity(review) == pair, "iOS review identity changed before Start")
-                try fixture.confirmIOSArchiveStart(pair) { _ = try self.remaining(5) }
-                try press(review, "Create unsigned archive", renderer: renderer, failures: failures) // Exactly ONE Start.
+                try stage("ios-archive-read-version") {
+                    try press(panel, "Read saved version", renderer: renderer, failures: failures, timeout: 48)
+                }
+                try stage("ios-archive-prepare-review") {
+                    try press(panel, "Review saved iOS inputs", renderer: renderer, failures: failures, timeout: 48)
+                }
+                let review = try waitElement(named(panel, "Confirm this saved unsigned iOS archive intent"), in: panel, failures: failures)
+                try reveal(review, in: renderer)
+                let fields = try guidedDiagnosticsSnapshot(review)
+                let text = fields.texts.joined(separator: " ")
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .replacingOccurrences(of: #" +([.,])"#, with: "$1", options: .regularExpression)
+                let expected = ["ios/MRKObserved.xcodeproj", "scheme MRKObserved", "configuration Release",
+                                "Bundle ID org.example.mrk.observed", "Saved preparation is not configured."]
+                let observed = expected.map { text.contains($0) }
+                let observedFields = observed.map { $0 ? "1" : "0" }.joined()
+                print("MRK_MACOS_GUIDED_IOS_REVIEW_FIELDS=v1;fields=\(observedFields)")
+                let tokens = ["ios/MRKObserved.xcodeproj", "MRKObserved", "Release",
+                              "org.example.mrk.observed", "is not configured"]
+                let observedTokens = tokens.map { text.contains($0) ? "1" : "0" }.joined()
+                print("MRK_MACOS_GUIDED_IOS_REVIEW_TOKENS=v1;fields=\(observedTokens)")
+                for (index, match) in observed.enumerated() {
+                    try require(match, "iOS saved unsigned selection differs at field \(index + 1)")
+                }
+                try stage("ios-archive-original-identity") {
+                    identity = try iosCurrentArchiveIdentity(review)
+                }
+                guard let pair = identity else { throw Refusal.condition("iOS review original identity unavailable") }
+                try stage("ios-archive-fixture-before-start") {
+                    try fixture.beginIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                }
+                try stage("ios-archive-explicit-consent") {
+                    let consent = try waitElement(controls(review, [.checkBox], label:
+                        "I trust this project and authorize one unsigned archive of these saved inputs.", prefix: true), in: review, enabled: true)
+                    try reveal(consent, in: renderer)
+                    try require((consent.value as? String) == "0" || (consent.value as? NSNumber) == NSNumber(value: 0),
+                                "iOS trust consent must begin unchecked")
+                    consent.click()
+                    try require((consent.value as? String) == "1" || (consent.value as? NSNumber) == NSNumber(value: 1),
+                                "iOS explicit trust consent not observed")
+                }
+                try stage("ios-archive-start-once") {
+                    try require(try iosCurrentArchiveIdentity(review) == pair, "iOS review identity changed before Start")
+                    try fixture.confirmIOSArchiveStart(pair) { _ = try self.remaining(5) }
+                    try press(review, "Create unsigned archive", renderer: renderer, failures: failures) // Exactly ONE Start.
+                }
             }
             guard let panel = selected, let pair = identity else { throw Refusal.condition("iOS selected original absent") }
             try stage("ios-unsigned-original-result") {
-                let result = try waitElement(named(panel, "Completed local unsigned iOS archive observation"),
-                    in: panel, timeout: 750, failures: failures)
-                try reveal(result, in: renderer)
-                observed = try iosResult(result, identity: pair)
-                let status = try unique(named(panel, "Original iOS archive status"), "iOS current terminal status absent")
-                try require(try iosCurrentArchiveIdentity(status) == pair, "iOS terminal status identity differs")
-                let text = try iosPublicText(status)
-                for required in ["iOS request finished", "Xcode version: known exit 0.", "iOS SDK selection: known exit 0.",
-                    "Saved preparation: not configured.", "Archive: known exit 0.",
-                    "Inspection snapshot: removed. Task work: removed. Archive output: retained-local-result."] {
-                    try require(text.contains(required), "iOS original command/finality fact missing")
+                let resultQuery = named(panel, "Completed local unsigned iOS archive observation")
+                let originalStatus = named(panel, statusLabel)
+                let terminalIssue = panel.staticTexts.matching(NSPredicate(
+                    format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
+                let readyOrFailed = NSPredicate(format: "result.exists == true OR failure.exists == true")
+                let statusReadIntervals: [TimeInterval] = [15, 60, 180]
+                for interval in statusReadIntervals {
+                    let targets: NSDictionary = ["result": resultQuery.element(boundBy: 0),
+                                                 "failure": terminalIssue.element(boundBy: 0)]
+                    let wait = XCTNSPredicateExpectation(predicate: readyOrFailed, object: targets)
+                    let resultOrFailure = XCTWaiter.wait(for: [wait], timeout: try remaining(interval)) == .completed
+                    if terminalIssue.count > 0 {
+                        try recordIOSArchiveNotice(panel, original: originalStatus, result: resultQuery)
+                        let diagnosticEnd = try clock.end(within: 5)
+                        fixture.recordIOSArchiveFailureOutput(pair) {
+                            _ = try clock.remaining(1, before: diagnosticEnd)
+                        }
+                        throw Refusal.condition("original iOS archive reported a terminal notice")
+                    }
+                    let status = try waitElement(originalStatus, in: panel, timeout: 12, failures: failures)
+                    try require(try iosCurrentArchiveIdentity(status) == pair, "iOS status original identity changed")
+                    let text = normalizedIOSFacts(try guidedDiagnosticsSnapshot(status).texts.joined(separator: " "))
+                    let phases = ["Awaiting your approval", "Starting iOS operation", "iOS operation running",
+                                  "Stopping · waiting for cleanup", "iOS request finished", "Cleanup needs attention"]
+                    let matches = phases.map { text.contains($0) ? "1" : "0" }.joined()
+                    print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(matches)")
+                    if text.contains("iOS request finished") {
+                        let outcome = recordIOSArchiveTerminal(text)
+                        try require(outcome == "complete" || outcome == "unobserved",
+                                    "original unsigned iOS archive reached a non-successful terminal outcome")
+                        break // The same operation is settled. Wait for its result card below.
+                    }
+                    if resultOrFailure { break }
+                    // Lost UI events do not authorize another Start. Use only
+                    // the visible status read for this same submitted identity.
+                    try stage("ios-archive-read-original-status") {
+                        try press(panel, "Check archive status", renderer: renderer, failures: failures, timeout: 12)
+                    }
                 }
-                try require(!text.contains("This is retained original-operation data"), "iOS historical original status refused")
-                try fixture.finishIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                var resultCard: XCUIElement?
+                try stage("ios-archive-terminal-result-card") {
+                    resultCard = try waitElement(resultQuery, in: panel, timeout: 750, failures: failures)
+                }
+                guard let result = resultCard else { throw Refusal.condition("iOS current terminal result absent") }
+                try stage("ios-archive-terminal-result-facts") {
+                    // The read-only AX result region has no invocation target.
+                    // Its exact identity, visible text and bytes are checked below.
+                    print("MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=card-observed")
+                    observed = try iosResult(result, identity: pair)
+                }
+                try stage("ios-archive-terminal-command-facts") {
+                    let status = try unique(named(panel, statusLabel), "iOS current terminal status absent")
+                    try require(try iosCurrentArchiveIdentity(status) == pair, "iOS terminal status identity differs")
+                    let text = try iosPublicText(status)
+                    let required = ["iOS request finished", "Xcode version: known exit 0.", "iOS SDK selection: known exit 0.",
+                        "Saved preparation: not configured.", "Archive: known exit 0.",
+                        "Inspection snapshot: removed. Task work: removed. Archive output: retained-local-result."]
+                    let matched = required.map { text.contains($0) }
+                    print("MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=\(matched.map { $0 ? "1" : "0" }.joined())")
+                    try require(matched.allSatisfy { $0 }, "iOS original command/finality fact missing")
+                    try require(!text.contains("This is retained original-operation data"), "iOS historical original status refused")
+                }
+                try stage("ios-archive-terminal-original-files") {
+                    try fixture.finishIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                }
                 _ = try clock.remaining(1, before: successCutoff)
                 successBeforeCutoff = true // Only here; neither Quit nor cleanup can create success.
             }
@@ -8362,6 +9325,12 @@ final class NormalAppUITests: XCTestCase {
         } catch {
             let primary = error
             _ = clock.fail("unsigned iOS observation failed") // Never clear/replace a prior original failure.
+            if let pair = identity, !successBeforeCutoff, !normalQuitObserved {
+                let end = min(clock.deadline, ProcessInfo.processInfo.systemUptime + 5)
+                fixture.recordIOSArchiveFailureOutput(pair) {
+                    _ = try clock.remaining(1, before: end, cleanup: true)
+                }
+            }
             if let (app, window, _) = launched, let panel = selected, let pair = identity, !normalQuitObserved {
                 do { try settleFailedIOSArchive(app, window: window, panel: panel, identity: pair) }
                 catch { /* Same-original failure/unknown retained; teardown still consumes its originals. */ }

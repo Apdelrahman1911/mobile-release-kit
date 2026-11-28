@@ -31,6 +31,18 @@ on:
         description: Original successful main carrier attempt
         type: string
         required: true
+      additional_ui:
+        description: Run only the selected fixture check on the verification branch
+        type: choice
+        default: none
+        options: [none, update-credentials, all, project-paths-xctest, project-edits-xctest, persistence-xctest,
+                  offline-checks-xctest, workflow-refusal-xctest, release-evidence-xctest,
+                  android-inputs-xctest, unsigned-ios-xctest, metadata-xctest, workflow-conflict-xctest,
+                  release-asset, native-status-unit, recovery-contracts, xcode-path-control, archived-upgrade, apfs-disposal-control]
+      protected_xcode_fixture:
+        description: Prepare the Apple Xcode fixture for the supplemental unsigned archive only
+        type: boolean
+        default: false
   push:
     branches:
       - verify/desktop-macos-update-check
@@ -45,23 +57,504 @@ permissions:
   attestations: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' && format('-{0}-{1}', inputs.additional_ui, inputs.protected_xcode_fixture) || '' }}
   cancel-in-progress: false
 
 jobs:
+  apfs-disposal-control:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' &&
+      inputs.additional_ui == 'apfs-disposal-control' && inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' &&
+      inputs.build_run == '45996045007' && inputs.carrier_run == '46015331710' && inputs.carrier_attempt == '1'
+    name: Compare held directory and regular-file disposal on macOS
+    runs-on: macos-26
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Compare descriptor and name identity across native disposal
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == ARM64 && "$(uname -m)" == arm64 ]]
+          [[ "$(id -u)" != 0 && "$(sw_vers -productVersion)" == 26.* ]]
+          /usr/bin/python3 -I -B - <<'PYTHON'
+          import fcntl
+          import json
+          import os
+          import stat
+          import subprocess
+          import tempfile
+
+          def identity(row):
+              return (row.st_dev, row.st_ino, row.st_uid, row.st_gid, row.st_mode,
+                      getattr(row, "st_flags", 0))
+
+          def held_path_facts(fd, parent):
+              def check_path():
+                  raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+                  path = os.fsdecode(raw.split(b"\x00", 1)[0])
+                  try:
+                      resolved = os.stat(path, follow_symlinks=False)
+                  except FileNotFoundError:
+                      return "unbound-path"
+                  return "original-live" if os.path.samestat(resolved, os.fstat(fd)) else "path-substituted"
+
+              def check_parent():
+                  found = os.stat("..", dir_fd=fd, follow_symlinks=False)
+                  return "same-parent" if os.path.samestat(found, os.fstat(parent)) else "different-parent"
+
+              def check_current():
+                  found = os.stat(".", dir_fd=fd, follow_symlinks=False)
+                  return "same-directory" if os.path.samestat(found, os.fstat(fd)) else "different-directory"
+
+              result = {}
+              for key, query in (("descriptorPath", check_path), ("relativeParent", check_parent),
+                                 ("relativeDot", check_current)):
+                  try:
+                      result[key] = query()
+                  except OSError as error:
+                      result[key] = error.errno
+              return result
+
+          def remove(parent, name, directory):
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+              fd = os.open(name, flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+              try:
+                  before = os.fstat(fd)
+                  assert identity(before) == identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                  assert before.st_uid == os.geteuid() and before.st_dev == os.fstat(parent).st_dev
+                  if directory:
+                      assert stat.S_ISDIR(before.st_mode) and not os.listdir(fd)
+                  else:
+                      assert stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                  call = os.rmdir if directory else os.unlink
+                  assert call(name, dir_fd=parent) is None
+                  after = os.fstat(fd)
+                  try:
+                      os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  except FileNotFoundError:
+                      missing = True
+                  else:
+                      missing = False
+                  same = identity(before) == identity(after)
+                  assert missing and same
+                  return dict(beforeLinks=before.st_nlink, afterLinks=after.st_nlink,
+                              nameAbsent=missing, descriptorIdentityPreserved=same,
+                              candidateLinkPostcondition=after.st_nlink == 0,
+                              heldPath=held_path_facts(fd, parent) if directory else None)
+              finally:
+                  os.close(fd)
+
+          with tempfile.TemporaryDirectory(prefix="mrk-disposal-control-", dir="/private/tmp") as root:
+              parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  os.mkdir("work", mode=0o700, dir_fd=parent)
+                  os.mkdir("archive.xcarchive", mode=0o700, dir_fd=parent)
+                  archive = os.stat("archive.xcarchive", dir_fd=parent, follow_symlinks=False)
+                  task = os.open("work", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                  try:
+                      os.mkdir("home", mode=0o700, dir_fd=task)
+                      os.mkdir("DerivedData", mode=0o700, dir_fd=task)
+                      fd = os.open("owned-output", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=task)
+                      os.close(fd)
+                      with os.scandir(task) as entries:
+                          first = sorted(row.name for row in entries)
+                      with os.scandir(task) as entries:
+                          second = sorted(row.name for row in entries)
+                      assert first == ["DerivedData", "home", "owned-output"]
+                      control = dict(independentEnumerationStable=first == second,
+                                     file=remove(task, "owned-output", False),
+                                     emptyDirectory=remove(task, "home", True),
+                                     secondDirectory=remove(task, "DerivedData", True))
+                  finally:
+                      os.close(task)
+                  control["workDirectory"] = remove(parent, "work", True)
+                  os.mkdir("original", mode=0o700, dir_fd=parent)
+                  original = os.open("original", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     dir_fd=parent)
+                  try:
+                      control["live"] = held_path_facts(original, parent)
+                      os.rename("original", "moved", src_dir_fd=parent, dst_dir_fd=parent)
+                      os.mkdir("original", mode=0o700, dir_fd=parent)
+                      os.rmdir("original", dir_fd=parent)
+                      control["movedOriginalRemovedSubstitute"] = held_path_facts(original, parent)
+                      assert os.path.samestat(os.fstat(original), os.stat("moved", dir_fd=parent, follow_symlinks=False))
+                  finally:
+                      os.close(original)
+                  after = os.stat("archive.xcarchive", dir_fd=parent, follow_symlinks=False)
+                  control["archiveUntouched"] = identity(after) == identity(archive)
+                  assert control["archiveUntouched"]
+                  control["hostOS"] = subprocess.check_output(["/usr/bin/sw_vers", "-productVersion"], text=True).strip()
+                  print("MRK_APFS_DISPOSAL_CONTROL=" + json.dumps(control, sort_keys=True))
+              finally:
+                  os.close(parent)
+          PYTHON
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.10'
+      - name: Verify source disposes only the exact held directory
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
+          set -euo pipefail
+          python -B -m unittest -v test_ios_archive test_ci_xcode_preparation
+          python -B - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import tempfile
+          from unittest.mock import patch
+
+          import test_ios_archive as test
+
+          digest = Path(test.operation_module.__file__).resolve()
+          assert digest == Path.cwd() / "src/mobile_release/ios_archive_operation.py"
+          original_rmdir = os.rmdir
+          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          with tempfile.TemporaryDirectory(prefix="mrk-source-disposal-", dir="/private/tmp") as root:
+              parent = os.open(root, flags)
+              try:
+                  for move in (False, True):
+                      os.mkdir("work", mode=0o700, dir_fd=parent)
+                      fd = os.open("work", flags, dir_fd=parent)
+                      try:
+                          value = os.fstat(fd)
+                          with test.original() as op:
+                              module = test.operation_module
+                              held = module._Held(parent, "work", test.build_inputs._FD(op.guard),
+                                                  True, identity=test.build_inputs._directory(value))
+                              held.slot.number = fd
+                              held.slot.open_state = "OPEN"
+                              op.files.live.add(held)
+                              removal = module._IOSRemoval(op.files, held)
+                              with patch.object(op.files, "point"), patch.object(op.files, "require_work_consumers"):
+                                  if not move:
+                                      removal.remove()
+                                      assert removal.state == "DELETED" and held.deleted and not op.guard.lifetime_ledger.fatal
+                                  else:
+                                      def substitute(name, *, dir_fd):
+                                          os.rename(name, "retained", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                                          os.mkdir(name, 0o700, dir_fd=dir_fd)
+                                          return original_rmdir(name, dir_fd=dir_fd)
+
+                                      with patch.object(os, "rmdir", side_effect=substitute) as call:
+                                          try:
+                                              removal.remove()
+                                          except test.wire.ProtocolError:
+                                              assert removal.state == "UNKNOWN" and not held.deleted
+                                              assert op.guard.lifetime_ledger.fatal
+                                          else:
+                                              raise AssertionError("renamed original incorrectly accepted")
+                                          call.assert_called_once_with("work", dir_fd=parent)
+                                      assert os.path.samestat(value, os.stat("retained", dir_fd=parent, follow_symlinks=False))
+                              assert "work" not in os.listdir(parent)
+                      finally:
+                          os.close(fd)
+              finally:
+                  os.close(parent)
+          print("MRK_IOS_APFS_SOURCE_CONTROL=exact-descriptor-removed;renamed-original-refused")
+          PYTHON
+
+      - name: Run source cleanup on Xcode's exact outputs and refuse an escaping alias
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
+          set -euo pipefail
+          umask 077
+          python -B - <<'PYTHON'
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import tempfile
+          from types import SimpleNamespace
+          from unittest.mock import patch
+
+          import test_ios_archive as test
+
+          def settle(work, *, should_refuse=False):
+              source = test.operation_module
+              native_open, native_close = os.open, os.close
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              parent = os.open(work.parent, flags)
+              fd = os.open(work.name, flags, dir_fd=parent)
+              try:
+                  with test.original() as operation:
+                      files = operation.files
+                      work_identity = test.build_inputs._directory(os.fstat(fd))
+                      held = source._Held(parent, work.name, test.build_inputs._FD(operation.guard), True,
+                                          identity=work_identity, creation={"state": "CREATED"})
+                      held.slot.number, held.slot.open_state = fd, "OPEN"
+                      files.work = held
+                      files.held.append(held)
+                      files.live.add(held)
+                      files.namespace = SimpleNamespace(path=work.parent, check=lambda: None, cleanup=lambda: None, closed=lambda: True)
+                      with patch.object(os, "open", native_open), patch.object(os, "close", native_close), \
+                              patch.object(files, "point"), patch.object(files, "require_work_consumers"):
+                          try:
+                              files.finish_work()
+                          except source.IOSArchiveError as error:
+                              assert should_refuse and error.reason == "work-retained"
+                              assert files.work_disposition() == "retained-work"
+                          else:
+                              assert not should_refuse and files.work_disposition() == "removed"
+                          finally:
+                              files.close()
+                              assert files.closed()
+              finally:
+                  os.close(parent)
+
+
+
+          fixture = Path("desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-ios-unsigned-v1.json")
+          raw = fixture.read_bytes()
+          assert hashlib.sha256(raw).hexdigest() == "999a48f946b2a26164d250086d5ece7588f3ff9b2b88824e596168b82faa8daf"
+          inputs = json.loads(raw)
+          assert inputs["schemaVersion"] == 1 and len(inputs["files"]) == 9 and not inputs["stages"]
+          with tempfile.TemporaryDirectory(prefix="mrk-xcode-alias-control-", dir="/private/tmp") as name:
+              root = Path(name)
+              for relative, encoded in inputs["files"].items():
+                  entry = Path(relative)
+                  assert entry.parts[0] == "project" and not {"..", "."} & set(entry.parts)
+                  dest = root / entry
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  raw = base64.b64decode(encoded, validate=True)
+                  assert 0 < len(raw) < 32 * 1024
+                  dest.write_bytes(raw)
+              work = root / "project/.mobile-release/desktop-ios-archive" / ("a" * 32) / "work"
+              for name in ("home", "tmp", "DerivedData"):
+                  (work / name).mkdir(mode=0o700, parents=True)
+              developer = Path("/Applications/Xcode.app").resolve(strict=True) / "Contents/Developer"
+              assert developer.parents[1].parent == Path("/Applications")
+              sdk = (developer / "Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk").resolve(strict=True)
+              xcode = developer / "usr/bin/xcodebuild"
+              environ = {"PATH": str(developer / "usr/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                         "DEVELOPER_DIR": str(developer), "SDKROOT": str(sdk),
+                         "HOME": str(work / "home"), "TMPDIR": str(work / "tmp"), "CFFIXED_USER_HOME": str(work / "home"),
+                         "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "CI": "true",
+                         "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+                         "MOBILE_RELEASE_VERSION_NAME": "1.2.3", "MOBILE_RELEASE_BUILD_NUMBER": "7"}
+              archive = work.parent / "archive.xcarchive"
+              result = subprocess.run([str(xcode), "-project", str(root / "project/ios/MRKObserved.xcodeproj"),
+                  "-scheme", "MRKObserved", "-configuration", "Release", "-destination", "generic/platform=iOS",
+                  "-archivePath", str(archive), "-derivedDataPath", str(work / "DerivedData"), "archive",
+                  "MARKETING_VERSION=1.2.3", "CURRENT_PROJECT_VERSION=7", "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"],
+                  cwd=root / "project", env=environ, capture_output=True, timeout=120)
+              rows = []
+              for parent, dirs, files in os.walk(work, followlinks=False):
+                  for leaf in dirs + files:
+                      path = Path(parent) / leaf
+                      if not path.is_symlink():
+                          continue
+                      target = path.readlink()
+                      expected = Path(os.path.normpath(path.parent / target))
+                      rows.append(dict(path=path.relative_to(work).as_posix(),
+                                       target=expected.relative_to(root).as_posix() if expected.is_relative_to(root) else "outside-fixture",
+                                       absolute=target.is_absolute()))
+              assert len(rows) <= 32
+              print("MRK_XCODE_WORK_ALIASES=" + json.dumps(dict(xcode=developer.parents[1].name,
+                    archivePresent=archive.is_dir(), returnCode=result.returncode, symlinks=sorted(rows, key=lambda row: row["path"]))))
+              assert result.returncode == 0 and archive.is_dir()
+              observed_archive = archive.stat()
+              try:
+                  settle(work)
+              except BaseException:
+                  for row in rows:
+                      path = work / row["path"]
+                      if path.is_symlink():
+                          parts = path.relative_to(work).parts
+                          print("MRK_XCODE_ALIAS_CLASS=" + json.dumps(dict(
+                              path=row["path"], originalTargetRecognized=test.operation_module._work_link_target(
+                                  parts[:-1], parts[-1], str(path.readlink()), work / "home"),
+                              prefixParts=Path(path.readlink()).parts[:4])))
+                  raise
+              assert not work.exists() and os.path.samestat(archive.stat(), observed_archive)
+              outside = root / "outside"
+              outside.write_bytes(b"untouched")
+              (work / "DerivedData" / "Build").mkdir(parents=True)
+              (work / "DerivedData" / "Build" / "escaping").symlink_to(outside)
+              settle(work, should_refuse=True)
+              assert (work / "DerivedData" / "Build" / "escaping").is_symlink()
+              assert outside.read_bytes() == b"untouched" and os.path.samestat(archive.stat(), observed_archive)
+              print("MRK_XCODE_REAL_WORK_DISPOSAL=archive-retained;work-removed;external-link-refused")
+          PYTHON
+
+  xcode-path-control:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' &&
+      inputs.additional_ui == 'xcode-path-control' && inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f'
+    name: Native Xcode SDK output comparison
+    runs-on: macos-26
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Compare the original argument with fixed Xcode SDK readbacks
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$(uname -m)" == arm64 && "$(id -u)" != 0 ]]
+          /usr/bin/python3 -I -B - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+
+          selected = Path("/Applications/Xcode.app").resolve(strict=True)
+          if selected.parent != Path("/Applications") or not re.fullmatch(r"Xcode[A-Za-z0-9._+\-]*\.app", selected.name):
+              raise SystemExit("unexpected hosted Xcode selection")
+          developer = selected / "Contents/Developer"
+          sdk_root = developer / "Platforms/iPhoneOS.platform/Developer/SDKs"
+          sdk = (sdk_root / "iPhoneOS.sdk").resolve(strict=True)
+          if sdk.parent != sdk_root:
+              raise SystemExit("unexpected hosted SDK selection")
+          anchor = str(developer / "usr/bin/xcodebuild")
+          roster = (
+              ("original", [anchor, "-version", "-sdk", "iphoneos", "Path"], True),
+              ("sdkroot-absent", [anchor, "-version", "-sdk", "iphoneos", "Path"], False),
+              ("sdk-info", [anchor, "-version", "-sdk", "iphoneos"], True),
+              ("xcrun", ["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-path"], True),
+              ("bound-sdk", [anchor, "-version", "-sdk", str(sdk), "Path"], True),
+          )
+          report = {"selectedSDK": sdk.name}
+          with tempfile.TemporaryDirectory(prefix="mrk-xcode-path-") as work:
+              root = Path(work)
+              home, tmp = root / "home", root / "tmp"
+              home.mkdir(mode=0o700)
+              tmp.mkdir(mode=0o700)
+              base_env = {"PATH": str(developer / "usr/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                          "DEVELOPER_DIR": str(developer), "HOME": str(home),
+                          "CFFIXED_USER_HOME": str(home), "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
+                          "LC_ALL": "en_US.UTF-8", "CI": "true", "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1"}
+              for label, argv, use_sdkroot in roster:
+                  env = dict(base_env, SDKROOT=str(sdk)) if use_sdkroot else base_env
+                  result = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                  lines = result.stdout.splitlines()
+                  paths = [match.group(1) for line in lines if (match := re.fullmatch(
+                      r"(?:Path: )?(/Applications/Xcode[A-Za-z0-9._+\-]*\.app/Contents/Developer/Platforms/iPhoneOS\.platform/Developer/SDKs/iPhoneOS[0-9.]*\.sdk)",
+                      line.strip()))]
+                  report[label] = dict(returnCode=result.returncode,
+                      stdoutLineCount=len(lines), recognizedSDKPaths=paths[:4],
+                      exactMatch=result.stdout.strip() == str(sdk), stderrNonempty=bool(result.stderr))
+                  if len(paths) == 1:
+                      reported = Path(paths[0])
+                      report[label]["sameFilesystemObject"] = reported.exists() and reported.samefile(sdk)
+                      report[label]["directAliasToBoundSDK"] = (reported.parent == sdk_root
+                          and reported.is_symlink() and reported.readlink() == Path(sdk.name))
+          print(json.dumps(report, sort_keys=True))
+          PY
+
+  recovery-contracts:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' &&
+      inputs.additional_ui == 'recovery-contracts' && inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f'
+    name: Frozen-source recovery (${{ matrix.suite }})
+    runs-on: macos-26
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: interrupted-project-writers
+            tests: test_project_crash_recovery test_configuration_crash_recovery test_github_workflow_recovery
+          - suite: media-identity-and-rollback
+            tests: test_metadata_images_edit test_metadata_images_recovery test_saved_text_recovery
+          - suite: missing-inputs-and-custody
+            tests: test_android_signed test_ios_signed test_local_recovery_settlement test_macos_vault_helper_startup
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Exercise original core paths with disposable fixtures
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          SUITE: ${{ matrix.tests }}
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(sw_vers -productVersion)" == 26.* && "$(id -u)" != 0 ]]
+          [[ "$(git rev-parse HEAD)" == 4e821384cd912562dd5e30b195e87c113bd2d09f ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == 50393070e54b402a5ac1bac63e411fa1fbd1ad14 ]]
+          umask 077
+          fixtures="$(mktemp -d "$RUNNER_TEMP/mrk-core-recovery.XXXXXXXX")"
+          export TMPDIR="$fixtures"
+          python -m pip install --disable-pip-version-check -e '.[test]'
+          IFS=' ' read -r -a tests <<< "$SUITE"
+          python -B -m unittest -v "${tests[@]}"
+
+  native-status-unit:
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' &&
+      inputs.additional_ui == 'native-status-unit' && inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f'
+    name: Run macOS-only workspace backlog regression from the frozen source
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Verify source identity and run only the omitted check
+        working-directory: desktop
+        env:
+          EXPECTED_SOURCE: ${{ inputs.expected_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$(uname -m)" == arm64 ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE" && "$(sw_vers -productVersion)" == 26.* ]]
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test --test-reporter=tap --experimental-strip-types tests/workspace-native-status.test.mjs | tee "$RUNNER_TEMP/native-status-unit.tap"
+          grep -xF '# pass 1' "$RUNNER_TEMP/native-status-unit.tap"
+          grep -xF '# skipped 0' "$RUNNER_TEMP/native-status-unit.tap"
   qualify-frozen:
     name: Qualify frozen media (${{ matrix.mode }})
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-      github.ref_protected && inputs.expected_sha == github.sha
+      github.event_name == 'workflow_dispatch' && inputs.additional_ui != 'native-status-unit' &&
+      inputs.additional_ui != 'recovery-contracts' && inputs.additional_ui != 'xcode-path-control' &&
+      inputs.additional_ui != 'apfs-disposal-control' &&
+      ((github.ref == 'refs/heads/main' && github.ref_protected && inputs.expected_sha == github.sha && inputs.additional_ui == 'none') ||
+       (github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' &&
+        inputs.carrier_attempt == '1' &&
+        ((inputs.expected_sha == '4e821384cd912562dd5e30b195e87c113bd2d09f' && inputs.build_run == '45904194634') ||
+         (inputs.expected_sha == 'e162063689313421abc8032e5a89b6b226a516ea' && inputs.build_run == '46122648657' &&
+          inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
+         (inputs.expected_sha == '4feeced4ee513d824f8e44c50b3a340a7c39beed' && inputs.build_run == '45996045007' &&
+          ((inputs.additional_ui == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture) ||
+           (inputs.additional_ui == 'archived-upgrade' && !inputs.protected_xcode_fixture))))))
     runs-on: macos-26
     timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 55 }}
     strategy:
       fail-fast: false
       matrix:
-        mode: [fresh, update-credentials, archived-upgrade, post-reinstall-prepare,
-               uninstaller, delete-data, workspace-xctest, recovery-xctest, core-recovery, performance-long]
+        mode: ${{ github.ref == 'refs/heads/main' && fromJSON('["fresh","update-credentials","archived-upgrade","post-reinstall-prepare","uninstaller","delete-data","workspace-xctest","recovery-xctest","core-recovery","performance-long"]') || (inputs.additional_ui == 'all' && fromJSON('["project-paths-xctest","project-edits-xctest","persistence-xctest","offline-checks-xctest","workflow-refusal-xctest","release-evidence-xctest","android-inputs-xctest","unsigned-ios-xctest"]')) || fromJSON(format('["{0}"]', inputs.additional_ui != 'none' && inputs.additional_ui || 'recovery-xctest')) }}
     env:
       BASH_ENV: ''
       ENV: ''
@@ -74,6 +567,29 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
           [[ "$(sw_vers -productVersion)" == 26.* && "$(uname -m)" == arm64 && "$(id -u)" != 0 ]]
           [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
+      - name: Require the successful protected-main carrier for this supplemental lane
+        if: github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ inputs.expected_sha }}
+          CARRIER_RUN: ${{ inputs.carrier_run }}
+        run: |
+          set -euo pipefail
+          [[ "$CARRIER_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
+          case "$RELEASE_SOURCE" in
+            4e821384cd912562dd5e30b195e87c113bd2d09f) release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14 ;;
+            4feeced4ee513d824f8e44c50b3a340a7c39beed) release_tree=40c62080fe8a1ec90034508dbc2ce892f1083fb9 ;;
+            e162063689313421abc8032e5a89b6b226a516ea) release_tree=d327075ed405f811834cd8c5818cf59d33ffd0ed ;;
+            *) exit 1 ;;
+          esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CARRIER_RUN" |
+            jq -e --arg sha "$RELEASE_SOURCE" --arg tree "$release_tree" '
+              .head_sha == $sha and .head_branch == "main" and
+              .head_commit.tree_id == $tree and
+              .display_title == "macOS / local-desktop-carrier / main" and
+              .path == ".github/workflows/desktop-macos-installed.yml" and
+              .event == "workflow_dispatch" and .run_attempt == 1 and .conclusion == "success"
+            ' >/dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -82,11 +598,12 @@ jobs:
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.carrier_run }}
-          name: macos-release-frozen-${{ github.sha }}-${{ inputs.carrier_run }}-${{ inputs.carrier_attempt }}
+          name: macos-release-frozen-${{ inputs.expected_sha }}-${{ inputs.carrier_run }}-${{ inputs.carrier_attempt }}
           path: ${{ runner.temp }}/qualified-media
       - name: Require exactly the attested files from the approved build and carrier
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ inputs.expected_sha }}
           BUILD_RUN: ${{ inputs.build_run }}
           CARRIER_RUN: ${{ inputs.carrier_run }}
         run: |
@@ -96,26 +613,130 @@ jobs:
           printf 'MRK_UPDATE_WORK=%s\n' "$work" >> "$GITHUB_ENV"
           export MRK_FROZEN_RELEASE_MEDIA="$RUNNER_TEMP/qualified-media"
           printf 'MRK_FROZEN_RELEASE_MEDIA=%s\n' "$MRK_FROZEN_RELEASE_MEDIA" >> "$GITHUB_ENV"
+          release_tree="$(git rev-parse 'HEAD^{tree}')"
+          if [[ "$GITHUB_REF" == refs/heads/verify/macos-0213-repaired-ios-roster ]]; then
+            case "$RELEASE_SOURCE" in
+              4e821384cd912562dd5e30b195e87c113bd2d09f) release_tree=50393070e54b402a5ac1bac63e411fa1fbd1ad14 ;;
+              4feeced4ee513d824f8e44c50b3a340a7c39beed) release_tree=40c62080fe8a1ec90034508dbc2ce892f1083fb9 ;;
+            e162063689313421abc8032e5a89b6b226a516ea) release_tree=d327075ed405f811834cd8c5818cf59d33ffd0ed ;;
+              *) exit 1 ;;
+            esac
+          fi
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
-            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --source "$RELEASE_SOURCE" --tree "$release_tree" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN"
           for asset in "$MRK_FROZEN_RELEASE_MEDIA"/*; do
             gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main \
-              --source-digest "$GITHUB_SHA" --deny-self-hosted-runners \
+              --source-digest "$RELEASE_SOURCE" --deny-self-hosted-runners \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml"
           done
           python3 -I -B desktop/tools/macos_release_media.py verify "$MRK_FROZEN_RELEASE_MEDIA" \
-            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --source "$RELEASE_SOURCE" --tree "$release_tree" \
             --build-run "$BUILD_RUN" --carrier-run "$CARRIER_RUN" --selection "$work/selection.json"
+      - name: Prepare the existing protected Xcode fixture on this disposable host
+        id: protected_xcode
+        if: github.ref == 'refs/heads/verify/macos-0213-repaired-ios-roster' && inputs.additional_ui == 'unsigned-ios-xctest' && matrix.mode == 'unsigned-ios-xctest' && inputs.protected_xcode_fixture
+        timeout-minutes: 36
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(id -u)" != 0 && "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          script=desktop/tools/prepare_ci_xcode.py
+          printf '%s  %s\n' fd2b77fe48faa7ace7e21b23319b40123afa35a50df337755576a434ee48d05e "$script" |
+            shasum -a 256 -c
+          sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
+            /usr/bin/python3 -I -B "$script" | tee "$MRK_UPDATE_WORK/prepare-xcode.json"
+      - name: Compare native Xcode output with the installed archive predicates
+        if: steps.protected_xcode.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          umask 077
+          /usr/bin/python3 -I -B - "$MRK_UPDATE_WORK/xcode-output-control.json" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          import time
+
+          selected = Path("/Applications/Xcode.app").resolve(strict=True)
+          if selected.parent != Path("/Applications") or selected.stat().st_uid != 0:
+              raise SystemExit("unexpected protected Xcode selection")
+          developer = selected / "Contents/Developer"
+          sdk_parent = developer / "Platforms/iPhoneOS.platform/Developer/SDKs"
+          alias = sdk_parent / "iPhoneOS.sdk"
+          sdk = alias.resolve(strict=True)
+          if sdk.parent != sdk_parent or sdk.stat().st_uid != 0:
+              raise SystemExit("unexpected protected SDK selection")
+          report = {}
+          with tempfile.TemporaryDirectory(prefix="mrk-xcode-output-") as work:
+              root = Path(work)
+              home, tmp = root / "home", root / "tmp"
+              home.mkdir(mode=0o700)
+              tmp.mkdir(mode=0o700)
+              env = {"PATH": str(developer / "usr/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                     "DEVELOPER_DIR": str(developer), "SDKROOT": str(sdk), "HOME": str(home),
+                     "CFFIXED_USER_HOME": str(home), "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
+                     "LC_ALL": "en_US.UTF-8", "CI": "true", "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+                     "MOBILE_RELEASE_VERSION_NAME": "1.0.0", "MOBILE_RELEASE_BUILD_NUMBER": "1"}
+              for label, args in (("version", ("-version",)), ("sdk", ("-version", "-sdk", "iphoneos", "Path"))):
+                  start = time.monotonic()
+                  try:
+                      result = subprocess.run([str(developer / "usr/bin/xcodebuild"), *args], cwd=root,
+                                              env=env, capture_output=True, text=True, timeout=30, check=False)
+                      output = result.stdout.strip()
+                      report[label] = dict(returnCode=result.returncode, stderrNonempty=bool(result.stderr),
+                          elapsedSeconds=round(time.monotonic() - start, 3))
+                      if label == "version":
+                          report[label]["matchesArchivePredicate"] = bool(re.fullmatch(
+                              r"Xcode [0-9]+(?:\.[0-9]+){0,2}\nBuild version [0-9A-Za-z]+\s*", result.stdout))
+                      else:
+                          reported = Path(output)
+                          versioned_alias = (reported.parent == sdk_parent and reported.is_symlink()
+                                             and reported.lstat().st_uid == 0
+                                             and re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+){0,2}\.sdk", reported.name)
+                                             and reported.readlink() == Path("iPhoneOS.sdk")
+                                             and reported.samefile(sdk))
+                          sibling = bool(reported.parent == sdk_parent and reported.is_symlink()
+                                         and re.fullmatch(r"iPhoneOS[0-9]+(?:\.[0-9]+){0,2}\.sdk", reported.name))
+                          report[label].update(reportsCanonicalSDK=output == str(sdk),
+                                               reportsUnversionedAlias=output == str(alias),
+                                               reportsVersionedSibling=sibling,
+                                               versionedSiblingRootOwned=sibling and reported.lstat().st_uid == 0,
+                                               versionedSiblingTargetsBoundSDK=sibling and reported.readlink() == Path("iPhoneOS.sdk"),
+                                               reportsVersionedAliasToSameSDK=bool(versioned_alias))
+                  except subprocess.TimeoutExpired:
+                      report[label] = dict(timedOut=True, elapsedSeconds=round(time.monotonic() - start, 3))
+          Path(sys.argv[1]).write_text(json.dumps(report, sort_keys=True) + "\n")
+          print(json.dumps(report, sort_keys=True))
+          PY
       - name: Execute the production lifecycle or original installed XCTest
         env:
           GH_TOKEN: ${{ github.token }}
+          MRK_FROZEN_CARRIER_RUN: ${{ inputs.carrier_run }}
           MRK_CHECK_REFRESHED_RUNTIME: ${{ matrix.mode == 'fresh' }}
           MRK_CHECK_QUARANTINED_REMOVE_MEDIA: ${{ matrix.mode == 'uninstaller' }}
         run: |
           set -euo pipefail
           python3 -I -B desktop/tools/macos_update_check.py --selection "$MRK_UPDATE_WORK/selection.json" \
             --work "$MRK_UPDATE_WORK" --mode '${{ matrix.mode }}'
+      - name: Retain the bounded protected Xcode fixture status
+        if: ${{ !cancelled() && (steps.protected_xcode.outcome == 'success' || steps.protected_xcode.outcome == 'failure') }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -f "$MRK_UPDATE_WORK/prepare-xcode.json" ]]; then
+            mkdir -p "$MRK_UPDATE_WORK/evidence"
+            cp "$MRK_UPDATE_WORK/prepare-xcode.json" "$MRK_UPDATE_WORK/evidence/"
+            if [[ -f "$MRK_UPDATE_WORK/xcode-output-control.json" ]]; then
+              cp "$MRK_UPDATE_WORK/xcode-output-control.json" "$MRK_UPDATE_WORK/evidence/"
+            fi
+          fi
       - name: Retain scenario result and bounded evidence
         if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -126,7 +747,7 @@ jobs:
           retention-days: 30
 
   qualification-proof:
-    if: ${{ needs.qualify-frozen.result == 'success' }}
+    if: ${{ github.ref == 'refs/heads/main' && needs.qualify-frozen.result == 'success' }}
     needs: qualify-frozen
     runs-on: ubuntu-24.04
     timeout-minutes: 8
