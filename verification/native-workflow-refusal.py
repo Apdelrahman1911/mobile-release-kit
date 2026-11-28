@@ -726,10 +726,16 @@ def observe(work, action, media, suite):
         ui.node("Four read-only workflow previews", category="heading", contains=True)
         for item in proposal["workflows"]:
             ui.click(item["path"], category="disclosuretriangle", contains=True)
-            nodes = ui.command("tree.snapshot", limit=800)["nodes"]
-            text = {value.strip() for row in nodes if row["visible"] for value in (row["name"], row["text"])}
-            need(item["sha256"] in text and any(str(item["byteLength"])+" UTF-8 bytes" in value for value in text),
-                 "exact-passive-preview-byte-count-or-digest")
+            digest, size = item["sha256"], str(item["byteLength"]) + " UTF-8 bytes"
+            ui.reveal(digest, category="statictext", contains=True)
+            def visible_data():
+                nodes = ui.command("tree.snapshot", limit=800)["nodes"]
+                text = {value.strip() for row in nodes if row["visible"] for value in (row["name"], row["text"])}
+                return any(digest in value for value in text) and any(size in value for value in text)
+            until(visible_data, 10, "exact-passive-preview-byte-count-or-digest")
+            facts.setdefault("passiveExactPreviewCount", 0)
+            facts["passiveExactPreviewCount"] += 1
+            save()
             ui.click(item["path"], category="disclosuretriangle", contains=True)
         record("passiveOptionalPreviewHadFourExactProposalsWithoutWrites",
                inventory() == before and git("ls-files","--stage") == original_index)
