@@ -1,0 +1,41 @@
+name: Exact unsigned macOS preflight for the vault fix
+
+on:
+  push:
+    branches: [verify/frozen-0213-unsigned-preflight]
+    paths: [".github/workflows/verify-0213-unsigned-preflight.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  unsigned-preflight:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/frozen-0213-unsigned-preflight'
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Verify exact source, retained inputs and package version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 && "$(sw_vers -productVersion)" == 26.* ]]
+          [[ "$(git rev-parse HEAD^)" == b7c322ca8bd33afa6abd8ab38542384c99e41df9 ]]
+          [[ "$(git rev-parse 'HEAD^^{tree}')" == d327075ed405f811834cd8c5818cf59d33ffd0ed ]]
+          [[ "$(git diff --name-only HEAD^ HEAD)" == .github/workflows/verify-0213-unsigned-preflight.yml ]]
+          python -I -B desktop/tools/macos_release_media.py preflight
+      - name: Exercise the exact unsigned packaging and media gates
+        env:
+          MRK_PART_TEST_ROOT: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python -B -m unittest -v             tests.desktop.test_macos_candidate_parts             tests.desktop.test_macos_candidate_part_transport             tests.desktop.test_macos_candidate_parts_workflow             tests.desktop.test_macos_desktop_update             tests.desktop.test_macos_candidate_stages             tests.desktop.test_macos_optional_arrays             tests.desktop.test_runtime_preparation.MacCoreBytecodeDataTests             tests.desktop.test_macos_installed_staging.MacAndroidHelperPackagingData.test_separate_producer_and_removal_graphs_preserve_their_own_bindings             tests.desktop.test_macos_release_media
