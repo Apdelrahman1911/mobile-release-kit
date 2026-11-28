@@ -732,7 +732,10 @@ def observe(work, action, media, suite):
             for path, (size, digest) in expected.items():
                 if {path, size, digest} <= values:
                     matched.add(path)
-        record("fourExactPathByteCountDigestRows", matched == expected_paths)
+        facts["fourExactPathByteCountDigestRows"] = matched == expected_paths
+        facts["fourGeneratedByteCountsVisible"] = all(size in seen or size.split()[0] in seen
+                                                      for size, _ in expected.values())
+        save()
         record("reviewCreatedNoWorkflowOrOtherFile", before == inventory())
         ui.click(close, category="button", region=region)
         until(lambda: in_region(review, "button", True)
@@ -767,6 +770,8 @@ def observe(work, action, media, suite):
         record("conflictKeptOriginalFilesIndexAndRefs", inventory() == custom_state
                and git("ls-files", "--stage") == original_index and git("rev-parse", "HEAD") == head
                and git("remote") == remote)
+        need(facts["fourExactPathByteCountDigestRows"] or facts["fourGeneratedByteCountsVisible"],
+             "fourExactPathByteCountDigestRows")
 
     def release_initialization():
         sys.path.insert(0, str((Path("src")).resolve()))

@@ -112,7 +112,7 @@ def verify_observation(work, media, suite):
         "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
         "review-alone-wrote-files", "only-disposable-clean-initialization-fixture",
         "initialization-unapproved-apply-enabled", "git-reviewed-original-heading-missing",
-        "git-branch-apply-admitted-before-consent", "git-review-ambiguous",
+        "git-branch-apply-admitted-before-consent", "git-review-ambiguous", "git-native-refusal-before-branch-review",
         "image-copy-available-before-consent", "exact-image-preview-roster",
         "original-image-copy-review-control-not-ready", "image-picker-not-admitted",
         "original-native-picker-cancellation-projection",
@@ -784,7 +784,20 @@ def observe(work, action, media, suite):
             return ((seen(rows,"This attempt did not confirm initialization") and seen(rows,"Native finality: settled"))
                     or (enabled(start) and not enabled(confirm)
                         and any(seen(rows,label) for label in ("invalid","not be confirmed","not available"))))
-        run_state(invalid_pin_observed,"invalid-pin-terminal")
+        try:
+            run_state(invalid_pin_observed,"invalid-pin-terminal")
+        except AssertionError:
+            visible = read_region()
+            known = {"Native finality: settled", "Native finality: unknown",
+                "This attempt did not confirm initialization", "preview", "invalid", "Review initialization",
+                "Existing targets differ", "Initialization confirmed", "Operation: initialize; opening",
+                "Operation: initialize; editing", "Operation: initialize; preparing", "Operation: initialize; final",
+                "Native reason: protocol_error", "Native reason: runtime_unavailable",
+                "The original initialization status is unavailable or invalid", "Ownership is unverified"}
+            facts["invalidPinStatusMarkers"] = sorted(key for key in known if seen(visible,key))
+            facts["invalidPinOriginalFilesUnchangedAtTimeout"] = source_state() == baseline
+            save()
+            raise
         need(not enabled(confirm) and source_state()==baseline,"invalid-pin-mutated-fixture")
         facts["shortPinRefusedBeforeAnyWrite"] = True
         save()
@@ -908,8 +921,20 @@ def observe(work, action, media, suite):
             ui.command("text.insert", text=value)
 
         def apply(review, heading, action, consent, outcome):
+            next_status = time.monotonic() + 2
+            markers = set()
             def observe_review():
+                nonlocal next_status
                 rows = ui.command("tree.snapshot", limit=800)["nodes"]
+                labels = {value for row in rows if row["visible"] for value in (row["name"], row["text"])}
+                markers.update(labels & {"Review before changing Git", "Git action needs attention",
+                    "Git recovery is needed", "Git action did not complete", "Git action is still running"})
+                if time.monotonic() >= next_status and git_has("Check action", "button", action_status, enabled=True):
+                    ui.click("Check action", category="button", region=action_status)
+                    next_status = time.monotonic() + 4
+                    return False
+                need(not markers & {"Git action needs attention", "Git recovery is needed", "Git action did not complete"},
+                     "git-native-refusal-before-branch-review")
                 sections = [row["id"] + "." for row in rows if row["role"] == "group"
                             and row["name"] == review and row["visible"]]
                 need(len(sections) <= 1, "git-review-ambiguous")
