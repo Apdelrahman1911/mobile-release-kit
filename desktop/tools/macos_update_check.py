@@ -925,6 +925,20 @@ def install_log_excerpt(evidence):
     (evidence / "install-log-excerpt.txt").write_text("\n".join(line.replace(home, "~") for line in keep[-600:]) + "\n")
 
 
+ADDITIONAL_FROZEN_UI = {
+    "project-paths-xctest": ("testSyntheticProjectPathFields", "project-test", "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI"),
+    "project-edits-xctest": ("testSyntheticProjectLocalEditsAndImages", "project-test", "MRK_MACOS_NORMAL_PROJECT_UI"),
+    "metadata-xctest": ("testSyntheticProjectLocalEditsAndImages", "project-test", "MRK_MACOS_NORMAL_METADATA_UI"),
+    "persistence-xctest": ("testSyntheticPersistentCredentials", "persistence-test", "MRK_MACOS_NORMAL_PERSISTENCE_UI"),
+    "offline-checks-xctest": ("testSyntheticProjectSavedOfflineChecks", "saved-checks-test", "MRK_MACOS_NORMAL_OFFLINE_UI"),
+    "workflow-refusal-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI"),
+    "workflow-conflict-xctest": ("testSyntheticProjectManagedWorkflowRefusal", "workflow-refusal-test", "MRK_MACOS_NORMAL_WORKFLOW_CONFLICT_UI"),
+    "release-evidence-xctest": ("testSyntheticProjectSavedReleaseEvidence", "release-evidence-test", "MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI"),
+    "android-inputs-xctest": ("testSyntheticProjectAndroidSourceSelection", "project-test", "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI"),
+    "unsigned-ios-xctest": ("testSyntheticProjectUnsignedIOSArchive", "ios-unsigned-archive-test", "MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI"),
+}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
@@ -934,7 +948,8 @@ def main():
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
                                            "recovery-xctest", "retained-transition", "retained-prepare",
-                                           "macl-journal-recovery", "post-reinstall-prepare", "archived-upgrade"), default="update")
+                                           "macl-journal-recovery", "post-reinstall-prepare", "archived-upgrade",
+                                           *ADDITIONAL_FROZEN_UI), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -943,10 +958,25 @@ def main():
     try:
         selection = load_selection(args.selection)
         if os.environ.get("MRK_FROZEN_RELEASE_MEDIA"):
-            need(os.environ.get("GITHUB_REF") == "refs/heads/main"
-                 and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             manifest_path = Path(os.environ["MRK_FROZEN_RELEASE_MEDIA"]) / "RELEASE-MANIFEST.json"
             frozen = json.loads(manifest_path.read_bytes())
+            ref = os.environ.get("GITHUB_REF")
+            identity = (frozen["sourceCommit"], frozen["sourceTree"], frozen["buildRun"])
+            historical = (identity == ("4e821384cd912562dd5e30b195e87c113bd2d09f",
+                                       "50393070e54b402a5ac1bac63e411fa1fbd1ad14", "45904194634")
+                          and args.mode in ("update-credentials", "recovery-xctest", "release-asset", *ADDITIONAL_FROZEN_UI))
+            candidate_replay = (identity == ("4feeced4ee513d824f8e44c50b3a340a7c39beed",
+                                           "40c62080fe8a1ec90034508dbc2ce892f1083fb9", "45996045007")
+                               and args.mode in ("unsigned-ios-xctest", "archived-upgrade"))
+            archive_candidate = (identity == ("e162063689313421abc8032e5a89b6b226a516ea",
+                                              "d327075ed405f811834cd8c5818cf59d33ffd0ed", "46122648657")
+                                 and args.mode == "unsigned-ios-xctest")
+            diagnostic = (ref == "refs/heads/verify/macos-0213-repaired-ios-readback"
+                          and (historical or candidate_replay or archive_candidate)
+                          and (frozen["carrierRun"], frozen["carrierAttempt"])
+                          == (os.environ.get("MRK_FROZEN_CARRIER_RUN"), "1"))
+            need((ref == "refs/heads/main" or diagnostic)
+                 and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "frozen-release-check-route")
             result["frozenRelease"] = {key: frozen[key] for key in
                                        ("sourceCommit", "sourceTree", "buildRun", "carrierRun", "carrierAttempt")}
             result["frozenRelease"].update(manifestSha256=digest(manifest_path),
@@ -954,6 +984,8 @@ def main():
                                            removeSha256=frozen["packages"]["Remove.pkg"]["sha256"])
             if args.mode == "archived-upgrade":
                 selection.update(recoveryInstall=selection["previous"], recoveryRemoval=selection["previousRemoval"])
+        if args.mode in ADDITIONAL_FROZEN_UI:
+            need("frozenRelease" in result and diagnostic, "additional-ui-frozen-route")
         result["selection"] = selection
         if os.environ.get("MRK_RELEASE_QUALIFICATION") == "true":
             chosen = selection["next"]
@@ -985,7 +1017,8 @@ def main():
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
-             "core-recovery": core_recovery_check, "recovery-xctest": workspace_xctest}[args.mode](
+             "core-recovery": core_recovery_check, "recovery-xctest": workspace_xctest,
+             **dict.fromkeys(ADDITIONAL_FROZEN_UI, workspace_xctest)}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -2796,6 +2829,89 @@ def android_helper_status():
                           capture_output=True, timeout=10).returncode
 
 
+def ios_archive_host_facts(release):
+    """Compare fixed hosted paths with the native unsigned-archive metadata predicates."""
+    rows = {}
+
+    def observe(path, directory=True):
+        try:
+            info = path.lstat()
+        except OSError as error:
+            rows[str(path)] = {"errno": error.errno}
+            return None
+        mode = stat.S_IMODE(info.st_mode)
+        ordinary = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        rows[str(path)] = {
+            "uid": info.st_uid, "gid": info.st_gid, "mode": f"{mode:04o}", "links": info.st_nlink,
+            "kind": "symlink" if stat.S_ISLNK(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) else "other",
+            "ordinaryMetadataAdmitted": ordinary and info.st_uid == 0 and not mode & 0o7022
+            and (directory or info.st_nlink == 1),
+        }
+        return info
+
+    applications = Path("/Applications")
+    managed = Path("/Library/MobileReleaseKitDeveloper")
+    for path in (Path("/"), Path("/Library"), managed, applications):
+        observe(path)
+    app = applications / "Xcode.app"
+    alias = observe(app)
+    if alias is not None and stat.S_ISLNK(alias.st_mode):
+        target = os.readlink(app).removeprefix("/Applications/")
+        valid = bool(re.fullmatch(r"Xcode[A-Za-z0-9._+-]*\.app", target)) and target != "Xcode.app"
+        rows[str(app)]["siblingAdmitted"] = valid
+        if valid:
+            app = applications / target
+    if rows[str(applications / "Xcode.app")].get("siblingAdmitted", True):
+        developer = app / "Contents/Developer"
+        for path in (app, app / "Contents", developer, developer / "usr", developer / "usr/bin"):
+            observe(path)
+        observe(developer / "usr/bin/xcodebuild", directory=False)
+        sdk = developer
+        for name in ("Platforms", "iPhoneOS.platform", "Developer", "SDKs"):
+            sdk /= name
+            observe(sdk)
+        alias = observe(sdk / "iPhoneOS.sdk")
+        if alias is not None and stat.S_ISLNK(alias.st_mode):
+            target = os.readlink(sdk / "iPhoneOS.sdk")
+            valid = bool(re.fullmatch(r"iPhoneOS[1-9][0-9]{0,2}(?:\.(?:0|[1-9][0-9]{0,2})){0,2}\.sdk", target))
+            rows[str(sdk / "iPhoneOS.sdk")]["siblingAdmitted"] = valid
+            if valid:
+                observe(sdk / target)
+
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", release):
+        return rows
+    runtime = STATE / "versions" / release / "runtime"
+    observe(runtime)
+    for name in ("manifest.json", "core.zip", "ios_archive_bootstrap.py"):
+        observe(runtime / name, directory=False)
+    return rows
+
+
+def observe_ios_archive_processes(stop, events):
+    """Record only transitions for Xcode/core descendants of the original app."""
+    previous = set()
+    while not stop.wait(0.25) and len(events) < 40:
+        try:
+            result = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,comm="],
+                                    capture_output=True, text=True, check=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return
+        by_pid = {}
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=2)
+            if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+                by_pid[int(fields[0])] = int(fields[1]), Path(fields[2].strip()).name
+        app = {pid for pid, (_, name) in by_pid.items() if name == PAYLOAD_PROCESS}
+        tree = set(app)
+        while expanded := {pid for pid, (parent, _) in by_pid.items() if parent in tree} - tree:
+            tree.update(expanded)
+        roles = {name for pid, (_, name) in by_pid.items() if pid in tree - app
+                 and name in {"python3", "python3.14", "xcodebuild", "XCBBuildService", "clang", "dsymutil"}}
+        if roles != previous:
+            events.append({"epochMillis": time.time_ns() // 1_000_000, "roles": sorted(roles)})
+            previous = roles
+
+
 def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, result):
     """Run the original production UI check on the caller's verified installed package."""
     origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
@@ -2811,6 +2927,11 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
            "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": source, "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": harness,
            "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY": "current-candidate-ordinary-only-v1"}
+    ios = mode == "unsigned-ios-xctest"
+    if ios:
+        result["iosArchiveHostFacts"] = ios_archive_host_facts(installed["release"])
+        del env["TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY"]
+        env["TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] = "current-candidate-ios-tools-only-v1"
     if same_frozen_source:
         env["TEST_RUNNER_MRK_NORMAL_UI_SAME_FROZEN_SOURCE"] = "true"
     project = Path(__file__).resolve().parents[2] / "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
@@ -2828,35 +2949,52 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
          "workspace-xctest-single-original-manifest")
     prepare = mode == "prepare-xctest"
     recovery = mode == "recovery-xctest"
-    method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
-              "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]
+    extra = ADDITIONAL_FROZEN_UI.get(mode)
+    if extra:
+        method, bundle_stem, completion_marker = extra
+        env["TEST_RUNNER_MRK_NORMAL_UI_GUIDED_PRODUCT_SURFACE"] = "exact-0.2.13-frozen-ui"
+        if mode == "metadata-xctest":
+            env["TEST_RUNNER_MRK_NORMAL_UI_METADATA_ONLY"] = "fixed-metadata-journey-v1"
+        if mode == "workflow-conflict-xctest":
+            env["TEST_RUNNER_MRK_NORMAL_UI_WORKFLOW_CONFLICT_ONLY"] = "fixed-workflow-conflict-v1"
+    else:
+        method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
+                  "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]
+        bundle_stem = "project-test"
     if recovery:
         project_path, baseline = seed_signed_gui_recovery(row, folder, work, env, result)
-    bundle = work / "project-test.xcresult"
+    bundle = work / (bundle_stem + ".xcresult")
     before_crashes = set(recent_crashes())
-    resource_samples, stop_sampling = [], threading.Event()
+    resource_samples, process_events, stop_sampling = [], [], threading.Event()
     sampler = None
-    if not (prepare or recovery):
+    if mode == "workspace-xctest":
         sampler = threading.Thread(target=workspace_resource_observations, args=(stop_sampling, resource_samples),
                                    daemon=True)
         sampler.start()
+    elif ios:
+        result["iosArchiveProcessEvents"] = process_events
+        sampler = threading.Thread(target=observe_ios_archive_processes, args=(stop_sampling, process_events),
+                                   daemon=True)
+        sampler.start()
+    xctest_started_at = time.monotonic()
     try:
         tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
                                  "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
                                  "-resultBundlePath", str(bundle), "-disableAutomaticPackageResolution",
                                  "-only-testing:MRKNormalAppUITests/NormalAppUITests/" + method,
                                  "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
-                                 "-default-test-execution-time-allowance", "300",
-                                 "-maximum-test-execution-time-allowance", "300"],
-                                env=env, capture_output=True, text=True, timeout=600)
+                                 "-default-test-execution-time-allowance", "900" if ios else "300",
+                                 "-maximum-test-execution-time-allowance", "900" if ios else "300"],
+                                env=env, capture_output=True, text=True, timeout=1200 if ios else 600)
     finally:
+        result["xctestSeconds"] = round(time.monotonic() - xctest_started_at, 2)
         stop_sampling.set()
         if sampler is not None:
             sampler.join(timeout=65)
 
     result["xctestReturn"] = tested.returncode
     transcript = tested.stdout + "\n" + tested.stderr
-    if sampler is not None:
+    if mode == "workspace-xctest":
         result["workspaceResources"] = {
             "method": "ps RSS/%cpu of the signed app process tree, sampled every second during actual XCTest stages",
             "stages": workspace_resource_summary(transcript, resource_samples),
@@ -2873,8 +3011,83 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
     result["cliRevokeCuts"] = re.findall(r"(?m)^MRK_RELEASE_CLI_REVOKE_CUT=(click-returned|off-visible)$", transcript)
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
+    folded_transcript = transcript.lower()
+    if extra and tested.returncode != 0 and bundle.is_dir():
+        # Retain only known failure categories. The raw result may include
+        # screenshot attachments, UI values or synthetic credential input.
+        try:
+            summary = subprocess.run(
+                ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(bundle), "--compact"],
+                env=env, capture_output=True, timeout=20, check=True,
+            )
+            rows = json.loads(summary.stdout).get("testFailures", [])
+            result["xctestSummaryFailureCount"] = len(rows)
+            locations = []
+            for row in rows[:12]:
+                location = row.get("sourceURL", "")
+                if isinstance(location, str) and "NormalAppUITests.swift" in location and len(location) <= 4096:
+                    match = re.search(r"(?:StartingLineNumber=|:)([1-9][0-9]{0,4})(?:\b|$)",
+                                      location.split("NormalAppUITests.swift", 1)[1], re.IGNORECASE)
+                    if match:
+                        locations.append(int(match[1]))
+            result["xctestSummaryFailureLines"] = locations
+            folded_transcript += "\n" + "\n".join(
+                row["failureText"] for row in rows[:12] if isinstance(row.get("failureText"), str)
+            ).lower()
+        except (subprocess.SubprocessError, OSError, ValueError, AttributeError, TypeError):
+            result["xctestSummaryUnavailable"] = True
+    runner_events = [event for event, fragment in (
+        ("objective-c-exception", "NSInvalidArgumentException"),
+        ("unsupported-predicate", "Unsupported predicate"),
+        ("execution-timeout", "exceeded execution time allowance"),
+        ("execution-timeout", "exceeded the maximum allowed execution time"),
+        ("runner-exited", "Test runner exited"),
+        ("runner-signal", "terminated with unexpected signal"),
+        ("test-crashed", "TEST CRASHED"),
+        ("ui-testing-failure", "UI Testing Failure"),
+        ("ax-snapshot-failure", "Failed to get matching snapshot"),
+        ("ax-attribute-failure", "Failed to get attributes"),
+        ("test-interrupted", "Testing was interrupted"),
+    ) if fragment.lower() in folded_transcript]
     for field, pattern in (
         ("xctestRequireLine", r"MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + r";line=([0-9]{1,5});check="),
+        ("xctestPackagedRequire", r"(?m)^MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=([0-9]{1,5});check=([a-z-]{1,20})$"),
+        ("xctestProjectSelection", r"(?m)^MRK_GUIDED_PROJECT_SELECTION=v1;([a-z-]{1,30})=([0-5])$"),
+        ("xctestSidebarNavigation", r"(?m)^MRK_GUIDED_NAV=v1;line=([0-9]{1,5});phase=(sidebar-scroll|hittable)$"),
+        ("xctestIOSToolDiagnosticCut", r"(?m)^MRK_GUIDED_IOS_TOOLS=v1;cut=([a-z-]{1,24});expired=([01])$"),
+        ("xctestIOSArchiveFileCut", r"(?m)^MRK_GUIDED_IOS_ARCHIVE_FILES=v1;cut=([a-z0-9-]{1,24})$"),
+        ("xctestIOSArchiveRosterCut", r"(?m)^MRK_GUIDED_IOS_ARCHIVE_ROSTER=v1;scope=(root|project|nested);extra=([0-9]{1,2});missing=([0-9]{1,2});known=([01]{5})$"),
+        ("xctestIOSArchiveInputCut", r"(?m)^MRK_GUIDED_IOS_ARCHIVE_INPUT=v1;index=([0-9]{1,2});bytes=([01]);identity=([01])$"),
+        ("xctestGuidedIOSResultCut", r"(?m)^MRK_GUIDED_IOS_ARCHIVE_RESULT=v1;cut=(card-observed|identity-matched|bounded-text|result-facts|counts-verified)$"),
+        ("xctestGuidedIOSTerminal", r"(?m)^MRK_GUIDED_IOS_TERMINAL=v1;(native-reason|failure)=([a-z-]{1,24}|[0-9]{1,2})$"),
+        ("xctestGuidedVaultOpen", r"(?m)^MRK_GUIDED_VAULT_OPEN=v1;operation=([01]);action=([01]);uninitialized=([01]);closed=([01])$"),
+        ("xctestGuidedVaultStatus", r"(?m)^MRK_GUIDED_VAULT_STATUS=v1;action=([a-z-]{1,26});field=(action|phase|settlement);group=([01]);value=([01]);preview=([01])$"),
+        ("xctestGuidedVaultAssessment", r"(?m)^MRK_GUIDED_VAULT_ASSESSMENT=v1;stage=(heading|envelope|native|service|release)$"),
+        ("xctestGuidedIOSReport", r"(?m)^MRK_GUIDED_IOS_REPORT=v1;context=([0-5]);receipt=([0-5])$"),
+        ("xctestGuidedIOSReview", r"(?m)^MRK_MACOS_GUIDED_IOS_REVIEW_FIELDS=v1;fields=([01]{5})$"),
+        ("xctestGuidedIOSReviewTokens", r"(?m)^MRK_MACOS_GUIDED_IOS_REVIEW_TOKENS=v1;fields=([01]{5})$"),
+        ("xctestGuidedIOSAckReadback", r"(?m)^MRK_MACOS_GUIDED_IOS_ACK_READBACK=v1;fields=([01]{3})$"),
+        ("xctestGuidedIOSOriginalPhase", r"(?m)^MRK_MACOS_GUIDED_IOS_ORIGINAL_PHASE=v1;fields=([01]{6})$"),
+        ("xctestIOSArchiveTerminal",
+         r"(?m)^MRK_MACOS_IOS_ARCHIVE_TERMINAL=v1;outcome=([a-z-]{1,16});reason=([a-z-]{1,32});"
+         r"xcode=(-?[0-9]{1,3}|[a-z-]{1,16});sdk=(-?[0-9]{1,3}|[a-z-]{1,16});"
+         r"archive=(-?[0-9]{1,3}|[a-z-]{1,16});output=([a-z-]{1,24})$"),
+        ("xctestIOSArchiveNotice", r"(?m)^MRK_MACOS_IOS_ARCHIVE_NOTICE=v1;code=([a-z_]{1,40});status=([0-2]);result=([0-2])$"),
+        ("xctestIOSArchiveDisposal",
+         r"(?m)^MRK_MACOS_IOS_ARCHIVE_DISPOSAL=v1;archive=([0-2]);work=([0-2]);entries=([0-9]{1,4});"
+         r"symlinks=([0-9]{1,4});hardlinks=([0-9]{1,4});foreign=([0-9]{1,4});unsafe=([0-9]{1,4});"
+         r"other=([0-9]{1,4});complete=([01])$"),
+        ("xctestIOSArchiveLastStage", r"(?m)^MRK_MACOS_IOS_ARCHIVE_LAST_STAGE=v1;stage=([a-z-]{1,24})$"),
+        ("xctestGuidedIOSLedger", r"(?m)^MRK_GUIDED_IOS_LEDGER=v1;expanded=([01]);static=([0-5]);named=([0-5])$"),
+        ("xctestGuidedWorkflowRefusal", r"(?m)^MRK_GUIDED_WORKFLOW_PREVIEW_REFUSAL=v1;reason=([a-z-]{1,32})$"),
+        ("xctestGuidedWorkflowConflictRow", r"(?m)^MRK_GUIDED_WORKFLOW_CONFLICT_ROW=v1;fields=([0-9]{1,3});id=(true|false);bytes=(true|false);hash=(true|false)$"),
+        ("xctestGuidedWorkflowConflictSafety", r"(?m)^MRK_GUIDED_WORKFLOW_CONFLICT_SAFETY=v1;(originals=preserved;apply=absent|effect=not_started;journal=not_created;cleanup=settled)$"),
+        ("xctestGuidedPicker", r"(?m)^MRK_GUIDED_PICKER=v1;observed=(absent|expected|other|multiple)$"),
+        ("xctestGuidedReadbackLoss", r"(?m)^MRK_GUIDED_READBACK_LOST=v1;line=([0-9]{1,5});present=([01])$"),
+        ("xctestGuidedOfflineCounts", r"(?m)^MRK_GUIDED_OFFLINE_COUNT=v1;total=([0-9]{1,3});missing=([0-9]{1,3});skipped=([0-9]{1,3});summary=([0-5])$"),
+        ("xctestGuidedOfflineAuthority", r"(?m)^MRK_GUIDED_OFFLINE_AUTHORITY=v1;consent=([0-5]);run=([0-5])$"),
+        ("xctestSelectFailure", r"(?m)^MRK_GUIDED_SELECT=v1;phase=(control|reveal|item|written-value);line=([0-9]{1,5})$"),
+        ("xctestAndroidSourceFailure", r"(?m)^MRK_GUIDED_ANDROID_SOURCE=v1;role=(jdk|sdk|gradle);phase=(original-group|native-picker|returned-status|retained-selections)$"),
         ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),
         ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
         ("maintenanceReadiness", r"(?m)^MRK_MAINTENANCE_READY=v1;phase=(initial|after-disclosure|failure);consent=([0-5]);refresh=([0-5]);enabled=([0-5]);checking=([0-5])$"),
@@ -2900,16 +3113,18 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["recoveryControls"] = re.findall(
             r"(?m)^MRK_RELEASE_RECOVERY_CONTROL=(before|refused|review);inspect=(true|false);close=(true|false)$",
             transcript)
-        result["recoveryTestRunnerEvents"] = [event for event, fragment in (
-            ("objective-c-exception", "NSInvalidArgumentException"),
-            ("unsupported-predicate", "Unsupported predicate"),
-            ("execution-timeout", "exceeded execution time allowance"),
-            ("runner-exited", "Test runner exited"),
-            ("test-crashed", "TEST CRASHED"),
-        ) if fragment.lower() in transcript.lower()]
+        result["recoveryProjectObservations"] = re.findall(
+            r"(?m)^MRK_RECOVERY_PROJECT_OPEN=v1;(folder|unselected|choose-error|read-error|exact-path|tmp-alias|fixture-parent)=([0-5])$",
+            transcript)[-7:]
+        result["recoveryTestRunnerEvents"] = runner_events
         result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
         result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
         observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]
+    elif extra:
+        result["xctestTestRunnerEvents"] = runner_events
+        facts = re.findall(r"(?m)^" + completion_marker + r"=([^\r\n]{1,16384})$", transcript)
+        result["scenarioFacts"] = facts
+        observed = len(facts) == 1
     else:
         result["workspaceFixtureObserved"] = "MRK_RELEASE_WORKSPACE=selected-saved-identity-files-unchanged" in transcript
         result["cliGrantAndRevokeObserved"] = "MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked" in transcript
@@ -2993,7 +3208,29 @@ def release_asset_check(selection, work, evidence, steps, result):
         image = output / "MobileReleaseKit-Remove.dmg"
         shutil.copyfile(work / "removal/MobileReleaseKit-Remove.dmg", image)
         need(digest(image) == selection["removal"]["imageSha256"], "asset-removal-image-digest")
-        shutil.copyfile(folder / "carrier-release-asset.dmg", output / "MobileReleaseKit-Install.dmg")
+        frozen_media = os.environ.get("MRK_FROZEN_RELEASE_MEDIA")
+        if frozen_media:
+            manifest = json.loads((Path(frozen_media) / "RELEASE-MANIFEST.json").read_bytes())
+            install_name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-Install.dmg"
+            shutil.copyfile(Path(frozen_media) / install_name, output / "MobileReleaseKit-Install.dmg")
+            image_evidence = {}
+            for role in ("Install", "Remove"):
+                name = f"MobileReleaseKit-{manifest['version']}-macos-arm64-{role}.dmg"
+                copied = output / f"MobileReleaseKit-{role}.dmg"
+                expected = manifest["images"][name]["sha256"]
+                need(digest(copied) == expected, "frozen-quarantine-image-identity")
+                require_quarantine(copied)
+                gate, _ = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "open", "--context", "context:primary-signature",
+                               str(copied)], 120)
+                need(gate.returncode == 0 and "Notarized Developer ID" in gate.stdout + gate.stderr,
+                     "frozen-quarantine-image-gatekeeper")
+                staple, _ = run(["/usr/bin/xcrun", "stapler", "validate", str(copied)], 120)
+                need(staple.returncode == 0 and digest(copied) == expected, "frozen-quarantine-image-staple")
+                image_evidence[name] = {"sha256": expected, "quarantineVerified": True,
+                                        "stapleVerified": True, "gatekeeper": "Notarized Developer ID"}
+            result["frozenQuarantinedImages"] = image_evidence
+        else:
+            shutil.copyfile(folder / "carrier-release-asset.dmg", output / "MobileReleaseKit-Install.dmg")
         result["asset"] = {"schemaVersion": 1, "version": row["packageVersion"], "release": row["release"],
                            "sourceCommit": origin["source"], "sourceTree": origin["tree"], "target": origin["target"],
                            "buildRun": row["runId"], "removalRun": selection["removal"]["runId"],
