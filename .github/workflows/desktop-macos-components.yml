@@ -911,7 +911,7 @@ jobs:
                 git_local_protocol::push_worker::new_branch_tests:: \
                 "${remote_tool_tests[@]}" \
                 --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
-              grep -Eq '^test result: ok\. 167 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 173 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
             )
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
