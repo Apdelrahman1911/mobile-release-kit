@@ -201,7 +201,8 @@ jobs:
              | select(.packageSha256=="1a42510801e93786d6cd32ce98c8596a166e85f863bd4f61fd105fda891d8b79")
              | select($installed[0].nativeSignaturesVerified==true and .packageSha256==$installed[0].packageSha256)
              | {sourceCommit,sourceTree,packageSha256,removeSha256,
-                observerExit:$summary[0].observerExit,status:($summary[0].scenarios),
+                observerExit:$summary[0].observerExit,status:($summary[0].scenarios), failureCodes:$summary[0].failureCodes,
+                diagnosticStages:(.diagnosticStages//[]),
                 branchFacts:(.gitBranches//{}|{observedOriginalLocalBranchControls,twoOriginalLocalRefsObserved,
                    createdExactBranchWithoutSwitching,renamedExactCurrentRefWithoutChangingFiles,switchedToExactOriginalTarget}),
                 initializationFacts:(.releaseInitialization//{}|{reviewCancellationKeptOriginalFiles,

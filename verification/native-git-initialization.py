@@ -100,6 +100,46 @@ def verify_observation(work, media, suite):
                    suite=suite,
                    resultSha256=file_hash(result_path) if result_path.is_file() else None,
                    sourceCommit=result.get("sourceCommit"), harnessCommit=os.environ["GITHUB_SHA"])
+    safe_errors = {
+        "branch-field-roster", "branch-create-field", "branch-create-field-identity",
+        "branch-create-field-value", "branch-picker-exact-alternate",
+        "branch-create-changed-checkout-files-or-unrelated-refs",
+        "branch-rename-changed-contents-tip-or-unrelated-refs",
+        "original-initialization-region", "initialization-review-precondition",
+        "initialization-exact-preview", "initialization-confirmed-result",
+        "initialization-cancelled-original-review", "initialization-invalid-pin-terminal",
+        "initialization-existing-customized-caller-conflict",
+        "exact-full-toolkit-pin-entry", "missing-reviewed-inventory-or-unapproved-apply",
+        "review-alone-wrote-files", "only-disposable-clean-initialization-fixture",
+        "image-copy-available-before-consent", "exact-image-preview-roster",
+        "original-image-copy-review-control-not-ready", "image-picker-not-admitted",
+        "original-native-picker-cancellation-projection",
+        "single-enabled-android-configuration", "cli-native-original-preparation",
+        "original-cli-prepare-final-without-review", "superseded-preparation-result",
+        "original-project-picker-did-not-resume", "exact-go-to-folder-sheet",
+        "native-folder-completion-did-not-match-fixture",
+    }
+    failure_codes = {}
+    for name in sorted(expected_scenarios):
+        row = scenarios.get(name, {})
+        if row.get("status") != "Failed":
+            continue
+        kind, _, code = row.get("reason", "").partition(": ")
+        if kind == "AssertionError" and code in safe_errors:
+            failure_codes[name] = code
+        elif kind == "AssertionError" and code.startswith("missing-or-ambiguous-region-"):
+            failure_codes[name] = "ambiguous-region"
+        elif kind == "AssertionError" and code.startswith(("missing-or-ambiguous-element-", "target-not-reachable-")):
+            failure_codes[name] = "missing-or-unreachable-control"
+        elif kind == "ClientError":
+            match = re.fullmatch(r"HTTP (408|409) \((condition_timeout|stale_snapshot)\)", code)
+            failure_codes[name] = match.group(2) if match else "driver-error"
+        else:
+            failure_codes[name] = kind if kind in {
+                "AssertionError", "AttributeError", "DescriptorError", "ImportError",
+                "ModuleNotFoundError", "KeyError", "FileNotFoundError", "CalledProcessError",
+            } else "other"
+    summary["failureCodes"] = failure_codes
     trace = evidence / "trace.jsonl"
     summary["traceSha256"] = file_hash(trace) if trace.is_file() else None
     payload = json.dumps(summary, sort_keys=True)
@@ -300,8 +340,8 @@ class UI:
                     raise
                 time.sleep(0.75)
 
-    def edit(self, name, text):
-        self.click(name, category="textfield", contains=True)
+    def edit(self, name, text, *, region=None):
+        self.click(name, category="textfield", contains=True, region=region)
         self.keys("command", "a")
         self.command("text.insert", text=text)
 
@@ -620,7 +660,9 @@ def observe(work, action, media, suite):
         from mobile_release.config_payloads import prepare_edit_ignore
 
         ui.page("Overview")
-        ui.click("Advanced: prepare release files together",category="disclosuretriangle")
+        results.setdefault("diagnosticStages", []).append("initialization-open-panel")
+        save()
+        ui.click("Advanced: prepare release files together",category="disclosuretriangle",contains=True)
         zone = "Project initialization"
         repo = "Apdelrahman1911/mobile-release-kit"
         pin = "7e2b0eaa4e320f72a82468c84d4c61e322dbe7fc"
@@ -630,6 +672,8 @@ def observe(work, action, media, suite):
         need(project.is_relative_to(work) and not project.is_symlink() and
              config.is_file() and not sentinel.exists() and not (project / ".github").exists(),
              "only-disposable-clean-initialization-fixture")
+        results.setdefault("diagnosticStages", []).append("initialization-read-fixture")
+        save()
         draft = json.loads(config.read_bytes())
         expected = prepare_input(draft,repo,pin)
         target = {Path(path): (prepare_edit_ignore((project / ".gitignore").read_bytes())[0] if i == 1
@@ -693,12 +737,16 @@ def observe(work, action, media, suite):
             ui.click(confirm,category="button",region=zone)
             run_state(lambda rows: seen(rows,label),"confirmed-result")
 
-        ui.edit("Toolkit repository (owner/repo)",repo)
-        ui.edit("Full toolkit commit (40 hexadecimal characters)",pin)
-        need(ui.node("Full toolkit commit (40 hexadecimal characters)",category="textfield",contains=True)[1]["text"]==pin,
+        results.setdefault("diagnosticStages", []).append("initialization-enter-toolkit")
+        save()
+        ui.edit("Toolkit repository (owner/repo)",repo,region=zone)
+        ui.edit("Full toolkit commit (40 hexadecimal characters)",pin,region=zone)
+        need(ui.node("Full toolkit commit (40 hexadecimal characters)",category="textfield",contains=True,region=zone)[1]["text"]==pin,
              "exact-full-toolkit-pin-entry")
         begin()
         review()
+        results.setdefault("diagnosticStages", []).append("initialization-review-ready")
+        save()
         need(source_state()==baseline,"review-alone-wrote-files")
         ui.click("Cancel review",category="button",region=zone)
         run_state(lambda rows: enabled(start) and not enabled(confirm),"cancelled-original-review")
@@ -707,6 +755,8 @@ def observe(work, action, media, suite):
         save()
         begin()
         review()
+        results.setdefault("diagnosticStages", []).append("initialization-confirm-reviewed-plan")
+        save()
         apply_and_read("Initialization confirmed.")
         result = source_state()
         need(set(result)==set(baseline)|set(target) and all((project / path).read_bytes()==data for path,data in target.items())
@@ -716,6 +766,8 @@ def observe(work, action, media, suite):
         save()
         begin()
         review()
+        results.setdefault("diagnosticStages", []).append("initialization-confirm-noop")
+        save()
         apply_and_read("All target files already matched and were preserved.")
         need(source_state()==result,"no-op-replaced-file-bytes-or-inode")
         facts["noOpKeepsAllFileIdentities"] = True
@@ -723,6 +775,8 @@ def observe(work, action, media, suite):
         caller = next(path for path in target if path.as_posix().startswith(".github/workflows/"))
         with (project / caller).open("ab") as stream:
             stream.write(b"\n# Preserved disposable customization.\n")
+        results.setdefault("diagnosticStages", []).append("initialization-customized-file-refusal")
+        save()
         customized = source_state()
         begin()
         run_state(lambda rows: seen(rows,refused),"existing-customized-caller-conflict")
@@ -730,7 +784,9 @@ def observe(work, action, media, suite):
         facts["customizedCallerRefusedWithoutChanges"] = True
         save()
         run_state(lambda rows: enabled(start) and not enabled(confirm), "refused-original-settlement")
-        ui.edit("Full toolkit commit (40 hexadecimal characters)",pin[:7])
+        results.setdefault("diagnosticStages", []).append("initialization-short-pin-refusal")
+        save()
+        ui.edit("Full toolkit commit (40 hexadecimal characters)",pin[:7],region=zone)
         begin()
         def invalid_pin_observed(rows):
             return ((seen(rows,"This attempt did not confirm initialization") and seen(rows,"Native finality: settled"))
@@ -862,24 +918,30 @@ def observe(work, action, media, suite):
         fact["twoOriginalLocalRefsObserved"] = True
         save()
 
-        # Branch creation and branch rename share the same title. The create
-        # field is the direct field of this section, not the nested rename.
-        controls = git_nodes(group, "New local branch name", "textfield")
-        rename_controls = git_nodes("Rename current local branch", "New local branch name", "textfield")
-        need(len(controls)==2 and len(rename_controls)==1, "branch-field-roster")
-        target_label = "New local branch name"
-        # The create field immediately follows its heading in the same section.
+        # Reveal the review button's form. Resolve both field IDs within
+        # the same snapshot so snapshot churn cannot confuse their identities.
+        results.setdefault("diagnosticStages", []).append("git-reveal-create")
+        save()
+        ui.reveal("Review new local branch", category="button", region=group)
         tree = ui.command("tree.snapshot", limit=800)
-        direct = [row for row in tree["nodes"] if row["role"]=="textfield" and row["name"]==target_label and
-                  row["visible"] and row["id"] != rename_controls[0]["id"]]
-        need(len(direct)==1 and direct[0]["bounds"] is not None, "branch-create-field")
-        ui.reveal("Create a new local branch without switching", category="heading", region=group)
-        tree = ui.command("tree.snapshot", limit=800)
-        target = [row for row in tree["nodes"] if row["role"]=="textfield" and row["name"]==target_label and
-                  row["visible"] and row["id"] != rename_controls[0]["id"]]
-        need(len(target)==1 and target[0]["enabled"], "branch-create-field-identity")
-        ui.command("element.click", snapshot_id=tree["snapshot_id"], id=target[0]["id"])
+        rows = tree["nodes"]
+        rename_regions = [row["id"] + "." for row in rows if row["role"] == "group"
+                          and row["name"] == "Rename current local branch" and row["visible"]]
+        need(len(rename_regions) <= 1, "branch-field-roster")
+        create_fields = [row for row in rows if row["role"] == "textfield"
+                         and row["name"] == "New local branch name" and row["visible"]
+                         and not any(row["id"].startswith(prefix) for prefix in rename_regions)]
+        need(len(create_fields) == 1, "branch-create-field")
+        target = create_fields[0]
+        need(target["enabled"] and target["bounds"] is not None, "branch-create-field-identity")
+        ui.command("element.click", snapshot_id=tree["snapshot_id"], id=target["id"])
+        ui.keys("command", "a")
         ui.command("text.insert", text=created)
+        values = [row["text"] for row in ui.command("tree.snapshot", limit=800)["nodes"]
+                  if row["role"] == "textfield" and row["name"] == "New local branch name"]
+        need(values.count(created) == 1, "branch-create-field-value")
+        results.setdefault("diagnosticStages", []).append("git-request-create-review")
+        save()
         runnable("Review new local branch", group)
         ui.click("Review new local branch", category="button", region=group)
         apply("Review new local branch", "Create " + created + " locally", "Create this local branch",
@@ -891,6 +953,8 @@ def observe(work, action, media, suite):
         save()
 
         refresh("main")
+        results.setdefault("diagnosticStages", []).append("git-enter-rename")
+        save()
         field("New local branch name", renamed, "Rename current local branch")
         runnable("Review branch rename", "Rename current local branch")
         ui.click("Review branch rename", category="button", region="Rename current local branch")
@@ -905,6 +969,8 @@ def observe(work, action, media, suite):
 
         refresh(renamed)
         switch_region = "Switch local branch"
+        results.setdefault("diagnosticStages", []).append("git-select-switch-target")
+        save()
         ui.click("Local branch", category="popupbutton", region=switch_region)
         ui.keys("home")
         ui.keys("down")
