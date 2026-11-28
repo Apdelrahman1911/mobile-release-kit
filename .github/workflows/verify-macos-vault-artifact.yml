@@ -2,7 +2,7 @@ name: Exact hosted synthetic vault and artifact verification
 
 on:
   push:
-    branches: [verify/frozen-0213-vault-artifact-refresh-saved]
+    branches: [verify/frozen-0213-native-artifact-consent-identity]
     paths: ['.github/workflows/verify-macos-vault-artifact.yml']
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
   signed-ui:
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-vault-artifact-refresh-saved'
+      github.event_name == 'push' && github.ref == 'refs/heads/verify/frozen-0213-native-artifact-consent-identity'
     runs-on: macos-26
     timeout-minutes: 40
     strategy:
