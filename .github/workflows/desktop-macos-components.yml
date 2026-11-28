@@ -911,7 +911,7 @@ jobs:
                 git_local_protocol::push_worker::new_branch_tests:: \
                 "${remote_tool_tests[@]}" \
                 --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
-              grep -Eq '^test result: ok\. 167 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 173 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
             )
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
@@ -1256,6 +1256,7 @@ jobs:
                   return module
               stager, prep, helper, signing = [load(name) for name in
                   ("stage_macos_installed", "prepare_runtime", "macos_android_helper_package", "macos_store_signing")]
+              phase = "host-identity"
               stager.need(os.uname().sysname == "Darwin" and os.uname().machine == "arm64"
                   and os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
                   and os.environ.get("RUNNER_OS") == "macOS" and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -1271,6 +1272,7 @@ jobs:
                   stager.need(info.st_uid == os.geteuid() and info.st_nlink == 1
                       and stat.S_IMODE(info.st_mode) == 0o600, "apple-key-private-file")
                   return body, stager.signature(info)
+              phase = "task-root"
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
               held = os.open(work, flags)
               try:
@@ -1278,7 +1280,12 @@ jobs:
                   stager.need(directory(work.lstat()) == root_identity
                       and work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-app-check."),
                       "apple-key-task-root")
-                  messages = stager.read(work / "apple-key-cargo.jsonl", 4 * 1024 * 1024)
+                  phase = "cargo-metadata"
+                  metadata = work / "apple-key-cargo.jsonl"
+                  report = metadata.lstat()
+                  print(json.dumps({"appleKeyCompilerMetadataBytes": report.st_size,
+                      "originalFourMiBBoundExceeded": report.st_size > 4 * 1024 * 1024}))
+                  messages = stager.read(metadata, 16 * 1024 * 1024)
                   artifacts = [json.loads(line) for line in messages.splitlines()]
                   candidates = [item for item in artifacts if item.get("reason") == "compiler-artifact"
                       and item.get("target", {}).get("name") == "mobile_release_desktop"
@@ -1291,6 +1298,7 @@ jobs:
                   stager.need(binary.parent == Path(os.environ["CARGO_TARGET_DIR"]) / "debug/deps"
                       and re.fullmatch(r"mobile_release_desktop-[0-9a-f]+", binary.name) is not None,
                       "apple-key-original-test-path")
+                  phase = "test-executable"
                   binary_info = binary.lstat()
                   stager.need(stat.S_ISREG(binary_info.st_mode) and binary_info.st_uid == os.geteuid()
                       and binary_info.st_nlink == 1 and binary_info.st_mode & 0o111 != 0
@@ -1301,6 +1309,7 @@ jobs:
                   # to store-runtime, without running its six unrelated suites.
                   target, arch = "aarch64-apple-darwin", "arm64"
                   capsule = work / "component"
+                  phase = "signed-runtime"
                   runtime = prep._root(capsule / "extracted/runtime")
                   original = stager.store_component_inputs(capsule, target)
                   def snapshot():
@@ -1311,14 +1320,18 @@ jobs:
                           rows.append((path.relative_to(runtime).as_posix(), stager.digest(body), len(body)))
                       stager.need(tuple(rows) == original[1], "apple-key-runtime-bytes")
                       return directories
+                  phase = "runtime-snapshot"
                   original_directories = snapshot()
+                  phase = "producer-profile"
                   producer_path, service_path = checkout / helper.PRODUCER_PROFILE, checkout / helper.PROFILE
                   producer, service = stager.read(producer_path, 1024), stager.read(service_path, 1024)
                   stager.packaging_signing_data(producer, service)
                   identity = stager.service_signing_data(service)
+                  phase = "runtime-receipt"
                   receipt = stager.decode(stager.read(capsule / "store-signed-receipt.json", 256 * 1024))
                   native = receipt["nativeMembers"]
                   stager.need(len(native) == signing.NATIVE_COUNT, "apple-key-runtime-native-count")
+                  phase = "synthetic-fixture"
                   source_paths = ("fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
                       "desktop/tools/verify_macos_store_runtime.rb", "tests/workflow/apple_p12_component.rb",
                       "fastlane/apple_provisioning_p12.rb", "fastlane/apple_provisioning_p12_assemble.rb")
@@ -1522,7 +1535,8 @@ jobs:
               # Never display argv, exception text, CSR/key bytes or captured
               # output. Unknown/failed ownership retains this private task root.
               print(json.dumps({"localAppleKeyComponent": "failed", "phase": phase,
-                  "errorType": type(error).__name__, "privateFixtureRetained": True}))
+                  "errorType": type(error).__name__, "privateFixtureRetained": True,
+                  "knownRefusal": str(error) if type(error).__name__ == "Refused" and str(error) in ('apple-key-fixture', 'apple-key-home', 'apple-key-hosted-source', 'apple-key-original-test-executable', 'apple-key-original-test-path', 'apple-key-original-test-shape', 'apple-key-private-directory', 'apple-key-private-file', 'apple-key-runtime-bytes', 'apple-key-runtime-native-count', 'absolute-path-required', 'path-spelling', 'ancestor-type', 'ancestor-changed', 'ancestor-close-unknown', 'ordinary-file-bound', 'file-open-changed', 'file-extended-attributes-query', 'file-extended-attributes', 'file-read-changed', 'original-close-unknown', 'apple-key-task-root') else None}))
               raise SystemExit(1) from None
           PY
       - name: Bound successful compiler cache publication
